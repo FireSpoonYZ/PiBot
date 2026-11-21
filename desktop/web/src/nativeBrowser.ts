@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { NativeBrowserPresenter } from '../../../web/src/bot-browser/nativePresentation';
+import { automaticGoogleClientSetup, googleSetupConsoleUrl } from '../../../web/src/google/currentGoogleSetup';
+import { configureGoogleClient, createGoogleSetupControlRequest, fetchGoogleStatus } from '../../../web/src/google/googleClient';
+import type { GoogleSetupControlState } from '../../../web/src/google/types';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { nextBrowserHostReconnectDelay } from './vendor/orca/browserHostReconnectDelay';
 
@@ -42,6 +45,7 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
   private rendererId = crypto.randomUUID();
   private readonly pages = new Map<string, string>();
   private readonly hidden = new Map<string, number>();
+  private googleClientAttempt?: { runId: string; result: Promise<GoogleSetupControlState> };
   private local = false;
   private attached = false;
   private polling = false;
@@ -144,8 +148,74 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
     } });
   }
 
+  provisionGoogleClient(runId: string, centerApi: DesktopPanelApi, centerIdentity: DesktopIdentity) {
+    if (this.googleClientAttempt?.runId === runId) return this.googleClientAttempt.result;
+    const result = this.provisionGoogleClientOnce(runId, centerApi, centerIdentity);
+    this.googleClientAttempt = { runId, result };
+    return result;
+  }
+
+  private async provisionGoogleClientOnce(runId: string, centerApi: DesktopPanelApi, centerIdentity: DesktopIdentity) {
+    const hostIdentity = this.identity;
+    const setupControl = createGoogleSetupControlRequest(this.api, hostIdentity, this.botId);
+    const setup = await setupControl({ action: 'status' });
+    const target = automaticGoogleClientSetup(setup);
+    if (!target || target.runId !== runId) throw Error('Google setup changed');
+    const readLiveRun = async () => {
+      const latest = await setupControl({ action: 'status' });
+      const live = automaticGoogleClientSetup(latest);
+      if (live?.runId !== runId || live.projectId !== target.projectId || live.account !== target.account) {
+        throw Error('Google setup changed');
+      }
+      return latest;
+    };
+
+    let { client } = await fetchGoogleStatus(centerApi, centerIdentity);
+    if (!client.configured) {
+      const consoleUrl = googleSetupConsoleUrl('client', target);
+      if (!client.supportsAutoConfigure || !client.redirectUri?.startsWith('https://') || !consoleUrl ||
+          (setup.center?.client?.redirectUri && client.redirectUri !== setup.center.client.redirectUri)) {
+        throw Error('Automatic Google client setup is unavailable');
+      }
+      const local = await this.isLocalHost();
+      const browser = await this.control<{ renderPlacement?: 'client'; rendererId?: string; tabs?: { id: string }[] }>({ action: 'status' });
+      if ((browser.renderPlacement === 'client' && browser.rendererId !== this.rendererId) ||
+          (!local && (!this.proxyUrl || !browser.tabs?.some(tab => tab.id === setup.browserPageId)))) {
+        throw Error('Automatic Google setup needs this desktop to own the setup browser');
+      }
+      await readLiveRun();
+      const download = await this.native('provisionGoogleClient', '', {
+        url: consoleUrl, text: client.redirectUri, setupRunId: runId,
+        hostId: hostIdentity.targetDeviceId, botId: this.botId,
+        ...(this.proxyUrl ? { proxyUrl: this.proxyUrl } : {}),
+      });
+      if (typeof download.clientFile !== 'string') throw Error('No Web OAuth client was downloaded');
+      await readLiveRun();
+      try {
+        ({ client } = await configureGoogleClient(centerApi, centerIdentity, {
+          clientFile: download.clientFile, projectId: target.projectId, ifUnconfigured: true,
+        }));
+      } catch {
+        // A lost response or concurrent first-time import can already have completed setup.
+        ({ client } = await fetchGoogleStatus(centerApi, centerIdentity));
+      }
+    }
+
+    if (!client.configured || client.projectId !== target.projectId) throw Error('Center did not save this project’s Google OAuth client');
+    void this.native('finishGoogleClientProvision', '', { setupRunId: runId }).catch(() => {});
+    const latest = await readLiveRun();
+    const next = await setupControl({ action: 'advance', step: 'client', runId, expectedRevision: latest.revision });
+    if (next.id !== runId || next.stale || next.step !== 'connect') {
+      throw Error('Center could not verify the Google OAuth client for this setup');
+    }
+    return next;
+  }
+
   private async execute(command: RendererCommand) {
     const { operationId: _operationId, operation, pageId, elementRef, ...params } = command;
+    if (operation === 'provisionGoogleClient' || operation === 'finishGoogleClientProvision') {
+      throw Error('Private Google client setup is owner-only');
+    }
     if (operation === 'create') {
       const rendererId = this.rendererId;
       const opened = await this.native('create', pageId, {

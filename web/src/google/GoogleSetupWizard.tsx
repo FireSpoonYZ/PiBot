@@ -21,6 +21,7 @@ import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/
 import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { useText } from '../ui';
 import {
+  automaticGoogleClientSetup,
   buildGoogleSetupMutationPayload,
   googleSetupConsoleUrl,
   isStaleGoogleSetupResult,
@@ -43,6 +44,7 @@ import {
 } from './googleCopy';
 import { GoogleClientConfigForm, GoogleSignInFlow } from './GoogleSignInFlow';
 import type {
+  GoogleChatCardContext,
   GoogleServiceChoice,
   GoogleSetupAction,
   GoogleSetupBlocker,
@@ -78,6 +80,7 @@ export interface GoogleSetupWizardProps {
   callGoogleSetup?: GoogleSetupControlCall;
   onOpenBrowser?: () => void;
   onOpenBrowserDestination?: (destination: BrowserDestination) => void;
+  provisionGoogleClient?: GoogleChatCardContext['provisionGoogleClient'];
   onOpenCapabilities?: () => void;
   onOpenCenterAdmin?: () => void;
   onStatusUpdated?: (snapshot: GoogleStatusSnapshot) => void;
@@ -363,6 +366,7 @@ export function GoogleSetupWizard({
   callGoogleSetup,
   onOpenBrowser,
   onOpenBrowserDestination,
+  provisionGoogleClient,
   onOpenCapabilities,
   onOpenCenterAdmin,
   onStatusUpdated,
@@ -408,6 +412,7 @@ export function GoogleSetupWizard({
   const [notice, setNotice] = useState('');
   const [resumeRetry, setResumeRetry] = useState<{ scope: string; runId: string; step?: string | null } | null>(null);
   const [showDirectConfig, setShowDirectConfig] = useState(false);
+  const [failedAutoClient, setFailedAutoClient] = useState<{ scope: string; runId: string }>();
   const [signInConfig, setSignInConfig] = useState<{
     open: boolean;
     mode?: 'connect' | 'expand' | 'reconnect';
@@ -807,16 +812,51 @@ export function GoogleSetupWizard({
   const effectiveCenterClient = centerStatus?.client ?? setup?.center?.client;
   const effectiveCenterAccounts = centerStatus?.accounts ?? setup?.center?.accounts ?? [];
   const redirectUri =
-    setup?.brandingLinks?.redirectUri ||
+    effectiveCenterClient?.redirectUri ||
     setup?.redirectUri ||
-    effectiveCenterClient?.redirectUri;
+    setup?.brandingLinks?.redirectUri;
   const clientConfigured = Boolean(effectiveCenterClient?.configured);
   const hasConnectedAccount = Boolean(effectiveCenterAccounts.some(a => a.status === 'connected'));
   const nonAdminBlocked =
     setup?.center?.isAdmin === false || setup?.blocker?.kind === 'admin-required';
   const browserLocked = Boolean(setup?.browserLock?.active || setup?.browserTakeoverRequired);
   const lockRequiresSystemBrowser = Boolean(setup?.browserLock?.requiresSystemBrowser);
+  const autoClientUrl = activeMode === 'do-it-for-me' && currentStep === 'client' && !clientConfigured
+    ? googleSetupConsoleUrl('client', setup ?? undefined)
+    : null;
+  const autoClientRunId = !effectiveReadOnly && !nonAdminBlocked && !setup?.unavailable && provisionGoogleClient && api && identity &&
+    (effectiveCenterClient?.supportsAutoConfigure === true || effectiveCenterClient?.configured === true)
+    ? automaticGoogleClientSetup(setup)?.runId
+    : undefined;
+  const autoClientFailed = Boolean(autoClientRunId && failedAutoClient?.scope === effectiveScopeKey &&
+    failedAutoClient.runId === autoClientRunId);
+  const autoClientPending = Boolean(autoClientRunId && !autoClientFailed);
+  const showBrowserTakeover = browserLocked && !autoClientPending;
+  const autoClientHint = t('正在通过独立窗口创建 Web OAuth 客户端，并将凭据私密保存到 Center，无需确认。',
+    'PiBot is creating the Web OAuth client privately and saving it to Center. No confirmation is needed.');
   const browserLockHint = setup?.browserPrompt || setupBrowserLockHint(setup?.browserLock, t);
+
+  useEffect(() => {
+    if (!autoClientRunId || autoClientFailed || !provisionGoogleClient || !api || !identity) return;
+    let active = true;
+    void provisionGoogleClient(autoClientRunId, api, identity).then(next => {
+      if (!active || activeScopeRef.current !== effectiveScopeKey) return;
+      applySetupState(next, effectiveScopeKey, ++requestSeqRef.current, 'advance');
+      void refreshCenter();
+    }, () => {
+      if (!active || activeScopeRef.current !== effectiveScopeKey) return;
+      setFailedAutoClient({ scope: effectiveScopeKey, runId: autoClientRunId });
+    });
+    return () => { active = false; };
+  }, [api, applySetupState, autoClientFailed, autoClientRunId, effectiveScopeKey, identity, provisionGoogleClient, refreshCenter]);
+
+  const clientManualAction = autoClientUrl && !autoClientPending && !effectiveReadOnly && !nonAdminBlocked ? (
+    <button type="button" className="gws-btn is-ghost is-sm" disabled={busy}
+      onClick={() => void openExternalUrl(autoClientFailed ? autoClientUrl.replace('/auth/clients/create', '/auth/clients') : autoClientUrl)}>
+      <ExternalLink size={13} aria-hidden="true" />
+      <span>{autoClientFailed ? t('检查 Google 客户端', 'Check Google clients') : t('使用系统浏览器', 'Use system browser')}</span>
+    </button>
+  ) : null;
   const isEmbeddedAccountStep = setup?.state === 'running' && currentStep === 'account' &&
     (activeMode === 'do-it-for-me' || activeMode === 'guide-here') &&
     setup.card?.card !== 'path' && setup.card?.card !== 'services';
@@ -862,7 +902,7 @@ export function GoogleSetupWizard({
       ...(projectId ? { projectId } : {}),
     });
   };
-  const canCompleteCurrentStep = setup?.state === 'running' && !kindPending && currentStep !== 'connect' && Boolean(currentStep) &&
+  const canCompleteCurrentStep = setup?.state === 'running' && !kindPending && !autoClientPending && currentStep !== 'connect' && Boolean(currentStep) &&
     (activeMode === 'guide-browser' || activeMode === 'guide-here' || currentStep === 'account' ||
       browserLocked || steps.some(item => item.id === currentStep && item.status === 'needs-user'));
 
@@ -1228,6 +1268,7 @@ export function GoogleSetupWizard({
       extraBlockerActions.length === 0 &&
       (hasPrimaryStepContinue || browserLocked || isSignInFlowActive);
     const showCompactBlocker = Boolean(
+      !autoClientPending &&
       setup?.blocker &&
         !nonAdminBlocked &&
         !setupCompleted &&
@@ -1616,7 +1657,7 @@ export function GoogleSetupWizard({
         {kindSelection}
 
         {/* Sensitive takeover banner (real privacy boundary) */}
-        {browserLocked && !setupCompleted ? (
+        {showBrowserTakeover && !setupCompleted ? (
           <div className="gws-compact-alert is-warn" role="alert">
             <div className="gws-compact-alert-text">
               <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
@@ -1764,13 +1805,16 @@ export function GoogleSetupWizard({
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{stepCopy.title}</div>
             <p className="gws-compact-step-hint">
-              {isEmbeddedAccountStep ? embeddedAccountHint : activeMode === 'do-it-for-me' && currentStep !== 'project'
-                ? t('Bot 正在内置浏览器处理当前步骤，需要你操作时会自动提示。', 'Bot is working on this step in the built-in browser and will prompt you when needed.')
-                : stepHint}
+              {autoClientPending ? autoClientHint
+                : autoClientFailed ? t('自动创建未能完成。请先检查 Google Cloud 是否已创建客户端，再手动完成。', 'Automatic setup could not finish. Check Google Cloud for an existing client before creating one manually.')
+                : isEmbeddedAccountStep ? embeddedAccountHint : activeMode === 'do-it-for-me' && currentStep !== 'project' && currentStep !== 'client'
+                  ? t('Bot 正在内置浏览器处理当前步骤，需要你操作时会自动提示。', 'Bot is working on this step in the built-in browser and will prompt you when needed.')
+                  : stepHint}
             </p>
             {!effectiveReadOnly ? (
               <div className="gws-compact-actions">
-                {onOpenBrowser && embeddedSupported && !browserLocked ? (
+                {clientManualAction}
+                {onOpenBrowser && embeddedSupported && !browserLocked && currentStep !== 'client' ? (
                   <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
                     <Globe size={13} aria-hidden="true" />
                     <span>{activeMode === 'guide-here' && currentStep !== 'account' ? stepCopy.openLabel : openBrowserLabel}</span>
@@ -1781,7 +1825,7 @@ export function GoogleSetupWizard({
                     {stepCopy.continueLabel}
                   </button>
                 ) : null}
-                {currentStep === 'client' && settingsEntryAction ? (
+                {currentStep === 'client' && !autoClientPending && settingsEntryAction ? (
                   <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={settingsEntryAction}>
                     <Lock size={13} aria-hidden="true" />
                     <span>{settingsEntryLabel}</span>
@@ -1888,10 +1932,10 @@ export function GoogleSetupWizard({
           {botName ? <span className="gws-card-sub">{botName}</span> : null}
         </div>
         <div className="gws-head-actions">
-          <span className={`gws-pill ${setupCompleted ? 'is-ok' : browserLocked ? 'is-warn' : 'is-accent'}`}>
+          <span className={`gws-pill ${setupCompleted ? 'is-ok' : showBrowserTakeover ? 'is-warn' : 'is-accent'}`}>
             {setupCompleted
               ? t('已就绪', 'Ready')
-              : browserLocked
+              : showBrowserTakeover
                 ? t('等待本人接管', 'Needs takeover')
                 : activeMode
                   ? googleSetupModeMeta(activeMode, t).title.split(' ')[0]
@@ -2097,7 +2141,7 @@ export function GoogleSetupWizard({
       {kindSelection}
 
       {/* Browser lock / sensitive takeover banner */}
-      {browserLocked ? (
+      {showBrowserTakeover ? (
         <div className="gws-takeover-alert" role="alert">
           <div className="gws-takeover-body">
             <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
@@ -2140,7 +2184,7 @@ export function GoogleSetupWizard({
                   <span className="gws-step-title">{item.title || googleStepTitle(item.id, t)}</span>
                   {item.detail ? <span className="gws-muted">{item.detail}</span> : null}
                 </div>
-                {item.url && isCurrent && item.id !== 'project' && !isEmbeddedAccountStep && !kindPending ? (
+                {item.url && isCurrent && item.id !== 'project' && !(item.id === 'client' && autoClientUrl) && !isEmbeddedAccountStep && !kindPending ? (
                   <button
                     type="button"
                     className="gws-btn is-ghost is-xs"
@@ -2161,11 +2205,14 @@ export function GoogleSetupWizard({
         <div className="gws-step-guide">
           <div className="gws-step-guide-title">{googleStepTitle(currentStep, t)}</div>
           <ul className="gws-guide-list">
-            {stepGuideLines.map((line, i) => (
+            {(autoClientPending ? [autoClientHint] : autoClientFailed
+              ? [t('自动创建未能完成，请先在 Google Cloud 检查是否已有客户端。', 'Automatic setup could not finish. Check Google Cloud for an existing client first.')]
+              : stepGuideLines).map((line, i) => (
               <li key={i}>{line}</li>
             ))}
           </ul>
-          {stepInfo.sensitiveWarning ? (
+          {clientManualAction ? <div className="gws-actions">{clientManualAction}</div> : null}
+          {stepInfo.sensitiveWarning && !autoClientPending ? (
             <p className="gws-sensitive-note">
               <ShieldAlert size={14} aria-hidden="true" />
               <span>{stepInfo.sensitiveWarning}</span>
@@ -2232,7 +2279,7 @@ export function GoogleSetupWizard({
       ) : null}
 
       {/* Blocker details & real actions */}
-      {setup?.blocker ? (
+      {setup?.blocker && !autoClientPending ? (
         <div className="gws-blocker" role="alert">
           <div className="gws-blocker-msg">
             <AlertTriangle size={15} aria-hidden="true" />
@@ -2258,7 +2305,7 @@ export function GoogleSetupWizard({
       ) : null}
 
       {/* Private client credential entry (step === 'client' or explicit quick path) */}
-      {api && identity && !effectiveReadOnly && (showDirectConfig || currentStep === 'client') && !setupCompleted ? (
+      {api && identity && !effectiveReadOnly && !autoClientPending && (showDirectConfig || currentStep === 'client') && !setupCompleted ? (
         <GoogleClientConfigForm
           api={api}
           identity={identity}

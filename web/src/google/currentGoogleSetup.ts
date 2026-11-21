@@ -536,6 +536,17 @@ export function isStaleGoogleSetupResult(
 const GOOGLE_CONSOLE_ORIGIN = 'https://console.cloud.google.com';
 const GOOGLE_PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/;
 
+export function automaticGoogleClientSetup(setup: GoogleSetupControlState | null | undefined) {
+  if (setup?.state !== 'running' || setup.mode !== 'do-it-for-me' || setup.step !== 'client' ||
+      setup.center?.isAdmin === false || setup.personStep === 'client' || !setup.id || !setup.account ||
+      !setup.projectId || !GOOGLE_PROJECT_ID_RE.test(setup.projectId)) return null;
+  const project = Array.isArray(setup.steps)
+    ? setup.steps.find(item => (item.step ?? item.id) === 'project')
+    : setup.steps?.project;
+  if (project?.status !== 'done') return null; // Direct credential import is not an automatic creation request.
+  return { runId: setup.id, projectId: setup.projectId, account: setup.account };
+}
+
 const CHOICE_CONSOLE_APIS: Record<string, readonly string[]> = {
   gmail: ['gmail.googleapis.com'],
   calendar: ['calendar-json.googleapis.com'],

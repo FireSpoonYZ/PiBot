@@ -251,7 +251,7 @@ test('rejects invalid publicUrl and validates Web OAuth client JSON strictly', a
 
     const initial = fixture.accounts.status();
     assert.deepEqual(initial, {
-      client: { configured: false, redirectUri: REDIRECT_URI },
+      client: { configured: false, redirectUri: REDIRECT_URI, supportsAutoConfigure: true },
       accounts: [],
     });
 
@@ -284,11 +284,25 @@ test('rejects invalid publicUrl and validates Web OAuth client JSON strictly', a
       (err) => err.code === 'FORBIDDEN'
     );
 
-    // Accepts valid Web client JSON and never exposes clientSecret.
+    // An automatic import must match the project from the actual download.
+    const automatic = { ifUnconfigured: true, projectId: PROJECT_ID };
+    await assert.rejects(
+      () => fixture.accounts.manage('configure', {
+        ...automatic, clientFile: makeWebClientJson({ project_id: 'other-project' }),
+      }, 'owner-1'),
+      { code: 'INVALID_ARGUMENT' },
+    );
+    assert.equal(fixture.accounts.status().client.configured, false);
+
+    // First-time setup accepts valid Web client JSON without exposing or replacing the secret.
     const configured = await fixture.accounts.manage(
       'configure',
-      { clientFile: makeWebClientJson() },
+      { ...automatic, clientFile: makeWebClientJson() },
       'owner-1'
+    );
+    await assert.rejects(
+      () => fixture.accounts.manage('configure', { ...automatic, clientFile: makeWebClientJson() }, 'owner-1'),
+      { code: 'REQUEST_CONFLICT' },
     );
     assert.equal(configured.client.configured, true);
     assert.equal(configured.client.clientId, CLIENT_ID);

@@ -32,6 +32,7 @@ export interface GoogleAccountView {
 
 export interface GoogleClientStatus {
   configured: boolean;
+  supportsAutoConfigure?: boolean;
   clientId?: string;
   projectId?: string;
   redirectUri?: string;
@@ -310,6 +311,7 @@ export interface GoogleChatCardContext {
   callBrowser?: BotBrowserControlCall;
   onOpenBrowser?: () => void;
   onOpenBrowserDestination?: (destination: BrowserDestination) => void;
+  provisionGoogleClient?: (runId: string, centerApi: DesktopPanelApi, centerIdentity: DesktopIdentity) => Promise<GoogleSetupControlState>;
   onOpenCapabilities?: () => void;
   onOpenCenterAdmin?: () => void;
   onSelectGoogleAccount?: (selection: {

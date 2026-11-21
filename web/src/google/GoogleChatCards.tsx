@@ -668,6 +668,7 @@ export function GoogleReadinessCard({
           callGoogleSetup={googleContext.callGoogleSetup}
           onOpenBrowser={googleContext.onOpenBrowser}
           onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
+          provisionGoogleClient={googleContext.provisionGoogleClient}
           onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
           onStatusUpdated={snap => setLiveStatus(snap)}
           onClose={() => setPanel('none')}

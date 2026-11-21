@@ -472,6 +472,7 @@ export function CurrentGoogleSetupCard({
           callGoogleSetup={callGoogleSetup ? callWizardSetup : undefined}
           onOpenBrowser={googleContext.onOpenBrowser}
           onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
+          provisionGoogleClient={googleContext.provisionGoogleClient}
           onOpenCapabilities={googleContext.onOpenCapabilities}
           onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
           onSetupChange={handleWizardSetupChange}

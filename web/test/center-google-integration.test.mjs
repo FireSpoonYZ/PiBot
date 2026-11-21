@@ -348,6 +348,7 @@ test('real Center server routes enforce auth/CSRF/no-store, public OAuth callbac
     assert.equal(statusBefore.statusCode, 200);
     assert.equal(statusBefore.headers['cache-control'], 'no-store');
     assert.equal(statusBefore.json().client.configured, false);
+    assert.equal(statusBefore.json().client.supportsAutoConfigure, true);
     assert.equal(statusBefore.json().client.redirectUri, REDIRECT_URI);
     const uiBroker = { async broker(_identity, op, params) {
       assert.equal(this, uiBroker);
@@ -368,7 +369,7 @@ test('real Center server routes enforce auth/CSRF/no-store, public OAuth callbac
     assert.equal(noCsrf.statusCode, 403);
     assert.equal(noCsrf.json().error.code, 'CSRF_INVALID');
 
-    // 3. Configure Web OAuth client via valid Web JSON; secret never echoed.
+    // 3. Automatic setup uses the private owner route and never echoes the downloaded secret.
     const clientJson = JSON.stringify({
       web: {
         client_id: clientId,
@@ -381,7 +382,7 @@ test('real Center server routes enforce auth/CSRF/no-store, public OAuth callbac
       method: 'POST',
       url: '/api/google/configure',
       headers: { cookie: ownerA.cookie, 'x-csrf-token': ownerA.csrfToken },
-      payload: { clientFile: clientJson },
+      payload: { clientFile: clientJson, projectId: 'acme-pibot', ifUnconfigured: true },
     });
     assert.equal(configured.statusCode, 200);
     assert.doesNotMatch(configured.body, new RegExp(clientSecret));

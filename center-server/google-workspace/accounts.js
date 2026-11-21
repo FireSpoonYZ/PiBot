@@ -303,6 +303,7 @@ export function openGoogleAccounts({ store, publicUrl, fetchImpl, now = Date.now
       return {
         configured: false,
         redirectUri,
+        supportsAutoConfigure: true,
       };
     }
     const keyState =
@@ -384,7 +385,12 @@ export function openGoogleAccounts({ store, publicUrl, fetchImpl, now = Date.now
       ...(parsed.projectId ? { projectId: parsed.projectId } : {}),
       savedAt: now(),
     };
-    mutateInternalRecord(GOOGLE_CLIENT_CREDENTIAL_ID, () => saved);
+    mutateInternalRecord(GOOGLE_CLIENT_CREDENTIAL_ID, (current) => {
+      if (input.ifUnconfigured === true && current) {
+        throw fail('REQUEST_CONFLICT', 'Center already has a Google Web OAuth client. Automatic setup will not replace it.');
+      }
+      return saved;
+    });
     clientKeyCache = null;
     return status();
   }

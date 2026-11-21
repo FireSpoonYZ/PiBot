@@ -2178,6 +2178,10 @@ function PrimaryChatPane({
     () => createGoogleSetupControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
   );
+  const provisionGoogleClient = useMemo(
+    () => /Windows/.test(navigator.userAgent) ? nativeBrowser?.provisionGoogleClient.bind(nativeBrowser) : undefined,
+    [nativeBrowser],
+  );
   const selectGoogleAccount = useCallback(
     async (selection: {
       email: string;
@@ -2233,6 +2237,7 @@ function PrimaryChatPane({
       callBrowser,
       onOpenBrowser: () => setInspectorTab('browser'),
       onOpenBrowserDestination: openBrowserDestination,
+      provisionGoogleClient,
       onOpenCapabilities: () => setInspectorTab('capabilities'),
       onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
       onSelectGoogleAccount: selectGoogleAccount,
@@ -2249,6 +2254,7 @@ function PrimaryChatPane({
       callGoogleSetup,
       callBrowser,
       openBrowserDestination,
+      provisionGoogleClient,
       onOpenCenterAdmin,
       selectGoogleAccount,
     ],
@@ -4680,6 +4686,7 @@ function PrimaryChatPane({
                   autoStart callGoogleSetup={callGoogleSetup}
                   onOpenBrowser={() => setInspectorTab('browser')}
                   onOpenBrowserDestination={openBrowserDestination}
+                  provisionGoogleClient={provisionGoogleClient}
                   onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
                   onClose={() => setInspectorTab(null)}
                 />

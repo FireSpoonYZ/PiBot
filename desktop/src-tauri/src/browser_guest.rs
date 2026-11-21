@@ -6,14 +6,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    fs::{File, OpenOptions},
+    io::Read,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-use tauri::{AppHandle, Manager, Webview, WebviewBuilder, WebviewUrl};
+use tauri::{webview::DownloadEvent, AppHandle, Manager, Webview, WebviewBuilder, WebviewUrl, WebviewWindowBuilder};
 
+const GOOGLE_CLIENT_DRAFT_WINDOW: &str = "google-client-draft-";
 const LEASE: Duration = Duration::from_secs(6);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -47,6 +51,7 @@ pub struct Request {
     event: Option<Value>,
     wait: Option<WaitCondition>,
     expected_url: Option<String>,
+    setup_run_id: Option<String>,
     document_generation: Option<u64>,
     ttl_ms: Option<u64>,
 }
@@ -116,7 +121,205 @@ fn parse_url(value: &str) -> Result<tauri::Url, BridgeError> {
     }
     Ok(url)
 }
+fn google_draft_navigation(url: &tauri::Url) -> bool {
+    url.as_str() == "about:blank"
+        || (url.scheme() == "https"
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && matches!(
+                url.host_str(),
+                Some("console.cloud.google.com" | "accounts.google.com")
+            ))
+}
+
+fn validate_google_client_draft(
+    console: &tauri::Url,
+    redirect: &str,
+) -> Result<(String, tauri::Url), BridgeError> {
+    if !google_draft_navigation(console)
+        || console.host_str() != Some("console.cloud.google.com")
+        || console.path() != "/auth/clients/create"
+        || console.fragment().is_some()
+    {
+        return Err(error("Not a Google Cloud OAuth client creation page"));
+    }
+    let projects: Vec<_> = console
+        .query_pairs()
+        .filter_map(|(key, value)| (key == "project").then_some(value))
+        .collect();
+    let [project] = projects.as_slice() else {
+        return Err(error("Expected one Google Cloud project"));
+    };
+    let valid_project = (6..=63).contains(&project.len())
+        && project.as_bytes()[0].is_ascii_lowercase()
+        && project.as_bytes()[project.len() - 1].is_ascii_alphanumeric()
+        && project.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+        });
+    if !valid_project
+        || console.query_pairs().any(|(key, _)| key != "project" && key != "authuser")
+    {
+        return Err(error("Invalid Google Cloud project link"));
+    }
+    let redirect = parse_url(redirect)?;
+    if redirect.scheme() != "https"
+        || redirect.path() != "/api/oauth/google/callback"
+        || redirect.host_str().is_none_or(|host| host == "onorca.dev" || host.ends_with(".onorca.dev"))
+        || redirect.query().is_some()
+        || redirect.fragment().is_some()
+    {
+        return Err(error("Expected the public Center HTTPS redirect URI"));
+    }
+    Ok((project.to_string(), redirect))
+}
+
+#[cfg(test)]
+#[test]
+fn google_client_draft_requires_a_cloud_project_and_the_public_center_callback() {
+    let console = tauri::Url::parse(
+        "https://console.cloud.google.com/auth/clients/create?project=test-project",
+    ).unwrap();
+    let callback = "https://center.example.test/api/oauth/google/callback";
+    assert!(validate_google_client_draft(&console, callback).is_ok());
+    for url in [
+        "https://console.cloud.google.com.evil.test/auth/clients/create?project=test-project",
+        "https://console.cloud.google.com/auth/clients?project=test-project",
+        "https://console.cloud.google.com/auth/clients/create",
+        "https://console.cloud.google.com/auth/clients/create?project=test-project&project=another-project",
+    ] {
+        assert!(validate_google_client_draft(&tauri::Url::parse(url).unwrap(), callback).is_err());
+    }
+    for redirect in [
+        "http://center.example.test/api/oauth/google/callback",
+        "https://center.example.test/api/oauth/google/callback?code=example",
+        "https://example.test/other",
+        "https://www.onorca.dev/api/oauth/google/callback",
+    ] {
+        assert!(validate_google_client_draft(&console, redirect).is_err());
+    }
+}
+
+#[cfg(windows)]
+fn proxy_browser_args(proxy: &tauri::Url) -> String {
+    let origin = proxy.origin().ascii_serialization();
+    format!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+         --proxy-server={origin} --proxy-bypass-list=<-loopback>"
+    )
+}
+
+fn google_client_window_label(run_id: &str) -> Option<String> {
+    let valid = run_id.len() == 36 && run_id.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    });
+    valid.then(|| format!("{GOOGLE_CLIENT_DRAFT_WINDOW}{run_id}"))
+}
+
+async fn provision_google_client(
+    app: &AppHandle,
+    console: tauri::Url,
+    redirect: &str,
+    run_id: &str,
+    directory: PathBuf,
+    proxy: Option<tauri::Url>,
+) -> Result<Value, BridgeError> {
+    const WAIT: Duration = Duration::from_secs(30);
+    const MAX_FILE_BYTES: u64 = 64 * 1024;
+
+    let (project, redirect) = validate_google_client_draft(&console, redirect)?;
+    let mut accounts = console.query_pairs().filter(|(key, _)| key == "authuser");
+    let account = accounts.next().map(|(_, value)| value.into_owned())
+        .filter(|value| value.len() <= 320 && value.contains('@') && !value.contains(char::is_whitespace))
+        .ok_or_else(|| error("Expected the Google account used for setup"))?;
+    if accounts.next().is_some() {
+        return Err(error("Expected one Google account for setup"));
+    }
+    let label = google_client_window_label(run_id).ok_or_else(|| error("Invalid Google setup run"))?;
+    let main = app.get_webview_window("main").ok_or_else(|| error("Main window unavailable"))?;
+    let attempts = app.path().app_local_data_dir()
+        .map_err(|_| error("Google setup storage is unavailable"))?
+        .join("google-client-attempts");
+    std::fs::create_dir_all(&attempts).map_err(|_| error("Could not prepare Google setup"))?;
+    let downloads = tempfile::tempdir().map_err(|_| error("Could not isolate the Google credential download"))?;
+    let destination = downloads.path().join("client.json");
+    // Reserve the attempt before loading Google. A reload or uncertain result must not create a second client.
+    OpenOptions::new().write(true).create_new(true).open(attempts.join(run_id))
+        .map_err(|_| error("Automatic creation was already attempted or could not be recorded"))?;
+
+    let deadline = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| error("System clock is invalid"))? + WAIT - Duration::from_secs(3);
+    let params = json!({
+        "project": project, "account": account, "redirectUri": redirect.as_str(),
+        "attempt": run_id, "deadline": deadline.as_millis(),
+    });
+    let script = format!("({})({params});", include_str!("google_client_draft.js"));
+    let (send, receive) = tokio::sync::oneshot::channel::<bool>();
+    let claim = Mutex::new((None::<tauri::Url>, Some(send)));
+    let download_destination = destination.clone();
+    let google_origin = console.origin();
+    // This window is outside Bot Browser control. Only its one Google credential download can leave it.
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(console))
+        .parent(&main).map_err(|_| error("Could not attach the private setup window"))?
+        .title("Google Cloud — Web OAuth client")
+        .inner_size(1060.0, 780.0)
+        .data_directory(directory)
+        .devtools(false)
+        .on_navigation(google_draft_navigation)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .on_download(move |view, event| {
+            let Ok(mut claim) = claim.lock() else { return false };
+            if claim.1.as_ref().is_none_or(|send| send.is_closed()) { return false; }
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    let valid_file = destination.file_name().and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("client_secret_") && name.ends_with(".json"));
+                    let valid_source = url.origin() == google_origin
+                        || (url.scheme() == "data" && url.as_str().len() <= 4 * MAX_FILE_BYTES as usize);
+                    let valid_page = view.url().is_ok_and(|page| {
+                        page.origin() == google_origin && page.path().starts_with("/auth/clients")
+                            && page.query_pairs().any(|(key, value)| key == "project" && value == project)
+                    });
+                    if claim.0.is_some() || !valid_file || !valid_source || !valid_page { return false; }
+                    claim.0 = Some(url);
+                    *destination = download_destination.clone();
+                    true
+                }
+                DownloadEvent::Finished { url, success, .. } if claim.0.as_ref() == Some(&url) => {
+                    if let Some(send) = claim.1.take() { let _ = send.send(success); }
+                    true
+                }
+                _ => false,
+            }
+        })
+        .initialization_script(script);
+    if let Some(proxy) = proxy {
+        #[cfg(windows)]
+        {
+            builder = builder.additional_browser_args(&proxy_browser_args(&proxy));
+        }
+        builder = builder.proxy_url(proxy);
+    }
+    builder.build().map_err(|_| error("Could not open the private Google setup window"))?;
+    match tokio::time::timeout(WAIT, receive).await {
+        Ok(Ok(true)) => {}
+        // Leave the owner's window available to recover a client if Google already created one.
+        _ => return Err(error("Google did not return a usable Web OAuth client download")),
+    }
+    let mut client_file = String::new();
+    let file = File::open(&destination).map_err(|_| error("Could not read the private Google download"))?;
+    file.take(MAX_FILE_BYTES + 1).read_to_string(&mut client_file)
+        .map_err(|_| error("Could not read the private Google download"))?;
+    if client_file.is_empty() || client_file.len() as u64 > MAX_FILE_BYTES {
+        return Err(error("Unexpected Web OAuth client download size"));
+    }
+    Ok(json!({"clientFile": client_file}))
+}
+
 pub fn permits(app: &AppHandle, label: &str, url: &tauri::Url) -> bool {
+    if label.starts_with(GOOGLE_CLIENT_DRAFT_WINDOW) {
+        return google_draft_navigation(url);
+    }
     allowed_url(url)
         && app
             .state::<BrowserGuests>()
@@ -210,7 +413,15 @@ pub async fn desktop_browser_guest(
     if !valid_id(&request.holder) {
         return Err(error("Invalid holder"));
     }
-    if request.operation == "create" {
+    if request.operation == "finishGoogleClientProvision" {
+        let label = request.setup_run_id.as_deref().and_then(google_client_window_label)
+            .ok_or_else(|| error("Invalid Google setup run"))?;
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
+        return Ok(json!({"ok": true}));
+    }
+    if matches!(request.operation.as_str(), "create" | "provisionGoogleClient") {
         let host = request
             .host_id
             .as_deref()
@@ -256,8 +467,21 @@ pub async fn desktop_browser_guest(
             .app_local_data_dir()
             .map_err(|e| error(e.to_string()))?
             .join("browser-guests")
-            .join(profile);
+            .join(&profile);
         std::fs::create_dir_all(&directory).map_err(|e| error(e.to_string()))?;
+        if request.operation == "provisionGoogleClient" {
+            if !cfg!(windows) {
+                return Err(error("Automatic Google credential download is not supported here"));
+            }
+            return provision_google_client(
+                &app,
+                url,
+                request.text.as_deref().ok_or_else(|| error("Missing Center redirect URI"))?,
+                request.setup_run_id.as_deref().ok_or_else(|| error("Missing Google setup run ID"))?,
+                directory,
+                proxy,
+            ).await;
+        }
         let id = format!("browser-guest-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
         {
             let state = app.state::<BrowserGuests>();
@@ -314,12 +538,7 @@ pub async fn desktop_browser_guest(
             // Preserve Wry hardening and route loopback destinations through Center too.
             #[cfg(windows)]
             {
-                // Chromium's proxy flag accepts a server origin without a URL path.
-                let proxy_origin = proxy.origin().ascii_serialization();
-                builder = builder.additional_browser_args(&format!(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --proxy-server={proxy_origin} --proxy-bypass-list=<-loopback>"
-                ));
+                builder = builder.additional_browser_args(&proxy_browser_args(&proxy));
             }
         }
         let window = app

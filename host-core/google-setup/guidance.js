@@ -729,7 +729,8 @@ export function buildBotGuidance(run, context = {}) {
     allowedBrowserActions = 'drive';
   }
 
-  if (blocker) {
+  if (blocker && !(step === 'client' && blocker.kind === 'needs-user' && blocker.step === 'client' &&
+      canAutoConfigureWebClient(run, centerStatus))) {
     return {
       phase: 'blocked',
       step,
@@ -775,6 +776,12 @@ export function buildBotGuidance(run, context = {}) {
       'On a miss: (1) re-read the page before retrying because the step may already be done; (2) retry at most once; (3) after a second miss on the same step, call google_setup(action="need_user", step, note) and end your turn.',
     neverRules,
   };
+}
+
+function canAutoConfigureWebClient(run, centerStatus) {
+  return run.mode === 'do-it-for-me' && run.personStep !== 'client' && Boolean(run.account && run.projectId) &&
+    run.steps?.project?.status === 'done' && centerStatus?.client?.supportsAutoConfigure === true &&
+    centerStatus?.isAdmin !== false;
 }
 
 function buildStepInstruction(step, {
@@ -911,9 +918,9 @@ function buildStepInstruction(step, {
         redirectUri,
         sensitiveLockRequired: true,
         requiresSystemBrowser: mustUseSystemBrowser,
-        nextAction: mustUseSystemBrowser
-          ? `SENSITIVE BOUNDARY: Browser observation/actions are locked for client creation. Tell the owner to open ${consoleUrl} in their own system browser, choose Application type "Web application" (NOT Desktop app), add Authorized redirect URI "${redirectUri}" (tick any AI agent box if shown), click Create, and submit the resulting Client ID and Client Secret directly into PiBot's private Center configuration control. Never ask them to paste secrets in chat or download/share a secret file.`
-          : `SENSITIVE BOUNDARY: Calling step/need_user on client locks the bot browser BEFORE clicking Create so the Client Secret dialog is never observed, screenshotted, or logged. Have the owner create a "Web application" client with Authorized redirect URI "${redirectUri}" and save Client ID + Client Secret directly in the private Center configuration control. Once Center confirms client.configured=true, proceed to connect.`,
+        nextAction: canAutoConfigureWebClient(run, centerStatus)
+          ? 'SENSITIVE BOUNDARY: On a supported desktop in Do it for me, the owner-authorized private setup window creates the Web OAuth client and imports it into Center automatically. End your turn so the desktop can finish; do not ask the owner to click Create, import, or confirm. Never open or inspect the credential page with bot_browser. If the desktop reports it could not finish, use the card’s manual fallback and check for an existing client before creating another.'
+          : `SENSITIVE BOUNDARY: Do not open or inspect client creation with bot_browser. When automatic creation is unavailable, the owner creates a "Web application" client at ${consoleUrl} with Authorized redirect URI "${redirectUri}" and saves it in the private Center configuration. Never ask for credentials or screenshots containing them in chat.`,
         doneSignal: 'Trusted Center status reports client.configured === true for this project.',
       };
     }

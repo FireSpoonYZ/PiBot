@@ -156,7 +156,7 @@ export async function fetchGoogleStatus(
 export async function configureGoogleClient(
   api: DesktopPanelApi,
   identity: DesktopIdentity,
-  input: { clientFile?: string; clientId?: string; clientSecret?: string },
+  input: { clientFile?: string; clientId?: string; clientSecret?: string; projectId?: string; ifUnconfigured?: true },
 ): Promise<GoogleStatusSnapshot> {
   const raw = await centerAdminRequest<unknown>(api, identity, {
     method: 'POST',

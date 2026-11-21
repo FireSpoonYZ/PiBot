@@ -159,6 +159,7 @@ function normalizeCenterStatus(raw) {
   const rawClient = isPlainObject(raw.client) ? raw.client : {};
   const client = {
     configured: rawClient.configured === true,
+    ...(rawClient.supportsAutoConfigure === true ? { supportsAutoConfigure: true } : {}),
     ...(typeof rawClient.clientId === 'string' && rawClient.clientId
       ? { clientId: rawClient.clientId }
       : {}),
@@ -215,6 +216,7 @@ function summarizeCenterForView(centerStatus) {
     ...(typeof centerStatus.isAdmin === 'boolean' ? { isAdmin: centerStatus.isAdmin } : {}),
     client: {
       configured: centerStatus.client?.configured === true,
+      ...(centerStatus.client?.supportsAutoConfigure === true ? { supportsAutoConfigure: true } : {}),
       ...(centerStatus.client?.clientId ? { clientId: centerStatus.client.clientId } : {}),
       ...(centerStatus.client?.projectId ? { projectId: centerStatus.client.projectId } : {}),
       ...(centerStatus.client?.redirectUri ? { redirectUri: centerStatus.client.redirectUri } : {}),

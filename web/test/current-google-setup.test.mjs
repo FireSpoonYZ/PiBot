@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeGoogleSetupControl } from '../../host-core/browser-setup-protocol.js';
 import {
+  automaticGoogleClientSetup,
   buildGoogleSetupMutationPayload,
   continueGoogleSetupAfterSignInRejection,
   deriveGoogleSetupAttention,
@@ -35,6 +36,26 @@ function makeSetupPresentation(overrides = {}) {
     ...overrides,
   };
 }
+
+test('only the owner-selected automatic creation path can provision a Google Web OAuth client', () => {
+  const setup = {
+    id: 'run-1', state: 'running', mode: 'do-it-for-me', step: 'client',
+    account: 'owner@example.test', projectId: 'test-project', steps: { project: { status: 'done' } },
+  };
+  assert.deepEqual(automaticGoogleClientSetup(setup), {
+    runId: setup.id, projectId: setup.projectId, account: setup.account,
+  });
+  for (const change of [
+    { mode: 'guide-here' },
+    { mode: 'guide-browser' },
+    { state: 'cancelled' },
+    { personStep: 'client' },
+    { center: { isAdmin: false } },
+    { steps: { project: { status: 'skipped' } } },
+  ]) {
+    assert.equal(automaticGoogleClientSetup({ ...setup, ...change }), null);
+  }
+});
 
 test('rejected Google login resumes the same guide revision and uses a canonical destination', async () => {
   const calls = [];

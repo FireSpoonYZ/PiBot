@@ -485,11 +485,18 @@ test('sensitive steps lock bot browser before consent/secret and refuse unverifi
     await env.callBot({ action: 'step', step: 'links', status: 'done' });
     await env.callBot({ action: 'step', step: 'publish', status: 'done' });
 
-    // Activating client proactively locks browser before Client Secret dialog.
+    env.setCenterStatus({
+      reachable: true, isAdmin: true,
+      client: { configured: false, supportsAutoConfigure: true, redirectUri: 'https://center.example.com/api/oauth/google/callback' },
+      accounts: [],
+    });
+    // Desktop auto-creation still locks the Bot browser before any Client Secret dialog.
     const clientActive = await env.callBot({ action: 'step', step: 'client', status: 'active' });
     assert.equal(clientActive.isError, false);
     assert.equal(clientActive.body.view.browserLock.active, true);
     assert.equal(clientActive.body.view.browserLock.reason, 'oauth-client-secret');
+    assert.match(clientActive.body.view.guidance.nextAction, /creates the Web OAuth client and imports it into Center automatically/);
+    assert.equal((await env.service.getAgentBrowserPolicy('bot-a')).allowed, false);
 
     // Sensitive URL classifier blocks accounts.google.com and /auth/clients.
     assert.equal(

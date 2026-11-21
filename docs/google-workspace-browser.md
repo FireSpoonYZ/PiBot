@@ -22,6 +22,7 @@ Google Calendar 规则的提前分钟数可以设为 **0（会议开始时）**�
 - 登录、MFA、条款和创建、显示密钥等敏感步骤由本人完成。点击 **交还给 Bot** 即可结束接管，不用先关闭或离开当前页。只要当前页仍受保护，Bot 就不能读取或操作该页。人工接管期间断开连接后，可选择 **继续接管**。**切换外部浏览器指导** 会在系统浏览器打开新页面。
 - 选择 **Bot 代办** 时，亲自阅读并同意 Google 用户数据政策、在 Google 页面完成配置后，点向导卡片上的 **已完成**。Bot 会接着填写并保存品牌链接，无需再手动保存或确认这一步。
 - 创建 Web OAuth 客户端和最终 Google 授权在 Bot 浏览器之外完成。向导仍暂停 Bot 浏览器工具，但不会把留在「受众群体」等普通页面上的标签页标记为敏感，也不需要接管这个标签页。授权卡会显示向导里已选的服务，无需重复选择；请在 Google 页面亲自确认。
+- Windows 桌面端和 Center 都支持这项功能时，选择 **Bot 代办** 后，会在独立窗口创建 Web OAuth 客户端并将 Google 生成的凭据直接保存到 Center，无需另点 **创建** 或导入。Bot 不能读取或截图该窗口；自动保存不会替换 Center 已有的客户端。自动处理失败时，可用系统浏览器和 Center 私密表单手动完成。最后仍由你本人在系统浏览器登录并授权。
 - 配置向导保留 Bot 代办、内嵌指导、外部浏览器指导三种路径，但只提供当前 Host 实际支持的操作。桌面需有可用的 Chrome/Edge 或兼容的 Chromium；Android 本机要求 WebView 支持独立多 Profile，不支持时不会借用应用 WebView 或默认 Cookie，Google 配置可改走系统浏览器。
 
 Center 使用固定的内置 MCP（`builtin.google-workspace`）调用 Google API，Host 不接收 Google 刷新令牌。按[中心部署指南](center-linux-deployment.md)保留并备份原数据卷和配套加密密钥；只重建容器不应要求所有 Bot 重新登录，丢失卷或密钥则不能凭镜像恢复授权。上游基线、MIT 许可与移植差异见 [Orca 来源清单](../center-server/google-workspace/vendor/orca/README.md)。
