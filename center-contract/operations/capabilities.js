@@ -42,7 +42,7 @@ const learningConfigSchema = {
   type: 'object',
   additionalProperties: false,
   description:
-    'Learning settings patch: review cadence, curator cadence, runtime budget, and auxiliary model refs (null follows the Bot model; explicit provider/model refs must already be enabled and granted to the target Host).',
+    'Patch automatic review settings, curator cadence, runtime budget, and auxiliary model refs. Null follows the Bot model. Explicit provider/model refs must already be enabled and granted to the target Host.',
   properties: {
     reviewModelRef: {
       anyOf: [{ type: 'string', minLength: 1, maxLength: 512 }, { type: 'null' }],
@@ -54,6 +54,7 @@ const learningConfigSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
+        enabled: { type: 'boolean', description: 'Whether this Bot runs automatic idle reviews for memory and skills.' },
         memoryEvery: { type: 'integer', minimum: 1, maximum: 10000 },
         skillEvery: { type: 'integer', minimum: 1, maximum: 10000 },
       },

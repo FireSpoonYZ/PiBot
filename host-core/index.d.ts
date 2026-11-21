@@ -1,7 +1,7 @@
 import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { CenterConnectionStatus, Provider, Model as CenterModel, ProviderCheckResult, DiscoveryResult, ActionRequest, ActionResult } from '../center-contract/index.js';
 import type { EntryRecord } from '@earendil-works/pi-durable';
-import type { BotAvatar } from '../center-contract/index.js';
+import type { BotAvatar, BotLearningSettingsPatch } from '../center-contract/index.js';
 import type {
   ShowerCreateOptions,
   ShowerFrame,
@@ -1785,15 +1785,6 @@ export type BotSkillReviewInput =
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
-/** CAS settings patch; auxiliary refs never introduce new provider credentials. */
-export interface BotLearningSettingsPatch {
-  reviewModelRef?: string | null;
-  curatorModelRef?: string | null;
-  review?: { memoryEvery?: number; skillEvery?: number };
-  curator?: { intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean };
-  budget?: { maxIterations?: number; maxInputTokens?: number | null; callTimeoutMs?: number; jobTimeoutMs?: number; pollTimeoutMs?: number };
-}
-
 /** Tool/runtime-level input; Host maps learn/review/curate to the Center start action. */
 export interface BotLearningInput {
   action: BotLearningAction;
@@ -1814,7 +1805,7 @@ export type BotInstallationAction =
 
 export type {
   BotInstallationCatalog, BotInstallationDescription, BotInstallationCheck,
-  LearningMemoryStatus, LearningSourceInput, LearningSourceResult,
+  BotLearningSettingsPatch, LearningMemoryStatus, LearningSourceInput, LearningSourceResult,
 } from '../center-contract/index.js';
 
 /** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations.

@@ -638,7 +638,12 @@ export interface BotLearningSettings {
   enabled?: boolean;
   reviewModelRef: string | null;
   curatorModelRef: string | null;
-  review: { memoryEvery: number; skillEvery: number };
+  review: {
+    /** Automatic reviews default to enabled. Older Centers omit this field. */
+    enabled?: boolean;
+    memoryEvery: number;
+    skillEvery: number;
+  };
   curator: {
     intervalHours: number;
     minIdleHours: number;
@@ -655,6 +660,14 @@ export interface BotLearningSettings {
     jobTimeoutMs: number;
     pollTimeoutMs: number;
   };
+}
+/** CAS settings patch. Auxiliary refs use the target Host's existing provider grants. */
+export interface BotLearningSettingsPatch {
+  reviewModelRef?: string | null;
+  curatorModelRef?: string | null;
+  review?: Partial<BotLearningSettings['review']>;
+  curator?: Partial<Omit<BotLearningSettings['curator'], 'enabled' | 'paused'>>;
+  budget?: Partial<BotLearningSettings['budget']>;
 }
 export interface BotLearningCounters {
   turnsSinceMemoryReview: number;

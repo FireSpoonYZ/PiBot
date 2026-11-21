@@ -112,7 +112,7 @@ function stripTopCredentials(value) {
 function defaultSettings() {
   return {
     reviewModelRef: null, curatorModelRef: null,
-    review: { memoryEvery: DEFAULT_MEMORY_EVERY, skillEvery: DEFAULT_SKILL_EVERY },
+    review: { enabled: true, memoryEvery: DEFAULT_MEMORY_EVERY, skillEvery: DEFAULT_SKILL_EVERY },
     curator: {
       intervalHours: DEFAULT_CURATOR_INTERVAL_HOURS, minIdleHours: DEFAULT_CURATOR_MIN_IDLE_HOURS,
       staleAfterDays: DEFAULT_STALE_AFTER_DAYS, archiveAfterDays: DEFAULT_ARCHIVE_AFTER_DAYS,
@@ -142,11 +142,10 @@ function validateSettingsPatch(current, patch) {
   }
   if (patch.review !== undefined) {
     const section = object(patch.review) ? patch.review : { invalid: true };
-    for (const key of Object.keys(section)) {
-      if (!['memoryEvery', 'skillEvery'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown review setting ' + key);
-      section[key] = intIn(section[key], 1, 10_000, 'review.' + key);
+    for (const [key, value] of Object.entries(section)) {
+      if (!['enabled', 'memoryEvery', 'skillEvery'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown review setting ' + key);
+      next.review[key] = key === 'enabled' ? boolIn(value, 'review.enabled') : intIn(value, 1, 10_000, 'review.' + key);
     }
-    Object.assign(next.review, section);
   }
   if (patch.curator !== undefined) {
     const section = object(patch.curator) ? patch.curator : { invalid: true };
@@ -420,6 +419,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
   function deliverHostCall(runtime, method, params) {
     return new Promise((resolve, reject) => {
       if (runtime.finished) { reject(error('INVALID_STATE', 'Job already finished')); return; }
+      if (runtime.abort.signal.aborted) { reject(error('CANCELLED', 'Job is stopping')); return; }
       const clean = hostCallParams(runtime, method, params);
       boundedJson(clean, MAX_CALL_PAYLOAD_BYTES, 'call params');
       const callId = 'call-' + randomUUID();
@@ -507,6 +507,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
 
   async function onCall(runtime, method, params) {
     if (runtime.finished) throw error('INVALID_STATE', 'Job already finished');
+    if (runtime.abort.signal.aborted) throw error('CANCELLED', 'Job is stopping');
     if (!ONCALL_METHODS.has(method)) throw error('FORBIDDEN', 'Unsupported learning callback ' + method);
     if (method === 'skill.call') {
       const name = object(params) ? params.name : null;
@@ -695,16 +696,23 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
   }
 
   function configure(identity, input) {
-    const current = getSettings(identity.deviceId, identity.botId);
+    const { deviceId, botId } = identity;
+    const current = getSettings(deviceId, botId);
     if (input.expectedRevision !== current.revision) throw error('REVISION_CONFLICT', 'Revision does not match');
     if (input.config !== undefined && !object(input.config)) throw error('VALIDATION_FAILED', 'Invalid config');
     const merged = validateSettingsPatch(current.settings, input.config ?? {});
     for (const key of ['reviewModelRef', 'curatorModelRef']) {
-      if (input.config?.[key] !== undefined) auxiliaryModel(merged[key], identity.deviceId);
+      if (input.config?.[key] !== undefined) auxiliaryModel(merged[key], deviceId);
     }
     transaction(() => {
-      settingsStmt.put.run(identity.deviceId, identity.botId, json(merged), current.revision + 1);
+      settingsStmt.put.run(deviceId, botId, json(merged), current.revision + 1);
     });
+    if (current.settings.review.enabled && !merged.review.enabled) {
+      const runtime = runtimes.get(activeByBot.get(botKey(deviceId, botId)));
+      if (runtime?.job.automatic && runtime.job.mode === 'review' && !runtime.abort.signal.aborted) {
+        cancelJob(runtime, 'cancel');
+      }
+    }
     return { settings: { ...merged, revision: current.revision + 1 } };
   }
 
@@ -718,8 +726,6 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     const sources = input.sources ?? [];
     if (!Array.isArray(sources) || sources.length > 16 || sources.some((source) => typeof source !== 'string' || !source.trim() || source.length > 4096)) throw error('INVALID_ARGUMENT', 'Invalid sources');
     if (sources.length && mode !== 'learn') throw error('FORBIDDEN', 'Sources are only allowed for manual learn');
-    const initialSettings = getSettings(identity.deviceId, identity.botId).settings;
-    const model = auxiliaryModel(mode === 'review' ? initialSettings.reviewModelRef : mode === 'curate' ? initialSettings.curatorModelRef : null, identity.deviceId);
     const focus = input.focus === undefined ? null : input.focus;
     if (focus !== null && (typeof focus !== 'string' || focus.length > 4_000)) throw error('INVALID_ARGUMENT', 'Invalid focus');
     // Tool-iteration count of the completed submission — upstream _iters_since_skill counts
@@ -744,6 +750,12 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
         return { replay: existing };
       }
       const { settings } = getSettings(deviceId, botId);
+      if (automatic && mode === 'review' && !settings.review.enabled) {
+        const decision = { status: 'deferred', jobId: null, mode, automatic, reason: 'disabled' };
+        recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
+        return { replay: decision };
+      }
+      const model = auxiliaryModel(mode === 'review' ? settings.reviewModelRef : mode === 'curate' ? settings.curatorModelRef : null, deviceId);
       const counters = getCounters(deviceId, botId);
       if (automatic && mode === 'review' && snapshot.span && snapshot.sessionId) {
         const previous = counters.reviewCursor;
@@ -826,7 +838,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       if (mode === 'curate') counters.lastCuratorRunAt = job.createdAt;
       saveCounters(deviceId, botId, counters);
       recordSubmission(deviceId, botId, input.requestId, fingerprint, { status: 'queued', jobId: job.jobId, mode, automatic });
-      return { admitted: job };
+      return { admitted: job, model, settings };
     });
 
     if (admission.replay) {
@@ -842,8 +854,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       return result;
     }
 
-    const job = admission.admitted;
-    const settings = getSettings(deviceId, botId).settings;
+    const { admitted: job, model, settings } = admission;
     const abort = new AbortController();
     const runtime = {
       job, model, abort, abortReason: null,
@@ -918,7 +929,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     const timeout = Math.min(runtime.budget.pollTimeoutMs, DEFAULT_POLL_TIMEOUT_MS);
     for (;;) {
       if (runtime.finished) return terminalReply(runtime.job);
-      if (runtime.pending) {
+      if (runtime.pending && !runtime.abort.signal.aborted) {
         const pending = runtime.pending;
         callStmt.delivered.run(new Date().toISOString(), pending.callId);
         return { jobId: job.jobId, status: runtime.job.status, call: { id: pending.callId, method: pending.method, params: pending.params } };
@@ -1058,6 +1069,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
         result: { success: false, error: { code: 'INDETERMINATE', message: 'Tool call outcome is unknown; it was not re-executed' } },
       };
     }
+    if (runtime.abort.signal.aborted) throw error('CANCELLED', 'Job is stopping');
     // Claim before side effects so an interrupted call is never silently duplicated.
     toolCallStmt.insert.run(job.jobId, input.callId, input.name, argsText, new Date().toISOString());
     const execution = (async () => {

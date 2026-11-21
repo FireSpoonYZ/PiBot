@@ -28,7 +28,7 @@ import type {
 } from '../web/src/center-admin';
 import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BatchModelsRequest, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
-  BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeleteModelResult, DeleteProviderResult, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
+  BotCapabilityEntry, BotLearningSettingsPatch, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeleteModelResult, DeleteProviderResult, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
   EnableRequest,
   InstallRequest, InstallSource, Installation, InstallationConfig, InstallationSkillFilesResponse, LoginRequest, Model, ModelConfig, ModelPickerResponse, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderAuthStatus, ProviderAuthFlow, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
@@ -46,18 +46,7 @@ export type {
   UpdateRequest,
 };
 
-export interface BotLearningPatchConfig {
-  reviewModelRef?: string | null;
-  curatorModelRef?: string | null;
-  review?: { memoryEvery?: number; skillEvery?: number };
-  curator?: {
-    intervalHours?: number;
-    minIdleHours?: number;
-    staleAfterDays?: number;
-    archiveAfterDays?: number;
-    consolidate?: boolean;
-  };
-}
+export type BotLearningPatchConfig = BotLearningSettingsPatch;
 export interface BotLearningTriggerResult {
   jobId?: string | null;
   status: string;

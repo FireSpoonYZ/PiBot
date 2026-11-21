@@ -14,6 +14,7 @@ import type {
   BotLearningCounters,
   BotLearningJobSummary,
   BotLearningSettings,
+  BotLearningSettingsPatch,
   BotLearningStatus,
   BotModelConfig,
   BotRef,
@@ -259,21 +260,7 @@ export interface McpOAuthStatus {
   error?: string;
 }
 
-export interface BotLearningPatchConfig {
-  enabled?: boolean;
-  reviewModelRef?: string | null;
-  curatorModelRef?: string | null;
-  review?: { memoryEvery?: number; skillEvery?: number };
-  curator?: {
-    intervalHours?: number;
-    minIdleHours?: number;
-    staleAfterDays?: number;
-    archiveAfterDays?: number;
-    consolidate?: boolean;
-    enabled?: boolean;
-    paused?: boolean;
-  };
-}
+export type BotLearningPatchConfig = BotLearningSettingsPatch;
 
 export interface BotLearningTriggerResult {
   jobId?: string | null;

@@ -493,19 +493,21 @@ export function DevicesTab({
     if (!cfgBot || !cfgLearning) return;
     setCfgBusy(true);
     setCfgError('');
+    setCfgNotice('');
     try {
       const res = await api.configureBotLearning(cfgBot.deviceId, cfgBot.botId, cfgLearning.settings.revision, {
-        enabled: nextEnabled,
-        curator: { enabled: nextEnabled },
+        review: { enabled: nextEnabled },
       });
-      setCfgLearning(prev => (prev ? { ...prev, settings: res.settings } : prev));
+      setCfgLearning(prev => prev?.deviceId === cfgBot.deviceId && prev.botId === cfgBot.botId
+        ? { ...prev, settings: res.settings }
+        : prev);
       setCfgNotice(
         nextEnabled
-          ? t('已开启空闲自动学习技能', 'Idle auto-learning enabled')
-          : t('已暂停空闲自动学习', 'Idle auto-learning paused'),
+          ? t('已开启自动反思', 'Automatic reflection enabled')
+          : t('已关闭自动反思', 'Automatic reflection disabled'),
       );
     } catch (err) {
-      setCfgError(errorMessage(err, t('更新学习开关失败', 'Failed to update learning toggle')));
+      setCfgError(errorMessage(err, t('无法更新自动反思设置', 'Failed to update automatic reflection')));
     } finally {
       setCfgBusy(false);
     }
@@ -1240,19 +1242,15 @@ export function DevicesTab({
                     <div className="ca-section ca-section-pad">
                       <div className="ca-inline-between">
                         <div>
-                          <div className="ca-field-label">{t('空闲自动学习技能', 'Idle Auto-Learning')}</div>
+                          <div className="ca-field-label">{t('自动反思', 'Automatic reflection')}</div>
                           <div className="ca-muted">
-                            {t('开启后，Bot 会在对话间隙自动提炼记忆并沉淀新技能', 'When enabled, the Bot automatically distills memories and skills while idle')}
+                            {t('Bot 空闲时自动复盘记忆并提炼技能', 'Review memories and extract skills when the Bot is idle')}
                           </div>
                         </div>
                         <CaSwitch
-                          checked={
-                            cfgLearning.settings.enabled ??
-                            cfgLearning.settings.curator.enabled ??
-                            true
-                          }
+                          checked={cfgLearning.settings.review.enabled !== false}
                           disabled={cfgBusy}
-                          label={t('切换空闲自动学习技能', 'Toggle idle auto-learning')}
+                          label={t('自动反思', 'Automatic reflection')}
                           onChange={next => void handleToggleLearning(next)}
                         />
                       </div>

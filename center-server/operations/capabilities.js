@@ -877,7 +877,7 @@ function sanitizeLearningConfigPatch(rawConfig) {
       if (!isPlainObject(value)) fail('VALIDATION_FAILED', 'review must be an object');
       const section = {};
       for (const [subKey, subVal] of Object.entries(value)) {
-        if (subKey !== 'memoryEvery' && subKey !== 'skillEvery') {
+        if (subKey !== 'enabled' && subKey !== 'memoryEvery' && subKey !== 'skillEvery') {
           fail('VALIDATION_FAILED', `Unknown review field '${subKey}'`);
         }
         section[subKey] = subVal;
