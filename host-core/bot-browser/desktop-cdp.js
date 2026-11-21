@@ -27,6 +27,8 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 25_000;
 const CLOSE_GRACE_MS = 2_000;
 const MAX_CDP_MESSAGE_BYTES = 24 * 1024 * 1024;
 const MAX_STDERR_TAIL_BYTES = 8_192;
+// CHROME_RESULT_CODE_PROFILE_IN_USE in chrome/common/chrome_result_codes.h.
+const CHROMIUM_PROFILE_IN_USE_EXIT_CODE = 21;
 
 const DEVTOOLS_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9_-]+$/;
 const DEVTOOLS_LISTENING_RE = /DevTools listening on (ws:\/\/[^\s\r\n]+)/;
@@ -625,6 +627,7 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
     let settled = false;
     let checking = false;
     let cleanExit = child.exitCode === 0 && !child.signalCode;
+    let unchangedProfileEndpoint = false;
     let pollTimer;
     const verification = new AbortController();
     const deadline = Date.now() + timeoutMs;
@@ -662,6 +665,7 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
         if (!url && windowsEndpoint && cleanExit) {
           if (windowsEndpoint.baselineError) throw windowsEndpoint.baselineError;
           const record = await windowsEndpoint.readEndpoint(windowsEndpoint.profilePath);
+          unchangedProfileEndpoint = Boolean(record && record.contents === windowsEndpoint.baseline?.contents);
           if (record && record.contents !== windowsEndpoint.baseline?.contents
               && record.mtimeMs >= windowsEndpoint.startedAt) {
             url = parseLoopbackDevToolsUrl(record.url);
@@ -696,6 +700,12 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
       fail(browserError('BROWSER_START_FAILED', `Failed to spawn Chromium: ${err?.message || 'error'}`));
     };
     const onExit = (code, exitSignal) => {
+      if (windowsEndpoint && code === CHROMIUM_PROFILE_IN_USE_EXIT_CODE && !exitSignal) {
+        fail(browserError('BROWSER_START_FAILED', 'Chromium reported that the Bot browser profile is in use.', {
+          data: { profileInUse: true },
+        }));
+        return;
+      }
       const stderr = getStderr();
       const lockLine = unwritableProfileLockLine(stderr);
       if (lockLine) {
@@ -724,9 +734,11 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
     };
 
     const timer = setTimeout(() => {
-      fail(browserError('BROWSER_TIMEOUT', windowsEndpoint?.baseline
+      const message = windowsEndpoint?.baseline
         ? 'Timed out waiting for a new Chromium DevTools endpoint. An existing browser may still be using this Bot profile; close that browser before retrying.'
-        : 'Timed out waiting for Chromium DevTools startup.'));
+        : 'Timed out waiting for Chromium DevTools startup.';
+      const details = cleanExit && unchangedProfileEndpoint ? { data: { profileInUse: true } } : {};
+      fail(browserError('BROWSER_TIMEOUT', message, details));
     }, timeoutMs);
     if (!windowsEndpoint) timer.unref?.();
 
@@ -907,7 +919,7 @@ export async function launchDesktopChromium({
     const lockLine = unwritableProfileLockLine(stderrTail);
     const earlySpawnErr = spawnError;
     await close();
-    if (lockLine && err?.code !== 'BROWSER_PROFILE_UNWRITABLE') {
+    if (lockLine && err?.code !== 'BROWSER_PROFILE_UNWRITABLE' && !err?.data?.profileInUse) {
       throw browserError(
         'BROWSER_PROFILE_UNWRITABLE',
         `Chromium cannot lock its profile directory (${lockLine}).`

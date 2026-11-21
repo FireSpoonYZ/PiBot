@@ -79,14 +79,25 @@ test('Windows inherited stderr remains usable without an ancillary profile file 
   await handle.close();
 });
 
-test('Windows unchanged stale endpoint never connects and explains an existing profile owner', async () => {
+test('Windows unchanged stale endpoint never connects and signals that the profile can be recovered', async () => {
   const fake = fakeLaunch();
   await assert.rejects(launchDesktopChromium({
     ...fake.options,
     startupTimeoutMs: 75,
     readWindowsEndpoint: async () => endpoint,
     verifyWindowsOwner: async () => assert.fail('stale endpoint must not be queried'),
-  }), error => error.code === 'BROWSER_TIMEOUT' && /existing browser/.test(error.message));
+  }), error => error.code === 'BROWSER_TIMEOUT' && error.data?.profileInUse === true &&
+    /existing browser/.test(error.message));
+  assert.equal(fake.connected, 0);
+});
+
+test('Windows profile-in-use exit is recoverable without connecting to the existing browser', async () => {
+  const fake = fakeLaunch({ exitCode: 21 });
+  await assert.rejects(launchDesktopChromium({
+    ...fake.options,
+    readWindowsEndpoint: async () => null,
+    verifyWindowsOwner: async () => assert.fail('an occupied profile must not be queried'),
+  }), error => error.code === 'BROWSER_START_FAILED' && error.data?.profileInUse === true);
   assert.equal(fake.connected, 0);
 });
 

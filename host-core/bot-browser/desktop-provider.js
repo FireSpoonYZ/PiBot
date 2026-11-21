@@ -18,12 +18,14 @@
 // MIT License — Copyright (c) 2026 Lovecast Inc.
 
 import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertId } from '../message-protocol.js';
 import { hasWaitCondition, normalizeProviderWait } from './protocol.js';
 import { launchDesktopChromium } from './desktop-cdp.js';
+import { assertPrivateWindowsProfileDir } from './desktop-windows-endpoint.js';
 import {
   discoverDesktopBrowser,
   isPersonalBrowserProfilePath,
@@ -1138,7 +1140,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       });
     }
 
-    const profilePath = await prepareBotProfileDir({
+    const baseProfilePath = await prepareBotProfileDir({
       botId,
       profileDir: profileDirOpt,
       dataDir: dataDirOpt,
@@ -1149,20 +1151,43 @@ export async function createDesktopBrowserProvider(opts = {}) {
       snapRoots: opts.snapRoots,
       passwdHomePath: opts.passwdHomePath,
     });
-    resolvedProfilePath = profilePath;
-
+    const recoveryProfilePath = platform === 'win32' && discovery.transport === 'loopback'
+      ? win32.join(baseProfilePath, '.pibot-recovery')
+      : null;
+    let profilePath = baseProfilePath;
+    const startProfile = (profilePath) => launchBrowser({
+      executablePath: discovery.executablePath,
+      profilePath,
+      transport: discovery.transport,
+      viewport,
+      platform,
+      env,
+      commandTimeoutMs,
+      signal,
+    });
     let handle;
     try {
-      handle = await launchBrowser({
-        executablePath: discovery.executablePath,
-        profilePath,
-        transport: discovery.transport,
-        viewport,
-        platform,
-        env,
-        commandTimeoutMs,
-        signal,
-      });
+      if (recoveryProfilePath) {
+        try {
+          await assertPrivateWindowsProfileDir(recoveryProfilePath);
+          profilePath = recoveryProfilePath;
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+      }
+      try {
+        handle = await startProfile(profilePath);
+      } catch (error) {
+        if (!recoveryProfilePath || profilePath !== baseProfilePath || error?.data?.profileInUse !== true) throw error;
+        signal?.throwIfAborted();
+        // An orphaned Windows Chromium may still own the original profile after
+        // a Host upgrade. Keep that profile intact and persist a new profile for this Bot.
+        await assertPrivateWindowsProfileDir(baseProfilePath);
+        await mkdir(recoveryProfilePath, { mode: 0o700, recursive: true });
+        await assertPrivateWindowsProfileDir(recoveryProfilePath);
+        profilePath = recoveryProfilePath;
+        handle = await startProfile(profilePath);
+      }
     } catch (err) {
       lastLaunchFailure = {
         reason: err?.code === 'BROWSER_PROFILE_UNWRITABLE' ? 'profile_dir_unwritable' : 'chromium_start_failed',
@@ -1171,6 +1196,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       throw err;
     }
 
+    resolvedProfilePath = profilePath;
     lastLaunchFailure = null;
     browserHandle = handle;
     sessionId = randomUUID();
