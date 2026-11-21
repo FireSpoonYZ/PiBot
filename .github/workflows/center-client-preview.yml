@@ -1,0 +1,60 @@
+name: Center client preview
+run-name: Center clients 0.0.27-dev.9
+
+on:
+  push:
+    branches:
+      - codex/center-preview-0.0.27-dev.9
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/desktop.yml
+    with:
+      source-ref: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      source-sha: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      release: true
+      version: 0.0.27-dev.9
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  android:
+    uses: ./.github/workflows/apk.yml
+    with:
+      source-ref: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      source-sha: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      release: true
+      version: 0.0.27-dev.9
+    secrets:
+      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+
+  macos:
+    uses: ./.github/workflows/desktop-macos.yml
+    with:
+      source-ref: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      source-sha: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      release: true
+      version: 0.0.27-dev.9
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  center:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/center.yml
+    with:
+      source-ref: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      source-sha: bd8d4516805470d44cdadffd087cbfeb1528cb30
+      release: true
+      version: 0.0.27-dev.9
