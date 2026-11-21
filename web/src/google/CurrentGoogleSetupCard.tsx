@@ -349,7 +349,7 @@ export function CurrentGoogleSetupCard({
           isLocalAndroid={googleContext.isLocalAndroid}
           expectedRunId={currentActiveRunId}
           readOnly={Boolean(disabled)}
-          managedStatus={Boolean(callGoogleSetup)}
+          managedStatus
           compactChat
           externalSetup={currentLiveSetup}
           callGoogleSetup={callGoogleSetup}

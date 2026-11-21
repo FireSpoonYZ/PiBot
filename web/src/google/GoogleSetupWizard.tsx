@@ -344,6 +344,7 @@ export function GoogleSetupWizard({
   const effectiveScopeKey = scopeKey || botId;
   const mountedRef = useRef(true);
   const autoStartedRef = useRef(false);
+  const onStatusUpdatedRef = useRef(onStatusUpdated);
   const activeScopeRef = useRef(effectiveScopeKey);
   activeScopeRef.current = effectiveScopeKey;
   const requestSeqRef = useRef(0);
@@ -373,7 +374,7 @@ export function GoogleSetupWizard({
 
   const [setup, setSetup] = useState<GoogleSetupControlState | null>(() => externalSetup ?? null);
   const [centerStatus, setCenterStatus] = useState<GoogleStatusSnapshot | null>(null);
-  const [loading, setLoading] = useState(() => !managedStatus && Boolean(callGoogleSetup));
+  const [initializedScopeKey, setInitializedScopeKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [unavailableReason, setUnavailableReason] = useState('');
   const [error, setError] = useState('');
@@ -471,6 +472,10 @@ export function GoogleSetupWizard({
     applySetupState(externalSetup, effectiveScopeKey, ++requestSeqRef.current, 'external', false);
   }, [applySetupState, effectiveScopeKey, externalSetup]);
 
+  useEffect(() => {
+    onStatusUpdatedRef.current = onStatusUpdated;
+  }, [onStatusUpdated]);
+
   const refreshCenter = useCallback(async () => {
     if (!api || !identity) return null;
     const reqScope = effectiveScopeKey;
@@ -478,13 +483,13 @@ export function GoogleSetupWizard({
       const snap = await fetchGoogleStatus(api, identity);
       if (mountedRef.current && reqScope === activeScopeRef.current) {
         setCenterStatus(snap);
-        onStatusUpdated?.(snap);
+        onStatusUpdatedRef.current?.(snap);
       }
       return snap;
     } catch {
       return null;
     }
-  }, [api, effectiveScopeKey, identity, onStatusUpdated]);
+  }, [api, effectiveScopeKey, identity]);
 
   const refreshLatestAfterConflict = useCallback(
     async (reqScope: string) => {
@@ -673,11 +678,9 @@ export function GoogleSetupWizard({
     let active = true;
     const init = async () => {
       if (managedStatus) {
-        setLoading(false);
         await refreshCenter();
         return;
       }
-      setLoading(true);
       const [nextSetup] = await Promise.all([
         callGoogleSetup ? sendControl({ action: 'status' }) : Promise.resolve(null),
         refreshCenter(),
@@ -694,7 +697,7 @@ export function GoogleSetupWizard({
         autoStartedRef.current = true;
         await sendControl({ action: 'start' });
       }
-      if (active && mountedRef.current) setLoading(false);
+      if (active && mountedRef.current) setInitializedScopeKey(effectiveScopeKey);
     };
     void init();
     return () => {
@@ -937,7 +940,9 @@ export function GoogleSetupWizard({
     }
   };
 
-  if (loading) {
+  const waitingForInitialStatus =
+    !managedStatus && initializedScopeKey !== effectiveScopeKey && Boolean(callGoogleSetup || (api && identity));
+  if (waitingForInitialStatus) {
     return (
       <div className="gws-card" role="status">
         <div className="gws-card-head">
