@@ -36,6 +36,7 @@ const STATE_KEYS = [
   'activity',
   'learning',
   'durableWaits',
+  'googleSetupRevision',
 ];
 
 const END_REASONS = new Set([

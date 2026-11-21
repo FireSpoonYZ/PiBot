@@ -1,7 +1,7 @@
 // Shared composer-docked active Google Setup wizard container (Desktop & Mobile).
 // - Renders nothing when there is no active setup flow or when Host confirms completion/cancellation/expiry.
 // - Isolates state by scopeKey + runId and refreshes in place on copy/revision updates.
-// - Preserves collapse state across same-step polling/revision/copy changes without unmounting form inputs;
+// - Preserves collapse state across same-step revision/copy changes without unmounting form inputs;
 //   auto-expands on first appearance, a genuinely new run, or a new step needing operator action.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp } from 'lucide-react';
@@ -36,6 +36,7 @@ export interface CurrentGoogleSetupCardProps {
   googleContext?: GoogleChatCardContext;
   disabled?: boolean;
   active?: boolean;
+  hostRevision?: number;
 }
 
 interface ScopedLiveState {
@@ -57,15 +58,23 @@ export function CurrentGoogleSetupCard({
   googleContext,
   disabled = false,
   active = true,
+  hostRevision,
 }: CurrentGoogleSetupCardProps) {
   const t = useText();
   const mountedRef = useRef(true);
   const requestSeqRef = useRef(0);
   const statusInFlightRef = useRef(new Map<string, Promise<GoogleSetupControlState>>());
   const mutationRef = useRef({ scopeKey, pending: 0, epoch: 0 });
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePresentation = isActiveGoogleSetupPresentation(presentation) ? presentation : undefined;
   const presentationRunId = activePresentation?.runId?.trim() ?? '';
+  const refreshQueueRef = useRef({ scopeKey, presentationRunId, force: false, revision: -1, retry: false });
+  if (refreshQueueRef.current.scopeKey !== scopeKey ||
+      refreshQueueRef.current.presentationRunId !== presentationRunId) {
+    refreshQueueRef.current = { scopeKey, presentationRunId, force: false, revision: -1, retry: false };
+  }
   const botId = activePresentation?.botId || googleContext?.botId || '';
   const callGoogleSetup = googleContext?.callGoogleSetup;
   const canQueryHost = Boolean(
@@ -116,6 +125,8 @@ export function CurrentGoogleSetupCard({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (refreshTimerRef.current !== null) clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
     };
   }, []);
 
@@ -141,8 +152,36 @@ export function CurrentGoogleSetupCard({
     (!initialChecked ||
       shouldRefreshGoogleSetupStatus(currentLiveSetup, activePresentation, currentActiveRunId));
 
+  const wakeRefresh = useCallback(() => {
+    if (!mountedRef.current || refreshTimerRef.current !== null) return;
+    // Let the wizard apply its mutation receipt before consuming queued Host revisions.
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      if (mountedRef.current) setRefreshTick(value => value + 1);
+    }, 0);
+  }, []);
+
+  const requestRefresh = useCallback((revision?: number) => {
+    const queue = refreshQueueRef.current;
+    if (queue.scopeKey !== scopeKey || queue.presentationRunId !== presentationRunId) return;
+    if (revision === undefined) {
+      queue.force = true;
+    } else {
+      if (revision <= (orderByScopeRef.current.state.latestRevision ?? -1)) return;
+      queue.revision = Math.max(queue.revision, revision);
+    }
+    queue.retry = true;
+    wakeRefresh();
+  }, [presentationRunId, scopeKey, wakeRefresh]);
+
   const refreshStatus = useCallback(() => {
     if (!canQueryHostRef.current || document.hidden || !callGoogleSetup || !botId || !presentationRunId) return;
+    const queue = refreshQueueRef.current;
+    if (queue.scopeKey !== scopeKey || queue.presentationRunId !== presentationRunId) return;
+    if (!queue.force && queue.revision <= (orderByScopeRef.current.state.latestRevision ?? -1)) {
+      queue.revision = -1;
+      return;
+    }
     const mutation = mutationRef.current;
     if (mutation.pending > 0) return;
     const fetchKey = JSON.stringify([scopeKey, botId]);
@@ -152,12 +191,22 @@ export function CurrentGoogleSetupCard({
     const reqPresentationRunId = presentationRunId;
     const reqSeq = ++requestSeqRef.current;
     const mutationEpoch = mutation.epoch;
+    const requested = { force: queue.force, revision: queue.revision, retry: queue.retry };
+    queue.force = false;
+    queue.revision = -1;
+    queue.retry = false;
     const statusRequest = callGoogleSetup({ botId, action: 'status' });
     statusInFlightRef.current.set(fetchKey, statusRequest);
 
     void statusRequest
       .then(next => {
-        if (!mountedRef.current || mutation !== mutationRef.current || mutationEpoch !== mutation.epoch) return;
+        if (!mountedRef.current || mutation !== mutationRef.current || queue !== refreshQueueRef.current) return;
+        if (mutationEpoch !== mutation.epoch) {
+          queue.force ||= requested.force;
+          queue.revision = Math.max(queue.revision, requested.revision);
+          queue.retry ||= requested.retry;
+          return;
+        }
         if (
           reqScopeKey !== activeScopeRef.current ||
           reqPresentationRunId !== activePresentationRunIdRef.current
@@ -195,7 +244,11 @@ export function CurrentGoogleSetupCard({
         });
       })
       .catch(() => {
-        if (!mountedRef.current || mutation !== mutationRef.current || mutationEpoch !== mutation.epoch) return;
+        if (!mountedRef.current || mutation !== mutationRef.current || queue !== refreshQueueRef.current) return;
+        if (requested.retry || mutationEpoch !== mutation.epoch) {
+          queue.force ||= requested.force;
+          queue.revision = Math.max(queue.revision, requested.revision);
+        }
         if (
           reqScopeKey !== activeScopeRef.current ||
           reqPresentationRunId !== activePresentationRunIdRef.current
@@ -216,13 +269,22 @@ export function CurrentGoogleSetupCard({
       })
       .finally(() => {
         statusInFlightRef.current.delete(fetchKey);
+        wakeRefresh();
       });
-  }, [botId, callGoogleSetup, presentationRunId, scopeKey]);
+  }, [botId, callGoogleSetup, presentationRunId, scopeKey, wakeRefresh]);
 
   useEffect(() => {
-    if (needsStatusFetch) refreshStatus();
+    refreshStatus();
+  }, [canQueryHost, refreshStatus, refreshTick]);
+
+  useEffect(() => {
+    if (!needsStatusFetch) return;
+    const revision = activePresentation?.revision;
+    requestRefresh(currentLiveSetup && typeof revision === 'number' && revision > currentLiveSetup.revision
+      ? revision
+      : undefined);
   }, [
-    refreshStatus,
+    requestRefresh,
     needsStatusFetch,
     activePresentation?.revision,
     activePresentation?.copy,
@@ -231,21 +293,28 @@ export function CurrentGoogleSetupCard({
     activePresentation?.blockerKind,
   ]);
 
-  const canPollStatus = canQueryHost && !disabled && !currentLiveSetup?.unavailable &&
+  const canFollowStatus = canQueryHost && !disabled && !currentLiveSetup?.unavailable &&
     shouldShowCurrentGoogleSetup(activePresentation, currentLiveSetup, currentActiveRunId);
 
   useEffect(() => {
-    if (!canPollStatus) return;
-    refreshStatus();
-    const timer = window.setInterval(refreshStatus, 5000);
-    window.addEventListener('focus', refreshStatus);
-    document.addEventListener('visibilitychange', refreshStatus);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', refreshStatus);
-      document.removeEventListener('visibilitychange', refreshStatus);
+    if (!canFollowStatus) return;
+    const refreshOnReturn = () => {
+      if (!document.hidden) requestRefresh();
     };
-  }, [canPollStatus, refreshStatus]);
+    refreshOnReturn();
+    window.addEventListener('focus', refreshOnReturn);
+    document.addEventListener('visibilitychange', refreshOnReturn);
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn);
+      document.removeEventListener('visibilitychange', refreshOnReturn);
+    };
+  }, [canFollowStatus, requestRefresh]);
+
+  useEffect(() => {
+    if (canFollowStatus && typeof hostRevision === 'number' && Number.isSafeInteger(hostRevision) && hostRevision >= 0) {
+      requestRefresh(hostRevision);
+    }
+  }, [canFollowStatus, hostRevision, requestRefresh]);
 
   const callWizardSetup = useCallback<GoogleSetupControlCall>(async input => {
     if (!callGoogleSetup) throw new Error('Google setup control is unavailable.');
@@ -263,8 +332,9 @@ export function CurrentGoogleSetupCard({
     } finally {
       mutation.pending -= 1;
       mutation.epoch += 1;
+      wakeRefresh();
     }
-  }, [botId, callGoogleSetup, scopeKey]);
+  }, [botId, callGoogleSetup, scopeKey, wakeRefresh]);
 
   const handleWizardSetupChange = useCallback(
     (next: GoogleSetupControlState, meta: { action: string }) => {

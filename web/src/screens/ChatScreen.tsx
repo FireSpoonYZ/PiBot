@@ -1362,6 +1362,7 @@ export function ChatScreen({
 
         <CurrentGoogleSetupCard
           active={visible}
+          hostRevision={effectiveChatLive?.googleSetupRevision}
           scopeKey={toolScopeKey}
           presentation={currentGoogleSetup}
           googleContext={googleContext}

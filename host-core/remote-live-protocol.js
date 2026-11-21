@@ -34,10 +34,12 @@ export const LIVE_EXTENSIONS_HEADER_WIRE = 'X-PiBot-Live-Extensions';
 export const LIVE_EXT_DURABLE_WAITS = 'durable-waits-v1';
 export const LIVE_EXT_HOST_SOURCES = 'host-sources-v1';
 export const LIVE_EXT_BROWSER_SCREENCAST = 'browser-screencast-v1';
+export const LIVE_EXT_GOOGLE_SETUP_REVISION = 'google-setup-revision-v1';
 export const SUPPORTED_LIVE_EXTENSIONS = Object.freeze([
   LIVE_EXT_DURABLE_WAITS,
   LIVE_EXT_HOST_SOURCES,
   LIVE_EXT_BROWSER_SCREENCAST,
+  LIVE_EXT_GOOGLE_SETUP_REVISION,
 ]);
 export const NO_LIVE_EXTENSIONS = Object.freeze({
   durableWaits: false,
@@ -47,6 +49,7 @@ export const ALL_LIVE_EXTENSIONS = Object.freeze({
   durableWaits: true,
   hostSources: true,
   browserScreencast: true,
+  googleSetupRevision: true,
 });
 
 const MAX_LIVE_EXTENSIONS_HEADER_BYTES = 512;
@@ -57,9 +60,15 @@ export function normalizeLiveExtensions(value) {
   const durableWaits = value.durableWaits === true;
   const hostSources = value.hostSources === true;
   const browserScreencast = value.browserScreencast === true;
-  if (!durableWaits && !hostSources && !browserScreencast) return NO_LIVE_EXTENSIONS;
-  if (durableWaits && hostSources && browserScreencast) return ALL_LIVE_EXTENSIONS;
-  return Object.freeze({ durableWaits, hostSources, ...(browserScreencast ? { browserScreencast } : {}) });
+  const googleSetupRevision = value.googleSetupRevision === true;
+  if (!durableWaits && !hostSources && !browserScreencast && !googleSetupRevision) return NO_LIVE_EXTENSIONS;
+  if (durableWaits && hostSources && browserScreencast && googleSetupRevision) return ALL_LIVE_EXTENSIONS;
+  return Object.freeze({
+    durableWaits,
+    hostSources,
+    ...(browserScreencast ? { browserScreencast } : {}),
+    ...(googleSetupRevision ? { googleSetupRevision } : {}),
+  });
 }
 
 export function parseLiveExtensionsHeader(raw) {
@@ -78,6 +87,7 @@ export function parseLiveExtensionsHeader(raw) {
   let durableWaits = false;
   let hostSources = false;
   let browserScreencast = false;
+  let googleSetupRevision = false;
   const parts = joined.split(',');
   if (parts.length > MAX_LIVE_EXTENSIONS_TOKENS) return NO_LIVE_EXTENSIONS;
   for (const part of parts) {
@@ -85,8 +95,9 @@ export function parseLiveExtensionsHeader(raw) {
     if (token === LIVE_EXT_DURABLE_WAITS) durableWaits = true;
     else if (token === LIVE_EXT_HOST_SOURCES) hostSources = true;
     else if (token === LIVE_EXT_BROWSER_SCREENCAST) browserScreencast = true;
+    else if (token === LIVE_EXT_GOOGLE_SETUP_REVISION) googleSetupRevision = true;
   }
-  return normalizeLiveExtensions({ durableWaits, hostSources, browserScreencast });
+  return normalizeLiveExtensions({ durableWaits, hostSources, browserScreencast, googleSetupRevision });
 }
 
 export function formatLiveExtensionsHeader(extensions) {
@@ -95,6 +106,7 @@ export function formatLiveExtensionsHeader(extensions) {
   if (ext.durableWaits) tokens.push(LIVE_EXT_DURABLE_WAITS);
   if (ext.hostSources) tokens.push(LIVE_EXT_HOST_SOURCES);
   if (ext.browserScreencast) tokens.push(LIVE_EXT_BROWSER_SCREENCAST);
+  if (ext.googleSetupRevision) tokens.push(LIVE_EXT_GOOGLE_SETUP_REVISION);
   return tokens.length > 0 ? tokens.join(',') : null;
 }
 
@@ -105,6 +117,7 @@ export function intersectLiveExtensions(local, remote) {
     durableWaits: a.durableWaits && b.durableWaits,
     hostSources: a.hostSources && b.hostSources,
     browserScreencast: a.browserScreencast && b.browserScreencast,
+    googleSetupRevision: a.googleSetupRevision && b.googleSetupRevision,
   });
 }
 
@@ -143,7 +156,7 @@ const LEGACY_STATE_KEYS = new Set([
   'activity',
   'learning',
 ]);
-const EXTENDED_STATE_KEYS = new Set([...LEGACY_STATE_KEYS, 'durableWaits']);
+const EXTENDED_STATE_KEYS = new Set([...LEGACY_STATE_KEYS, 'durableWaits', 'googleSetupRevision']);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // Live attribution is already a safe projection (Host-side whitelist + bounds in
 // runtime-live-projection); validate the exact shape here so a forged Host cannot
@@ -733,7 +746,13 @@ function normalizeBotLearningState(value) {
 
 function normalizeLiveState(state, ext = ALL_LIVE_EXTENSIONS) {
   if (!isPlainObject(state)) throw invalid('state must be a plain object');
-  rejectUnknownFields(state, ext.durableWaits ? EXTENDED_STATE_KEYS : LEGACY_STATE_KEYS, 'state');
+  rejectUnknownFields(state, EXTENDED_STATE_KEYS, 'state');
+  if (!ext.durableWaits && Object.prototype.hasOwnProperty.call(state, 'durableWaits')) {
+    throw invalid('state has unknown field: durableWaits');
+  }
+  if (!ext.googleSetupRevision && Object.prototype.hasOwnProperty.call(state, 'googleSetupRevision')) {
+    throw invalid('state has unknown field: googleSetupRevision');
+  }
   if (!Array.isArray(state.history)) throw invalid('state.history must be an array');
   const messageKeys = ext.durableWaits ? EXTENDED_MESSAGE_KEYS : LEGACY_MESSAGE_KEYS;
   for (const item of state.history) {
@@ -863,6 +882,9 @@ function normalizeLiveState(state, ext = ALL_LIVE_EXTENSIONS) {
       delete state.durableWaits;
     }
   }
+  if (Object.prototype.hasOwnProperty.call(state, 'googleSetupRevision')) {
+    assertNonNegativeSafeInteger(state.googleSetupRevision, 'state.googleSetupRevision');
+  }
   return state;
 }
 
@@ -889,15 +911,24 @@ function downgradeAttributionForPeer(attribution, allowHostSources) {
  *  - hostSources off: maps schedule -> legacy host (no sourceType) and
  *    task_dispatch -> webhook, while preserving google-workspace-rule and
  *    webhook markers expected on D.
+ *  - googleSetupRevision off: omits the setup revision invalidation signal.
  */
 export function projectLiveSnapshotForPeer(snapshot, peerExtensions) {
   const ext = normalizeLiveExtensions(peerExtensions);
-  if (ext.durableWaits && ext.hostSources) return snapshot;
+  if (ext.durableWaits && ext.hostSources && ext.googleSetupRevision) return snapshot;
   if (!isPlainObject(snapshot) || !isPlainObject(snapshot.state)) return snapshot;
   const state = snapshot.state;
+  if (ext.durableWaits && ext.hostSources) {
+    if (!Object.prototype.hasOwnProperty.call(state, 'googleSetupRevision')) return snapshot;
+    const { googleSetupRevision: _dropped, ...nextState } = state;
+    return { ...snapshot, state: nextState };
+  }
   const nextState = { ...state };
   if (!ext.durableWaits) {
     delete nextState.durableWaits;
+  }
+  if (!ext.googleSetupRevision) {
+    delete nextState.googleSetupRevision;
   }
   if (Array.isArray(state.history)) {
     nextState.history = state.history.map((item) => {
@@ -1002,6 +1033,9 @@ export function normalizeLiveSnapshot(frame, target, options) {
     sequence: frame.sequence,
     state: normalizeLiveState(frame.state, ext),
   };
+  if (isWork && Object.prototype.hasOwnProperty.call(snapshot.state, 'googleSetupRevision')) {
+    throw invalid('work snapshot must not carry googleSetupRevision');
+  }
   if (isWork) snapshot.scopeId = frame.scopeId;
   if (target) {
     if (target.kind === 'browser') throw invalid('browser routes require browser frame packets');

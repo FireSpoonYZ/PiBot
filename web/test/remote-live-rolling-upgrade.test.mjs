@@ -107,7 +107,10 @@ function buildLiveStates() {
     waitPresentations: new Map([[WAIT_KEY, { details: SETTLED_DETAILS, live: false, status: 'answered' }]]),
     durableWaits: [],
   });
-  return { pendingState, settledState };
+  return {
+    pendingState: { ...pendingState, googleSetupRevision: 4 },
+    settledState: { ...settledState, googleSetupRevision: 5 },
+  };
 }
 
 /** Loopback mock local control server speaking real /v1/host + /v1/bots/:botId/live SSE. */
@@ -406,7 +409,7 @@ function connectRawLegacyPeer({ url, hello }) {
   });
 }
 
-test('new Host -> new Relay -> new Client retains durableWaits, actionable waits, new sources, and durableWaits-only SSE updates', async () => {
+test('new Host -> new Relay -> new Client retains extended live fields and forwards revision-only SSE updates', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pibot-live-new-new-'));
   const relayDir = join(root, 'relay');
   mkdirSync(relayDir, { recursive: true });
@@ -445,11 +448,18 @@ test('new Host -> new Relay -> new Client retains durableWaits, actionable waits
     const first = (await stream.next()).value;
     assert.equal(first.type, 'snapshot');
     assert.deepEqual(first.state.durableWaits, [WAIT_IDENTITY]);
+    assert.equal(first.state.googleSetupRevision, 4);
     assert.equal(first.state.history[4].messages[0].durableWait, true);
     assert.deepEqual(
       first.state.history.slice(0, 3).map((item) => item.attribution?.sourceType),
       ['google-workspace-rule', 'schedule', 'task_dispatch'],
     );
+
+    control.pushUpdate({ googleSetupRevision: 5 });
+    const revisionOnly = (await stream.next()).value;
+    assert.equal(revisionOnly.type, 'snapshot');
+    assert.equal(revisionOnly.state.googleSetupRevision, 5);
+    assert.deepEqual(revisionOnly.state.history, first.state.history);
 
     // Trigger a durableWaits-only SSE update (previously failed host-live STATE_KEYS with BAD_FRAME).
     control.pushUpdate({ durableWaits: [] });
@@ -458,7 +468,7 @@ test('new Host -> new Relay -> new Client retains durableWaits, actionable waits
     assert.deepEqual(second.state.durableWaits, []);
 
     // Trigger full settled diff update.
-    const settledDiff = diffLiveState({ ...pendingState, durableWaits: [] }, settledState);
+    const settledDiff = diffLiveState({ ...pendingState, durableWaits: [], googleSetupRevision: 5 }, settledState);
     control.pushUpdate(settledDiff);
     const third = (await stream.next()).value;
     assert.equal(third.type, 'snapshot');
@@ -518,6 +528,7 @@ test('new Host -> old strict Relay -> new Client negotiates legacy downgrade wit
     assert.equal(first.type, 'snapshot');
     assert.equal(first.state.durableWaits, undefined);
     assert.equal('durableWaits' in first.state, false);
+    assert.equal('googleSetupRevision' in first.state, false);
     assert.equal('durableWait' in first.state.history[4].messages[0], false);
     assert.equal(first.state.history[0].attribution.sourceType, 'google-workspace-rule');
     assert.equal('sourceType' in first.state.history[1].attribution, false);
@@ -605,6 +616,7 @@ test('new Host -> new Relay serves downgraded legacy frames to old Client and fu
     const oldLiveMsg = await oldClient.nextFrame();
     assert.equal(oldLiveMsg.type, 'live-frame');
     assert.equal('durableWaits' in oldLiveMsg.frame.state, false);
+    assert.equal('googleSetupRevision' in oldLiveMsg.frame.state, false);
     assert.equal('durableWait' in oldLiveMsg.frame.state.history[4].messages[0], false);
     assert.equal(oldLiveMsg.frame.state.history[0].attribution.sourceType, 'google-workspace-rule');
     assert.equal('sourceType' in oldLiveMsg.frame.state.history[1].attribution, false);
@@ -613,6 +625,7 @@ test('new Host -> new Relay serves downgraded legacy frames to old Client and fu
     const newStream = newClient.live(hostDeviceId, { kind: 'primary', botId: BOT_ID });
     const newFirst = (await newStream.next()).value;
     assert.deepEqual(newFirst.state.durableWaits, [WAIT_IDENTITY]);
+    assert.equal(newFirst.state.googleSetupRevision, 4);
     assert.equal(newFirst.state.history[4].messages[0].durableWait, true);
     assert.deepEqual(
       newFirst.state.history.slice(0, 3).map((item) => item.attribution?.sourceType),

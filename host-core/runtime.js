@@ -1028,6 +1028,13 @@ export async function openRuntime(options) {
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
   registry.install(mcpDispatchExtension);
+  const live = createRuntimeLive({
+    host,
+    getHarness: () => harness,
+    getWaits: () => waitsBridge,
+    // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
+    resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
+  });
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     // Cua inventory：对固定 Driver 二进制跑一次只读 CLI metadata（list-tools +
@@ -1068,7 +1075,15 @@ export async function openRuntime(options) {
       },
       isBotTurnRunning: (botId) => (typeof isBotTurnRunningReader === 'function' ? isBotTurnRunningReader(botId) : null),
       onBrowserEvent: options?.onBrowserEvent,
-      onSetupEvent: options?.onSetupEvent,
+      onSetupEvent: (event) => {
+        try {
+          if (event?.type === 'run-changed' || event?.type === 'cards-due') {
+            live.setGoogleSetupRevision(event.botId, event.run?.revision);
+          }
+        } finally {
+          options?.onSetupEvent?.(event);
+        }
+      },
       abortBotTurn: async (botId) => {
         if (!harness) return;
         const bot = host.getBot(botId);
@@ -1109,6 +1124,7 @@ export async function openRuntime(options) {
       env: envFor,
     }, CTX);
   } catch (err) {
+    try { await live.close(); } catch { /* close 失败不掩盖原错误 */ }
     if (harness) {
       try { await harness.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     } else if (storage) {
@@ -1127,13 +1143,6 @@ export async function openRuntime(options) {
     host.close();
     throw err;
   }
-  const live = createRuntimeLive({
-    host,
-    getHarness: () => harness,
-    getWaits: () => waitsBridge,
-    // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
-    resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
-  });
   workContexts = createWorkContextRuntime({
     host,
     harness,
@@ -2218,6 +2227,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     await schedules.deleteBot(bot);
     await browserSetup.releaseBot(botId);
     host.deleteBot({ botId });
+    live.clearGoogleSetupRevision(botId);
     await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
     return true;
@@ -2694,6 +2704,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await schedules.deleteBot(bot);
       await browserSetup.releaseBot(botId);
       const res = host.deleteBot({ botId });
+      live.clearGoogleSetupRevision(botId);
       await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
       if (onBotsSync) await onBotsSync();

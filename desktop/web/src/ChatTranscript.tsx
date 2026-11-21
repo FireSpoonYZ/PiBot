@@ -368,6 +368,7 @@ export function ChatTranscript({
   const currentGoogleSetupPortal = googleSetupSlotContainer
     ? createPortal(
         <CurrentGoogleSetupCard
+          hostRevision={effectiveLive?.googleSetupRevision}
           scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
           presentation={currentGoogleSetup}
           googleContext={googleContext}

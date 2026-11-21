@@ -298,6 +298,42 @@ test('real Host schedule handoff keeps its Stop fence across restart and private
   }
 });
 
+test('Google setup sends committed revisions to both chat watches without a Bot turn', async t => {
+  const f = await hostFixture(t, { googleSetup: true, extraBots: 1 });
+  const [otherBot] = f.peerBots;
+  const phone = f.watchLive();
+  const desktop = f.watchLive();
+  const unrelated = f.watchLive(otherBot.botId);
+  await until(() => phone.state && desktop.state && unrelated.state, 'initial chat snapshots');
+  assert.equal(phone.state.googleSetupRevision, undefined);
+  const historyBefore = await f.history();
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+
+  const start = await control({ action: 'start' });
+  await until(() => phone.state.googleSetupRevision === start.revision &&
+    desktop.state.googleSetupRevision === start.revision, 'new run on both watches');
+
+  const selected = await control({
+    action: 'answer', card: 'path', values: ['guide-browser'], runId: start.id,
+    expectedRevision: start.revision, cardCopy: start.card.copy,
+  });
+  assert.equal(selected.card.card, 'services');
+  await until(() => phone.state.googleSetupRevision === selected.revision &&
+    desktop.state.googleSetupRevision === selected.revision, 'next card on both watches');
+  assert.equal((await control({ action: 'status' })).revision, selected.revision);
+
+  const reconnected = f.watchLive();
+  await until(() => reconnected.state?.googleSetupRevision === selected.revision, 'revision in a new watch snapshot');
+  const cancelled = await control({ action: 'cancel', runId: start.id, expectedRevision: selected.revision });
+  assert.equal(cancelled.state, 'cancelled');
+  await until(() => phone.state.googleSetupRevision === cancelled.revision &&
+    desktop.state.googleSetupRevision === cancelled.revision &&
+    reconnected.state.googleSetupRevision === cancelled.revision, 'cancellation on all watches');
+  assert.equal(unrelated.state.googleSetupRevision, undefined);
+  assert.equal(f.state.calls.length, 0);
+  assert.deepEqual(await f.history(), historyBefore);
+});
+
 test('Google setup waits for services, then resumes the Bot on sign-in confirmation and Continue', async t => {
   const f = await hostFixture(t, { googleSetup: true });
   const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });

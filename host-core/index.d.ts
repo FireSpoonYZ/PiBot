@@ -1400,6 +1400,8 @@ export interface BotLiveState {
   learning?: BotLearningLiveState | null;
   /** Complete active questionnaire identity set (max 64); removes stale cached history authority. */
   durableWaits?: Array<{ installationId: string; conversationId: number; requestId: string }>;
+  /** Latest committed setup revision observed by this Host; primary watches only. Read full state through owner control. */
+  googleSetupRevision?: number;
 }
 
 export interface BotLearningOutcomeSummary {
