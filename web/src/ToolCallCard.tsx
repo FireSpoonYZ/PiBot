@@ -162,8 +162,10 @@ export function ToolCallCard({
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
   const hasVisibleChildPresentation = Boolean(
     tool.children && (
-      (tool.status === 'running' && tool.children.some(child =>
-        child.presentationLive === true && Boolean(readToolPresentation(child.presentation)))) ||
+      (tool.status === 'running' && tool.children.some(child => {
+        const childPres = readToolPresentation(child.presentation);
+        return child.presentationLive === true && childPres !== null && childPres.kind !== 'google-setup';
+      })) ||
       pendingToolPrompts(tool.children, tool.status === 'running').length > 0
     ),
   );
@@ -172,7 +174,10 @@ export function ToolCallCard({
   }, [collapseOutput, mobileCompact, hasVisibleChildPresentation]);
   const hasCompactBody = hasDetails || Boolean(tool.argSummary || tool.error || tool.children?.length ||
     tool.nestedCallsTruncated || (codemode && tool.status !== 'running' && tool.children === undefined));
-  const presentationActive = resolveToolPresentationActive(tool, presentation, active, disabled);
+  const isGoogleSetupHistory = presentation?.kind === 'google-setup';
+  const presentationActive = isGoogleSetupHistory
+    ? false
+    : resolveToolPresentationActive(tool, presentation, active, disabled);
   const presentationCard = presentation ? (
     <ToolPresentationCard
       key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
@@ -181,7 +186,7 @@ export function ToolCallCard({
       disabled={disabled}
       variant={variant === 'desktop' ? 'desktop' : undefined}
       requesterName={requesterName}
-      googleContext={googleContext}
+      googleContext={isGoogleSetupHistory ? undefined : googleContext}
       onSubmit={presentation.kind === 'questionnaire' && onSubmitQuestionnaire
         ? input => onSubmitQuestionnaire(presentation.installationId, input)
         : undefined}
@@ -192,6 +197,13 @@ export function ToolCallCard({
     />
   ) : null;
   if (presentationOnly) return presentationCard;
+  if (isGoogleSetupHistory) {
+    return (
+      <div key={`${scopeKey}:${tool.id}`} role="listitem" className="gws-history-listitem">
+        {presentationCard}
+      </div>
+    );
+  }
 
   const renderChildren = () =>
     tool.children && tool.children.length > 0 ? (

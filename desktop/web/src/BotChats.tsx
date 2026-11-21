@@ -2017,6 +2017,7 @@ function PrimaryChatPane({
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [googleSetupSlotEl, setGoogleSetupSlotEl] = useState<HTMLDivElement | null>(null);
   const autoFocusedRef = useRef(false);
   /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
   const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
@@ -4162,6 +4163,7 @@ function PrimaryChatPane({
         onSubmitQuestionnaire={submitQuestionnaire}
         onSubmitVaultUnlock={submitVaultUnlock}
         googleContext={googleContext}
+        googleSetupSlotContainer={googleSetupSlotEl}
         attachmentFetcher={attachmentFetcher}
         loading={online && rawLoading}
         error={online ? (rawError || liveError) : null}
@@ -4288,6 +4290,8 @@ function PrimaryChatPane({
           }
         }}
       />
+
+      <div ref={setGoogleSetupSlotEl} className="desktop-google-setup-slot" style={{ flex: 'none' }} />
 
       <Composer
         textareaRef={composerRef}

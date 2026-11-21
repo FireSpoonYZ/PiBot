@@ -52,6 +52,8 @@ import type {
   QuestionnaireSubmitPayload,
   VaultUnlockSubmitPayload,
 } from '../ToolPresentation';
+import { CurrentGoogleSetupCard } from '../google/CurrentGoogleSetupCard';
+import type { GoogleSetupPresentation } from '../google/types';
 import {
   IMAGE_MAX_COUNT,
   ImageAttachmentThumb,
@@ -166,6 +168,7 @@ export interface ChatScreenProps {
   onSubmitQuestionnaire(installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown>;
   onSubmitVaultUnlock(input: VaultUnlockSubmitPayload): Promise<unknown>;
   googleContext?: GoogleChatCardContext;
+  currentGoogleSetup?: GoogleSetupPresentation;
   onOpenBrowser?: () => void;
   browserTakeoverHint?: string | null;
 
@@ -326,6 +329,7 @@ export function ChatScreen({
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
   googleContext,
+  currentGoogleSetup,
   onOpenBrowser,
   browserTakeoverHint,
   canStopBot,
@@ -1016,6 +1020,13 @@ export function ChatScreen({
             onDismiss={onDismissOfflineNotice}
           />
         )}
+        <CurrentGoogleSetupCard
+          scopeKey={toolScopeKey}
+          presentation={currentGoogleSetup}
+          googleContext={googleContext}
+          disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
+        />
+
         {activeBot.archivedAt ? (
           <div className="grok-card-group composer-archived-banner">
             <span className="composer-archived-banner-text">

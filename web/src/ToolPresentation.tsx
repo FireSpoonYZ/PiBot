@@ -14,6 +14,7 @@ import {
   GoogleReadinessCard,
   GoogleSetupChatCard,
 } from './google/GoogleChatCards';
+import { readGoogleSetupPresentation } from './google/currentGoogleSetup';
 import type {
   GoogleAccountSelectPresentation,
   GoogleBrowserTakeoverPresentation,
@@ -109,7 +110,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isOptString = (v: unknown): v is string | undefined => v === undefined || typeof v === 'string';
-const isOptNullableString = (v: unknown): v is string | null | undefined => v === undefined || v === null || typeof v === 'string';
 const isInt = (v: unknown): v is number => Number.isSafeInteger(v);
 
 /** 严格核验一条 todo 任务；任一字段不合规即整条记录拒绝（调用方整体 null）。 */
@@ -217,20 +217,7 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as VaultUnlockPresentation;
   }
   if (value.kind === 'google-setup') {
-    if (!isOptString(value.installationId) || !isOptString(value.botId)) return null;
-    if (!isOptNullableString(value.runId) || !isOptNullableString(value.card) || !isOptNullableString(value.step)) return null;
-    if (!isOptNullableString(value.mode) || !isOptString(value.state) || !isOptString(value.title) || !isOptString(value.summary)) return null;
-    if (!isOptNullableString(value.blockerKind)) return null;
-    if (value.revision !== undefined && !isInt(value.revision)) return null;
-    if (value.copy !== undefined && (!isInt(value.copy) || (value.copy as number) < 0)) return null;
-    if (value.actions !== undefined) {
-      if (!Array.isArray(value.actions)) return null;
-      const validActions = value.actions.every(item =>
-        isRecord(item) && isNonEmptyString(item.id) && isOptString(item.label) && isOptString(item.step),
-      );
-      if (!validActions) return null;
-    }
-    return value as unknown as GoogleSetupPresentation;
+    return readGoogleSetupPresentation(value);
   }
   if (value.kind === 'google-account-select') {
     if (!isOptString(value.installationId)) return null;
@@ -306,7 +293,7 @@ export function ToolPresentationCard({
     return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} requesterName={requesterName} onSubmit={onSubmitVaultUnlock} />;
   }
   if (presentation.kind === 'google-setup') {
-    return <GoogleSetupChatCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
+    return <GoogleSetupChatCard presentation={presentation} />;
   }
   if (presentation.kind === 'google-account-select') {
     return <GoogleAccountSelectCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;

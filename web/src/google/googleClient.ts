@@ -85,7 +85,8 @@ export function classifyGoogleError(failure: unknown): GoogleErrorClassification
     code === 'SETUP_REVISION_CONFLICT' ||
     code === 'GOOGLE_SETUP_CONFLICT' ||
     code === 'REQUEST_CONFLICT' ||
-    code === 'STALE_INPUT';
+    code === 'STALE_INPUT' ||
+    status === 409;
 
   const invalidArgument = code === 'INVALID_ARGUMENT';
 

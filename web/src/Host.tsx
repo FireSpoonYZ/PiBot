@@ -65,6 +65,7 @@ import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
+import { selectCurrentGoogleSetup } from './google/currentGoogleSetup';
 import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
@@ -4822,6 +4823,11 @@ ${newer}` : draftSnapshot;
     });
   }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots, activeDurableWaits]);
 
+  const currentGoogleSetup = useMemo(
+    () => selectCurrentGoogleSetup(allChatTurns),
+    [allChatTurns],
+  );
+
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),
     [botActivity],
@@ -6104,6 +6110,7 @@ ${newer}` : draftSnapshot;
           onSubmitQuestionnaire={submitQuestionnaire}
           onSubmitVaultUnlock={submitVaultUnlock}
           googleContext={mobileGoogleContext}
+          currentGoogleSetup={currentGoogleSetup}
           onOpenBrowser={openBotBrowser}
           browserTakeoverHint={browserTakeoverHint}
           canStopBot={canStopBot}
