@@ -123,7 +123,13 @@ mod tests {
         assert!(!cache.contains("peer-1", &n1, unix0, t0));
         assert!(cache.insert_verified("peer-1", &n1, unix0 + 20, unix0, t0));
         assert!(cache.contains("peer-1", &n1, unix0 + 10, t0 + Duration::from_secs(10)));
-        assert!(!cache.insert_verified("peer-1", &n1, unix0 + 20, unix0 + 10, t0 + Duration::from_secs(10)));
+        assert!(!cache.insert_verified(
+            "peer-1",
+            &n1,
+            unix0 + 20,
+            unix0 + 10,
+            t0 + Duration::from_secs(10)
+        ));
 
         // Wall-clock moved past sent_at + 30, but monotonic TTL (61s) has NOT elapsed -> still retained
         assert!(cache.contains("peer-1", &n1, unix0 + 55, t0 + Duration::from_secs(55)));

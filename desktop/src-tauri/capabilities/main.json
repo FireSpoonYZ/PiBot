@@ -22,6 +22,7 @@
     "allow-desktop-update-check",
     "allow-desktop-update-download",
     "allow-desktop-update-install",
-    "allow-desktop-update-cancel"
+    "allow-desktop-update-cancel",
+    "allow-desktop-clipboard-sync"
   ]
 }

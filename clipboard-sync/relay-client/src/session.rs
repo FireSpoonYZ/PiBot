@@ -109,7 +109,10 @@ impl LinkShared {
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).cancelled
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancelled
     }
 
     fn enter_online(&self) -> Option<u64> {
@@ -338,8 +341,7 @@ async fn connect_websocket(
         let _ = tcp.set_nodelay(true);
 
         let transport = if endpoint.use_tls {
-            let tls_cfg = tls_config
-                .ok_or(ConnectError::Terminal(LinkStatus::CertificateError))?;
+            let tls_cfg = tls_config.ok_or(ConnectError::Terminal(LinkStatus::CertificateError))?;
             let server_name = endpoint
                 .server_name
                 .clone()
@@ -547,9 +549,14 @@ where
         Err(outcome) => return outcome,
     };
 
-    if let Err(outcome) =
-        perform_hello_handshake(&mut ws, device_id, device_token, key.routing_id(), cancel_rx)
-            .await
+    if let Err(outcome) = perform_hello_handshake(
+        &mut ws,
+        device_id,
+        device_token,
+        key.routing_id(),
+        cancel_rx,
+    )
+    .await
     {
         return outcome;
     }

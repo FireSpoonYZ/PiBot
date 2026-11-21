@@ -19,31 +19,39 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BooleanSupplier;
 
 /**
- * Default-process controller for Android clipboard sync (first pass, manual send / auto receive).
+ * Default-process controller for Android clipboard sync (manual send / automatic receive, plus
+ * optional foreground-authorized Shizuku background automatic outbound).
  *
  * <p>Uses {@link BotClientService} foreground lifecycle and generation-fenced encrypted
- * {@link CenterClientCredentials} via {@link BotHostClient}, persisting the independent switch
- * and group code in {@link ClipboardSyncStorage} scoped to the active Center binding.
+ * {@link CenterClientCredentials} via {@link BotHostClient}, persisting the independent switch,
+ * group code, and clipboard-specific background authorization in {@link ClipboardSyncStorage}
+ * scoped to the active Center binding.
  *
  * <p>Incoming remote text is written automatically to the OS clipboard in the default process
  * with our own clip marker and {@link ClipDescription#EXTRA_IS_SENSITIVE}, bounded to at most
  * one latest pending write and rechecked against app enabled state, lifecycle, credentials,
  * and native online generation on every callback.
  *
- * <p>Outgoing text in this pass uses explicit {@code sendNow} read in the focused real Activity
- * ({@link BotHostTauriPlugin}) and transferred only over the private same-UID bridge. A seam
- * ({@link PrivilegedClipboardAdapter}) is reserved for a later privileged/Shizuku/tile adapter.
+ * <p>Outgoing text supports explicit {@code sendNow} read in the focused real Activity
+ * ({@link BotHostTauriPlugin}) over the private same-UID bridge, and optional background automatic
+ * observation via {@link ClipboardSyncShizukuAdapter} only after explicit foreground consent and
+ * only while the native relay link is active-online. Any Shizuku failure cleanly falls back to
+ * {@code "manual"} mode while keeping manual {@code sendNow} and automatic receiving intact.
  */
 final class ClipboardSyncController {
 
     static final String OWN_CLIP_LABEL = "pibot-clipboard-sync";
     static final String SHOWER_CLIP_LABEL = "pibot";
     static final String EXTRA_OWN_SYNC = "com.example.launcherprobe.clipboard_sync.OWN";
+    static final int MAX_TEXT_BYTES = 65_536;
 
     static final String MODE_AUTOMATIC = "automatic";
     static final String MODE_MANUAL = "manual";
@@ -57,6 +65,10 @@ final class ClipboardSyncController {
     static final String CONNECTION_UNAUTHORIZED = "unauthorized";
     static final String CONNECTION_UNSUPPORTED = "unsupported";
     static final String CONNECTION_CERTIFICATE_ERROR = "certificateError";
+
+    private static final long WATCH_CONNECTING_INTERVAL_MS = 500L;
+    private static final long WATCH_ONLINE_INTERVAL_MS = 2_500L;
+    private static final long ADAPTER_RETRY_BACKOFF_MS = 15_000L;
 
     private static final Object INSTANCE_LOCK = new Object();
     private static ClipboardSyncController instance;
@@ -92,16 +104,22 @@ final class ClipboardSyncController {
     }
 
     /**
-     * Seam for a future privileged Android clipboard adapter (e.g. Shizuku / notification / Quick
-     * Settings tile) that can observe and read the OS clipboard in automatic mode. Not wired in
-     * this first pass; {@code null} selects manual mode with Settings {@code sendNow}.
+     * Narrow seam for the optional privileged Android background clipboard adapter
+     * ({@link ClipboardSyncShizukuAdapter}). Kept stopped and unbound while off, unauthorized,
+     * or not active-online; reports {@code mode == "automatic"} only with a live authenticated
+     * listener.
      */
     interface PrivilegedClipboardAdapter {
-        boolean isAutomaticAvailable();
+        void checkAuthorizationPrerequisites() throws BridgeException;
 
-        void start(Runnable onPossibleLocalChange);
+        boolean isListenerActive();
 
-        void stop();
+        boolean startListening(Runnable onPossibleLocalChange, Runnable onListenerUnavailable);
+
+        default void cancelPending() {
+        }
+
+        void stopListening();
 
         String readSendableText();
     }
@@ -144,6 +162,23 @@ final class ClipboardSyncController {
             this.credentialGeneration = credentialGeneration;
             this.nativeGeneration = nativeGeneration;
             this.text = text;
+        }
+    }
+
+    private static final class PendingCapture {
+        final long linkEpoch;
+        final long handle;
+        final String bindingKey;
+        final long credentialGeneration;
+        final long onlineGeneration;
+
+        PendingCapture(long linkEpoch, long handle, String bindingKey, long credentialGeneration,
+                       long onlineGeneration) {
+            this.linkEpoch = linkEpoch;
+            this.handle = handle;
+            this.bindingKey = bindingKey;
+            this.credentialGeneration = credentialGeneration;
+            this.onlineGeneration = onlineGeneration;
         }
     }
 
@@ -290,11 +325,19 @@ final class ClipboardSyncController {
     private long activeCredentialGeneration = -1L;
     private String activeGroupCode;
     private boolean currentEnabled;
+    private boolean currentBackgroundAuthorized;
+    private long observedLinkEpoch;
+    private long observedOnlineGeneration;
     private PendingWrite pendingIncoming;
     private boolean incomingWriteScheduled;
+    private PendingCapture pendingPrivilegedCapture;
+    private boolean privilegedCaptureScheduled;
 
     private final AtomicBoolean reconcileQueued = new AtomicBoolean();
-    private final AtomicBoolean privilegedCaptureQueued = new AtomicBoolean();
+    private final AtomicBoolean resetBackoffPending = new AtomicBoolean();
+    private final Object watchLock = new Object();
+    private ScheduledFuture<?> onlineWatchFuture;
+    private long nextAdapterAttemptAtMs;
 
     static ClipboardSyncController get(Context context) {
         synchronized (INSTANCE_LOCK) {
@@ -308,7 +351,7 @@ final class ClipboardSyncController {
                         BotClientService::isActive,
                         text -> writeClipToSystem(app, text),
                         mainHandler::post,
-                        null,
+                        new ClipboardSyncShizukuAdapter(app, mainHandler),
                         newControlWorker());
             }
             return instance;
@@ -333,8 +376,8 @@ final class ClipboardSyncController {
         this.controlWorker = Objects.requireNonNull(controlWorker);
     }
 
-    private static ExecutorService newControlWorker() {
-        return Executors.newSingleThreadExecutor(runnable -> {
+    private static ScheduledExecutorService newControlWorker() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "clipboard-sync-control");
             thread.setDaemon(true);
             return thread;
@@ -437,11 +480,41 @@ final class ClipboardSyncController {
         if (rawText == null) {
             return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "仅支持纯文本剪贴板");
         }
-        String text = rawText.toString();
-        if (text.isEmpty()) {
+        if (rawText.length() == 0) {
             return ClipReadResult.error("CLIPBOARD_EMPTY", "剪贴板为空");
         }
+        if (rawText.length() > MAX_TEXT_BYTES) {
+            return ClipReadResult.error("CLIPBOARD_TOO_LARGE", "剪贴板文本超过大小限制");
+        }
+        String text = rawText.toString();
+        if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
+            return ClipReadResult.error("CLIPBOARD_TOO_LARGE", "剪贴板文本超过大小限制");
+        }
         return ClipReadResult.ok(text);
+    }
+
+    static int utf8ByteLength(String text) {
+        int bytes = 0;
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            char c = text.charAt(i);
+            if (c < 0x80) {
+                bytes += 1;
+            } else if (c < 0x800) {
+                bytes += 2;
+            } else if (Character.isHighSurrogate(c)
+                    && i + 1 < len
+                    && Character.isLowSurrogate(text.charAt(i + 1))) {
+                bytes += 4;
+                i++;
+            } else {
+                bytes += 3;
+            }
+            if (bytes > MAX_TEXT_BYTES) {
+                return bytes;
+            }
+        }
+        return bytes;
     }
 
     static ClipReadResult validateDescription(ClipDescription description) {
@@ -512,11 +585,11 @@ final class ClipboardSyncController {
     // ---------- Lifecycle & Center state hooks (called in default process) ----------
 
     void onLifecycleStarted() {
-        scheduleReconcile();
+        scheduleReconcile(true);
     }
 
     void onNetworkAvailable() {
-        scheduleReconcile();
+        scheduleReconcile(true);
     }
 
     /**
@@ -526,7 +599,9 @@ final class ClipboardSyncController {
      */
     void onCenterStateChanged(boolean disconnected) {
         long detached = detachActiveLinkLocked();
+        cancelPrivilegedPending();
         controlWorker.execute(() -> {
+            nextAdapterAttemptAtMs = 0L;
             stopDetachedHandle(detached);
             if (disconnected) {
                 try {
@@ -545,6 +620,7 @@ final class ClipboardSyncController {
      */
     CompletableFuture<Void> shutdown() {
         long detached = detachActiveLinkLocked();
+        cancelPrivilegedPending();
         CompletableFuture<Void> done = new CompletableFuture<>();
         controlWorker.execute(() -> {
             try {
@@ -560,12 +636,18 @@ final class ClipboardSyncController {
         return done;
     }
 
-    private void scheduleReconcile() {
+    private void scheduleReconcile(boolean resetAdapterBackoff) {
+        if (resetAdapterBackoff) {
+            resetBackoffPending.set(true);
+        }
         if (!reconcileQueued.compareAndSet(false, true)) {
             return;
         }
         controlWorker.execute(() -> {
             reconcileQueued.set(false);
+            if (resetBackoffPending.getAndSet(false)) {
+                nextAdapterAttemptAtMs = 0L;
+            }
             reconcileQuietly();
         });
     }
@@ -602,6 +684,7 @@ final class ClipboardSyncController {
                 boolean enabled = (Boolean) params.opt("enabled");
                 if (!enabled) {
                     long detached = detachActiveLinkLocked();
+                    cancelPrivilegedPending();
                     return onControl(() -> {
                         stopDetachedHandle(detached);
                         return actionSetEnabled(false);
@@ -624,6 +707,23 @@ final class ClipboardSyncController {
                     return failed(new BridgeException("INVALID_ARGUMENT", "not-sent", "showCode 参数无效"));
                 }
                 return onControl(this::actionShowCode);
+            case "authorizeBackground":
+                if (params.length() != 1) {
+                    return failed(new BridgeException("INVALID_ARGUMENT", "not-sent", "authorizeBackground 参数无效"));
+                }
+                return onControl(this::actionAuthorizeBackground);
+            case "revokeBackground":
+                if (params.length() != 1) {
+                    return failed(new BridgeException("INVALID_ARGUMENT", "not-sent", "revokeBackground 参数无效"));
+                }
+                synchronized (stateLock) {
+                    currentBackgroundAuthorized = false;
+                    observedLinkEpoch = 0L;
+                    observedOnlineGeneration = 0L;
+                    pendingPrivilegedCapture = null;
+                }
+                cancelPrivilegedPending();
+                return onControl(this::actionRevokeBackground);
             default:
                 // sendNow MUST arrive through private bridge op "clipboardSyncSend", never via web params.
                 return failed(new BridgeException("INVALID_ARGUMENT", "not-sent", "不支持的剪贴板同步操作"));
@@ -637,6 +737,9 @@ final class ClipboardSyncController {
     CompletableFuture<JSONObject> sendNow(String text) {
         if (text == null || text.isEmpty()) {
             return failed(new BridgeException("CLIPBOARD_EMPTY", "not-sent", "剪贴板为空"));
+        }
+        if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
+            return failed(new BridgeException("CLIPBOARD_TOO_LARGE", "not-sent", "剪贴板文本超过大小限制"));
         }
         return onControl(() -> actionSendNow(text));
     }
@@ -668,7 +771,7 @@ final class ClipboardSyncController {
         if (!nativeBridge.isSupported()) {
             stopActiveLinkOnControl();
             if (!enabled) {
-                return reply(buildStatus(false, false, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED), null);
+                return reply(buildStatus(false, false, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED, false), null);
             }
             throw new BridgeException("UNSUPPORTED", "not-sent", "当前设备不支持剪贴板同步");
         }
@@ -676,13 +779,15 @@ final class ClipboardSyncController {
         if (creds == null) {
             stopActiveLinkOnControl();
             if (!enabled) {
-                return reply(buildStatus(false, false, currentMode(), CONNECTION_NOT_PAIRED), null);
+                return reply(buildStatus(false, false, MODE_MANUAL, CONNECTION_NOT_PAIRED, false), null);
             }
             throw new BridgeException("NOT_PAIRED", "not-sent", "请先连接中心");
         }
         if (!enabled) {
             // Immediately fence callbacks and pending writes even before persistence finishes.
             stopActiveLinkOnControl();
+        } else {
+            nextAdapterAttemptAtMs = 0L;
         }
         ClipboardSyncStorage.State existing;
         try {
@@ -692,7 +797,7 @@ final class ClipboardSyncController {
             throw new BridgeException("STORAGE_ERROR", "not-sent", "无法读取剪贴板同步配置");
         }
         try {
-            storage.saveForBinding(creds.binding, enabled, existing.groupCode);
+            storage.saveForBinding(creds.binding, enabled, existing.groupCode, existing.backgroundAuthorized);
         } catch (IOException failed) {
             stopActiveLinkOnControl();
             throw new BridgeException("STORAGE_ERROR", "not-sent", "无法保存剪贴板同步配置");
@@ -718,14 +823,15 @@ final class ClipboardSyncController {
             }
             throw new BridgeException("INTERNAL", "not-sent", "无法生成同步组码");
         }
-        boolean keepEnabled = readCurrentEnabledForMutation(creds.binding);
+        ClipboardSyncStorage.State existing = readStateForMutation(creds.binding);
         // Changing group always fences any older link immediately before persisting.
         stopActiveLinkOnControl();
         try {
-            storage.saveForBinding(creds.binding, keepEnabled, generated);
+            storage.saveForBinding(creds.binding, existing.enabled, generated, existing.backgroundAuthorized);
         } catch (IOException failed) {
             throw new BridgeException("STORAGE_ERROR", "not-sent", "无法保存同步组码");
         }
+        nextAdapterAttemptAtMs = 0L;
         JSONObject status = reconcileOnControl();
         return reply(status, generated);
     }
@@ -747,14 +853,15 @@ final class ClipboardSyncController {
             }
             throw new BridgeException("INVALID_ARGUMENT", "not-sent", "同步组码无效");
         }
-        boolean keepEnabled = readCurrentEnabledForMutation(creds.binding);
+        ClipboardSyncStorage.State existing = readStateForMutation(creds.binding);
         // Joining a group persists the code and preserves the independent switch (never implicitly turns on).
         stopActiveLinkOnControl();
         try {
-            storage.saveForBinding(creds.binding, keepEnabled, normalized);
+            storage.saveForBinding(creds.binding, existing.enabled, normalized, existing.backgroundAuthorized);
         } catch (IOException failed) {
             throw new BridgeException("STORAGE_ERROR", "not-sent", "无法保存同步组码");
         }
+        nextAdapterAttemptAtMs = 0L;
         JSONObject status = reconcileOnControl();
         return reply(status, null);
     }
@@ -781,6 +888,66 @@ final class ClipboardSyncController {
         }
         JSONObject status = reconcileOnControl();
         return reply(status, state.groupCode);
+    }
+
+    private JSONObject actionAuthorizeBackground() throws Exception {
+        if (!nativeBridge.isSupported()) {
+            stopActiveLinkOnControl();
+            throw new BridgeException("UNSUPPORTED", "not-sent", "当前设备不支持剪贴板同步");
+        }
+        BotHostClient.ClipboardCredentials creds = credentialsProvider.current();
+        if (creds == null) {
+            stopActiveLinkOnControl();
+            throw new BridgeException("NOT_PAIRED", "not-sent", "请先连接中心");
+        }
+        if (privilegedAdapter == null) {
+            throw new BridgeException("UNSUPPORTED", "not-sent", "当前设备不支持后台自动同步");
+        }
+        // Verifies Shizuku is running and already granted (via foreground onboarding) without
+        // requesting system permissions or registering a listener while off/offline.
+        privilegedAdapter.checkAuthorizationPrerequisites();
+
+        ClipboardSyncStorage.State existing;
+        try {
+            existing = storage.readForBinding(creds.binding);
+        } catch (IOException unreadable) {
+            throw new BridgeException("STORAGE_ERROR", "not-sent", "无法读取剪贴板同步配置");
+        }
+        try {
+            storage.saveForBinding(creds.binding, existing.enabled, existing.groupCode, true);
+        } catch (IOException failed) {
+            throw new BridgeException("STORAGE_ERROR", "not-sent", "无法保存后台剪贴板授权");
+        }
+        nextAdapterAttemptAtMs = 0L;
+        JSONObject status = reconcileOnControl();
+        return reply(status, null);
+    }
+
+    private JSONObject actionRevokeBackground() throws Exception {
+        stopPrivilegedAdapterOnControl();
+        cancelOnlineWatch();
+        if (!nativeBridge.isSupported()) {
+            stopActiveLinkOnControl();
+            return reply(buildStatus(false, false, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED, false), null);
+        }
+        BotHostClient.ClipboardCredentials creds = credentialsProvider.current();
+        if (creds == null) {
+            stopActiveLinkOnControl();
+            return reply(buildStatus(false, false, MODE_MANUAL, CONNECTION_NOT_PAIRED, false), null);
+        }
+        ClipboardSyncStorage.State existing;
+        try {
+            existing = storage.readForBinding(creds.binding);
+        } catch (IOException unreadable) {
+            throw new BridgeException("STORAGE_ERROR", "not-sent", "无法读取剪贴板同步配置");
+        }
+        try {
+            storage.saveForBinding(creds.binding, existing.enabled, existing.groupCode, false);
+        } catch (IOException failed) {
+            throw new BridgeException("STORAGE_ERROR", "not-sent", "无法移除后台剪贴板授权");
+        }
+        JSONObject status = reconcileOnControl();
+        return reply(status, null);
     }
 
     private JSONObject actionSendNow(String text) throws Exception {
@@ -843,12 +1010,12 @@ final class ClipboardSyncController {
         return reply(updatedStatus, null);
     }
 
-    private boolean readCurrentEnabledForMutation(ClipboardSyncStorage.Binding binding) {
+    private ClipboardSyncStorage.State readStateForMutation(ClipboardSyncStorage.Binding binding) {
         try {
-            return storage.readForBinding(binding).enabled;
+            return storage.readForBinding(binding);
         } catch (IOException unreadable) {
-            // Allow overwriting corrupted storage with a fresh group while keeping switch off.
-            return false;
+            // Allow overwriting corrupted storage with a fresh group while failing closed.
+            return ClipboardSyncStorage.State.empty();
         }
     }
 
@@ -857,12 +1024,12 @@ final class ClipboardSyncController {
     private JSONObject reconcileOnControl() throws Exception {
         if (!nativeBridge.isSupported()) {
             stopActiveLinkOnControl();
-            return buildStatus(false, false, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED);
+            return buildStatus(false, false, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED, false);
         }
         BotHostClient.ClipboardCredentials creds = credentialsProvider.current();
         if (creds == null) {
             stopActiveLinkOnControl();
-            return buildStatus(false, false, currentMode(), CONNECTION_NOT_PAIRED);
+            return buildStatus(false, false, MODE_MANUAL, CONNECTION_NOT_PAIRED, false);
         }
         ClipboardSyncStorage.State state;
         try {
@@ -874,12 +1041,14 @@ final class ClipboardSyncController {
 
         boolean configured = state.isConfigured();
         boolean enabled = state.enabled;
+        boolean backgroundAuthorized = state.backgroundAuthorized;
         boolean serviceActive = lifecycleOpen.getAsBoolean();
         boolean shouldRun = serviceActive && creds.linkAllowed && enabled && configured;
 
         boolean alreadyMatches;
         synchronized (stateLock) {
             currentEnabled = enabled;
+            currentBackgroundAuthorized = backgroundAuthorized;
             alreadyMatches = activeHandle != 0L
                     && creds.binding.bindingKey().equals(activeBindingKey)
                     && creds.generation == activeCredentialGeneration
@@ -899,37 +1068,64 @@ final class ClipboardSyncController {
             } else {
                 connection = CONNECTION_OFFLINE;
             }
-            return buildStatus(enabled, configured, currentMode(), connection);
+            return buildStatus(enabled, configured, MODE_MANUAL, connection, backgroundAuthorized);
         }
 
         if (!alreadyMatches) {
             stopActiveLinkOnControl();
-            startLinkOnControl(creds, state.groupCode);
+            startLinkOnControl(creds, state.groupCode, backgroundAuthorized);
         }
 
         long liveHandle;
+        long liveEpoch;
+        String liveBindingKey;
+        long liveCredGen;
         synchronized (stateLock) {
             liveHandle = activeHandle;
+            liveEpoch = linkEpoch;
+            liveBindingKey = activeBindingKey;
+            liveCredGen = activeCredentialGeneration;
         }
         if (!nativeBridge.isSupported()) {
             stopActiveLinkOnControl();
-            return buildStatus(enabled, configured, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED);
+            return buildStatus(enabled, configured, MODE_UNSUPPORTED, CONNECTION_UNSUPPORTED, false);
         }
         String connection = liveHandle != 0L
                 ? normalizeNativeStatus(nativeBridge.status(liveHandle))
                 : CONNECTION_OFFLINE;
-        String mode = CONNECTION_UNSUPPORTED.equals(connection) && !nativeBridge.isSupported()
-                ? MODE_UNSUPPORTED
-                : currentMode();
-        return buildStatus(enabled, configured, mode, connection);
+        long onlineGen = (liveHandle != 0L && liveBindingKey != null)
+                ? readOnlineGenerationIfCurrent(liveEpoch, liveHandle, liveBindingKey, liveCredGen)
+                : 0L;
+        boolean activeOnline = liveHandle != 0L
+                && CONNECTION_ONLINE.equals(connection)
+                && onlineGen > 0L;
+
+        boolean listenerActive = reconcilePrivilegedAdapterOnControl(
+                backgroundAuthorized, activeOnline, liveEpoch, liveHandle, liveBindingKey, liveCredGen, onlineGen);
+
+        String mode;
+        if (CONNECTION_UNSUPPORTED.equals(connection) && !nativeBridge.isSupported()) {
+            mode = MODE_UNSUPPORTED;
+        } else if (listenerActive) {
+            mode = MODE_AUTOMATIC;
+        } else {
+            mode = MODE_MANUAL;
+        }
+        return buildStatus(enabled, configured, mode, connection, backgroundAuthorized);
     }
 
-    private void startLinkOnControl(BotHostClient.ClipboardCredentials creds, String groupCode) {
+    private void startLinkOnControl(BotHostClient.ClipboardCredentials creds,
+                                    String groupCode,
+                                    boolean backgroundAuthorized) {
         long myEpoch;
         synchronized (stateLock) {
             myEpoch = ++linkEpoch;
             pendingIncoming = null;
+            pendingPrivilegedCapture = null;
+            observedLinkEpoch = 0L;
+            observedOnlineGeneration = 0L;
             currentEnabled = true;
+            currentBackgroundAuthorized = backgroundAuthorized;
         }
         String expectedBindingKey = creds.binding.bindingKey();
         long expectedCredGen = creds.generation;
@@ -962,42 +1158,303 @@ final class ClipboardSyncController {
         }
         if (!installed) {
             nativeBridge.stop(handle);
-            return;
-        }
-        if (privilegedAdapter != null && privilegedAdapter.isAutomaticAvailable()) {
-            privilegedAdapter.start(this::onPrivilegedClipboardChanged);
         }
     }
 
-    private void onPrivilegedClipboardChanged() {
-        if (privilegedAdapter == null || !privilegedCaptureQueued.compareAndSet(false, true)) {
+    private boolean reconcilePrivilegedAdapterOnControl(boolean backgroundAuthorized,
+                                                        boolean activeOnline,
+                                                        long liveEpoch,
+                                                        long liveHandle,
+                                                        String liveBindingKey,
+                                                        long liveCredGen,
+                                                        long onlineGen) {
+        if (privilegedAdapter == null || !backgroundAuthorized || liveHandle == 0L || liveBindingKey == null) {
+            stopPrivilegedAdapterOnControl();
+            cancelOnlineWatch();
+            return false;
+        }
+        if (!activeOnline || onlineGen <= 0L) {
+            // Never register a listener or keep Shizuku bound while not active-online.
+            stopPrivilegedAdapterOnControl();
+            scheduleOnlineWatch(WATCH_CONNECTING_INTERVAL_MS);
+            return false;
+        }
+
+        boolean alreadyArmedForExactEpoch;
+        synchronized (stateLock) {
+            alreadyArmedForExactEpoch = observedLinkEpoch == liveEpoch
+                    && observedOnlineGeneration == onlineGen
+                    && activeHandle == liveHandle
+                    && currentEnabled
+                    && currentBackgroundAuthorized
+                    && liveBindingKey.equals(activeBindingKey)
+                    && liveCredGen == activeCredentialGeneration;
+        }
+        if (alreadyArmedForExactEpoch && privilegedAdapter.isListenerActive()) {
+            scheduleOnlineWatch(WATCH_ONLINE_INTERVAL_MS);
+            return true;
+        }
+
+        // Stop any stale listener (e.g., older onlineGeneration before reconnect, or dead binder).
+        stopPrivilegedAdapterOnControl();
+
+        long now = monotonicMillis();
+        if (now < nextAdapterAttemptAtMs) {
+            scheduleOnlineWatch(Math.max(WATCH_CONNECTING_INTERVAL_MS, nextAdapterAttemptAtMs - now));
+            return false;
+        }
+
+        if (!isExactOnlineEpochCurrent(liveEpoch, liveHandle, liveBindingKey, liveCredGen, onlineGen)) {
+            scheduleOnlineWatch(WATCH_CONNECTING_INTERVAL_MS);
+            return false;
+        }
+
+        boolean started;
+        try {
+            started = privilegedAdapter.startListening(
+                    () -> onPrivilegedClipboardChanged(liveEpoch, liveHandle, liveBindingKey, liveCredGen, onlineGen),
+                    () -> onPrivilegedListenerUnavailable(liveEpoch, onlineGen));
+        } catch (Throwable failure) {
+            started = false;
+        }
+
+        if (!started || !privilegedAdapter.isListenerActive()) {
+            stopPrivilegedAdapterOnControl();
+            nextAdapterAttemptAtMs = monotonicMillis() + ADAPTER_RETRY_BACKOFF_MS;
+            scheduleOnlineWatch(ADAPTER_RETRY_BACKOFF_MS);
+            return false;
+        }
+
+        boolean stillCurrent = isExactOnlineEpochCurrent(liveEpoch, liveHandle, liveBindingKey, liveCredGen, onlineGen);
+        boolean installed = false;
+        if (stillCurrent) {
+            synchronized (stateLock) {
+                if (linkEpoch == liveEpoch
+                        && activeHandle == liveHandle
+                        && currentEnabled
+                        && currentBackgroundAuthorized
+                        && liveBindingKey.equals(activeBindingKey)
+                        && liveCredGen == activeCredentialGeneration) {
+                    observedLinkEpoch = liveEpoch;
+                    observedOnlineGeneration = onlineGen;
+                    installed = true;
+                }
+            }
+        }
+        if (!installed) {
+            stopPrivilegedAdapterOnControl();
+            return false;
+        }
+        nextAdapterAttemptAtMs = 0L;
+        scheduleOnlineWatch(WATCH_ONLINE_INTERVAL_MS);
+        return true;
+    }
+
+    private boolean isExactOnlineEpochCurrent(long expectedEpoch, long expectedHandle,
+                                              String expectedBindingKey, long expectedCredGen,
+                                              long expectedOnlineGen) {
+        if (expectedHandle == 0L || expectedOnlineGen <= 0L || expectedBindingKey == null) {
+            return false;
+        }
+        if (!lifecycleOpen.getAsBoolean()) {
+            return false;
+        }
+        BotHostClient.ClipboardCredentials freshCreds = credentialsProvider.current();
+        if (freshCreds == null
+                || !freshCreds.linkAllowed
+                || !expectedBindingKey.equals(freshCreds.binding.bindingKey())
+                || expectedCredGen != freshCreds.generation) {
+            return false;
+        }
+        long liveGen = readOnlineGenerationIfCurrent(expectedEpoch, expectedHandle, expectedBindingKey, expectedCredGen);
+        if (liveGen == 0L || liveGen != expectedOnlineGen) {
+            return false;
+        }
+        return CONNECTION_ONLINE.equals(normalizeNativeStatus(nativeBridge.status(expectedHandle)));
+    }
+
+    private void onPrivilegedClipboardChanged(long expectedEpoch, long expectedHandle,
+                                              String expectedBindingKey, long expectedCredGen,
+                                              long expectedOnlineGen) {
+        if (privilegedAdapter == null || expectedHandle == 0L || expectedOnlineGen <= 0L
+                || expectedBindingKey == null || !lifecycleOpen.getAsBoolean()) {
             return;
         }
+        boolean schedule = false;
+        synchronized (stateLock) {
+            if (expectedEpoch != linkEpoch
+                    || activeHandle != expectedHandle
+                    || !currentEnabled
+                    || !currentBackgroundAuthorized
+                    || !expectedBindingKey.equals(activeBindingKey)
+                    || expectedCredGen != activeCredentialGeneration
+                    || observedLinkEpoch != expectedEpoch
+                    || observedOnlineGeneration != expectedOnlineGen) {
+                return;
+            }
+            // Bounded to 1 latest pending capture for this exact native link epoch.
+            pendingPrivilegedCapture = new PendingCapture(
+                    expectedEpoch, expectedHandle, expectedBindingKey, expectedCredGen, expectedOnlineGen);
+            if (!privilegedCaptureScheduled) {
+                privilegedCaptureScheduled = true;
+                schedule = true;
+            }
+        }
+        if (schedule) {
+            controlWorker.execute(this::drainPrivilegedCapture);
+        }
+    }
+
+    private void drainPrivilegedCapture() {
+        PendingCapture pending;
+        synchronized (stateLock) {
+            privilegedCaptureScheduled = false;
+            pending = pendingPrivilegedCapture;
+            pendingPrivilegedCapture = null;
+            if (pending == null) {
+                return;
+            }
+            if (pending.linkEpoch != linkEpoch
+                    || activeHandle != pending.handle
+                    || !currentEnabled
+                    || !currentBackgroundAuthorized
+                    || !pending.bindingKey.equals(activeBindingKey)
+                    || pending.credentialGeneration != activeCredentialGeneration
+                    || observedLinkEpoch != pending.linkEpoch
+                    || observedOnlineGeneration != pending.onlineGeneration) {
+                return;
+            }
+        }
+        if (privilegedAdapter == null || !privilegedAdapter.isListenerActive()) {
+            reconcileQuietly();
+            return;
+        }
+        // Validate exact native link epoch BEFORE issuing IPC read so stale notifications
+        // never read or publish text after offline/reconnect/disable/revoke.
+        if (!isExactOnlineEpochCurrent(
+                pending.linkEpoch, pending.handle, pending.bindingKey,
+                pending.credentialGeneration, pending.onlineGeneration)) {
+            reconcileQuietly();
+            return;
+        }
+
+        String text;
+        try {
+            text = privilegedAdapter.readSendableText();
+        } catch (Throwable failure) {
+            reconcileQuietly();
+            return;
+        }
+        if (text == null || text.isEmpty() || utf8ByteLength(text) > MAX_TEXT_BYTES) {
+            return;
+        }
+
+        // Recheck exact epoch immediately before native send.
+        if (!isExactOnlineEpochCurrent(
+                pending.linkEpoch, pending.handle, pending.bindingKey,
+                pending.credentialGeneration, pending.onlineGeneration)) {
+            reconcileQuietly();
+            return;
+        }
+        synchronized (stateLock) {
+            if (pending.linkEpoch != linkEpoch
+                    || activeHandle != pending.handle
+                    || !currentEnabled
+                    || !currentBackgroundAuthorized
+                    || !pending.bindingKey.equals(activeBindingKey)
+                    || pending.credentialGeneration != activeCredentialGeneration
+                    || observedLinkEpoch != pending.linkEpoch
+                    || observedOnlineGeneration != pending.onlineGeneration) {
+                return;
+            }
+        }
+        try {
+            nativeBridge.send(pending.handle, pending.onlineGeneration, text);
+        } catch (Throwable ignored) {
+            // Automatic capture never logs plaintext or crashes on transient offline state.
+        }
+    }
+
+    private void onPrivilegedListenerUnavailable(long expectedEpoch, long expectedOnlineGen) {
+        boolean matched;
+        synchronized (stateLock) {
+            matched = observedLinkEpoch == expectedEpoch && observedOnlineGeneration == expectedOnlineGen;
+            if (matched) {
+                observedLinkEpoch = 0L;
+                observedOnlineGeneration = 0L;
+                pendingPrivilegedCapture = null;
+            }
+        }
         controlWorker.execute(() -> {
-            privilegedCaptureQueued.set(false);
-            if (!lifecycleOpen.getAsBoolean() || privilegedAdapter == null || !privilegedAdapter.isAutomaticAvailable()) {
-                return;
+            if (matched) {
+                nextAdapterAttemptAtMs = monotonicMillis() + ADAPTER_RETRY_BACKOFF_MS;
             }
-            String text = privilegedAdapter.readSendableText();
-            if (text == null || text.isEmpty()) {
-                return;
-            }
-            try {
-                actionSendNow(text);
-            } catch (Throwable ignored) {
-                // Automatic capture never logs plaintext or crashes on transient offline state.
-            }
+            reconcileQuietly();
         });
+    }
+
+    private void scheduleOnlineWatch(long delayMs) {
+        if (!(controlWorker instanceof ScheduledExecutorService)) {
+            return;
+        }
+        ScheduledExecutorService scheduler = (ScheduledExecutorService) controlWorker;
+        synchronized (watchLock) {
+            if (onlineWatchFuture != null) {
+                onlineWatchFuture.cancel(false);
+                onlineWatchFuture = null;
+            }
+            if (scheduler.isShutdown()) {
+                return;
+            }
+            onlineWatchFuture = scheduler.schedule(this::reconcileQuietly, delayMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void cancelOnlineWatch() {
+        synchronized (watchLock) {
+            if (onlineWatchFuture != null) {
+                onlineWatchFuture.cancel(false);
+                onlineWatchFuture = null;
+            }
+        }
+    }
+
+    private void stopPrivilegedAdapterOnControl() {
+        detachPrivilegedObservationLocked();
+        if (privilegedAdapter != null) {
+            try {
+                privilegedAdapter.stopListening();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void detachPrivilegedObservationLocked() {
+        synchronized (stateLock) {
+            observedLinkEpoch = 0L;
+            observedOnlineGeneration = 0L;
+            pendingPrivilegedCapture = null;
+        }
+    }
+
+    private void cancelPrivilegedPending() {
+        if (privilegedAdapter != null) {
+            try {
+                privilegedAdapter.cancelPending();
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     private void stopActiveLinkOnControl() {
         long detached = detachActiveLinkLocked();
+        cancelPrivilegedPending();
         stopDetachedHandle(detached);
     }
 
     /**
-     * Immediately fences callbacks, clears any pending incoming OS write, and detaches
-     * the active native handle under {@code stateLock}. Caller MUST stop the returned
+     * Immediately fences callbacks, clears any pending incoming OS write and privileged capture,
+     * and detaches the active native handle under {@code stateLock}. Caller MUST stop the returned
      * non-zero handle outside {@code stateLock}.
      */
     private long detachActiveLinkLocked() {
@@ -1005,23 +1462,24 @@ final class ClipboardSyncController {
         synchronized (stateLock) {
             ++linkEpoch;
             pendingIncoming = null;
+            pendingPrivilegedCapture = null;
+            observedLinkEpoch = 0L;
+            observedOnlineGeneration = 0L;
             handleToStop = activeHandle;
             activeHandle = 0L;
             activeBindingKey = null;
             activeCredentialGeneration = -1L;
             activeGroupCode = null;
             currentEnabled = false;
+            currentBackgroundAuthorized = false;
         }
+        cancelOnlineWatch();
         return handleToStop;
     }
 
     private void stopDetachedHandle(long handle) {
-        if (privilegedAdapter != null) {
-            try {
-                privilegedAdapter.stop();
-            } catch (Throwable ignored) {
-            }
-        }
+        cancelOnlineWatch();
+        stopPrivilegedAdapterOnControl();
         if (handle != 0L) {
             // Drain any in-flight onlineGeneration(handle) readers before freeing the native handle.
             handleCallLock.writeLock().lock();
@@ -1060,13 +1518,19 @@ final class ClipboardSyncController {
             }
             ++linkEpoch;
             pendingIncoming = null;
+            pendingPrivilegedCapture = null;
+            observedLinkEpoch = 0L;
+            observedOnlineGeneration = 0L;
             detached = activeHandle;
             activeHandle = 0L;
             activeBindingKey = null;
             activeCredentialGeneration = -1L;
             activeGroupCode = null;
             currentEnabled = false;
+            currentBackgroundAuthorized = false;
         }
+        cancelOnlineWatch();
+        cancelPrivilegedPending();
         long handleToStop = detached;
         if (handleToStop != 0L || privilegedAdapter != null) {
             controlWorker.execute(() -> stopDetachedHandle(handleToStop));
@@ -1177,14 +1641,8 @@ final class ClipboardSyncController {
 
     // ---------- Helpers ----------
 
-    private String currentMode() {
-        if (!nativeBridge.isSupported()) {
-            return MODE_UNSUPPORTED;
-        }
-        if (privilegedAdapter != null && privilegedAdapter.isAutomaticAvailable()) {
-            return MODE_AUTOMATIC;
-        }
-        return MODE_MANUAL;
+    private static long monotonicMillis() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     private static String mapBlockedCenterError(String code) {
@@ -1197,13 +1655,15 @@ final class ClipboardSyncController {
         return CONNECTION_OFFLINE;
     }
 
-    private static JSONObject buildStatus(boolean enabled, boolean configured, String mode, String connection) {
+    private static JSONObject buildStatus(boolean enabled, boolean configured, String mode,
+                                          String connection, boolean backgroundAuthorized) {
         try {
             return new JSONObject()
                     .put("enabled", enabled)
                     .put("configured", configured)
                     .put("mode", mode)
-                    .put("connection", connection);
+                    .put("connection", connection)
+                    .put("backgroundAuthorized", backgroundAuthorized);
         } catch (JSONException impossible) {
             throw new IllegalStateException(impossible);
         }

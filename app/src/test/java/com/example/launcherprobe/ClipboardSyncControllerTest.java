@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.crypto.Cipher;
@@ -535,53 +536,192 @@ public class ClipboardSyncControllerTest {
                 controller.handleAction(action("newGroup")).join()).code);
     }
 
+    private static final class FakePrivilegedAdapter
+            implements ClipboardSyncController.PrivilegedClipboardAdapter {
+        volatile BridgeException prerequisiteError;
+        volatile boolean startSucceeds = true;
+        volatile boolean listenerActive;
+        volatile String nextText = "from-privileged-adapter";
+        final AtomicInteger startCount = new AtomicInteger();
+        final AtomicInteger stopCount = new AtomicInteger();
+        final AtomicInteger readCount = new AtomicInteger();
+        final AtomicReference<Runnable> onChangeRef = new AtomicReference<>();
+        final AtomicReference<Runnable> onUnavailableRef = new AtomicReference<>();
+
+        @Override
+        public void checkAuthorizationPrerequisites() throws BridgeException {
+            BridgeException err = prerequisiteError;
+            if (err != null) {
+                throw err;
+            }
+        }
+
+        @Override
+        public boolean isListenerActive() {
+            return listenerActive;
+        }
+
+        @Override
+        public boolean startListening(Runnable onPossibleLocalChange, Runnable onListenerUnavailable) {
+            startCount.incrementAndGet();
+            if (!startSucceeds) {
+                listenerActive = false;
+                return false;
+            }
+            onChangeRef.set(onPossibleLocalChange);
+            onUnavailableRef.set(onListenerUnavailable);
+            listenerActive = true;
+            return true;
+        }
+
+        @Override
+        public void stopListening() {
+            stopCount.incrementAndGet();
+            listenerActive = false;
+            onChangeRef.set(null);
+            onUnavailableRef.set(null);
+        }
+
+        @Override
+        public String readSendableText() {
+            readCount.incrementAndGet();
+            return nextText;
+        }
+    }
+
     @Test
-    public void privilegedAdapterSeamReportsAutomaticModeAndStopsWithLink() throws Exception {
+    public void backgroundAuthorizationRequiresExplicitConsentAndActiveOnlineLink() throws Exception {
         credsRef.set(creds(1L, "https://center.example.com", "dev-1", "tok-1", null, true));
-        AtomicBoolean adapterStarted = new AtomicBoolean();
-        AtomicReference<Runnable> callbackRef = new AtomicReference<>();
-        ClipboardSyncController.PrivilegedClipboardAdapter adapter =
-                new ClipboardSyncController.PrivilegedClipboardAdapter() {
-                    @Override
-                    public boolean isAutomaticAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public void start(Runnable onPossibleLocalChange) {
-                        adapterStarted.set(true);
-                        callbackRef.set(onPossibleLocalChange);
-                    }
-
-                    @Override
-                    public void stop() {
-                        adapterStarted.set(false);
-                    }
-
-                    @Override
-                    public String readSendableText() {
-                        return "from-privileged-adapter";
-                    }
-                };
-
+        FakePrivilegedAdapter adapter = new FakePrivilegedAdapter();
         ClipboardSyncController controller = newController(adapter);
-        controller.handleAction(action("newGroup")).get(2, TimeUnit.SECONDS);
-        JSONObject enabled = controller.handleAction(
-                new JSONObject().put("action", "setEnabled").put("enabled", true)).get(2, TimeUnit.SECONDS);
-        assertEquals("automatic", enabled.getJSONObject("status").getString("mode"));
-        assertTrue(adapterStarted.get());
 
+        controller.handleAction(action("newGroup")).get(2, TimeUnit.SECONDS);
+        controller.handleAction(new JSONObject().put("action", "setEnabled").put("enabled", true))
+                .get(2, TimeUnit.SECONDS);
         StartedLink link = nativeBridge.latestLink();
         link.status = ClipboardSyncController.CONNECTION_ONLINE;
         link.onlineGeneration = 55L;
-        callbackRef.get().run();
 
-        // Drain via subsequent status action on the same serial control worker.
+        // Without explicit authorizeBackground, stays manual and NEVER starts listener (even if Shizuku ready).
+        JSONObject beforeAuth = controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertEquals("manual", beforeAuth.getJSONObject("status").getString("mode"));
+        assertFalse(beforeAuth.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertEquals(0, adapter.startCount.get());
+
+        // Prerequisite failure rejects authorization and leaves backgroundAuthorized=false.
+        adapter.prerequisiteError = new BridgeException("SHIZUKU_PERMISSION_REQUIRED", "not-sent", "未授权");
+        assertEquals("SHIZUKU_PERMISSION_REQUIRED", expectBridgeFailure(() ->
+                controller.handleAction(action("authorizeBackground")).join()).code);
+        JSONObject afterFailedAuth = controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertFalse(afterFailedAuth.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertEquals(0, adapter.startCount.get());
+
+        // Explicit authorizeBackground when active-online arms listener with NO initial copy.
+        adapter.prerequisiteError = null;
+        JSONObject authed = controller.handleAction(action("authorizeBackground")).get(2, TimeUnit.SECONDS);
+        assertTrue(authed.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertEquals("automatic", authed.getJSONObject("status").getString("mode"));
+        assertEquals(1, adapter.startCount.get());
+        assertEquals("enrollment must never trigger an initial read", 0, adapter.readCount.get());
+        assertTrue(nativeBridge.sentTexts.isEmpty());
+
+        // Subsequent clipboard change publishes with exact onlineGeneration.
+        Runnable gen55Callback = adapter.onChangeRef.get();
+        assertNotNull(gen55Callback);
+        gen55Callback.run();
         controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertEquals(1, adapter.readCount.get());
         assertEquals(1, nativeBridge.sentTexts.size());
         assertEquals("from-privileged-adapter", nativeBridge.sentTexts.get(0));
+        assertEquals(Long.valueOf(55L), nativeBridge.sentGenerations.get(0));
 
-        controller.handleAction(new JSONObject().put("action", "setEnabled").put("enabled", false)).get(2, TimeUnit.SECONDS);
-        assertFalse(adapterStarted.get());
+        // Reconnect advances onlineGeneration to 56: stale callback from gen 55 must NOT read or send.
+        link.onlineGeneration = 56L;
+        gen55Callback.run();
+        controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertEquals("stale gen callback must not issue IPC read", 1, adapter.readCount.get());
+        assertEquals(1, nativeBridge.sentTexts.size());
+        assertEquals("reconnect re-arms listener for new onlineGeneration", 2, adapter.startCount.get());
+
+        // Disable stops/unbinds listener immediately while keeping persisted backgroundAuthorized=true.
+        JSONObject disabled = controller.handleAction(
+                new JSONObject().put("action", "setEnabled").put("enabled", false)).get(2, TimeUnit.SECONDS);
+        assertEquals("manual", disabled.getJSONObject("status").getString("mode"));
+        assertTrue(disabled.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertFalse(adapter.listenerActive);
+
+        // Re-enable while still connecting (onlineGeneration == 0): must NOT start listener until online.
+        int startsBeforeReenable = adapter.startCount.get();
+        JSONObject connecting = controller.handleAction(
+                new JSONObject().put("action", "setEnabled").put("enabled", true)).get(2, TimeUnit.SECONDS);
+        assertEquals("connecting", connecting.getJSONObject("status").getString("connection"));
+        assertEquals("manual", connecting.getJSONObject("status").getString("mode"));
+        assertEquals(startsBeforeReenable, adapter.startCount.get());
+    }
+
+    @Test
+    public void revokeAndShizukuFailureFallbackToManualWhileKeepingSendNowAndReceive() throws Exception {
+        credsRef.set(creds(1L, "https://center.example.com", "dev-1", "tok-1", null, true));
+        FakePrivilegedAdapter adapter = new FakePrivilegedAdapter();
+        ClipboardSyncController controller = newController(adapter);
+
+        controller.handleAction(action("newGroup")).get(2, TimeUnit.SECONDS);
+        // Authorize while off: must NOT auto-enable or start listener.
+        JSONObject authedOff = controller.handleAction(action("authorizeBackground")).get(2, TimeUnit.SECONDS);
+        assertFalse(authedOff.getJSONObject("status").getBoolean("enabled"));
+        assertTrue(authedOff.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertEquals("manual", authedOff.getJSONObject("status").getString("mode"));
+        assertEquals(0, adapter.startCount.get());
+
+        controller.handleAction(new JSONObject().put("action", "setEnabled").put("enabled", true))
+                .get(2, TimeUnit.SECONDS);
+        StartedLink link = nativeBridge.latestLink();
+        link.status = ClipboardSyncController.CONNECTION_ONLINE;
+        link.onlineGeneration = 77L;
+
+        // If Shizuku startListening fails (e.g. OEM restriction), mode stays manual; sendNow & receive still work.
+        adapter.startSucceeds = false;
+        JSONObject failedBind = controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertEquals("manual", failedBind.getJSONObject("status").getString("mode"));
+        assertTrue(failedBind.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertFalse(adapter.listenerActive);
+
+        controller.sendNow("manual-fallback-text").get(2, TimeUnit.SECONDS);
+        assertEquals(1, nativeBridge.sentTexts.size());
+        assertEquals("manual-fallback-text", nativeBridge.sentTexts.get(0));
+
+        link.receiver.onText(77L, "remote-incoming-text");
+        mainExecutor.drainAll();
+        assertEquals(1, osWrites.size());
+        assertEquals("remote-incoming-text", osWrites.get(0));
+
+        // Recover via explicit authorizeBackground, then simulate runtime listener loss (binder death).
+        adapter.startSucceeds = true;
+        JSONObject recovered = controller.handleAction(action("authorizeBackground")).get(2, TimeUnit.SECONDS);
+        assertEquals("automatic", recovered.getJSONObject("status").getString("mode"));
+        assertTrue(adapter.listenerActive);
+
+        Runnable unavailableCallback = adapter.onUnavailableRef.get();
+        assertNotNull(unavailableCallback);
+        adapter.listenerActive = false;
+        unavailableCallback.run();
+        JSONObject afterLoss = controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertEquals("manual", afterLoss.getJSONObject("status").getString("mode"));
+
+        // Explicit revokeBackground removes consent while preserving enabled & group and manual/receive paths.
+        JSONObject revoked = controller.handleAction(action("revokeBackground")).get(2, TimeUnit.SECONDS);
+        assertFalse(revoked.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertTrue(revoked.getJSONObject("status").getBoolean("enabled"));
+        assertTrue(revoked.getJSONObject("status").getBoolean("configured"));
+        assertEquals("manual", revoked.getJSONObject("status").getString("mode"));
+
+        // Re-authorize, then re-pair to a new credential binding -> backgroundAuthorized resets to false.
+        controller.handleAction(action("authorizeBackground")).get(2, TimeUnit.SECONDS);
+        credsRef.set(creds(2L, "https://center.example.com", "dev-1", "tok-2-repaired", null, true));
+        controller.onCenterStateChanged(false);
+        JSONObject afterRepair = controller.handleAction(action("status")).get(2, TimeUnit.SECONDS);
+        assertFalse(afterRepair.getJSONObject("status").getBoolean("backgroundAuthorized"));
+        assertEquals("manual", afterRepair.getJSONObject("status").getString("mode"));
+        assertFalse(adapter.listenerActive);
     }
 }

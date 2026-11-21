@@ -168,10 +168,18 @@ public class ClipboardSyncFilterTest {
                 new JSONObject().put("action", "showCode")));
         assertEquals("sendNow", BotHostTauriPlugin.validateClipboardSyncParams(
                 new JSONObject().put("action", "sendNow")));
+        assertEquals("authorizeBackground", BotHostTauriPlugin.validateClipboardSyncParams(
+                new JSONObject().put("action", "authorizeBackground")));
+        assertEquals("revokeBackground", BotHostTauriPlugin.validateClipboardSyncParams(
+                new JSONObject().put("action", "revokeBackground")));
 
         // Reject plaintext injection via sendNow or extra keys on any action.
         assertNull(BotHostTauriPlugin.validateClipboardSyncParams(
                 new JSONObject().put("action", "sendNow").put("text", "forged")));
+        assertNull(BotHostTauriPlugin.validateClipboardSyncParams(
+                new JSONObject().put("action", "authorizeBackground").put("extra", true)));
+        assertNull(BotHostTauriPlugin.validateClipboardSyncParams(
+                new JSONObject().put("action", "revokeBackground").put("force", true)));
         assertNull(BotHostTauriPlugin.validateClipboardSyncParams(
                 new JSONObject().put("action", "status").put("extra", true)));
         assertNull(BotHostTauriPlugin.validateClipboardSyncParams(
@@ -184,5 +192,25 @@ public class ClipboardSyncFilterTest {
 
         assertTrue(BotHostUiProtocol.isOperation("clipboardSync"));
         assertTrue(BotHostUiProtocol.isOperation("clipboardSyncSend"));
+    }
+
+    @Test
+    public void enforcesStrictUtf8ByteLimitMatchingCore() {
+        String exactAscii = "a".repeat(ClipboardSyncController.MAX_TEXT_BYTES);
+        assertTrue(ClipboardSyncController.extractSendableText(
+                ClipData.newPlainText("ok", exactAscii)).ok);
+
+        String overAscii = "a".repeat(ClipboardSyncController.MAX_TEXT_BYTES + 1);
+        ClipboardSyncController.ClipReadResult overAsciiRes = ClipboardSyncController.extractSendableText(
+                ClipData.newPlainText("big", overAscii));
+        assertFalse(overAsciiRes.ok);
+        assertEquals("CLIPBOARD_TOO_LARGE", overAsciiRes.errorCode);
+
+        // Multi-byte UTF-8: 3-byte CJK characters exceeding 65,536 bytes despite < 65,536 chars.
+        String overCjk = "中".repeat((ClipboardSyncController.MAX_TEXT_BYTES / 3) + 1);
+        ClipboardSyncController.ClipReadResult overCjkRes = ClipboardSyncController.extractSendableText(
+                ClipData.newPlainText("cjk", overCjk));
+        assertFalse(overCjkRes.ok);
+        assertEquals("CLIPBOARD_TOO_LARGE", overCjkRes.errorCode);
     }
 }

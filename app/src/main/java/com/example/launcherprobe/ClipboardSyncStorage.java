@@ -3,7 +3,6 @@ package com.example.launcherprobe;
 import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
-import android.util.AtomicFile;
 
 import org.json.JSONObject;
 
@@ -11,6 +10,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -81,14 +83,20 @@ final class ClipboardSyncStorage {
     }
 
     static final class State {
-        private static final State EMPTY = new State(false, null);
+        private static final State EMPTY = new State(false, null, false);
 
         final boolean enabled;
         final String groupCode;
+        final boolean backgroundAuthorized;
 
         State(boolean enabled, String groupCode) {
+            this(enabled, groupCode, false);
+        }
+
+        State(boolean enabled, String groupCode, boolean backgroundAuthorized) {
             this.enabled = enabled;
             this.groupCode = (groupCode == null || groupCode.isEmpty()) ? null : groupCode;
+            this.backgroundAuthorized = backgroundAuthorized;
         }
 
         static State empty() {
@@ -164,7 +172,7 @@ final class ClipboardSyncStorage {
         }
     }
 
-    private final AtomicFile file;
+    private final Path file;
     private final CipherBox cipherBox;
 
     ClipboardSyncStorage(Context context) {
@@ -172,7 +180,7 @@ final class ClipboardSyncStorage {
     }
 
     ClipboardSyncStorage(File targetFile, CipherBox cipherBox) {
-        this.file = new AtomicFile(Objects.requireNonNull(targetFile));
+        this.file = Objects.requireNonNull(targetFile).toPath();
         this.cipherBox = Objects.requireNonNull(cipherBox);
     }
 
@@ -180,12 +188,11 @@ final class ClipboardSyncStorage {
         if (binding == null) {
             return State.empty();
         }
-        File base = file.getBaseFile();
-        if (!base.exists() && !new File(base.getPath() + ".bak").exists()) {
+        if (Files.notExists(file)) {
             return State.empty();
         }
         try {
-            byte[] raw = file.readFully();
+            byte[] raw = Files.readAllBytes(file);
             JSONObject envelope = new JSONObject(new String(raw, StandardCharsets.UTF_8));
             if (envelope.getInt("v") != ENVELOPE_VERSION) {
                 throw new IOException("剪贴板同步存储版本不受支持");
@@ -205,7 +212,8 @@ final class ClipboardSyncStorage {
             }
             boolean enabled = record.getBoolean("enabled");
             String groupCode = record.isNull("groupCode") ? null : record.optString("groupCode", null);
-            return new State(enabled, groupCode);
+            boolean backgroundAuthorized = record.optBoolean("backgroundAuthorized", false);
+            return new State(enabled, groupCode, backgroundAuthorized);
         } catch (Exception failure) {
             // Never log secrets/ciphertext or fall back to plaintext.
             throw new IOException("剪贴板同步状态读取失败");
@@ -213,6 +221,11 @@ final class ClipboardSyncStorage {
     }
 
     synchronized void saveForBinding(Binding binding, boolean enabled, String groupCode) throws IOException {
+        saveForBinding(binding, enabled, groupCode, false);
+    }
+
+    synchronized void saveForBinding(Binding binding, boolean enabled, String groupCode,
+                                     boolean backgroundAuthorized) throws IOException {
         if (binding == null) {
             throw new IllegalArgumentException("中心绑定不可用");
         }
@@ -224,7 +237,8 @@ final class ClipboardSyncStorage {
                     .put("deviceId", binding.deviceId)
                     .put("credentialFingerprint", binding.credentialFingerprint)
                     .put("enabled", enabled)
-                    .put("groupCode", (groupCode == null || groupCode.isEmpty()) ? JSONObject.NULL : groupCode);
+                    .put("groupCode", (groupCode == null || groupCode.isEmpty()) ? JSONObject.NULL : groupCode)
+                    .put("backgroundAuthorized", backgroundAuthorized);
             EncryptedPayload encrypted = cipherBox.encrypt(record.toString().getBytes(StandardCharsets.UTF_8));
             JSONObject envelope = new JSONObject()
                     .put("v", ENVELOPE_VERSION)
@@ -235,20 +249,27 @@ final class ClipboardSyncStorage {
             // Never fall back to plaintext if AndroidKeyStore / cipher fails.
             throw new IOException("剪贴板同步状态加密失败");
         }
-        FileOutputStream stream = file.startWrite();
         try {
-            stream.write(encodedEnvelope);
-            file.finishWrite(stream);
-        } catch (Exception failure) {
-            file.failWrite(stream);
+            Path staged = Files.createTempFile(file.toAbsolutePath().getParent(), ".clipboard-sync-", ".tmp");
+            try {
+                try (FileOutputStream stream = new FileOutputStream(staged.toFile())) {
+                    stream.write(encodedEnvelope);
+                    stream.getFD().sync();
+                }
+                // Report rename failures; AtomicFile.finishWrite can report success with stale state.
+                Files.move(staged, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                Files.deleteIfExists(staged);
+            }
+        } catch (IOException failure) {
             throw new IOException("剪贴板同步状态保存失败");
         }
     }
 
     synchronized void clear() throws IOException {
-        file.delete();
-        File base = file.getBaseFile();
-        if (base.exists() || new File(base.getPath() + ".bak").exists()) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException failure) {
             throw new IOException("剪贴板同步状态清除失败");
         }
     }

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   AudioLines,
   ChevronsUpDown,
+  ClipboardCheck,
   Clock,
   Code2,
   Download,
@@ -33,6 +34,7 @@ import { ErrorNotice, useAction, useCollapseToolOutput, useHideToolOutput, useTe
 import { PlatformLogoIcon, uuid } from '../hub/shared';
 import { Badge, Disclosure, Row, Section } from '../bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from '../ClientUpdateSection';
+import { ClipboardSyncSection } from '../ClipboardSyncSection';
 import { ConfirmDialog, ListRow, Switch } from '../components/ui';
 import type { CenterAdminTab, HubSettingsPage } from './types';
 
@@ -169,8 +171,12 @@ export function HubSettingsView({
   const titleId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const scrollByPage = useRef<Partial<Record<HubSettingsPage, number>>>({});
-  const previousPage = useRef<HubSettingsPage | null>(null);
+  const scrollByPage = useRef<Partial<Record<HubSettingsPage | 'clipboard', number>>>({});
+  const previousPage = useRef<HubSettingsPage | 'clipboard' | null>(null);
+
+  const [clipboardOpen, setClipboardOpen] = useState(false);
+  const activeClipboard = page === 'overview' && clipboardOpen;
+  const effectivePage: HubSettingsPage | 'clipboard' = activeClipboard ? 'clipboard' : page;
 
   const [editingCenter, setEditingCenter] = useState(false);
   const [renamingDevice, setRenamingDevice] = useState<{ deviceId: string; generation: number } | null>(null);
@@ -201,18 +207,34 @@ export function HubSettingsView({
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
 
   useLayoutEffect(() => {
+    if (page !== 'overview' && clipboardOpen) {
+      setClipboardOpen(false);
+    }
     const previous = previousPage.current;
-    if (previous === page) return;
-    previousPage.current = page;
+    if (previous === effectivePage) return;
+    previousPage.current = effectivePage;
     if (previous === 'connection') {
       setEditingCenter(false);
       centerConn.setToken('');
     }
     if (previous === 'devices') setRenamingDevice(null);
     setSettingsConfirm(null);
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollByPage.current[page] ?? 0;
-    if (previous || page !== 'overview') titleRef.current?.focus({ preventScroll: true });
-  }, [page, centerConn.setToken]);
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollByPage.current[effectivePage] ?? 0;
+    if (previous || effectivePage !== 'overview') titleRef.current?.focus({ preventScroll: true });
+  }, [page, clipboardOpen, effectivePage, centerConn.setToken]);
+
+  useEffect(() => {
+    if (!activeClipboard) return;
+    const handleBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setClipboardOpen(false);
+    };
+    window.addEventListener('app-back', handleBack, true);
+    return () => window.removeEventListener('app-back', handleBack, true);
+  }, [activeClipboard]);
 
   useEffect(() => {
     void ensureRemoteApi();
@@ -364,7 +386,7 @@ export function HubSettingsView({
   return (
     <main className="grok-subpage grok-page-enter hst-settings" aria-labelledby={titleId}>
       <header className="grok-subpage-topbar">
-        {page === 'overview' && onOpenDrawer ? (
+        {page === 'overview' && !activeClipboard && onOpenDrawer ? (
           <button
             type="button"
             className="grok-floating-circle-btn"
@@ -376,20 +398,28 @@ export function HubSettingsView({
             <PanelLeft size={20} strokeWidth={2} />
           </button>
         ) : (
-          <button type="button" className="grok-floating-circle-btn" onClick={onBack} aria-label={t('返回', 'Back')}>
+          <button
+            type="button"
+            className="grok-floating-circle-btn"
+            onClick={activeClipboard ? () => setClipboardOpen(false) : onBack}
+            aria-label={t('返回', 'Back')}
+          >
             <ArrowLeft size={20} />
           </button>
         )}
-        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">{pageTitles[page]}</h2>
+        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">
+          {activeClipboard ? t('剪贴板同步', 'Clipboard Sync') : pageTitles[page]}
+        </h2>
         <span className="hst-topbar-spacer" aria-hidden="true" />
       </header>
 
       <div
         className="grok-subpage-scroll"
         ref={scrollRef}
-        onScroll={event => { scrollByPage.current[page] = event.currentTarget.scrollTop; }}
+        onScroll={event => { scrollByPage.current[effectivePage] = event.currentTarget.scrollTop; }}
       >
         {page !== 'overview' && actionNotice}
+        {activeClipboard && <ClipboardSyncSection variant="mobile" />}
         {page === 'connection' && (
           <>
             <Section>
@@ -625,7 +655,7 @@ export function HubSettingsView({
           )}
         </Section>}
 
-        <div className="hst-overview" hidden={page !== 'overview'}>
+        <div className="hst-overview" hidden={page !== 'overview' || activeClipboard}>
           {/* 1. 中心与管理 */}
           <Section title={t('中心与管理', 'Center & Admin')}>
             <ListRow
@@ -664,6 +694,13 @@ export function HubSettingsView({
               title={t('通知、后台与节点自检', 'Alerts, background & local host')}
               subtitle={t('通知权限、电池优化、Shizuku 与本机节点状态', 'Notifications, battery optimization, Shizuku & local host status')}
               onClick={() => onOpenPage('permissions')}
+              chevron
+            />
+            <Row
+              icon={<ClipboardCheck />}
+              title={t('剪贴板同步', 'Clipboard Sync')}
+              subtitle={t('本机独立开关、邀请组配对与立即发送当前剪贴板', 'Per-device toggle, group pairing & send clipboard now')}
+              onClick={() => setClipboardOpen(true)}
               chevron
             />
           </Section>
@@ -834,7 +871,7 @@ export function HubSettingsView({
           </div>
         </div>
 
-        {page === 'overview' && actionNotice}
+        {page === 'overview' && !activeClipboard && actionNotice}
       </div>
 
       <ConfirmDialog

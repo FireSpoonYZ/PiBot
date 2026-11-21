@@ -80,7 +80,7 @@ pub(crate) fn pick_plain_text_mime(mime_types: &[String]) -> Option<(&str, TextE
   if let Some(m) = mime_types.iter().find(|m| is_utf8_text_plain(m)) {
     return Some((m.as_str(), TextEncoding::Utf8));
   }
-  if let Some(m) = mime_types.iter().find(|m| m == MIME_UTF8_STRING) {
+  if let Some(m) = mime_types.iter().find(|m| m.as_str() == MIME_UTF8_STRING) {
     return Some((m.as_str(), TextEncoding::Utf8));
   }
   if let Some(m) = mime_types
@@ -89,10 +89,10 @@ pub(crate) fn pick_plain_text_mime(mime_types: &[String]) -> Option<(&str, TextE
   {
     return Some((m.as_str(), TextEncoding::Utf8));
   }
-  if let Some(m) = mime_types.iter().find(|m| m == MIME_STRING) {
+  if let Some(m) = mime_types.iter().find(|m| m.as_str() == MIME_STRING) {
     return Some((m.as_str(), TextEncoding::Iso88591));
   }
-  if let Some(m) = mime_types.iter().find(|m| m == MIME_TEXT) {
+  if let Some(m) = mime_types.iter().find(|m| m.as_str() == MIME_TEXT) {
     return Some((m.as_str(), TextEncoding::Utf8));
   }
   None

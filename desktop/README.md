@@ -62,6 +62,19 @@ macOS 没有安装器生命周期：安装准备通过后，客户端先用当�
 
 原生命令为 `desktop_update_status/check/download/install/cancel`；界面不提供任意下载 URL 或发布公钥替换入口。桌面端只由 Tauri updater 插件消费最终合并配置 `plugins.updater.pubkey`（CI 通过构建输入 `E_LAUNCHER_UPDATER_PUBLIC_KEY` 生成 `--config` 覆盖注入），私钥不进入安装包或中心；未配置正确公钥的构建无法通过插件验签。发布步骤见[发布说明](../docs/releasing.md)。
 
+## 剪贴板同步（Windows / Linux）
+
+在「设置 → 剪贴板同步」配置本机。macOS 暂不支持。
+
+- **交互与前提**：采用「一次入组（`pibot-clipboard-v1:...`）+ 每设备独立开关」。需先升级 Center 至支持 `/v1/link` `X-PiBot-Clipboard-V1: 1` 隔离中继的版本；仅实时在线投递，无离线补发或历史记录。
+- **范围与安全边界**：仅同步 `≤ 64 KiB` 的非空 UTF-8 纯文本，端到端 `XChaCha20-Poly1305` 加密；敏感/密码管理器标记按平台尽力跳过（best-effort），硬拦截含 `pibot1.` 或 `pibot-clipboard-v1:` 的文本；不同步文件/图片/富文本，不做自动粘贴注入，也不向 Bot、Host 工具或 MCP 暴露。
+- **托盘与进程语义**：运行在桌面客户端（Tauri 原生进程）而非 `pibot-host`；同步已开启且系统托盘可用时，关闭主窗口会留在托盘。完全退出客户端会停止同步，不清空系统剪贴板，也不停止 `pibot-host`。托盘不显示正文或组码。
+- **平台实现**：
+  - **Windows**：独立工作线程 `HWND_MESSAGE` + `AddClipboardFormatListener`（无焦点抢占），仅读 `CF_UNICODETEXT`，跳过 `CF_HDROP` 与监控/历史/云同步排除格式；写入附带 `PiBot.ClipboardSync.OwnWrite.v1` 防回环标记。
+  - **Linux**：仅监听常规 `CLIPBOARD`（绝不监听 `PRIMARY`）。Wayland 探测 `ext-data-control` / `wlr-data-control`，**不支持该协议的合成器直接返回 `Unsupported`，不回退 XWayland**；X11 使用 `XFixes` + 未映射 `InputOnly` 窗口，支持单次与 `INCR` 读写；写入附带 `application/x-pibot-clipboard-sync` 标记。
+
+完整设计、Linux 合成器测试矩阵与三节点验收清单见 [docs/clipboard-sync.md](../docs/clipboard-sync.md)。
+
 ## 服务诊断
 
 从已配对的用户会话运行状态命令。`ready` 只表示本机认证控制接口已响应，中心 Relay 和配置应用状态分别在客户端设置及中心的「设备与 Bot」检查。 [完整诊断步骤](../docs/center-linux-deployment.md#按层定位故障)

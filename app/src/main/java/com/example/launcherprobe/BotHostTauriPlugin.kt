@@ -367,6 +367,14 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             forward(invoke, "clipboardSyncSend", JSONObject().put("text", read.text))
             return
         }
+        if (action == "authorizeBackground" || action == "revokeBackground") {
+            if (!foregroundUi()) {
+                replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台修改后台剪贴板授权")
+                return
+            }
+            forward(invoke, "clipboardSync", params)
+            return
+        }
         forward(invoke, "clipboardSync", params)
     }
 
@@ -1244,7 +1252,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             if (params == null) return null
             val action = params.opt("action") as? String ?: return null
             return when (action) {
-                "status", "newGroup", "showCode", "sendNow" ->
+                "status", "newGroup", "showCode", "sendNow",
+                "authorizeBackground", "revokeBackground" ->
                     if (params.length() == 1) action else null
                 "setEnabled" ->
                     if (params.length() == 2 && params.opt("enabled") is Boolean) action else null

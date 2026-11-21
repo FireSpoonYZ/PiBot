@@ -1,4 +1,9 @@
 pub mod bridge;
+#[cfg(target_os = "linux")]
+mod clipboard_linux;
+pub mod clipboard_runtime;
+#[cfg(windows)]
+mod clipboard_windows;
 pub mod host_service;
 pub mod image_picker;
 pub mod pairing_code;
@@ -56,12 +61,15 @@ async fn desktop_request(
   app: AppHandle,
   webview: Webview,
   bridge: State<'_, DesktopBridge>,
+  clipboard: State<'_, clipboard_runtime::ClipboardRuntime>,
   request: DesktopRequestInput,
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
-  bridge
-    .request(&app, &request.op, request.params)
-    .await
+  let op = request.op.as_str();
+  clipboard.before_broker_request(&app, op);
+  let result = bridge.request(&app, op, request.params).await;
+  clipboard.after_broker_request(&app, op, result.as_ref().ok());
+  result
 }
 
 #[tauri::command]
@@ -145,7 +153,7 @@ pub struct NavigationGuardConfig {
 
 pub fn run() {
   let bridge = DesktopBridge::new();
-  let app = tauri::Builder::default()
+  let builder = tauri::Builder::default()
     // Register single-instance first so secondary launches exit before other plugins initialize.
     .plugin(tauri_plugin_single_instance::init(|app, _, _| {
       if let Some(window) = app.get_webview_window("main") {
@@ -156,6 +164,7 @@ pub fn run() {
     }))
     .manage(bridge)
     .manage(updates::UpdateState::default())
+    .manage(clipboard_runtime::ClipboardRuntime::new())
     // Reload/navigation kills every observer Channel owned by the old
     // document; evict them before the new page's JS installs its watches.
     .on_page_load(|webview, payload| {
@@ -188,7 +197,32 @@ pub fn run() {
         }
       }
       Ok(())
+    });
+
+  #[cfg(any(windows, target_os = "linux"))]
+  let builder = builder
+    .on_menu_event(|app, event| {
+      app
+        .state::<clipboard_runtime::ClipboardRuntime>()
+        .handle_tray_menu_event(app, event);
     })
+    .on_window_event(|window, event| {
+      if window.label() == "main" {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+          let app = window.app_handle();
+          if !app.state::<updates::UpdateState>().blocks_close_to_tray()
+            && app
+              .state::<clipboard_runtime::ClipboardRuntime>()
+              .can_close_to_tray(app)
+          {
+            api.prevent_close();
+            let _ = window.hide();
+          }
+        }
+      }
+    });
+
+  let app = builder
     .invoke_handler(tauri::generate_handler![
       desktop_request,
       desktop_open_center,
@@ -207,12 +241,16 @@ pub fn run() {
       updates::desktop_update_download,
       updates::desktop_update_install,
       updates::desktop_update_cancel,
+      clipboard_runtime::desktop_clipboard_sync,
     ])
     .build(tauri::generate_context!())
     .expect("failed to build pibot desktop application");
 
   app.run(|app_handle, event| {
     if matches!(event, RunEvent::Exit) {
+      app_handle
+        .state::<clipboard_runtime::ClipboardRuntime>()
+        .shutdown(app_handle);
       app_handle.state::<DesktopBridge>().shutdown();
     }
   });

@@ -47,8 +47,7 @@ impl ValidatedEndpoint {
 }
 
 pub(crate) fn validate_device_id(id: &str) -> bool {
-    (1..=MAX_DEVICE_ID_LEN).contains(&id.len())
-        && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    (1..=MAX_DEVICE_ID_LEN).contains(&id.len()) && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
 pub(crate) fn validate_device_token(token: &str) -> bool {
@@ -100,7 +99,9 @@ fn validate_port_digits(port_str: &str) -> Result<(), LinkStartError> {
     if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
         return Err(LinkStartError::InvalidOrigin);
     }
-    let port: u16 = port_str.parse().map_err(|_| LinkStartError::InvalidOrigin)?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| LinkStartError::InvalidOrigin)?;
     if port == 0 {
         return Err(LinkStartError::InvalidOrigin);
     }
@@ -280,14 +281,42 @@ mod tests {
     #[test]
     fn accepts_valid_https_and_literal_loopback_http_origins() {
         let cases = [
-            ("https://center.example", "wss://center.example/v1/link", true),
-            (" https://center.example/ ", "wss://center.example/v1/link", true),
-            ("https://center.example:443", "wss://center.example/v1/link", true),
-            ("https://center.example:8443/", "wss://center.example:8443/v1/link", true),
-            ("https://192.168.1.10:8443", "wss://192.168.1.10:8443/v1/link", true),
+            (
+                "https://center.example",
+                "wss://center.example/v1/link",
+                true,
+            ),
+            (
+                " https://center.example/ ",
+                "wss://center.example/v1/link",
+                true,
+            ),
+            (
+                "https://center.example:443",
+                "wss://center.example/v1/link",
+                true,
+            ),
+            (
+                "https://center.example:8443/",
+                "wss://center.example:8443/v1/link",
+                true,
+            ),
+            (
+                "https://192.168.1.10:8443",
+                "wss://192.168.1.10:8443/v1/link",
+                true,
+            ),
             ("https://[::1]:8443", "wss://[::1]:8443/v1/link", true),
-            ("http://127.0.0.1:8790", "ws://127.0.0.1:8790/v1/link", false),
-            ("http://127.0.0.1:8790/", "ws://127.0.0.1:8790/v1/link", false),
+            (
+                "http://127.0.0.1:8790",
+                "ws://127.0.0.1:8790/v1/link",
+                false,
+            ),
+            (
+                "http://127.0.0.1:8790/",
+                "ws://127.0.0.1:8790/v1/link",
+                false,
+            ),
             ("http://127.0.0.1", "ws://127.0.0.1/v1/link", false),
             ("http://[::1]:8790", "ws://[::1]:8790/v1/link", false),
             ("http://[::1]:8790/", "ws://[::1]:8790/v1/link", false),
@@ -346,7 +375,10 @@ mod tests {
     fn upgrade_request_sets_clipboard_header_and_omits_origin() {
         let endpoint = parse_center_origin("https://center.example:8443/").expect("valid");
         let req = endpoint.build_upgrade_request().expect("request");
-        assert_eq!(req.uri().path_and_query().map(|pq| pq.as_str()), Some("/v1/link"));
+        assert_eq!(
+            req.uri().path_and_query().map(|pq| pq.as_str()),
+            Some("/v1/link")
+        );
         assert!(req.headers().get(ORIGIN).is_none());
         assert_eq!(
             req.headers()
@@ -374,7 +406,10 @@ mod tests {
         assert!(!validate_routing_id(&"g0".repeat(32)));
 
         assert!(build_tls_config(None).is_ok());
-        assert_eq!(build_tls_config(Some("")).err(), Some(LinkStartError::InvalidCaPem));
+        assert_eq!(
+            build_tls_config(Some("")).err(),
+            Some(LinkStartError::InvalidCaPem)
+        );
         assert_eq!(
             build_tls_config(Some("not a certificate")).err(),
             Some(LinkStartError::InvalidCaPem)

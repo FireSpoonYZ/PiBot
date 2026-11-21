@@ -197,5 +197,36 @@ public class ClipboardSyncStorageTest {
         ClipboardSyncStorage.State after = storage.readForBinding(binding);
         assertFalse(after.enabled);
         assertFalse(after.isConfigured());
+        assertFalse(after.backgroundAuthorized);
+    }
+
+    @Test
+    public void backgroundAuthorizedIsBindingScopedAndDefaultsFalse() throws Exception {
+        File file = new File(temp.getRoot(), ClipboardSyncStorage.FILE_NAME);
+        ClipboardSyncStorage storage = new ClipboardSyncStorage(file, newAesGcmBox());
+        ClipboardSyncStorage.Binding binding1 = ClipboardSyncStorage.Binding.create(
+                "https://center.example.com", "dev-1", "tok-1", "ca-1");
+
+        // Legacy 3-arg save defaults backgroundAuthorized to false.
+        storage.saveForBinding(binding1, true, "GROUP-1");
+        ClipboardSyncStorage.State legacyLoaded = storage.readForBinding(binding1);
+        assertTrue(legacyLoaded.enabled);
+        assertEquals("GROUP-1", legacyLoaded.groupCode);
+        assertFalse(legacyLoaded.backgroundAuthorized);
+
+        // Explicit 4-arg save persists backgroundAuthorized=true for same binding only.
+        storage.saveForBinding(binding1, false, "GROUP-1", true);
+        ClipboardSyncStorage.State authorized = storage.readForBinding(binding1);
+        assertFalse(authorized.enabled);
+        assertEquals("GROUP-1", authorized.groupCode);
+        assertTrue(authorized.backgroundAuthorized);
+
+        // Re-pair / rotated credential resets backgroundAuthorized to false (never migrates consent).
+        ClipboardSyncStorage.Binding binding2 = ClipboardSyncStorage.Binding.create(
+                "https://center.example.com", "dev-1", "tok-2-repaired", "ca-1");
+        ClipboardSyncStorage.State repaired = storage.readForBinding(binding2);
+        assertFalse(repaired.enabled);
+        assertFalse(repaired.isConfigured());
+        assertFalse(repaired.backgroundAuthorized);
     }
 }

@@ -435,12 +435,18 @@ mod tests {
             },
             client_key,
             move |clip| {
-                received_cb.lock().unwrap().push((clip.generation, clip.text));
+                received_cb
+                    .lock()
+                    .unwrap()
+                    .push((clip.generation, clip.text));
             },
         )
         .expect("start link");
 
-        let snap1 = wait_for_snapshot(&link, |s| s.status == LinkStatus::Online && s.generation == 1).await;
+        let snap1 = wait_for_snapshot(&link, |s| {
+            s.status == LinkStatus::Online && s.generation == 1
+        })
+        .await;
         assert_eq!(snap1.generation, 1);
 
         // Wrong generation and ineligible empty text must return false.
@@ -452,10 +458,16 @@ mod tests {
             .await
             .expect("put timeout")
             .expect("put value");
-        assert_eq!(put_val.get("type").and_then(Value::as_str), Some("clipboard-put"));
+        assert_eq!(
+            put_val.get("type").and_then(Value::as_str),
+            Some("clipboard-put")
+        );
 
         // Wait for reconnect to generation 2.
-        let snap2 = wait_for_snapshot(&link, |s| s.status == LinkStatus::Online && s.generation == 2).await;
+        let snap2 = wait_for_snapshot(&link, |s| {
+            s.status == LinkStatus::Online && s.generation == 2
+        })
+        .await;
         assert_eq!(snap2.generation, 2);
         // Superseded generation 1 publish must be rejected.
         assert!(!link.publish(1, "stale-gen-publish"));
@@ -584,7 +596,9 @@ mod tests {
                 let mut buf = [0u8; 1024];
                 let _ = tcp.read(&mut buf).await;
                 let _ = tcp
-                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
                     .await;
             }
         });

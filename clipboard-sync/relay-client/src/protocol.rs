@@ -424,7 +424,10 @@ mod tests {
         ];
 
         for raw in bad_cases {
-            assert!(parse_clipboard_event(&raw).is_err(), "must reject malformed event");
+            assert!(
+                parse_clipboard_event(&raw).is_err(),
+                "must reject malformed event"
+            );
         }
     }
 

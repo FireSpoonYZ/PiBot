@@ -1,8 +1,9 @@
 [package]
 name = "pibot-clipboard-sync"
-version = "0.0.25"
+version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-only"
 description = "Android JNI bridge for PiBot clipboard sync"
 
 # Standalone crate: never pulled into another workspace.

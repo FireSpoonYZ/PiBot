@@ -59,6 +59,7 @@ flowchart LR
 - **Bot 看板与跨机群聊。** 桌面与移动端共用「Bot 看板」，汇总所有设备的*需要你（待确认或其他执行失败）*、*工作中*、*待查看*与*空闲*状态。因 Host 停止而中断回复的 Bot，在无待确认事项或排队任务时归入空闲，卡片仍显示中断原因。支持跨设备 Room 群聊协同与 Bot 私聊审阅。
 - **Shower 虚拟屏。** 按会话提供独立虚拟显示空间与 GUI 自动化能力（Linux 私有 Xvnc + 轻量桌面，Windows 交互会话桌面，Android 基于 Shizuku 的虚拟屏）。
 - **Bot 学习与 Webhook**。后台自动回顾会话并生成 Skill 建议。通用 JSON Webhook 支持幂等键，可用于 n8n、CI 或外部自动化脚本。
+- **原生剪贴板同步（集成中）。** 基于 Center `/v1/link` 隔离中继与端到端加密（XChaCha20-Poly1305）的跨设备纯文本（≤ 64 KiB）实时同步，采用「一次入组 + 单设备开关」，不保存历史、不同步文件、不接入 Bot 或 MCP。 [剪贴板同步说明](docs/clipboard-sync.md)
 
 ---
 
@@ -160,6 +161,7 @@ $serial = '<已授权设备序列号>'
 | **Webhook 自动任务** | [docs/webhooks.md](docs/webhooks.md) | Bearer 入口创建、幂等键要求、n8n / curl 触发示例与事件生命周期 |
 | **Always-on Runtime** | [docs/always-on-runtime.md](docs/always-on-runtime.md) | 执行身份、可恢复定时交接、持久问卷、上下文与迁移验收 |
 | **Shower 虚拟屏** | [docs/shower-cross-platform.md](docs/shower-cross-platform.md) | Windows / Linux / Android 跨平台虚拟屏原理与权限配置 |
+| **跨设备剪贴板同步** | [docs/clipboard-sync.md](docs/clipboard-sync.md) | 端到端加密纯文本同步、平台限制、版本策略与三节点验收矩阵 |
 | **发布与版本管理** | [docs/releasing.md](docs/releasing.md) | 版本校验、签名配置、CI 发布流水线与中心客户端分发元数据 |
 
 ---
@@ -175,6 +177,7 @@ $serial = '<已授权设备序列号>'
 | [`desktop/`](desktop/) | Windows / Linux / macOS Tauri 桌面客户端、`pibot-host` 启动器与 NSIS / DEB 安装包钩子 |
 | [`mobile/`](mobile/)、[`web/src/`](web/src/) | Android Tauri 外壳与多端共享 React / TypeScript 界面 |
 | [`app/src/main/`](app/src/main/)、[`shower-server/`](shower-server/) | Android 原生桥接、生命周期服务、任务通知、语音与虚拟屏服务 |
+| [`clipboard-sync/`](clipboard-sync/) | 跨设备剪贴板同步 Rust 加密核心、原生 WSS 客户端与 Android JNI 库 |
 | [`plugins/`](plugins/) | 内置与受管插件（如 Billion Context 等） |
 | [`scripts/`](scripts/)、[`docs/`](docs/) | 构建准备脚本、发布校验工具与专题文档 |
 

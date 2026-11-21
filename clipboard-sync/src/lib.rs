@@ -161,7 +161,9 @@ impl fmt::Display for CryptoError {
             Self::InvalidCiphertext => "invalid sealed clipboard encoding or length",
             Self::EncryptionFailed => "AEAD encryption failed",
             Self::AuthenticationFailed => "AEAD authentication failed",
-            Self::InvalidPlaintext => "decrypted clipboard payload is not valid eligible UTF-8 text",
+            Self::InvalidPlaintext => {
+                "decrypted clipboard payload is not valid eligible UTF-8 text"
+            }
         };
         f.write_str(msg)
     }
@@ -449,7 +451,10 @@ mod tests {
         let key = GroupKey::generate().expect("generate key");
         let code = key.to_code();
         assert!(!eligible_text(&code, false));
-        assert!(!eligible_text(&format!("paste {code} on other device"), false));
+        assert!(!eligible_text(
+            &format!("paste {code} on other device"),
+            false
+        ));
     }
 
     #[test]
@@ -462,9 +467,7 @@ mod tests {
 
         let rid = key1.routing_id();
         assert_eq!(rid.len(), ROUTING_ID_HEX_LEN);
-        assert!(rid
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(rid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
 
         // Debug must not expose secret code or routing ID.
         let debug_str = format!("{key1:?}");
@@ -524,7 +527,9 @@ mod tests {
         let key1 = GroupKey::generate().expect("generate key1");
         let key2 = GroupKey::generate().expect("generate key2");
         let ts = 1_700_000_100;
-        let clip = key1.encrypt("device-alpha", "secret clip", ts).expect("encrypt");
+        let clip = key1
+            .encrypt("device-alpha", "secret clip", ts)
+            .expect("encrypt");
 
         // Wrong key.
         assert_eq!(
@@ -614,7 +619,10 @@ mod tests {
         let clip = key.encrypt("dev-1", "timed clip", ts).expect("encrypt");
 
         // Exact boundaries (+/- 30s) succeed.
-        assert_eq!(key.decrypt("dev-1", &clip, ts), Ok("timed clip".to_string()));
+        assert_eq!(
+            key.decrypt("dev-1", &clip, ts),
+            Ok("timed clip".to_string())
+        );
         assert_eq!(
             key.decrypt("dev-1", &clip, ts + MAX_AGE_SECONDS),
             Ok("timed clip".to_string())

@@ -16,11 +16,15 @@ const APP_COMMANDS: &[&str] = &[
   "desktop_update_download",
   "desktop_update_install",
   "desktop_update_cancel",
+  "desktop_clipboard_sync",
 ];
 
 fn main() {
   println!("cargo:rerun-if-changed=../../assets/icon.png");
   println!("cargo:rerun-if-changed=../build/icons/icon.ico");
+  println!("cargo:rerun-if-changed=../build/icons/icon.png");
+  println!("cargo:rerun-if-changed=capabilities/main.json");
+  println!("cargo:rerun-if-changed=permissions/clipboard.toml");
   let attributes = tauri_build::Attributes::new()
     .windows_attributes(
       tauri_build::WindowsAttributes::new().window_icon_path("../build/icons/icon.ico"),
