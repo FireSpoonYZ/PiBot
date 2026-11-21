@@ -871,6 +871,11 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     );
   }
 
+  function canCompactBillionContext(provider) {
+    return isBillionContextProvider(provider) &&
+      typeof provider.entry?.bot?.requestContributions?.compactContext === 'function';
+  }
+
   function selectContextProviders(botId) {
     return [...instances.values()].flatMap((instance) => {
       const entry = instance.bots.get(botId);
@@ -894,7 +899,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     if (providers.length !== 1) return false;
     const provider = providers[0];
     const { id, entry } = provider;
-    if (!isBillionContextProvider(provider)) {
+    if (!canCompactBillionContext(provider)) {
       return false;
     }
     if (!agent.extensions.some((extension) => extension === entry.extension)) return false;
@@ -932,8 +937,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
   function getBillionContextBinding(requestView) {
     if (!requestView || typeof requestView !== 'object') return null;
     const binding = preparedContextBindings.get(requestView);
-    if (!binding || !isBillionContextProvider(binding)) return null;
-    if (typeof binding.entry?.bot?.requestContributions?.compactContext !== 'function') return null;
+    if (!canCompactBillionContext(binding)) return null;
     return { ...binding, autoFold: binding.entry.context.effectiveConfig?.autoFold === true };
   }
 

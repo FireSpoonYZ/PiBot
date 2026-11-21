@@ -33,6 +33,7 @@ import {
   setRequestBudget,
   isLocalBudgetOverflowError,
   createBaseProjectionReplacer,
+  resolveRequestOutputCap,
   computePreflightTargetTokens,
   computeOverflowRecoveryBudget,
   createTurnProvenanceStore,
@@ -795,8 +796,9 @@ export async function openRuntime(options) {
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
           // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
+          const maxTokens = resolveRequestOutputCap(model.maxTokens, checkpoint.streamOptions?.maxTokens);
           const preflightTarget = !isAntigravity
-            ? computePreflightTargetTokens(model.contextWindow, model.maxTokens, model.api)
+            ? computePreflightTargetTokens(model.contextWindow, maxTokens, model.api)
             : undefined;
           const requestView = await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
           const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
@@ -817,7 +819,7 @@ export async function openRuntime(options) {
             const bcProvider = plugins.getBillionContextBinding(requestView);
             if (bcProvider) {
               requestRecoveryState.set(api.taskId, {
-                cutoff: checkpoint.cutoff, preflightTarget, turnKey, baselineMessages, baselineTokens,
+                cutoff: checkpoint.cutoff, preflightTarget, maxTokens, turnKey, baselineMessages, baselineTokens,
                 baseMessages: requestView.messages, bcProvider,
               }, context.abortSignal);
             } else {
@@ -945,7 +947,7 @@ export async function openRuntime(options) {
           }
         }
         const nextRequest = compacted?.messages ? { ...request, messages: compacted.messages } : request;
-        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status);
+        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status, { billionContext: eligible });
         // Managed oversize requests go through the final guard so Durable can still run its native fallback.
         await decisions.checkBudget(nextRequest, api, context, eligible);
         if (nextRequest !== request) return nextRequest;
@@ -967,7 +969,7 @@ export async function openRuntime(options) {
 
       const sentEstimatedTokens = budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, messages);
       const { targetTokens, effectiveContextWindow } = computeOverflowRecoveryBudget({
-        configuredContextWindow: model.contextWindow, modelMaxTokens: model.maxTokens,
+        configuredContextWindow: model.contextWindow, modelMaxTokens: recovery.maxTokens, api: model.api,
         sentEstimatedTokens, errorMessage: error.errorMessage,
       });
       try {
@@ -978,7 +980,7 @@ export async function openRuntime(options) {
         await decisions.checkBudget(nextRequest, api, context, true);
         context.abortSignal?.throwIfAborted();
         if (!online || closing) return;
-        setRequestBudget(result.messages, result.total, effectiveContextWindow);
+        setRequestBudget(result.messages, result.total, effectiveContextWindow, undefined, { billionContext: true });
         return nextRequest;
       } catch (err) {
         requestRecoveryState.delete(api.taskId);

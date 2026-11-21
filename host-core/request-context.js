@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { defineDoc } from '@earendil-works/pi-durable';
+import { clampMaxTokensToContext, resolveSamplingParams } from '@earendil-works/pi-ai/api/simple-options';
 import { calculateContextTokens, estimateMessageTokens } from '@earendil-works/pi-ai/utils/estimate';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 
@@ -16,17 +17,22 @@ export const RequestContext = defineDoc({
 
 const requestBudgets = new WeakMap();
 const localBudgetErrors = new WeakSet();
+const OPENAI_CONTEXT_SAFETY_TOKENS = 4096;
+const openAIOutputLimits = new Map([
+  ['openai-responses', { fields: ['max_output_tokens'], minimum: 16 }],
+  ['openai-completions', { fields: ['max_completion_tokens', 'max_tokens'], minimum: 1 }],
+]);
 const contextRecoveryMessages = {
   no_range: '没有足够的旧内容可以压缩。',
   summary_failed: '自动压缩未能生成可用摘要。',
   still_over_limit: '自动压缩后仍然超限。',
 };
 
-export function setRequestBudget(messages, tokenCount, contextWindow, recoveryStatus) {
+export function setRequestBudget(messages, tokenCount, contextWindow, recoveryStatus, { billionContext = false } = {}) {
   // The SDK copies the messages array but preserves its message objects.
   const last = Array.isArray(messages) ? messages.at(-1) : undefined;
   if (last && typeof last === 'object') {
-    requestBudgets.set(last, { tokenCount, contextWindow, recoveryStatus });
+    requestBudgets.set(last, { tokenCount, contextWindow, recoveryStatus, billionContext });
   }
 }
 
@@ -34,11 +40,52 @@ export function isLocalBudgetOverflowError(message) {
   return Boolean(message && typeof message === 'object' && localBudgetErrors.has(message));
 }
 
+export function resolveRequestOutputCap(modelMaxTokens, requestMaxTokens) {
+  const requested = requestMaxTokens ?? modelMaxTokens;
+  return Math.min(requested, modelMaxTokens ?? requested);
+}
+
+function withBillionContextOutputBudget(model, context, options, budget) {
+  const outputLimit = openAIOutputLimits.get(model.api);
+  const maxTokens = resolveRequestOutputCap(model.maxTokens, options?.maxTokens);
+  if (!outputLimit || !Number.isFinite(maxTokens) || maxTokens <= outputLimit.minimum) return options;
+  const { safetyTokens } = computeRequestOutputBudget(budget.contextWindow, maxTokens, model.api);
+  if (safetyTokens === 0) return options;
+  const available = Math.floor(budget.contextWindow - budget.tokenCount) - safetyTokens;
+
+  return {
+    ...options,
+    async onPayload(payload, requestModel) {
+      const field = outputLimit.fields.find((key) => payload?.[key] === outputLimit.minimum && Object.hasOwn(payload, key));
+      const replacement = await options?.onPayload?.(payload, requestModel);
+      if (!field || (replacement !== undefined && replacement !== payload) ||
+          !Object.hasOwn(payload, field) || payload[field] !== outputLimit.minimum ||
+          outputLimit.fields.some((key) => key !== field && Object.hasOwn(payload, key))) return replacement;
+
+      // The SDK applies sampling parameters after constructing the output limit.
+      const samplingParams = resolveSamplingParams(model, options?.reasoning ?? 'off', options?.samplingParams);
+      if (samplingParams && Object.hasOwn(samplingParams, field)) return replacement;
+      const requested = options?.maxTokens ?? model.maxTokens;
+      if (clampMaxTokensToContext(model, context, requested) > outputLimit.minimum) return replacement;
+
+      // A preserved assistant's usage may still describe the history before BC projected it.
+      if (available <= outputLimit.minimum) {
+        throw new Error(`context_length_exceeded: 上下文约 ${budget.tokenCount} tokens，` +
+          `模型的 ${budget.contextWindow} tokens 窗口无法为本次请求预留足够的输出空间。`);
+      }
+      return { ...payload, [field]: Math.min(Math.floor(maxTokens), available) };
+    },
+  };
+}
+
 export function withRequestBudget(provider) {
   const guard = (method) => (model, context, options) => {
     const budget = requestBudgets.get(context.messages.at(-1));
     if (!budget || budget.tokenCount < budget.contextWindow) {
-      return provider[method](model, context, options);
+      const requestOptions = budget?.billionContext && method === 'streamSimple'
+        ? withBillionContextOutputBudget(model, context, options, budget)
+        : options;
+      return provider[method](model, context, requestOptions);
     }
     const error = {
       role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
@@ -612,10 +659,10 @@ export function createBaseProjectionReplacer(finalMessages, baseMessages) {
   };
 }
 
-export function computePreflightTargetTokens(contextWindow, maxTokens = 0, api) {
+function computeRequestOutputBudget(contextWindow, maxTokens, api) {
   // Anthropic's input window excludes the independent completion budget.
-  if (api === 'anthropic-messages') return contextWindow;
-  if (!Number.isFinite(contextWindow) || contextWindow <= 1) return 1;
+  if (api === 'anthropic-messages') return { targetTokens: contextWindow, safetyTokens: 0 };
+  if (!Number.isFinite(contextWindow) || contextWindow <= 1) return { targetTokens: 1, safetyTokens: 0 };
   const windowInt = Math.floor(contextWindow);
   let reserve;
   if (Number.isFinite(maxTokens) && maxTokens > 0) {
@@ -624,7 +671,16 @@ export function computePreflightTargetTokens(contextWindow, maxTokens = 0, api) 
     reserve = Math.floor(windowInt * 0.1);
   }
   reserve = Math.max(1, Math.min(reserve, windowInt - 1));
-  return Math.max(1, windowInt - reserve);
+  const target = Math.max(1, windowInt - reserve);
+  // Keep the previous policy when the fixed margin leaves no usable input budget.
+  const safetyTokens = openAIOutputLimits.has(api) && target > OPENAI_CONTEXT_SAFETY_TOKENS + 1
+    ? OPENAI_CONTEXT_SAFETY_TOKENS
+    : 0;
+  return { targetTokens: target - safetyTokens, safetyTokens };
+}
+
+export function computePreflightTargetTokens(contextWindow, maxTokens = 0, api) {
+  return computeRequestOutputBudget(contextWindow, maxTokens, api).targetTokens;
 }
 
 function parsePositiveInt(raw) {
@@ -745,6 +801,7 @@ export function parseOverflowLimits(errorMessage) {
 export function computeOverflowRecoveryBudget({
   configuredContextWindow,
   modelMaxTokens = 0,
+  api,
   sentEstimatedTokens,
   errorMessage,
 }) {
@@ -791,7 +848,10 @@ export function computeOverflowRecoveryBudget({
   const shrinkCap = sent > 1
     ? Math.min(sent - 1, Math.max(1, Math.floor(sent * 0.9)))
     : (sent === 1 ? 1 : Math.max(1, effectiveContextWindow - 1));
-  const windowCap = effectiveContextWindow > 1 ? effectiveContextWindow - 1 : 1;
+  const outputBudget = computeRequestOutputBudget(effectiveContextWindow, modelMaxTokens, api);
+  const windowCap = outputBudget.safetyTokens > 0
+    ? outputBudget.targetTokens
+    : Math.max(1, effectiveContextWindow - 1);
 
   const targetTokens = windowTarget !== undefined
     ? Math.max(1, Math.min(windowTarget, shrinkCap, windowCap))
