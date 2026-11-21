@@ -773,3 +773,70 @@ test('non-admin user is blocked when Center is unconfigured', async () => {
     await env.cleanup();
   }
 });
+
+test('handed-off connect unblocks and instructs done once Center verifies target readiness', async () => {
+  const client = { configured: true };
+  const env = makeEnv({ centerStatus: { client, accounts: [] } });
+  try {
+    await env.service.control(
+      { botId: 'bot-a', action: 'start', mode: 'guide-browser', choices: ['gmail', 'files'] },
+      OWNER,
+    );
+    await env.callBot({ action: 'set', account: 'alice@acme.dev' });
+    const handed = await env.callBot({
+      action: 'need_user',
+      step: 'connect',
+      note: 'Sign in to Google in your system browser.',
+    });
+    assert.equal(handed.isError, false);
+    assert.equal(handed.body.view.blocker.kind, 'needs-user');
+    assert.equal(handed.body.view.blocker.step, 'connect');
+
+    const beforeReady = await env.callBot({ action: 'done' });
+    assert.equal(beforeReady.isError, true);
+    assert.equal(beforeReady.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'bob@acme.dev', status: 'connected', connectedAt: 50_000, services: readyServices() }],
+    });
+    const wrongDone = await env.callBot({ action: 'done' });
+    assert.equal(wrongDone.isError, true);
+    assert.equal(wrongDone.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'alice@acme.dev', status: 'connected', connectedAt: 55_000, services: [{ service: 'gmail', state: 'ready' }] }],
+    });
+    const partialDone = await env.callBot({ action: 'done' });
+    assert.equal(partialDone.isError, true);
+    assert.equal(partialDone.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'alice@acme.dev', status: 'connected', connectedAt: 60_000, services: readyServices() }],
+    });
+    const beforeShow = await env.service.getRun('bot-a');
+    const showReady = await env.callBot({ action: 'show' });
+    assert.equal(showReady.isError, false);
+    assert.equal(showReady.body.view.blocker, null);
+    assert.equal(showReady.body.view.guidance.phase, 'active-step');
+    assert.equal(showReady.body.view.guidance.ownerButtons, undefined);
+    assert.match(showReady.body.view.guidance.nextAction, /google_setup\(action="done"\)/);
+    assert.equal((await env.service.getRun('bot-a')).revision, beforeShow.revision);
+    assert.equal((await env.service.getRun('bot-a')).steps.connect.status, 'needs-user');
+
+    const directStep = await env.callBot({ action: 'step', step: 'connect', status: 'done' });
+    assert.equal(directStep.isError, true);
+    assert.equal(directStep.body.code, 'SETUP_FORBIDDEN');
+
+    const doneRes = await env.callBot({ action: 'done' });
+    assert.equal(doneRes.isError, false);
+    assert.equal(doneRes.body.view.state, 'done');
+    assert.equal(doneRes.body.view.steps.connect.status, 'done');
+    assert.equal(doneRes.body.view.card.card, 'connected');
+    assert.equal(doneRes.body.view.revision, beforeShow.revision + 1);
+  } finally {
+    await env.cleanup();
+  }
+});

@@ -28,6 +28,7 @@ import {
   googleSetupActionsLine,
   googleSetupBlockerLine,
   googleSetupChoicesWords,
+  googleSetupDoneRefusal,
 } from './blocker.js';
 import {
   currentGoogleSetupStep,
@@ -727,6 +728,19 @@ export function buildBotGuidance(run, context = {}) {
     allowedBrowserActions = 'read-only';
   } else if (run.mode === 'do-it-for-me') {
     allowedBrowserActions = 'drive';
+  }
+
+  if ((step === 'connect' || step === null) && googleSetupDoneRefusal(run, centerStatus) === null) {
+    return {
+      phase: 'active-step',
+      step,
+      mode: run.mode,
+      allowedBrowserActions,
+      consoleUrl,
+      nextAction:
+        'Center verified the connected account and all selected services. Call google_setup(action="done") to finish the setup card. No owner action is needed.',
+      neverRules,
+    };
   }
 
   if (blocker && !(step === 'client' && blocker.kind === 'needs-user' && blocker.step === 'client' &&
