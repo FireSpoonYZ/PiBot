@@ -241,7 +241,6 @@ export function googleStepInstructions(
       return {
         lines: [
           t('在 Google Cloud Console 确认右上角登录的是正确 Google 账号。', 'Confirm the Google account at top right in Cloud Console.'),
-          t('创建新项目（个人账号选 External，Google Workspace 组织可按权限选 Internal），完成后记下 Project ID。', 'Create a project (External for Gmail, or Internal if your Workspace allows it) and note the Project ID.'),
         ],
       };
     case 'apis':

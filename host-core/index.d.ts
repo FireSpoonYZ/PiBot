@@ -2588,6 +2588,7 @@ export interface BrowserControlInput {
   holderLabel?: string;
   force?: boolean;
   preempt?: boolean;
+  shared?: boolean;
   resume?: boolean;
   ignoreCache?: boolean;
   event?: BrowserControlInputEvent;
@@ -2603,6 +2604,8 @@ export interface BrowserControlStatusResult {
   available: boolean;
   reason?: string;
   canStreamInteract: boolean;
+  supportsSharedInput?: boolean;
+  sharedInput?: boolean;
   nativePresentation?: boolean;
   renderPlacement?: 'client' | 'server';
   rendererId?: string;

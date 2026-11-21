@@ -8,6 +8,7 @@ import {
   normalizeBotActInput,
 } from '../../host-core/bot-browser/protocol.js';
 import {
+  checkBotActionSensitivity,
   classifyPageSensitivity,
   containsSecretLeak,
   sanitizeUrlForModel,
@@ -313,6 +314,19 @@ test('policy: URL validation blocks file/javascript/chrome/credentialed/internal
   );
   assert.equal(containsSecretLeak('Your secret is GOCSPX-abcDEF1234567890'), true);
   assert.equal(containsSecretLeak('Normal page heading'), false);
+});
+
+test('project creation accepts the ordinary Create button and preserves credential protection', () => {
+  const projectUrl = 'https://console.cloud.google.com/projectcreate';
+  const click = (pageUrl, name) => checkBotActionSensitivity({
+    act: { kind: 'click', ref: 'create-button' },
+    pageUrl,
+    targetRefMeta: { role: 'button', name },
+  });
+  assert.equal(click(projectUrl, 'Create').allowed, true);
+  assert.equal(click(projectUrl, 'Create OAuth client').code, 'BROWSER_SECRET_STEP_BLOCKED');
+  assert.equal(click('https://console.cloud.google.com/auth/clients/create', 'Create').code, 'BROWSER_SECRET_STEP_BLOCKED');
+  assert.equal(click(projectUrl, 'Accept terms').code, 'BROWSER_SENSITIVE_BLOCKED');
 });
 
 test('protocol & tool contract: act.wait validates state/selector/networkidle and preserves BROWSER_TIMEOUT', async () => {
@@ -728,6 +742,98 @@ test('concurrent clients: lease token hidden from other client, explicit preempt
   );
 
   await service.close();
+});
+
+test('ordinary browser input is shared with the Bot and still fenced by device and sensitive pages', async (t) => {
+  const { promise: started, resolve: markStarted } = Promise.withResolvers();
+  const { promise: finish, resolve: finishAction } = Promise.withResolvers();
+  let actionAborted = false;
+  let exclusiveTakeovers = 0;
+  let now = Date.now();
+  const mock = createMockProviderFactory({
+    async onPerform(input) {
+      if (input.action === 'act' && input.act?.ref === 'e1') {
+        input.signal.addEventListener('abort', () => { actionAborted = true; }, { once: true });
+        markStarted();
+        await finish;
+      }
+    },
+  });
+  const service = createBotBrowserService({
+    host: createFakeHost(['bot-a']),
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+    onTakeover: async () => { exclusiveTakeovers += 1; },
+    now: () => now,
+    leaseTtlMs: 1000,
+  });
+  t.after(async () => {
+    finishAction();
+    await service.close();
+  });
+
+  const desktop = ownerAuth('desktop-1');
+  const phone = ownerAuth('phone-1', 'Phone');
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const [tool] = service.toolsForBot();
+  const bot = (input) => tool.execute(input, { conversationId: 1 }, {});
+  const { pageId } = await control({ action: 'open', url: 'https://example.com' });
+  await bot({ action: 'snapshot' });
+
+  const act = bot({ action: 'act', act: { kind: 'click', ref: 'e1' } });
+  await started;
+  const nextBotRead = bot({ action: 'snapshot' });
+  const grant = { action: 'takeover', shared: true };
+  const shared = await control(grant);
+  assert.equal(shared.supportsSharedInput, true);
+  assert.equal(shared.sharedInput, true);
+  assert.equal(shared.pageId, pageId);
+  assert.equal(exclusiveTakeovers, 0);
+  assert.equal(actionAborted, false);
+
+  const frame = await control({ action: 'frame', pageId, lease: shared.lease });
+  const input = {
+    action: 'input', pageId, revision: frame.revision, frameSeq: frame.seq,
+    lease: shared.lease, event: { kind: 'click', x: 0.5, y: 0.5 },
+  };
+  assert.equal((await control(input)).ok, true);
+  await assert.rejects(() => control(input, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+  await assert.rejects(() => control(grant, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+
+  const reconnected = await control(grant);
+  assert.notEqual(reconnected.lease, shared.lease);
+  assert.equal((await control({ action: 'status', lease: shared.lease })).isHolder, false);
+  assert.equal((await control({ action: 'status', lease: reconnected.lease })).isHolder, true);
+
+  const switched = await control({ ...grant, force: true }, phone);
+  assert.equal(switched.sharedInput, true);
+  assert.notEqual(switched.lease, reconnected.lease);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, false);
+  finishAction();
+  assert.notEqual((await act).isError, true);
+  assert.notEqual((await nextBotRead).isError, true);
+
+  now += 1001;
+  const expired = await control({ action: 'status' });
+  assert.equal(expired.phase, 'bot');
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, false);
+
+  const renewed = await control(grant);
+  const exclusive = await control({ action: 'takeover', lease: renewed.lease });
+  assert.notEqual(exclusive.sharedInput, true);
+  assert.equal(exclusiveTakeovers, 1);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, true);
+  await control({ action: 'handback', lease: exclusive.lease });
+
+  const ordinary = await control(grant);
+  const sensitive = await control({
+    action: 'navigate', pageId, lease: ordinary.lease, url: 'https://accounts.google.com/signin',
+  });
+  assert.equal(sensitive.sensitive, true);
+  assert.notEqual(sensitive.sharedInput, true);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, true);
+  assert.equal((await bot({ action: 'snapshot' })).isError, true);
+  await assert.rejects(() => control(grant), { code: 'BROWSER_TAKEOVER_REQUIRED' });
 });
 
 test('disconnect/lease expiry fails closed into held and never auto-hands back to bot', async () => {

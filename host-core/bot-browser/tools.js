@@ -245,7 +245,8 @@ export function createBotBrowserTools({
         'requiring selector; hidden includes absent), text (visible document text substring), url (exact current URL), and load ' +
         '(load|domcontentloaded; networkidle returns BROWSER_UNSUPPORTED) waits until all conditions hold simultaneously or fails with BROWSER_TIMEOUT. ' +
         'Arbitrary JS eval, cookie access/import, CDP passthrough, and local file:// URLs are forbidden. ' +
-        'If the human owner takes over, or if the page reaches sign-in/MFA/OAuth consent, Terms/User Data Policy checkboxes, ' +
+        'The human owner can interact with ordinary pages while the bot is active. Refresh the snapshot if the page changes. ' +
+        'If the human owner takes exclusive control, or if the page reaches sign-in/MFA/OAuth consent, Terms/User Data Policy checkboxes, ' +
         'password/payment fields, or OAuth Client Secret creation, this tool returns PAUSED_FOR_HUMAN and halts immediately: ' +
         'do NOT retry clicking or continue silently; ask the human to take over or complete OAuth/secrets in their system browser. ' +
         'After human handback, call status/snapshot again before acting.',

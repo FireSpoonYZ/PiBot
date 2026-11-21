@@ -147,9 +147,7 @@ function compactStepCopy(
     case 'project':
       return {
         title: t('创建 Google Cloud 项目', 'Create a Google Cloud project'),
-        hint: t('在控制台新建项目后回来继续；如需指定项目，可填写非敏感的 Project ID。',
-          'Create a project in Cloud Console, then continue. Optionally paste its non-sensitive Project ID.',
-        ),
+        hint: t('确认项目已创建后继续。', 'Continue after the project is created.'),
         openLabel: t('打开项目创建页', 'Open project creation page'),
         continueLabel: t('已创建，继续', 'Created, continue'),
       };
@@ -214,6 +212,30 @@ function compactStepCopy(
         openLabel: t('打开 Google Cloud', 'Open Google Cloud'),
         continueLabel: t('已完成，继续', 'Done, continue'),
       };
+  }
+}
+
+function setupBrowserLockHint(
+  lock: GoogleSetupControlState['browserLock'],
+  t: (zh: string, en: string) => string,
+): string {
+  switch (lock?.reason) {
+    case 'google-auth':
+      return lock.requiresSystemBrowser
+        ? t('请在外部浏览器亲自完成 Google 登录。', 'Finish signing in to Google in your system browser.')
+        : t('请接管当前页面并亲自完成 Google 登录。', 'Take over this page and finish signing in to Google.');
+    case 'oauth-client-secret':
+      return lock.requiresSystemBrowser
+        ? t('请在外部浏览器创建 OAuth 客户端，再到设置页录入凭据。', 'Create the OAuth client in your system browser, then save its credentials in Settings.')
+        : t('请亲自创建 OAuth 客户端，并在设置页录入凭据。', 'Create the OAuth client yourself and save its credentials in Settings.');
+    case 'policy-consent':
+      return lock.requiresSystemBrowser
+        ? t('请在外部浏览器阅读并确认 Google 用户数据政策。', 'Review and accept Google’s User Data Policy in your system browser.')
+        : t('请接管页面，亲自阅读并确认 Google 用户数据政策。', 'Take over this page to review and accept Google’s User Data Policy.');
+    default:
+      return lock?.requiresSystemBrowser
+        ? t('请在外部浏览器完成此步骤。', 'Finish this step in your system browser.')
+        : t('请接管当前页面并完成此步骤。', 'Take over this page and finish the step.');
   }
 }
 
@@ -357,7 +379,6 @@ export function GoogleSetupWizard({
   });
   const submittingRef = useRef(false);
   const statusInFlightRef = useRef(false);
-  const lastServerProjectIdRef = useRef<string | undefined>(externalSetup?.projectId);
   const lastServerChoicesKeyRef = useRef<string>(
     Array.isArray(externalSetup?.choices) ? externalSetup.choices.join(',') : '',
   );
@@ -369,7 +390,6 @@ export function GoogleSetupWizard({
     submittingRef.current = false;
     statusInFlightRef.current = false;
     autoStartedRef.current = false;
-    lastServerProjectIdRef.current = externalSetup?.projectId;
     lastServerChoicesKeyRef.current = Array.isArray(externalSetup?.choices)
       ? externalSetup.choices.join(',')
       : '';
@@ -389,7 +409,7 @@ export function GoogleSetupWizard({
     targetAccount?: string;
     choices?: GoogleServiceChoice[];
   }>({ open: false });
-  const [projectIdInput, setProjectIdInput] = useState(() => externalSetup?.projectId ?? '');
+  const [projectIdDraft, setProjectIdDraft] = useState<{ scope: string; runId: string; value: string } | null>(null);
   const [serviceDraft, setServiceDraft] = useState<GoogleServiceChoice[]>(() =>
     Array.isArray(externalSetup?.choices) && externalSetup.choices.length > 0
       ? externalSetup.choices
@@ -451,10 +471,12 @@ export function GoogleSetupWizard({
         setUnavailableReason('');
       }
       setSetup(next);
-      if (next.projectId && next.projectId !== lastServerProjectIdRef.current) {
-        lastServerProjectIdRef.current = next.projectId;
-        setProjectIdInput(next.projectId);
-      }
+      setProjectIdDraft(draft =>
+        draft?.scope === reqScope && draft.runId === next.id &&
+          normalizeSetupMode(next.mode ?? undefined) === 'guide-browser' && !next.projectId
+          ? draft
+          : null,
+      );
       if (Array.isArray(next.choices) && next.choices.length > 0) {
         const nextChoicesKey = next.choices.join(',');
         if (nextChoicesKey !== lastServerChoicesKeyRef.current) {
@@ -562,7 +584,13 @@ export function GoogleSetupWizard({
       } catch (cause) {
         if (!mountedRef.current || reqScope !== activeScopeRef.current) return null;
         const info = classifyGoogleError(cause);
-        if (info.conflict) {
+        if (info.code === 'SETUP_PROJECT_ID_REQUIRED' && !opts?.silentError) {
+          setError(normalizeSetupMode(displayedSetup?.mode ?? undefined) === 'guide-browser'
+            ? t('请填写 Google Cloud 控制台地址中 project= 后的 Project ID。',
+              'Enter the Project ID from the project= parameter in the Cloud Console address.')
+            : t('还没读到 Project ID。请在内嵌浏览器打开新项目的主页后继续。',
+              'The Project ID is not available yet. Open the new project’s dashboard in the in-app browser, then continue.'));
+        } else if (info.conflict) {
           // Re-sync latest revision on 409 / CAS mismatch; never auto-retry the outdated action.
           await refreshLatestAfterConflict(reqScope);
           if (mountedRef.current && reqScope === activeScopeRef.current && !opts?.silentError) {
@@ -734,6 +762,23 @@ export function GoogleSetupWizard({
     setup?.step ||
     steps.find(s => s.status === 'active' || s.status === 'needs-user' || s.status === 'waiting-human')?.id ||
     null;
+  const needsExternalProjectId = currentStep === 'project' && activeMode === 'guide-browser' && !setup?.projectId;
+  const projectIdInput = needsExternalProjectId && projectIdDraft?.scope === effectiveScopeKey &&
+    projectIdDraft.runId === setup?.id ? projectIdDraft.value : '';
+  const waitingForExternalProjectId = needsExternalProjectId && !projectIdInput.trim();
+  const updateProjectIdDraft = (value: string) => {
+    if (setup?.id) setProjectIdDraft({ scope: effectiveScopeKey, runId: setup.id, value });
+  };
+  const projectStepHint = needsExternalProjectId
+    ? t('创建项目后，填写 Google Cloud 控制台地址中 project= 后的 Project ID。',
+      'After creating the project, enter the Project ID from the project= parameter in the Cloud Console address.')
+    : activeMode === 'do-it-for-me'
+      ? t('Bot 会在内嵌浏览器读取 Project ID，需要你操作时会提示。',
+        'The bot reads the Project ID in the in-app browser and prompts you when it needs your help.')
+      : activeMode === 'guide-here'
+        ? t('在内嵌浏览器创建项目，等项目主页打开后继续。Bot 会自动读取 Project ID。',
+          'Create the project in the in-app browser and continue after its dashboard opens. The bot reads the Project ID automatically.')
+        : compactStepCopy('project', t).hint;
 
   const effectiveCenterClient = centerStatus?.client ?? setup?.center?.client;
   const effectiveCenterAccounts = centerStatus?.accounts ?? setup?.center?.accounts ?? [];
@@ -747,6 +792,7 @@ export function GoogleSetupWizard({
     setup?.center?.isAdmin === false || setup?.blocker?.kind === 'admin-required';
   const browserLocked = Boolean(setup?.browserLock?.active || setup?.browserTakeoverRequired);
   const lockRequiresSystemBrowser = Boolean(setup?.browserLock?.requiresSystemBrowser);
+  const browserLockHint = setup?.browserPrompt || setupBrowserLockHint(setup?.browserLock, t);
   const isEmbeddedAccountStep = setup?.state === 'running' && currentStep === 'account' &&
     (activeMode === 'do-it-for-me' || activeMode === 'guide-here') &&
     setup.card?.card !== 'path' && setup.card?.card !== 'services';
@@ -784,10 +830,12 @@ export function GoogleSetupWizard({
 
   const handleCompleteStep = async (step = currentStep) => {
     if (!step || effectiveReadOnly || submittingRef.current || !setup?.id || setup.state !== 'running') return;
+    const projectId = step === 'project' && needsExternalProjectId ? projectIdInput.trim() : undefined;
+    if (projectId === '') return;
     await sendControl({
       action: 'advance',
       step,
-      ...(step === 'project' && projectIdInput.trim() ? { projectId: projectIdInput.trim() } : {}),
+      ...(projectId ? { projectId } : {}),
     });
   };
   const canCompleteCurrentStep = setup?.state === 'running' && currentStep !== 'connect' && Boolean(currentStep) &&
@@ -1013,6 +1061,14 @@ export function GoogleSetupWizard({
   }
 
   const stepInfo = currentStep ? googleStepInstructions(currentStep, redirectUri, t) : null;
+  const externalProjectUrl = currentStep === 'project' && activeMode === 'guide-browser'
+    ? googleSetupConsoleUrl(currentStep, setup ?? undefined)
+    : null;
+  const stepGuideLines = isEmbeddedAccountStep
+    ? [embeddedAccountHint]
+    : currentStep === 'project'
+      ? [...(stepInfo?.lines ?? []), projectStepHint]
+      : stepInfo?.lines ?? [];
   const setupCompleted =
     (setup?.state === 'done' || setup?.state === 'completed') && clientConfigured && hasConnectedAccount;
   const setupClaimsDoneWithoutCenter =
@@ -1071,6 +1127,7 @@ export function GoogleSetupWizard({
       Boolean(currentStep) &&
       (activeMode === 'do-it-for-me' || activeMode === 'guide-here');
     const stepCopy = currentStep ? compactStepCopy(currentStep, t) : null;
+    const stepHint = currentStep === 'project' ? projectStepHint : stepCopy?.hint;
     const hasPrimaryStepContinue = Boolean(
       canMutateChat &&
         (isExternalStepFlow || isEmbeddedStepFlow) && canCompleteCurrentStep,
@@ -1491,13 +1548,8 @@ export function GoogleSetupWizard({
         {browserLocked && !setupCompleted ? (
           <div className="gws-compact-alert is-warn" role="alert">
             <div className="gws-compact-alert-text">
-              <strong>{t('此步骤需你亲自完成', 'Your turn on this sensitive step')}</strong>
-              <span>
-                {setup?.browserPrompt ||
-                  (lockRequiresSystemBrowser
-                    ? t('涉及密钥创建，请在系统浏览器完成后到独立设置页录入。', 'Finish in your system browser and save credentials in Settings.')
-                    : t('涉及登录、政策同意或密钥，Bot 已停手等待你操作。', 'Bot paused for sign-in, policy consent, or secrets.'))}
-              </span>
+              <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
+              <span>{browserLockHint}</span>
             </div>
             {!effectiveReadOnly ? (
               <div className="gws-compact-actions">
@@ -1511,7 +1563,7 @@ export function GoogleSetupWizard({
                   <button
                     type="button"
                     className="gws-btn is-primary is-sm"
-                    disabled={busy}
+                    disabled={busy || waitingForExternalProjectId}
                     onClick={() => void handleCompleteStep()}
                   >
                     {stepCopy?.continueLabel || t('已完成，继续', 'Done, continue')}
@@ -1536,7 +1588,7 @@ export function GoogleSetupWizard({
         {isExternalStepFlow && stepCopy && !unavailableReason ? (
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{stepCopy.title}</div>
-            {stepCopy.hint ? <p className="gws-compact-step-hint">{stepCopy.hint}</p> : null}
+            {stepHint ? <p className="gws-compact-step-hint">{stepHint}</p> : null}
 
             {currentStep === 'client' && redirectUri ? (
               <div className="gws-compact-copy-row">
@@ -1553,15 +1605,15 @@ export function GoogleSetupWizard({
               </div>
             ) : null}
 
-            {currentStep === 'project' && canMutateChat ? (
+            {needsExternalProjectId && canMutateChat ? (
               <input
                 type="text"
                 className="gws-input gws-compact-input"
                 value={projectIdInput}
                 disabled={busy}
-                placeholder={t('Project ID（可选，非敏感）', 'Project ID (optional, non-sensitive)')}
+                placeholder="Project ID"
                 aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
-                onChange={e => setProjectIdInput(e.target.value)}
+                onChange={e => updateProjectIdDraft(e.target.value)}
               />
             ) : null}
 
@@ -1625,7 +1677,7 @@ export function GoogleSetupWizard({
                           ? ' is-primary'
                           : ''
                     }`}
-                    disabled={busy || !canMutateChat}
+                    disabled={busy || !canMutateChat || waitingForExternalProjectId}
                     onClick={() => void handleCompleteStep()}
                   >
                     {stepCopy.continueLabel}
@@ -1641,21 +1693,10 @@ export function GoogleSetupWizard({
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{stepCopy.title}</div>
             <p className="gws-compact-step-hint">
-              {isEmbeddedAccountStep ? embeddedAccountHint : activeMode === 'do-it-for-me'
+              {isEmbeddedAccountStep ? embeddedAccountHint : activeMode === 'do-it-for-me' && currentStep !== 'project'
                 ? t('Bot 正在内置浏览器处理当前步骤，需要你操作时会自动提示。', 'Bot is working on this step in the built-in browser and will prompt you when needed.')
-                : stepCopy.hint}
+                : stepHint}
             </p>
-            {currentStep === 'project' && hasPrimaryStepContinue ? (
-              <input
-                type="text"
-                className="gws-input gws-compact-input"
-                value={projectIdInput}
-                disabled={busy}
-                placeholder={t('Project ID（可选，非敏感）', 'Project ID (optional, non-sensitive)')}
-                aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
-                onChange={event => setProjectIdInput(event.target.value)}
-              />
-            ) : null}
             {!effectiveReadOnly ? (
               <div className="gws-compact-actions">
                 {onOpenBrowser && embeddedSupported && !browserLocked ? (
@@ -1982,13 +2023,8 @@ export function GoogleSetupWizard({
       {browserLocked ? (
         <div className="gws-takeover-alert" role="alert">
           <div className="gws-takeover-body">
-            <strong>{t('Bot 已停手并锁定敏感页，等待你亲自完成', 'Bot paused & locked sensitive step for your takeover')}</strong>
-            <span>
-              {setup?.browserPrompt ||
-                (lockRequiresSystemBrowser
-                  ? t('当前 Host 无法隔离此敏感步骤（如 Client Secret 创建），请改在本人系统浏览器操作并通过下方私密表单提交。', 'This Host cannot isolate this sensitive step in-page. Complete it in your system browser and submit via the private form below.')
-                  : t('即将进入登录、政策勾选或凭据创建步骤，请亲自接管操作，Bot 不会代你勾选或读取密钥。', 'Reached sign-in, policy consent, or client secret step. Take over directly — Bot will not accept terms or read secrets.'))}
-            </span>
+            <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
+            <span>{browserLockHint}</span>
           </div>
           <div className="gws-actions">
             {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
@@ -2027,7 +2063,7 @@ export function GoogleSetupWizard({
                   <span className="gws-step-title">{item.title || googleStepTitle(item.id, t)}</span>
                   {item.detail ? <span className="gws-muted">{item.detail}</span> : null}
                 </div>
-                {item.url && isCurrent && !isEmbeddedAccountStep ? (
+                {item.url && isCurrent && item.id !== 'project' && !isEmbeddedAccountStep ? (
                   <button
                     type="button"
                     className="gws-btn is-ghost is-xs"
@@ -2048,7 +2084,7 @@ export function GoogleSetupWizard({
         <div className="gws-step-guide">
           <div className="gws-step-guide-title">{googleStepTitle(currentStep, t)}</div>
           <ul className="gws-guide-list">
-            {(isEmbeddedAccountStep ? [embeddedAccountHint] : stepInfo.lines).map((line, i) => (
+            {stepGuideLines.map((line, i) => (
               <li key={i}>{line}</li>
             ))}
           </ul>
@@ -2067,24 +2103,34 @@ export function GoogleSetupWizard({
               </button>
             </div>
           ) : null}
+          {externalProjectUrl && !effectiveReadOnly ? (
+            <div className="gws-actions">
+              <button type="button" className="gws-btn is-ghost is-sm" onClick={() => void openExternalUrl(externalProjectUrl)}>
+                <ExternalLink size={14} aria-hidden="true" />
+                <span>{t('打开项目创建页', 'Open project creation page')}</span>
+              </button>
+            </div>
+          ) : null}
           {currentStep === 'project' && canCompleteCurrentStep && !effectiveReadOnly ? (
-            <div className="gws-inline-input-row">
-              <input
-                type="text"
-                className="gws-input"
-                value={projectIdInput}
-                disabled={busy}
-                placeholder={t('粘贴非敏感的 Project ID（可选）', 'Paste non-sensitive Project ID (optional)')}
-                aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
-                onChange={e => setProjectIdInput(e.target.value)}
-              />
+            <div className={needsExternalProjectId ? 'gws-inline-input-row' : 'gws-actions'}>
+              {needsExternalProjectId ? (
+                <input
+                  type="text"
+                  className="gws-input"
+                  value={projectIdInput}
+                  disabled={busy}
+                  placeholder="Project ID"
+                  aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
+                  onChange={e => updateProjectIdDraft(e.target.value)}
+                />
+              ) : null}
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
-                disabled={busy}
+                disabled={busy || waitingForExternalProjectId}
                 onClick={() => void handleCompleteStep()}
               >
-                {t('已完成', 'Done')}
+                {t('已创建，继续', 'Created, continue')}
               </button>
             </div>
           ) : null}

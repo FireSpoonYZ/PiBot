@@ -289,7 +289,12 @@ pub async fn desktop_browser_guest(
             // Preserve Wry hardening and route loopback destinations through Center too.
             #[cfg(windows)]
             {
-                builder = builder.additional_browser_args(&format!("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --proxy-server={} --proxy-bypass-list=<-loopback>",proxy.as_str()));
+                // Chromium's proxy flag accepts a server origin without a URL path.
+                let proxy_origin = proxy.origin().ascii_serialization();
+                builder = builder.additional_browser_args(&format!(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                     --proxy-server={proxy_origin} --proxy-bypass-list=<-loopback>"
+                ));
             }
         }
         let window = app

@@ -188,6 +188,12 @@ test('browserControl and googleSetupControl normalizers align with real services
     if (action === 'frame') assert.equal(normalized.quality, 80);
   }
 
+  assert.deepEqual(normalizeBrowserControl({ action: 'takeover', botId: 'bot-1', shared: true }), {
+    action: 'takeover', botId: 'bot-1', shared: true,
+  });
+  assert.throws(() => normalizeBrowserControl({ action: 'takeover', botId: 'bot-1', shared: 'true' }), { code: 'INVALID_ARGUMENT' });
+  assert.throws(() => normalizeBrowserControl({ action: 'status', botId: 'bot-1', shared: true }), { code: 'INVALID_ARGUMENT' });
+
   for (const action of GOOGLE_SETUP_ACTIONS) {
     const normalized = normalizeGoogleSetupControl({ action, botId: 'bot-1' });
     assert.equal(normalized.action, action);
@@ -429,6 +435,18 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
       (err) => err?.code === 'BOT_CONTEXT_REQUIRED',
     );
     currentConvOwner = botA.botId;
+
+    const opened = await browserTool.execute({ action: 'open', url: 'https://example.com/' }, fakeApi, {});
+    assert.notEqual(opened.isError, true);
+    const { pageId } = JSON.parse(opened.output[0].text);
+    const shared = await coord.browserControl(
+      { action: 'takeover', botId: botA.botId, pageId, shared: true },
+      { clientId: 'local:desktop-1', transport: 'local' },
+    );
+    assert.equal(shared.sharedInput, true);
+    const status = await browserTool.execute({ action: 'status' }, fakeApi, {});
+    assert.equal(JSON.parse(status.output[0].text).pausedForHuman, false);
+    assert.equal(publishedDetails.length, 1, 'shared input must not open a takeover card');
 
     // 3. Fail-closed safety gate: triggering sensitive `client` step while browser provider fails
     // MUST keep the safety lock engaged and block bot_browser tool with PAUSED_FOR_HUMAN

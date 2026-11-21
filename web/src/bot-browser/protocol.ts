@@ -32,6 +32,8 @@ export interface BrowserView {
   available: boolean;
   reason?: string;
   canStreamInteract: boolean;
+  supportsSharedInput?: true;
+  sharedInput?: true;
   nativePresentation?: true;
   renderPlacement?: 'client' | 'server';
   rendererId?: string;
@@ -79,6 +81,7 @@ export interface OwnedLease {
 
 export type PendingControlAction =
   | null
+  | 'sharing'
   | 'taking'
   | 'handing-back'
   | 'releasing'
@@ -278,6 +281,8 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
     available,
     ...(reason ? { reason } : {}),
     canStreamInteract,
+    ...(obj.supportsSharedInput === true ? { supportsSharedInput: true as const } : {}),
+    ...(phase === 'human' && obj.sharedInput === true ? { sharedInput: true as const } : {}),
     ...(obj.nativePresentation === true ? { nativePresentation: true as const } : {}),
     ...(obj.renderPlacement === 'client' || obj.renderPlacement === 'server' ? { renderPlacement: obj.renderPlacement } : {}),
     ...(rendererId ? { rendererId } : {}),
@@ -714,6 +719,7 @@ export function buildBrowserRequest(
     url?: string;
     event?: BrowserInputEvent;
     force?: boolean;
+    shared?: boolean;
   },
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
@@ -730,6 +736,7 @@ export function buildBrowserRequest(
   }
   if (params.event) payload.event = params.event;
   if (params.force === true) payload.force = true;
+  if (action === 'takeover' && params.shared === true) payload.shared = true;
   return payload;
 }
 

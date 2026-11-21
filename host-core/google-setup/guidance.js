@@ -398,6 +398,9 @@ export function buildSetupCard(ref, run, context = {}) {
               }
             : null;
       const stepNote = run.steps?.[step]?.note;
+      const summary = stepNote ?? stepOwnerSummary(step, {
+        choices, brandingLinks, mode: run.mode, projectId: run.projectId,
+      });
       const actions = blocker?.actions ?? (
         step === 'client'
           ? [{ id: 'configure-client' }, { id: 'check-again' }]
@@ -407,7 +410,7 @@ export function buildSetupCard(ref, run, context = {}) {
         ...base,
         step,
         title: stepTitle(step, choices),
-        summary: stepNote ?? stepOwnerSummary(step, { choices, brandingLinks, projectId: run.projectId }),
+        summary,
         consoleUrl,
         ...(step === 'apis' ? { apiIds: googleConsoleApiIds(choices) } : {}),
         ...(step === 'links' ? { brandingLinks } : {}),
@@ -422,7 +425,7 @@ export function buildSetupCard(ref, run, context = {}) {
           ...action,
           label: googleSetupActionLabel(action),
         })),
-        fallbackText: `Google setup — ${stepTitle(step, choices)}: ${stepNote ?? stepOwnerSummary(step, { choices, brandingLinks, projectId: run.projectId })}`,
+        fallbackText: `Google setup — ${stepTitle(step, choices)}: ${summary}`,
       };
     }
 
@@ -505,12 +508,17 @@ export function buildSetupCard(ref, run, context = {}) {
   }
 }
 
-function stepOwnerSummary(step, { choices, brandingLinks, projectId }) {
+function stepOwnerSummary(step, { choices, brandingLinks, mode, projectId }) {
   switch (step) {
     case 'account':
       return 'Confirm which Google account owns this Google Cloud project, and whether it uses a Google Workspace organization (Internal) or personal Gmail (External).';
     case 'project':
-      return 'Create a new Google Cloud project and provide its Project ID so subsequent steps open that project directly.';
+      if (mode !== 'guide-browser') {
+        return 'Create the project in the built-in browser. PiBot reads the Project ID when the Google Cloud dashboard opens.';
+      }
+      return projectId
+        ? 'Confirm that the Google Cloud project is ready, then continue.'
+        : 'Create the Google Cloud project, then enter the Project ID from the page address (the value of project=) to continue.';
     case 'apis': {
       const ids = googleConsoleApiIds(choices).join(', ');
       return `Enable the required project APIs (${ids}). Enabling APIs turns on project capabilities only and does not authorize personal data.`;
@@ -776,16 +784,17 @@ function buildStepInstruction(step, {
     case 'project':
       if (run.mode === 'guide-browser') {
         return {
-          nextAction:
-            'Mark project active so the owner gets the Create project step card. Ask them to create the project in their browser, press Done, and share the Project ID (shown under the name or in ?project=...). Record it with set(projectId=...).',
-          doneSignal: 'Owner provides valid Google Cloud Project ID and marks project done.',
+          nextAction: run.projectId
+            ? 'Mark project active and wait for the owner to confirm the project on the setup card. Use the recorded Project ID.'
+            : 'Mark project active so the owner gets the Create project card. The card asks for the Project ID from the console address once the project is created. If the owner provides it in chat, record it with set(projectId=...). Wait for their confirmation on the card.',
+          doneSignal: 'The Project ID is recorded and the owner has marked the project done.',
         };
       }
       return {
         nextAction:
           allowedBrowserActions === 'drive'
-            ? `Mark project active, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), read the generated Project ID right before clicking Create, click Create, wait until /home/dashboard?project=<id> confirms creation, call google_setup(action="set", projectId=<id>), and mark project done.`
-            : `Mark project active and open ${consoleUrl} so the owner can create the project. Do not click or fill. Once the dashboard URL shows ?project=<id>, record set(projectId=<id>) and mark project done.`,
+            ? `Mark project active. Check the setup tab first. If the project has not been created, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), and click Create. Once /home/dashboard?project=<id> confirms creation, record the ID with google_setup(action="set", projectId=<id>) and mark project done. Read the ID from the built-in browser.`
+            : `Mark project active and check the setup tab. Open ${consoleUrl} if the owner still needs to create the project. Do not click or fill. Once the dashboard URL shows ?project=<id>, record set(projectId=<id>) and mark project done. Read the ID from the built-in browser.`,
         doneSignal: 'Google Cloud dashboard shows ?project=<id> and projectId is saved.',
       };
 

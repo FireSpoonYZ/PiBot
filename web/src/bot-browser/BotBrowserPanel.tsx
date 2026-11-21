@@ -144,6 +144,10 @@ function extractRawLease(raw: unknown): string | null {
   return null;
 }
 
+function isOlderBrowserView(incoming: BrowserView, current: BrowserView | null): boolean {
+  return Boolean(current?.sessionId && incoming.sessionId === current.sessionId && incoming.revision < current.revision);
+}
+
 export function BotBrowserPanel({
   botId,
   deviceId,
@@ -172,6 +176,7 @@ export function BotBrowserPanel({
   const [ownedLease, setOwnedLease] = useState<OwnedLease | null>(null);
   const [isHolder, setIsHolder] = useState(false);
   const [pendingAction, setPendingActionState] = useState<PendingControlAction>(null);
+  const [attemptedSharedPage, setAttemptedSharedPage] = useState<string | null>(null);
   const consumedDestinationRef = useRef<BrowserDestination | null>(null);
   const [failedDestination, setFailedDestination] = useState<BrowserDestination | null>(null);
   useEffect(() => {
@@ -236,6 +241,7 @@ export function BotBrowserPanel({
     setPendingActionState(action);
   }, []);
   const pendingTakeoverLeaseRef = useRef<string | null>(null);
+  const mayReconnectSharedInputRef = useRef(true);
   const lastFrameCursorRef = useRef<FrameCursor | null>(null);
   const streamFailSinceRef = useRef<number | null>(null);
   const streamDegradedRef = useRef(false);
@@ -368,6 +374,7 @@ export function BotBrowserPanel({
   const applyViewState = useCallback(
     (nextView: BrowserView): { nextLease: OwnedLease | null; nextIsHolder: boolean } => {
       const prevView = viewRef.current;
+      const wasHolder = isHolderRef.current;
       let nextLease: OwnedLease | null = null;
       let nextIsHolder = false;
       let preemptedBy: string | null = null;
@@ -411,6 +418,13 @@ export function BotBrowserPanel({
         setNoticeBanner(
           t(`控制权已转移至「${preemptedBy}」，当前视图已转为只读。`, `Control moved to ${preemptedBy}. This view is now read-only.`),
         );
+      }
+      if (nextIsHolder && nextView.sharedInput) {
+        mayReconnectSharedInputRef.current = false;
+        if (!wasHolder) {
+          setNoticeBanner(null);
+          setPreemptConfirmOpen(false);
+        }
       }
 
       const activeTab = activeTabOf(nextView);
@@ -464,6 +478,7 @@ export function BotBrowserPanel({
     inFlightPollRef.current = false;
     clearCachedFrame();
     clearLocalLease();
+    mayReconnectSharedInputRef.current = true;
     viewRef.current = null;
     pendingStreamFrameRef.current = null;
     useLegacyFramesRef.current = false;
@@ -473,6 +488,7 @@ export function BotBrowserPanel({
 
     setView(null);
     setPendingAction(null);
+    setAttemptedSharedPage(null);
     setLoadingStatus(true);
     setStreamDegraded(false);
     setFrameRedacted(false);
@@ -506,13 +522,23 @@ export function BotBrowserPanel({
       let nextDelay = POLL_INTERVAL_IDLE_MS;
 
       try {
-        const rawStatus = await requestRef.current(buildBrowserRequest('status', { botId }));
+        const lease = ownedLeaseRef.current?.lease ?? pendingTakeoverLeaseRef.current;
+        const rawStatus = await requestRef.current(buildBrowserRequest('status', { botId, lease }));
         if (epoch !== epochRef.current) return;
+        // Holder status belongs to the token sent with this poll, which may have rotated in flight.
+        if (lease !== (ownedLeaseRef.current?.lease ?? pendingTakeoverLeaseRef.current)) {
+          nextDelay = POLL_INTERVAL_ACTIVE_MS;
+          return;
+        }
 
         const parsedView = parseBrowserView(rawStatus);
         if (!parsedView) {
           setLoadingStatus(false);
           setErrorBanner(t('无法识别 Host 返回的浏览器状态。', 'Unrecognized browser status from target host.'));
+          return;
+        }
+        if (isOlderBrowserView(parsedView, viewRef.current)) {
+          nextDelay = POLL_INTERVAL_ACTIVE_MS;
           return;
         }
 
@@ -742,6 +768,7 @@ export function BotBrowserPanel({
 
   const handleRetry = useCallback(() => {
     setErrorBanner(null);
+    setAttemptedSharedPage(null);
     streamDegradedRef.current = false;
     setStreamDegraded(false);
     setFrameRedacted(false);
@@ -754,14 +781,21 @@ export function BotBrowserPanel({
   }, [schedulePoll]);
 
   const handleTakeover = useCallback(
-    async (options?: { force?: boolean }) => {
+    async (options?: { force?: boolean; shared?: boolean; automatic?: boolean }) => {
       if (!connected || pendingActionRef.current !== null) return;
       const currentView = viewRef.current;
       const epoch = epochRef.current;
-      setPendingAction('taking');
-      setErrorBanner(null);
-      setNoticeBanner(null);
-      setPreemptConfirmOpen(false);
+      const shared = options?.shared === true;
+      const automatic = options?.automatic === true;
+      const failureMessage = shared
+        ? t('无法在本机启用页面操作，请重试。', 'Could not enable input on this device. Please retry.')
+        : t('接管失败，请稍后重试。', 'Failed to take over control. Please retry.');
+      setPendingAction(shared ? 'sharing' : 'taking');
+      if (!automatic) {
+        setErrorBanner(null);
+        setNoticeBanner(null);
+        setPreemptConfirmOpen(false);
+      }
 
       try {
         const res = await requestRef.current(
@@ -770,23 +804,33 @@ export function BotBrowserPanel({
             pageId: currentView?.pageId,
             revision: currentView?.revision,
             force: options?.force === true,
+            shared,
           }),
         );
         if (epoch !== epochRef.current) return;
 
         const nextView = parseBrowserView(res);
+        const latestView = viewRef.current;
         const rawLease = extractRawLease(res);
+        if (shared && rawLease) mayReconnectSharedInputRef.current = false;
+        if (latestView && ((nextView && nextView.revision < latestView.revision) ||
+            (latestView.sessionId !== currentView?.sessionId &&
+              (!nextView || latestView.sessionId !== nextView.sessionId)))) {
+          // An earlier grant can be verified only while the newer view still shows the same session in human control.
+          if (rawLease && !ownedLeaseRef.current && latestView.phase === 'human' &&
+              nextView && latestView.sessionId === nextView.sessionId) {
+            pendingTakeoverLeaseRef.current = rawLease;
+          }
+          schedulePoll(0);
+          return;
+        }
 
         if (nextView) {
           const confirmed = confirmTakeoverLease(nextView, rawLease);
           if (confirmed) {
             ownedLeaseRef.current = confirmed;
             pendingTakeoverLeaseRef.current = null;
-            isHolderRef.current = true;
-            setOwnedLease(confirmed);
-            setIsHolder(true);
-            viewRef.current = nextView;
-            setView(nextView);
+            applyViewState(nextView);
             streamDegradedRef.current = false;
             setStreamDegraded(false);
             streamFailSinceRef.current = null;
@@ -794,7 +838,7 @@ export function BotBrowserPanel({
             return;
           }
 
-          if (nextView.phase === 'taking') {
+          if (!shared && nextView.phase === 'taking') {
             pendingTakeoverLeaseRef.current = rawLease ?? nextView.lease ?? null;
             viewRef.current = nextView;
             setView(nextView);
@@ -803,10 +847,8 @@ export function BotBrowserPanel({
           }
 
           applyViewState(nextView);
-          setErrorBanner(
-            nextView.reason ||
-              t('未收到 Host 停手确认，人工输入尚未开放。', 'Host did not confirm takeover. Manual input remains locked.'),
-          );
+          if (!automatic) setErrorBanner(nextView.reason || failureMessage);
+          schedulePoll(150);
           return;
         }
 
@@ -817,16 +859,12 @@ export function BotBrowserPanel({
           return;
         }
 
-        setErrorBanner(
-          t('接管请求未返回有效确认，人工输入保持锁定。', 'Takeover response was not confirmed. Input remains locked.'),
-        );
+        if (!automatic) setErrorBanner(failureMessage);
+        schedulePoll(150);
       } catch (err) {
         if (epoch !== epochRef.current) return;
         const classified = classifyBrowserError(err);
-        setErrorBanner(
-          classified.message ||
-            t('接管失败，请稍后重试。', 'Failed to take over control. Please retry.'),
-        );
+        if (!automatic) setErrorBanner(classified.message || failureMessage);
         schedulePoll(150);
       } finally {
         if (epoch === epochRef.current) {
@@ -1017,6 +1055,30 @@ export function BotBrowserPanel({
   const urlMeta = useMemo(() => classifyPageUrl(currentTab?.url), [currentTab?.url]);
   const isSensitive = Boolean(view?.sensitive || urlMeta.isKnownSensitiveUrl);
   const frameRestricted = frameRedacted || (isSensitive && !isHolder);
+  const allowsSharedInput = Boolean(view?.supportsSharedInput && !isSensitive && !frameRedacted &&
+    !urlMeta.isCloudSecretArea && !view.attentionRequested && !view.fallbackToSystemBrowser);
+  const canReconnectSharedInput = allowsSharedInput && view?.sharedInput && view.isHolder === true && !isHolder;
+  const canAcquireSharedInput = view?.phase === 'bot' ||
+    (canReconnectSharedInput && mayReconnectSharedInputRef.current);
+  const sharedPage = connected && pageVisible && allowsSharedInput && view?.available &&
+    (view.canStreamInteract || (nativePresenter && view.nativePresentation)) &&
+    view.pageId && currentTab?.id === view.pageId && canAcquireSharedInput
+    ? JSON.stringify([botId, deviceId, view.sessionId, view.pageId, view.phase])
+    : null;
+
+  useEffect(() => {
+    if (!sharedPage) {
+      if (attemptedSharedPage !== null) setAttemptedSharedPage(null);
+      return;
+    }
+    if (attemptedSharedPage === sharedPage || pendingAction !== null || pendingActionRef.current !== null ||
+        viewRef.current !== view || pendingTakeoverLeaseRef.current || !readDocumentVisible()) return;
+
+    setAttemptedSharedPage(sharedPage);
+    if (view?.phase === 'human') mayReconnectSharedInputRef.current = false;
+    void handleTakeover({ shared: true, automatic: true });
+  }, [sharedPage, attemptedSharedPage, pendingAction, view, handleTakeover]);
+
   const zoomForSignIn = resolvedMode === 'fullscreen' && isMobileViewport && isHolder && urlMeta.isGoogleAuth;
   const zoom = preferredZoom ?? (zoomForSignIn ? 2 : 1);
 
@@ -1311,6 +1373,9 @@ export function BotBrowserPanel({
   const isHeld = view?.phase === 'held';
   const isOtherHolder = Boolean(view?.phase === 'human' && !isHolder);
   const isTaking = pendingAction === 'taking' || view?.phase === 'taking';
+  const isConnectingSharedInput = pendingAction === 'sharing' ||
+    Boolean(sharedPage && attemptedSharedPage !== sharedPage && pendingAction === null);
+  const canRetrySharedInput = canReconnectSharedInput || (sharedPage !== null && attemptedSharedPage === sharedPage);
   const isHandingBack = pendingAction === 'handing-back';
   const supportsNative = Boolean(nativePresenter && view?.nativePresentation);
   const isAvailableInteractive = Boolean(
@@ -1338,6 +1403,9 @@ export function BotBrowserPanel({
     if (isHandingBack) {
       return { tone: 'muted', text: t('正在交还…', 'Handing back…'), spinning: true };
     }
+    if (isConnectingSharedInput) {
+      return { tone: 'muted', text: t('正在连接页面…', 'Connecting to page…'), spinning: true };
+    }
     if (isTaking) {
       return { tone: 'warn', text: t('正在接管…', 'Taking over…'), spinning: true };
     }
@@ -1345,13 +1413,23 @@ export function BotBrowserPanel({
       return { tone: 'warn', text: t('Bot 已暂停', 'Bot paused'), spinning: false };
     }
     if (view.phase === 'human' && isHolder) {
+      if (view.sharedInput) {
+        return nativeReady || canSendInput
+          ? { tone: 'active', text: t('可直接操作', 'Ready for input'), spinning: false }
+          : { tone: 'muted', text: t('正在获取画面…', 'Waiting for live view…'), spinning: true };
+      }
       return { tone: 'active', text: t('已接管', 'In control'), spinning: false };
+    }
+    if (canRetrySharedInput) {
+      return { tone: 'muted', text: t('页面操作待连接', 'Page input disconnected'), spinning: false };
     }
     if (isOtherHolder) {
       const label = view.holderLabel || t('其他设备', 'another device');
       return {
         tone: 'muted',
-        text: t(`正在 ${label} 接管中`, `Controlled by ${label}`),
+        text: view.sharedInput
+          ? t(`${label} 正在操作`, `${label} is operating this page`)
+          : t(`正在 ${label} 接管中`, `Controlled by ${label}`),
         spinning: false,
       };
     }
@@ -1391,7 +1469,7 @@ export function BotBrowserPanel({
   ];
 
   const primaryActionButton = (() => {
-    if (!isAvailableInteractive || isHeld) return null;
+    if (!isAvailableInteractive || isHeld || isConnectingSharedInput) return null;
 
     if (isTaking) {
       return (
@@ -1412,6 +1490,7 @@ export function BotBrowserPanel({
     }
 
     if (view?.phase === 'human' && isHolder) {
+      if (view.sharedInput) return null;
       return (
         <button
           type="button"
@@ -1425,6 +1504,19 @@ export function BotBrowserPanel({
       );
     }
 
+    if (canRetrySharedInput) {
+      return (
+        <button
+          type="button"
+          className="bb-btn bb-btn--secondary"
+          disabled={pendingAction !== null}
+          onClick={() => void handleTakeover({ shared: true })}
+        >
+          {t('重新连接页面', 'Reconnect to page')}
+        </button>
+      );
+    }
+
     if (isOtherHolder) {
       return (
         <button
@@ -1434,10 +1526,14 @@ export function BotBrowserPanel({
           onClick={() => setPreemptConfirmOpen(true)}
         >
           <Unlock size={14} aria-hidden="true" />
-          <span>{t('切换到本机接管', 'Take control here')}</span>
+          <span>
+            {view?.sharedInput ? t('切换到本机操作', 'Switch input to this device') : t('切换到本机接管', 'Take control here')}
+          </span>
         </button>
       );
     }
+
+    if (view?.supportsSharedInput && !view.pageId && !view.attentionRequested) return null;
 
     return (
       <button
@@ -1576,7 +1672,7 @@ export function BotBrowserPanel({
                   }}
                 >
                   <Square size={16} aria-hidden="true" />
-                  {t('释放控制权', 'Release control')}
+                  {view?.sharedInput ? t('关闭浏览器会话', 'Close browser session') : t('释放控制权', 'Release control')}
                 </button>
               ) : null}
               <button
@@ -1692,7 +1788,7 @@ export function BotBrowserPanel({
                   type="button"
                   className="bb-nav-btn"
                   disabled={!canNavigate || !available}
-                  title={canNavigate ? label : t('接管后可操作导航', 'Take over to navigate')}
+                  title={label}
                   onClick={() => void runPageAction('navigating', action)}
                 >
                   <Icon size={18} aria-hidden="true" />
@@ -1780,7 +1876,7 @@ export function BotBrowserPanel({
               <div className="bb-banner-title">
                 {urlMeta.isGoogleSignInRejected
                   ? t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')
-                  : t('刚才接管时连接中断，Bot 仍处于停手状态，不会擅自继续操作。', 'Connection dropped during takeover. The Bot remains paused until you decide.')}
+                  : view?.attentionMessage || t('浏览器已暂停，请选择如何继续。', 'Browser paused. Choose how to continue.')}
               </div>
               {currentTab?.url && !isSensitive ? (
                 <div className="bb-banner-sub">{urlMeta.displayHost || currentTab.url}</div>
@@ -1839,7 +1935,7 @@ export function BotBrowserPanel({
                   type="button"
                   className="bb-btn bb-btn--primary bb-btn--sm"
                   disabled={pendingAction !== null}
-                  onClick={() => void handleTakeover({ force: true })}
+                  onClick={() => void handleTakeover({ force: true, shared: allowsSharedInput && view?.sharedInput === true })}
                 >
                   {t('确认切换', 'Switch here')}
                 </button>

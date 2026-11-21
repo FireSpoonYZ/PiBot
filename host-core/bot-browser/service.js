@@ -398,6 +398,8 @@ export function createBotBrowserService(options = {}) {
       available: state.available,
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
+      ...(authority.canControl && authority.role !== 'system' ? { supportsSharedInput: true } : {}),
+      ...(state.sharedInput ? { sharedInput: true } : {}),
       ...(entry?.renderer ? { renderPlacement: 'client' } : {}),
       ...(localRenderer ? { rendererId: entry.renderer.rendererId, nativePresentation: true } : {}),
       ...(entry?.provider?.nativePresentation && authority.transport === 'local' ? { nativePresentation: true } : {}),
@@ -436,7 +438,8 @@ export function createBotBrowserService(options = {}) {
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
       phase: state.phase,
-      pausedForHuman: state.phase !== 'bot',
+      pausedForHuman: !state.canBotOperate,
+      ...(state.sharedInput ? { sharedInput: true } : {}),
       ...(state.sessionId ? { sessionId: state.sessionId } : {}),
       ...(state.pageId ? { pageId: state.pageId } : {}),
       revision: state.revision,
@@ -632,6 +635,24 @@ export function createBotBrowserService(options = {}) {
           }));
           await refreshProviderStatus(entry, { allowUnavailable: true });
           return buildControlViewDto(state, auth, { includeLeaseToken: false });
+        }
+        if (req.shared) {
+          const preempt = req.force === true || req.preempt === true;
+          const replacesOwnLease = !req.lease && state.sharedInput && state.isActiveLeaseHolder(auth);
+          const share = async () => {
+            const latest = await refreshProviderStatus(entry, { allowUnavailable: true });
+            if (!latest) throw browserError('BROWSER_STREAM_UNAVAILABLE');
+            if (req.pageId && req.pageId !== state.pageId) throw browserError('BROWSER_STALE_PAGE');
+            if (req.sessionId && req.sessionId !== state.sessionId) throw browserError('BROWSER_STALE_PAGE');
+            return state.beginSharedInput({
+              authority: auth,
+              leaseToken: req.lease,
+              preempt,
+              holderLabelOverride: req.holderLabel,
+            });
+          };
+          const token = preempt || replacesOwnLease ? await changePresentationOwner(entry, share) : await share();
+          return buildControlViewDto(state, auth, { includeLeaseToken: true, presentedLease: token });
         }
         const take = () => state.beginTakeover({
           authority: auth,
@@ -1058,7 +1079,7 @@ export function createBotBrowserService(options = {}) {
     return state.enqueueBotOp(action, async (opSignal) => {
       const signal = combineSignals(opSignal, callOpts.signal);
       const assertStillBot = () => {
-        if (opSignal.aborted || state.phase !== 'bot') {
+        if (opSignal.aborted || !state.canBotOperate) {
           throw browserError('BROWSER_PAUSED_FOR_HUMAN', undefined, {
             phase: state.phase,
             reason: state.reason,
@@ -1092,6 +1113,7 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for this bot.`);
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -1139,14 +1161,16 @@ export function createBotBrowserService(options = {}) {
             throw err;
           }
           if (reqPageId) state.assertOwnsPage(reqPageId);
+          const targetPageId = reqPageId ?? state.pageId;
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
               action: 'navigate',
               actor: 'bot',
               botId,
-              pageId: reqPageId ?? state.pageId,
+              pageId: targetPageId,
               url: safeUrl,
               signal,
             });
@@ -1188,6 +1212,7 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active browser tab; call open first.');
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -1218,6 +1243,7 @@ export function createBotBrowserService(options = {}) {
               }
             );
           }
+          assertStillBot();
           return buildBotStatusDto(state);
         }
 
@@ -1244,6 +1270,7 @@ export function createBotBrowserService(options = {}) {
           }
           const snapshotOpts = normalizeBotSnapshotOptions(rawArgs.snapshot ?? {});
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -1271,6 +1298,7 @@ export function createBotBrowserService(options = {}) {
               fallbackToSystemBrowser: sanitized.fallbackToSystemBrowser,
             });
           }
+          assertStillBot();
           state.setSnapshotRefs(sanitized.refMap);
           return {
             pageId: state.pageId,
@@ -1322,6 +1350,7 @@ export function createBotBrowserService(options = {}) {
           }
 
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           const providerAct = formatProviderAct(normalizedAct);
           let res;
           try {
@@ -1390,6 +1419,7 @@ export function createBotBrowserService(options = {}) {
             );
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let rawFrame;
           try {
             rawFrame = await provider.perform({
@@ -1446,6 +1476,7 @@ export function createBotBrowserService(options = {}) {
             );
           }
 
+          assertStillBot();
           return {
             pageId: framePageId,
             revision: state.revision,

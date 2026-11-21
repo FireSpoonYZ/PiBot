@@ -42,6 +42,7 @@ import {
   googleChoices,
   googleConsoleStepUrl,
   isValidGoogleProjectId,
+  readGoogleConsoleAddress,
 } from './console.js';
 import {
   googleSetupAccount,
@@ -71,6 +72,7 @@ import {
 import {
   applyRunChange,
   assertModeAvailable,
+  assertRecordedProjectId,
   CENTER_CONFIGURED_SKIPPED_STEPS,
   currentGoogleSetupStep,
   evaluateModeAvailability,
@@ -108,6 +110,9 @@ export {
 
 const MAX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const CONTROL_ACTIONS = new Set(['status', 'start', 'answer', 'advance', 'cancel', 'resume']);
+const PROJECT_CONFIRMATION_FIELDS = new Set([
+  'action', 'botId', 'fresh', 'runId', 'expectedRevision', 'card', 'cardCopy', 'step', 'signal',
+]);
 const SYSTEM_SENSITIVE_LOCK_AUTHORITY = Object.freeze({
   actor: 'system',
   reason: 'google-setup-sensitive-lock',
@@ -116,6 +121,10 @@ const SYSTEM_SENSITIVE_LOCK_AUTHORITY = Object.freeze({
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function usesEmbeddedSetupBrowser(mode) {
+  return mode === 'do-it-for-me' || mode === 'guide-here';
 }
 
 function assertOwnerAuthority(authority) {
@@ -564,7 +573,7 @@ export function createGoogleSetupService(options = {}) {
 
   function needsEmbeddedAccountPage(run) {
     return run?.state === 'running' &&
-      (run.mode === 'do-it-for-me' || run.mode === 'guide-here') &&
+      usesEmbeddedSetupBrowser(run.mode) &&
       run.answers?.path?.values?.[0] === run.mode &&
       Boolean(run.services?.length) &&
       !run.browserLock?.active &&
@@ -594,6 +603,24 @@ export function createGoogleSetupService(options = {}) {
       // A browser failure must leave the wizard available for retry or external guidance.
       return false;
     }
+  }
+
+  async function captureEmbeddedProjectId(run) {
+    if (isValidGoogleProjectId(run.projectId) || !usesEmbeddedSetupBrowser(run.mode) ||
+        typeof browserControl !== 'function') return;
+
+    let status;
+    try {
+      status = await browserControl({ action: 'status', botId: run.botId }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+    } catch {
+      return;
+    }
+    if (status?.available === false || !Array.isArray(status?.tabs)) return;
+
+    const tab = status.tabs.find((entry) => entry.id === run.browserPageId) ??
+      status.tabs.find((entry) => entry.id === status.pageId);
+    const { page, projectId } = readGoogleConsoleAddress(tab?.url);
+    if (page === 'project-dashboard' && projectId !== null) run.projectId = projectId;
   }
 
   async function commitRun(prev, next, {
@@ -992,6 +1019,9 @@ export function createGoogleSetupService(options = {}) {
 
         const next = structuredClone(current);
         const prevLock = next.browserLock;
+        if (card === 'step' && values[0] === 'done' && values[1] === 'project') {
+          await captureEmbeddedProjectId(next);
+        }
         applyRunChange(
           next,
           'owner',
@@ -1061,11 +1091,26 @@ export function createGoogleSetupService(options = {}) {
             idempotent: true,
           };
         }
-        if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
+        const confirmsEmbeddedProject = rawInput.step === 'project' && rawInput.runId === current.id &&
+          usesEmbeddedSetupBrowser(current.mode) &&
+          Object.keys(rawInput).every((key) => PROJECT_CONFIRMATION_FIELDS.has(key));
+        const expectedRevision = rawInput.expectedRevision;
+        if (confirmsEmbeddedProject && (expectedRevision === undefined || expectedRevision <= current.revision) &&
+            current.steps.project?.status === 'done' && isValidGoogleProjectId(current.projectId)) {
+          return {
+            ...buildView(botId, current, { centerStatus, modeAvailability }),
+            applied: false,
+            idempotent: true,
+          };
+        }
+        // A project-only confirmation can use the live step and browser state under this run's lane.
+        const canUseCurrentProjectStep = confirmsEmbeddedProject && expectedRevision < current.revision &&
+          currentGoogleSetupStep(current) === 'project';
+        if (expectedRevision !== undefined && expectedRevision !== current.revision && !canUseCurrentProjectStep) {
           throw setupError(
             'SETUP_REVISION_CONFLICT',
-            `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
-            { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
+            `Setup revision mismatch: expected ${expectedRevision}, current is ${current.revision}.`,
+            { expectedRevision, currentRevision: current.revision },
           );
         }
 
@@ -1133,6 +1178,10 @@ export function createGoogleSetupService(options = {}) {
               mutated = true;
             }
           } else {
+            if (targetStep === 'project') {
+              await captureEmbeddedProjectId(next);
+              assertRecordedProjectId(next);
+            }
             next.steps[targetStep] = {
               status: 'done',
               by: 'user',

@@ -377,6 +377,14 @@ export async function createDesktopBrowserProvider(opts = {}) {
   const pendingTargetTasks = new Set();
   const activeWaits = new Set();
 
+  function assertProviderOpen() {
+    if (closed) {
+      throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
+        outcome: 'not-sent',
+      });
+    }
+  }
+
   function enqueue(operation) {
     const result = queue.then(operation, operation);
     queue = result.then(
@@ -2215,46 +2223,78 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
   }
 
-  async function performWait(page, waitSpec, signal) {
+  function buildActResult(page, kind, detail) {
+    return {
+      ok: true,
+      kind,
+      pageId: page.pageId,
+      revision,
+      documentGeneration: page.documentGeneration,
+      url: page.url,
+      title: page.title,
+      sensitive: Boolean(page.sensitive),
+      sensitiveCategory: page.sensitiveCategory,
+      sensitiveReason: page.sensitiveReason,
+      authUseSystemBrowser: Boolean(page.authUseSystemBrowser),
+      ...detail,
+    };
+  }
+
+  async function performWait(input) {
+    const { signal } = input;
+    const waitSpec = normalizeDesktopWaitCommand(input);
+    const page = await enqueue(async () => {
+      assertProviderOpen();
+      const target = resolveOwnedPage(input.pageId);
+      if (!waitSpec.hasCondition) await refreshPageState(target, { signal });
+      revalidateTargetState(target, { ...input, documentGeneration: undefined });
+      assertPageNotSensitiveForBot(target);
+      return target;
+    });
+
     if (signal?.aborted) {
       throw browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' });
     }
+    const registerWakeup = (wake) => {
+      page.waitWakeups.add(wake);
+      return () => page.waitWakeups.delete(wake);
+    };
 
     if (!waitSpec.hasCondition) {
       const waitMs = waitSpec.timeoutMs;
       const deadline = Date.now() + waitMs;
-      while (true) {
+      const assertTimedWaitTarget = () => {
+        if (signal?.aborted) {
+          throw browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' });
+        }
+        assertProviderOpen();
+        if (!browserHandle || browserHandle.client.closed) {
+          throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
+        }
+        if (pagesById.get(page.pageId) !== page) {
+          throw browserError('BROWSER_TAB_NOT_FOUND', `Browser page '${page.pageId}' was not found for this Bot.`);
+        }
         assertPageNotSensitiveForBot(page);
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) break;
+      };
+      for (;;) {
+        const result = await enqueue(async () => {
+          assertTimedWaitTarget();
+          if (Date.now() < deadline) return null;
+          await refreshPageState(page, { signal });
+          assertTimedWaitTarget();
+          return buildActResult(page, 'wait', { waitedMs: waitMs });
+        });
+        if (result) return result;
         await sleepAbortable(
-          remaining,
+          deadline - Date.now(),
           signal,
           (cancel) => {
             activeWaits.add(cancel);
             return () => activeWaits.delete(cancel);
           },
-          (wake) => {
-            page.waitWakeups.add(wake);
-            return () => page.waitWakeups.delete(wake);
-          }
+          registerWakeup
         );
-        if (closed) {
-          throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-            outcome: 'not-sent',
-          });
-        }
-        if (!browserHandle || browserHandle.client.closed) {
-          throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
-        }
-        if (!pagesById.has(page.pageId)) {
-          throw browserError('BROWSER_TAB_NOT_FOUND', `Browser page '${page.pageId}' was not found for this Bot.`);
-        }
-        assertPageNotSensitiveForBot(page);
       }
-      await refreshPageState(page, { signal });
-      assertPageNotSensitiveForBot(page);
-      return { waitedMs: waitMs };
     }
 
     const startedAt = performance.now();
@@ -2266,6 +2306,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
     const assertWaiting = () => {
       if (signal?.aborted || closeController.signal.aborted) throw browserError('CANCELLED', 'Wait cancelled.');
+      assertProviderOpen();
       if (deadlineSignal.aborted || performance.now() - startedAt >= waitSpec.timeoutMs) {
         throw browserError('BROWSER_TIMEOUT', 'Browser wait conditions were not met before timeout.');
       }
@@ -2275,36 +2316,36 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
     try {
       for (;;) {
-        assertWaiting();
-        const { domSignals } = await refreshPageState(page, { signal: waitSignal });
-        assertWaiting();
-        const generation = page.documentGeneration;
-        let probe = null;
-        if (domSignals) {
-          // All predicates refer to one document, never cached metadata from an earlier navigation.
-          try {
-            probe = await probeWaitDomCondition(page, waitSpec, waitSignal, waitSpec.timeoutMs);
-          } catch {
-            // A navigation can destroy the execution context; sample the new document on the next pass.
+        // Sample a single document between mutations, then release the queue between samples.
+        const result = await enqueue(async () => {
+          assertWaiting();
+          const { domSignals } = await refreshPageState(page, { signal: waitSignal });
+          assertWaiting();
+          const generation = page.documentGeneration;
+          let probe = null;
+          if (domSignals) {
+            try {
+              probe = await probeWaitDomCondition(page, waitSpec, waitSignal, waitSpec.timeoutMs);
+            } catch {
+              // Navigation can destroy the execution context. Retry on the next pass.
+            }
           }
-        }
-        assertWaiting();
-        if (probe?.selectorInvalid) throw browserError('INVALID_ARGUMENT', 'Invalid CSS selector in act.wait.');
-        if (probe && generation === page.documentGeneration) {
+          assertWaiting();
+          if (!probe || generation !== page.documentGeneration) return null;
+          if (probe.selectorInvalid) throw browserError('INVALID_ARGUMENT', 'Invalid CSS selector in act.wait.');
           const loaded = !waitSpec.load || (waitSpec.load === 'load'
             ? !page.isNavigating && probe.readyState === 'complete'
             : (probe.readyState === 'interactive' || probe.readyState === 'complete')
               && (!page.isNavigating || page.domContentLoaded));
           if (loaded && (!waitSpec.selector || probe.selectorMatched) && (!waitSpec.text || probe.textMatched)
               && (!waitSpec.url || probe.urlMatched)) {
-            return { waitedMs: Math.round(performance.now() - startedAt) };
+            return buildActResult(page, 'wait', { waitedMs: Math.round(performance.now() - startedAt) });
           }
-        }
+          return null;
+        });
+        if (result) return result;
         try {
-          await sleepAbortable(WAIT_POLL_INTERVAL_MS, waitSignal, null, wake => {
-            page.waitWakeups.add(wake);
-            return () => page.waitWakeups.delete(wake);
-          });
+          await sleepAbortable(WAIT_POLL_INTERVAL_MS, waitSignal, null, registerWakeup);
         } catch {
           assertWaiting();
         }
@@ -2314,10 +2355,8 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
   }
 
-  async function performAct(input) {
+  async function performAct(input, cmd, kind) {
     const signal = input.signal;
-    const cmd = isPlainObject(input.command) ? input.command : input;
-    const kind = String(cmd.kind ?? cmd.op ?? '').trim();
 
     if (FORBIDDEN_ACT_KINDS.has(kind) || FORBIDDEN_ACT_KINDS.has(kind.toLowerCase())) {
       throw browserError(
@@ -2332,11 +2371,9 @@ export async function createDesktopBrowserProvider(opts = {}) {
       });
     }
 
-    const waitSpec = kind === 'wait' ? normalizeDesktopWaitCommand(input) : null;
-
     const page = resolveOwnedPage(input.pageId);
-    if (!waitSpec?.hasCondition) await refreshPageState(page, { signal });
-    revalidateTargetState(page, kind === 'wait' ? { ...input, documentGeneration: undefined } : input);
+    await refreshPageState(page, { signal });
+    revalidateTargetState(page, input);
     assertPageNotSensitiveForBot(page);
 
     const resolveRef = async () => {
@@ -2386,7 +2423,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
     };
 
     let detail = {};
-    if (kind !== 'wait') invalidatePageFrames(page);
+    invalidatePageFrames(page);
 
     if (kind === 'click' || kind === 'dblclick' || kind === 'hover') {
       const { entry } = await resolveRef();
@@ -2522,25 +2559,10 @@ export async function createDesktopBrowserProvider(opts = {}) {
         { sessionId: page.sessionId, timeoutMs: commandTimeoutMs, signal }
       );
       detail = { scrolled: direction, amount };
-    } else if (kind === 'wait') {
-      detail = await performWait(page, waitSpec, signal);
     }
 
-    if (kind !== 'wait') await refreshPageState(page, { signal });
-    return {
-      ok: true,
-      kind,
-      pageId: page.pageId,
-      revision,
-      documentGeneration: page.documentGeneration,
-      url: page.url,
-      title: page.title,
-      sensitive: Boolean(page.sensitive),
-      sensitiveCategory: page.sensitiveCategory,
-      sensitiveReason: page.sensitiveReason,
-      authUseSystemBrowser: Boolean(page.authUseSystemBrowser),
-      ...detail,
-    };
+    await refreshPageState(page, { signal });
+    return buildActResult(page, kind, detail);
   }
 
   async function performInput(input) {
@@ -2678,11 +2700,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
     },
 
     async perform(input) {
-      if (closed) {
-        throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-          outcome: 'not-sent',
-        });
-      }
+      assertProviderOpen();
       if (!isPlainObject(input)) {
         throw browserError('INVALID_ARGUMENT', 'perform(input) requires a plain object.', {
           outcome: 'not-sent',
@@ -2702,13 +2720,12 @@ export async function createDesktopBrowserProvider(opts = {}) {
       }
       // Frame wait and screenshot CDP commands never reserve the mutation/input queue.
       if (action === 'frame') return performFrame(input);
+      const cmd = action === 'act' ? (isPlainObject(input.command) ? input.command : input) : null;
+      const kind = cmd && String(cmd.kind ?? cmd.op ?? '').trim();
+      if (kind === 'wait') return performWait(input);
 
       return enqueue(async () => {
-        if (closed) {
-          throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-            outcome: 'not-sent',
-          });
-        }
+        assertProviderOpen();
         switch (action) {
           case 'open':
             return performOpen(input);
@@ -2727,7 +2744,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
           case 'snapshot':
             return performSnapshot(input);
           case 'act':
-            return performAct(input);
+            return performAct(input, cmd, kind);
           case 'input':
             return performInput(input);
           default:

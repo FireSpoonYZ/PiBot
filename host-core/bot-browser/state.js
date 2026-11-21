@@ -1,6 +1,6 @@
 // host-core/bot-browser/state.js
-// Per-bot browser session state machine, single-writer human lease, generation/revision tracking,
-// fail-closed disconnect hold, and real bot action queue + in-flight drain confirmation.
+// Per-bot browser state, one human input lease, generation/revision tracking,
+// and a sequential bot action queue with explicit takeover settlement.
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   BROWSER_DEFAULT_LEASE_TTL_MS,
@@ -56,8 +56,8 @@ export function createBotBrowserState({
   let sensitivity = defaultSensitivity();
   let snapshotRefs = new Map();
 
-  // Single-writer human lease (memory-only, never persisted, never logged).
-  let lease = null; // { token, clientId, holderLabel, issuedAt, lastSeenAt, expiresAt }
+  // One human input lease (memory-only, never persisted, never logged).
+  let lease = null; // { token, clientId, holderLabel, issuedAt, lastSeenAt, expiresAt, shared }
   let leaseGeneration = 0;
   let lastHolderLabel = null;
   let leaseTimer = null;
@@ -146,6 +146,10 @@ export function createBotBrowserState({
     return tabs.find((t) => t.id === pageId) ?? tabs[0] ?? null;
   }
 
+  function canBotOperate() {
+    return !closed && (phase === 'bot' || (phase === 'human' && lease?.shared === true && !sensitivity.sensitive));
+  }
+
   function recomputeSensitivity(override = {}) {
     const tab = activeTab();
     const url = override.url !== undefined ? override.url : (tab?.url ?? '');
@@ -173,28 +177,31 @@ export function createBotBrowserState({
     if (sensitivity.blockBotObserve) {
       snapshotRefs.clear();
     }
-    if (sensitivity.sensitive !== prevSensitive || sensitivity.secretRisk !== prevSecret) {
+    if (lease?.shared && sensitivity.sensitive) {
+      holdForSensitive({ reason: sensitivity.reasons[0] ?? 'sensitive_page', guidance: sensitivity.guidance });
+    } else if (sensitivity.sensitive !== prevSensitive || sensitivity.secretRisk !== prevSecret) {
       bumpRevision(true);
     }
     return sensitivity;
   }
 
   /**
-   * Fail-closed lease expiration: when a human controller disconnects or misses heartbeat TTL,
-   * transition `'human'` -> `'held'` (`disconnected_hold`). NEVER auto-return to `'bot'`.
+   * Expiration drops shared input while bot control continues. An expired exclusive
+   * takeover leaves the browser held until the owner decides how to resume.
    */
   function expireLeaseIfNeeded() {
     if (phase !== 'human' || !lease) return false;
     if (now() <= lease.expiresAt) return false;
 
     clearLeaseTimer();
-    lastHolderLabel = lease.holderLabel;
+    const shared = lease.shared === true && !sensitivity.sensitive;
+    lastHolderLabel = shared ? null : lease.holderLabel;
     lease = null;
-    phase = 'held';
-    holdReason = 'disconnected_hold';
-    snapshotRefs.clear();
+    phase = shared ? 'bot' : 'held';
+    holdReason = shared ? null : 'disconnected_hold';
+    if (!shared) snapshotRefs.clear();
     bumpRevision(true);
-    emit('lease_expired', { reason: 'disconnected_hold' });
+    emit('lease_expired', { reason: shared ? 'shared_input_expired' : 'disconnected_hold' });
     return true;
   }
 
@@ -235,7 +242,7 @@ export function createBotBrowserState({
   }
 
   function pumpBotQueue() {
-    if (closed || phase !== 'bot' || inFlightBotOp !== null || botQueue.length === 0) {
+    if (!canBotOperate() || inFlightBotOp !== null || botQueue.length === 0) {
       return;
     }
     const next = botQueue.shift();
@@ -243,7 +250,7 @@ export function createBotBrowserState({
       pumpBotQueue();
       return;
     }
-    if (phase !== 'bot' || closed) {
+    if (!canBotOperate()) {
       const err = browserError(
         closed ? 'BROWSER_CLOSED' : 'BROWSER_PAUSED_FOR_HUMAN',
         closed ? 'Bot browser service is closed.' : 'Browser is paused for human control.',
@@ -284,15 +291,13 @@ export function createBotBrowserState({
           op.settled = true;
           if (inFlightBotOp === op) inFlightBotOp = null;
           const uncertain = next.mutating && error?.outcome === 'unconfirmed';
-          if (uncertain && phase === 'bot') holdForSensitive({ reason: 'action_unconfirmed' });
+          if (uncertain && (phase === 'bot' || lease?.shared)) holdForSensitive({ reason: 'action_unconfirmed' });
           resolveDone(uncertain ? 'unconfirmed' : 'settled');
           next.reject(error);
         }
       )
       .finally(() => {
-        if (!closed && phase === 'bot') {
-          pumpBotQueue();
-        }
+        pumpBotQueue();
       });
   }
 
@@ -301,7 +306,7 @@ export function createBotBrowserState({
     if (closed) {
       return Promise.reject(browserError('BROWSER_CLOSED'));
     }
-    if (phase !== 'bot') {
+    if (!canBotOperate()) {
       const err = browserError(
         'BROWSER_PAUSED_FOR_HUMAN',
         'Bot browser actions are paused while human takeover or hold is active.',
@@ -455,7 +460,7 @@ export function createBotBrowserState({
     });
   }
 
-  function grantLease(authority, displayLabelOverride = null) {
+  function grantLease(authority, displayLabelOverride = null, shared = false) {
     const issuedAt = now();
     const holderLabel = displayLabelOverride || authority.holderLabel;
     leaseGeneration += 1;
@@ -466,14 +471,15 @@ export function createBotBrowserState({
       issuedAt,
       lastSeenAt: issuedAt,
       expiresAt: issuedAt + leaseTtlMs,
+      shared,
     };
     lastHolderLabel = holderLabel;
     holdReason = null;
     phase = 'human';
-    snapshotRefs.clear();
+    if (!shared) snapshotRefs.clear();
     bumpRevision(true);
     scheduleLeaseTimer();
-    emit('takeover_granted');
+    emit(shared ? 'shared_input_granted' : 'takeover_granted');
     return lease.token;
   }
 
@@ -536,15 +542,33 @@ export function createBotBrowserState({
     return true;
   }
 
+  function beginSharedInput({ authority, leaseToken, preempt = false, holderLabelOverride }) {
+    expireLeaseIfNeeded();
+    if (closed) throw browserError('BROWSER_CLOSED');
+    if (phase === 'taking') throw browserError('BROWSER_TAKEOVER_PENDING');
+    if (phase === 'held' || sensitivity.sensitive) {
+      throw browserError('BROWSER_TAKEOVER_REQUIRED', undefined, { phase, reason: currentReason() });
+    }
+    if (!available || !canStreamInteract) throw browserError('BROWSER_STREAM_UNAVAILABLE');
+    if (!pageId) throw browserError('BROWSER_PAGE_NOT_FOUND');
+
+    if (phase === 'human') {
+      const sameClient = lease?.clientId === authority.clientId;
+      if (lease?.shared && sameClient && tokensEqual(leaseToken, lease.token) && !preempt) {
+        renewLease(authority, leaseToken);
+        return lease.token;
+      }
+      // Reopening the pane on the same authenticated client rotates its shared token.
+      if (!lease?.shared || (!preempt && !(sameClient && leaseToken == null))) {
+        throw browserError('BROWSER_LEASE_CONFLICT', undefined, { phase, holderLabel: currentHolderLabel() });
+      }
+    }
+    return grantLease(authority, holderLabelOverride, true);
+  }
+
   /**
-   * Real takeover transition:
-   * 1. Rejects non-force preemption if another client holds `'human'`.
-   * 2. Preempts immediately if `force`/`preempt` is true (invalidating old lease + bumping revision).
-   * 3. From `'bot'` or `'held'`: moves to `'taking'`, cancels all queued bot ops (`not-sent`),
-   *    aborts any in-flight bot op + runs optional `onTakeoverHook`, and waits up to
-   *    `takeoverTimeoutMs` for confirmed settlement BEFORE opening `'human'` input.
-   * 4. If in-flight action does NOT settle before timeout: fails closed into `'held'`
-   *    (`takeover_unconfirmed`) and throws `BROWSER_TAKEOVER_UNCONFIRMED`.
+   * Exclusive takeover verifies any existing lease before replacing it. Bot work
+   * drains before granting exclusive input, including when input was previously shared.
    */
   async function beginTakeover({
     authority,
@@ -562,28 +586,23 @@ export function createBotBrowserState({
 
     // Already in human control: handle same-client renewal vs cross-client/unverified preemption.
     if (phase === 'human' && lease) {
-      if (lease.clientId === authority.clientId && leaseToken && tokensEqual(leaseToken, lease.token)) {
-        if (!wantPreempt) {
-          renewLease(authority, leaseToken);
-          return { token: lease.token, preempted: false, resumed: true };
-        }
-        // Explicit force by current holder: rotate token cleanly.
-        const token = grantLease(authority, desiredLabel);
-        return { token, preempted: false, resumed: true };
-      }
-      if (!wantPreempt) {
+      const verifiedHolder = lease.clientId === authority.clientId && tokensEqual(leaseToken, lease.token);
+      if (!verifiedHolder && !wantPreempt) {
         throw browserError(
           'BROWSER_LEASE_CONFLICT',
           `Browser is currently controlled by ${lease.holderLabel}. Confirm preemption to take control here.`,
           { phase: 'human', holderLabel: lease.holderLabel }
         );
       }
-      // Explicit preemption: immediately invalidate previous holder's token and bump revision.
-      clearLeaseTimer();
-      lease = null;
-      const token = grantLease(authority, desiredLabel);
-      emit('takeover_preempted');
-      return { token, preempted: true, resumed: false };
+      if (!lease.shared) {
+        if (!wantPreempt) {
+          renewLease(authority, leaseToken);
+          return { token: lease.token, preempted: false, resumed: true };
+        }
+        const token = grantLease(authority, desiredLabel);
+        if (!verifiedHolder) emit('takeover_preempted');
+        return { token, preempted: !verifiedHolder, resumed: verifiedHolder };
+      }
     }
 
     // Already draining a takeover.
@@ -606,7 +625,7 @@ export function createBotBrowserState({
       throw browserError('BROWSER_TAKEOVER_UNCONFIRMED', undefined, { phase, reason: currentReason() });
     }
 
-    // Transition from 'bot' or 'held' -> 'taking'.
+    // Move into exclusive takeover and fence both the active bot operation and any shared lease.
     const prevPhase = phase;
     phase = 'taking';
     holdReason = null;
@@ -700,7 +719,7 @@ export function createBotBrowserState({
   async function holdForSystemLock({ reason = 'sensitive_step_lock', onTakeoverHook = null } = {}) {
     expireLeaseIfNeeded();
     if (closed) throw browserError('BROWSER_CLOSED');
-    if (phase === 'human') {
+    if (phase === 'human' && !lease?.shared) {
       // Human owner already holds control; keep human lease intact and clear bot refs.
       snapshotRefs.clear();
       return { held: false, phase };
@@ -752,14 +771,21 @@ export function createBotBrowserState({
   }
 
   function holdForSensitive({ reason = 'sensitive_page', guidance = null } = {}) {
+    const wasShared = lease?.shared === true;
     expireLeaseIfNeeded();
     if (closed) return;
     snapshotRefs.clear();
-    cancelQueuedBotOps(reason);
-    if (phase === 'bot') {
+    const enteringHold = phase === 'bot' || wasShared;
+    if (enteringHold) {
+      clearLeaseTimer();
+      lease = null;
       phase = 'held';
       holdReason = reason;
       bumpRevision(true);
+    }
+    cancelQueuedBotOps(reason);
+    if (wasShared) abortInFlightBotOp(reason);
+    if (enteringHold) {
       emit('held_for_sensitive', { reason, guidance });
     } else if (phase === 'held' && holdReason !== reason) {
       holdReason = reason;
@@ -893,6 +919,8 @@ export function createBotBrowserState({
     get profileDir() { return profileDir; },
     get sessionId() { return sessionId; },
     get phase() { return phase; },
+    get sharedInput() { return lease?.shared === true; },
+    get canBotOperate() { return canBotOperate(); },
     get revision() { return revision; },
     get available() { return available; },
     get reason() { return currentReason(); },
@@ -917,6 +945,7 @@ export function createBotBrowserState({
     enqueueBotOp,
     syncProviderResult,
     recomputeSensitivity,
+    beginSharedInput,
     beginTakeover,
     holdForSystemLock,
     holdForSensitive,

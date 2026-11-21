@@ -144,7 +144,7 @@ const CONTROL_ACTION_FIELDS = Object.freeze({
   select: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   closeTab: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream', 'waitMs'],
-  takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
+  takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'shared', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
   input: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event'],
   handback: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason'],
   release: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'reason'],
@@ -564,6 +564,10 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   if (input.force !== undefined) {
     if (typeof input.force !== 'boolean') throw browserError('INVALID_ARGUMENT', 'force must be boolean');
     normalized.force = input.force;
+  }
+  if (input.shared !== undefined) {
+    if (typeof input.shared !== 'boolean') throw browserError('INVALID_ARGUMENT', 'shared must be boolean');
+    normalized.shared = input.shared;
   }
   if (input.preempt !== undefined) {
     if (typeof input.preempt !== 'boolean') throw browserError('INVALID_ARGUMENT', 'preempt must be boolean');

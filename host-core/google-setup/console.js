@@ -277,6 +277,7 @@ export function readGoogleConsoleAddress(address) {
   const path = url.pathname.replace(/\/+$/, '');
   let page = 'other';
   if (path === '/projectcreate') page = 'project-create';
+  else if (path === '/home/dashboard') page = 'project-dashboard';
   else if (path === '/apis/enableflow') page = 'enable-flow';
   else if (path.startsWith('/apis/')) page = 'apis';
   else if (path.startsWith('/auth/overview/create') || path.startsWith('/auth/branding')) {

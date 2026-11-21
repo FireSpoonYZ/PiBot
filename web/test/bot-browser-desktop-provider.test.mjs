@@ -902,6 +902,22 @@ test('desktop provider act.wait enforces conditions, lifecycle, validation, sens
     assert.equal(urlRes.ok, true);
     assert.equal(urlRes.url, 'https://example.com/done?step=2');
 
+    const userText = 'continued by user';
+    const waitingForUser = provider.perform({
+      action: 'act', actor: 'bot', pageId,
+      command: { kind: 'wait', text: userText, timeoutMs: 1000 },
+    });
+    const [afterWait, afterInput] = await Promise.all([
+      waitingForUser,
+      provider.perform({
+        action: 'input', actor: 'human', pageId,
+        event: { kind: 'text', text: userText },
+        beforeInput() { targetState.visibleText = userText; },
+      }),
+    ]);
+    assert.equal(afterInput.ok, true);
+    assert.equal(afterWait.ok, true);
+
     // Lifecycle load / domcontentloaded: domcontentloaded resolves on DOMContentLoaded while load still waits for loadEventFired.
     targetState.readyState = 'loading';
     harness.emitEvent('Page.frameStartedLoading', { frameId: targetState.frameId }, targetState.sessionId);

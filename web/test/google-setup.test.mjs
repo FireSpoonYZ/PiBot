@@ -226,6 +226,92 @@ test('confirming services opens one embedded account tab and owner resume restor
   }
 });
 
+test('embedded project confirmation reads the setup tab and tolerates a concurrent progress update', async () => {
+  let setupUrl = 'https://console.cloud.google.com/projectcreate';
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl({ action }) {
+        assert.equal(action, 'status');
+        return {
+          available: true,
+          canStreamInteract: true,
+          pageId: 'other-tab',
+          tabs: [
+            { id: 'setup-tab', url: setupUrl },
+            { id: 'other-tab', url: 'https://console.cloud.google.com/home/dashboard?project=other-project' },
+          ],
+        };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({
+      action: 'start', mode: 'guide-here', choices: ['gmail'], browserPageId: 'setup-tab',
+    });
+    const project = await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const confirm = {
+      action: 'advance', step: 'project', runId: started.id, expectedRevision: project.revision,
+    };
+
+    await assert.rejects(() => control(confirm), { code: 'SETUP_PROJECT_ID_REQUIRED' });
+    assert.equal((await control({ action: 'status' })).step, 'project');
+
+    const updated = await env.callBot({ action: 'step', step: 'project', status: 'active' });
+    assert.equal(updated.isError, false);
+    assert.ok(updated.body.view.revision > project.revision);
+    setupUrl = 'https://console.cloud.google.com/home/dashboard?project=pibot-center';
+    await assert.rejects(() => control({ ...confirm, kind: 'work' }), { code: 'SETUP_REVISION_CONFLICT' });
+
+    const next = await control(confirm);
+    assert.equal(next.step, 'apis');
+    assert.equal(next.projectId, 'pibot-center');
+    assert.equal(new URL(next.guidance.consoleUrl).searchParams.get('project'), 'pibot-center');
+    assert.equal((await control(confirm)).revision, next.revision);
+    assert.equal((await control({ ...confirm, runId: 'older-run' })).staleReason, 'STALE_RUN');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('the external project step needs a supplied ID only when the run has none', async () => {
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl() {
+        return {
+          available: true,
+          canStreamInteract: true,
+          pageId: 'embedded-tab',
+          tabs: [{ id: 'embedded-tab', url: 'https://console.cloud.google.com/home/dashboard?project=embedded-project' }],
+        };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({ action: 'start', mode: 'guide-browser', choices: ['gmail'] });
+    const project = await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const confirm = {
+      action: 'advance', step: 'project', runId: started.id, expectedRevision: project.revision,
+    };
+    await assert.rejects(() => control(confirm), { code: 'SETUP_PROJECT_ID_REQUIRED' });
+
+    const next = await control({ ...confirm, projectId: 'pibot-center' });
+    assert.equal(next.step, 'apis');
+    assert.equal(next.projectId, 'pibot-center');
+
+    const restarted = await control({ action: 'start', restart: true, mode: 'guide-browser', choices: ['gmail'] });
+    await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const saved = await env.callBot({ action: 'set', projectId: 'known-project' });
+    assert.equal(saved.isError, false);
+    const reused = await control({ ...confirm, runId: restarted.id, expectedRevision: saved.body.view.revision });
+    assert.equal(reused.step, 'apis');
+    assert.equal(reused.projectId, 'known-project');
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('Center Web OAuth links never use Orca domains and preserve People base scopes', () => {
   const valid = deriveCenterBrandingLinks('https://center.acme.example/subpath');
   assert.deepEqual(valid, {

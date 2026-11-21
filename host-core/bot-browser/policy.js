@@ -59,7 +59,7 @@ const PAYMENT_PATH_RE = /\/(checkout|billing\/pay|payment-method|payments|credit
 const SECRET_CONSOLE_PATH_RE = /^\/(auth\/clients|apis\/credentials|iam-admin\/serviceaccounts|security\/secret-manager)(\/|$)/i;
 
 const POLICY_CONSENT_RE = /(user\s+data\s+policy|google\s+api\s+services.*policy|terms\s+of\s+service|terms\s+and\s+conditions|privacy\s+policy|i\s+agree|accept\s+terms|agree\s+to\s+the|用户数据政策|服务条款|隐私政策|我同意|同意条款|接受条款)/i;
-const SECRET_CREATE_OR_REVEAL_RE = /(create\s+oauth|create\s+client|create\s+credentials|\bcreate\b|download\s+json|client\s+secret|show\s+secret|reveal\s+secret|copy\s+secret|generate\s+key|create\s+key|创建客户端|创建凭据|创建密钥|下载\s*json|显示密钥|复制密钥|密钥)/i;
+const SECRET_CREATE_OR_REVEAL_RE = /(create\s+oauth|create\s+client|create\s+credentials|download\s+json|client\s+secret|show\s+secret|reveal\s+secret|copy\s+secret|generate\s+key|create\s+key|创建客户端|创建凭据|创建密钥|下载\s*json|显示密钥|复制密钥|密钥)/i;
 const SENSITIVE_FIELD_RE = /(password|passcode|passphrase|one[\s-]?time|otp|2fa|mfa|verification\s+code|auth\s+code|client[\s_]?secret|api[\s_]?key|private[\s_]?key|credit\s+card|card\s+number|cvv|cvc|security\s+code|密码|口令|验证码|安全码|密钥)/i;
 const OAUTH_CONSENT_ACTION_RE = /(sign\s+in\s+with\s+google|continue\s+with\s+google|grant\s+access|allow\s+access|authorize\s+app|approve\s+access|oauth\s+consent|登录\s*google|授权访问|允许访问)/i;
 
@@ -519,10 +519,13 @@ export function checkBotActionSensitivity({
   }
 
   // 3. Before clicking Create / Download JSON / Reveal Secret on Google Cloud Console.
+  const isProjectCreateButton = typeof targetRefMeta?.name === 'string' &&
+    /^create$/i.test(targetRefMeta.name.trim()) &&
+    parseUrlSafe(pageUrl)?.pathname === '/projectcreate';
   if (
     isGoogleCloudConsoleUrl(pageUrl) &&
     (act.kind === 'click' || act.kind === 'dblclick' || act.kind === 'press') &&
-    SECRET_CREATE_OR_REVEAL_RE.test(refText)
+    (SECRET_CREATE_OR_REVEAL_RE.test(refText) || (!isProjectCreateButton && /\bcreate\b/i.test(refText)))
   ) {
     return {
       allowed: false,

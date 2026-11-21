@@ -258,6 +258,12 @@ export function currentGoogleSetupStep(run) {
   );
 }
 
+export function assertRecordedProjectId(run) {
+  if (!isValidGoogleProjectId(run.projectId)) {
+    throw setupError('SETUP_PROJECT_ID_REQUIRED', 'Record the Google Cloud project ID before completing the project step.');
+  }
+}
+
 /** Whether the person, not the bot, does this step. */
 export function personDoesGoogleSetupStep(run, step) {
   if (!run) return true;
@@ -513,6 +519,7 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
         if (actor === 'bot') {
           throw setupError('SETUP_FORBIDDEN', PERSON_FINISHES);
         }
+        if (second === 'project') assertRecordedProjectId(run);
         // Note: `client` and `connect` completion are verified against trusted Center
         // status by the service layer before calling recordAnswer.
         const theirs = isPersonOwnedStep(run, second) || !botClicks(run, second);
@@ -706,6 +713,7 @@ export function applyRunChange(run, actor, change, now, options = {}) {
           throw setupError('SETUP_FORBIDDEN', PERSON_FINISHES);
         }
       }
+      if (change.step === 'project' && change.status === 'done') assertRecordedProjectId(run);
       const note = change.note !== undefined ? scrubNonSensitiveText(change.note, 500) : undefined;
       if (change.note !== undefined) assertNoSecretMaterial(change.note, 'note');
       const by =

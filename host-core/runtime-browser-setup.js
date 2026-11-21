@@ -179,7 +179,7 @@ function maybeExtractBrowserTakeoverPresentation(botId, rawResult) {
   const needsTakeover =
     parsed.status === 'PAUSED_FOR_HUMAN' ||
     parsed.action === 'requestTakeover' ||
-    parsed.phase === 'human' ||
+    (parsed.phase === 'human' && parsed.pausedForHuman === true && parsed.sharedInput !== true) ||
     parsed.phase === 'taking' ||
     parsed.phase === 'held';
   if (!needsTakeover) return null;
