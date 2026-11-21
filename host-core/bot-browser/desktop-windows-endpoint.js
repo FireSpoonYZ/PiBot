@@ -7,7 +7,7 @@ const MAX_ENDPOINT_BYTES = 512;
 const unsafe = () => browserError('BROWSER_UNSAFE_ENDPOINT', 'Cannot verify the private Chromium DevTools endpoint.');
 
 // Inspect every ancestor: realpath alone would silently follow a profile junction.
-async function assertPrivateDirectory(directory) {
+export async function assertPrivateWindowsProfileDir(directory) {
   let current = directory;
   for (;;) {
     const info = await lstat(current);
@@ -22,7 +22,7 @@ async function assertPrivateDirectory(directory) {
 
 export async function readWindowsDevToolsEndpoint(profilePath) {
   const filename = path.join(profilePath, 'DevToolsActivePort');
-  await assertPrivateDirectory(profilePath);
+  await assertPrivateWindowsProfileDir(profilePath);
   let info;
   try {
     info = await lstat(filename);
@@ -43,7 +43,7 @@ export async function readWindowsDevToolsEndpoint(profilePath) {
     const bytes = Buffer.alloc(MAX_ENDPOINT_BYTES + 1);
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
     const after = await lstat(filename);
-    await assertPrivateDirectory(profilePath);
+    await assertPrivateWindowsProfileDir(profilePath);
     if (after.isSymbolicLink() || after.nlink !== 1 || bytesRead > MAX_ENDPOINT_BYTES) throw unsafe();
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) return null;
     const contents = bytes.subarray(0, bytesRead).toString('utf8');
