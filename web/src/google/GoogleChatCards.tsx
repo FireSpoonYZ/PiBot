@@ -25,6 +25,7 @@ import {
   googleFixLabel,
   googleReadinessFace,
   googleServiceLabel,
+  googleStepTitle,
 } from './googleCopy';
 import { GoogleClientConfigForm, GoogleSignInFlow } from './GoogleSignInFlow';
 import { GoogleSetupWizard } from './GoogleSetupWizard';
@@ -41,52 +42,37 @@ import type {
 import './google-ui.css';
 
 /* ------------------------------------------------------------------ */
-/* 1. Google Setup Chat Card                                           */
+/* 1. Google Setup Read-Only Text History Note                         */
 /* ------------------------------------------------------------------ */
 
 export function GoogleSetupChatCard({
   presentation,
-  disabled,
-  googleContext,
 }: {
   presentation: GoogleSetupPresentation;
-  active: boolean;
+  active?: boolean;
   disabled?: boolean;
   googleContext?: GoogleChatCardContext;
 }) {
   const t = useText();
-  if (!googleContext) {
-    return (
-      <div className="gws-card is-muted">
-        <div className="gws-card-head">
-          <span className="gws-card-title">{presentation.title || t('Google 应用配置向导', 'Google App Setup')}</span>
-          <span className="gws-pill is-muted">{t('只读', 'Read-only')}</span>
-        </div>
-        <p className="gws-muted">
-          {presentation.summary || t('请在当前 Bot 聊天或能力设置中打开以查看实时向导状态。', 'Open in the active Bot chat or Capabilities to view live setup status.')}
-        </p>
-      </div>
-    );
-  }
+  const title = presentation.title || t('Google 配置向导', 'Google setup');
+  const stepLabel = presentation.step ? googleStepTitle(presentation.step, t) : '';
+  const detail =
+    presentation.state === 'done' || presentation.state === 'completed'
+      ? t('已完成', 'Completed')
+      : presentation.state === 'cancelled'
+        ? t('已取消', 'Cancelled')
+        : presentation.state === 'failed'
+          ? stepLabel
+            ? `${stepLabel}（${t('已暂停', 'Paused')}）`
+            : t('已暂停', 'Paused')
+          : stepLabel || t('进行中', 'In progress');
+  const lineText = `${title} · ${detail}`;
 
-  // Note: Setup cards remain interactive even after the Bot ends its turn (in chat history)
-  // as long as the live run ID and card copy match `googleSetupControl(action='status')`.
+  // Strictly one plain read-only text line: no card frame, no buttons, no details, no guidance links.
   return (
-    <GoogleSetupWizard
-      api={googleContext.api}
-      identity={googleContext.identity}
-      botId={presentation.botId || googleContext.botId}
-      botName={googleContext.botName}
-      isLocalAndroid={googleContext.isLocalAndroid}
-      expectedRunId={presentation.runId ?? undefined}
-      expectedCard={presentation.card ?? undefined}
-      expectedStep={presentation.step ?? undefined}
-      expectedCardCopy={presentation.copy}
-      readOnly={Boolean(disabled) || presentation.state === 'done' || presentation.state === 'cancelled'}
-      callGoogleSetup={googleContext.callGoogleSetup}
-      onOpenBrowser={googleContext.onOpenBrowser}
-      onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
-    />
+    <p className="gws-history-line" role="note" title={lineText}>
+      {lineText}
+    </p>
   );
 }
 

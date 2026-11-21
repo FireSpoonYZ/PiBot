@@ -3,6 +3,7 @@
 // live.history 只补齐尚未分页到的新窗口，不作为全量历史覆盖；历史问卷只读。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Pencil } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
@@ -25,6 +26,8 @@ import type {
   QuestionnaireSubmitPayload,
   VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
+import { selectCurrentGoogleSetup } from '../../../web/src/google/currentGoogleSetup';
+import { CurrentGoogleSetupCard } from '../../../web/src/google/CurrentGoogleSetupCard';
 import { TurnToolCallsSection } from '../../../web/src/hub/shared';
 import {
   GrokBotAvatar,
@@ -77,6 +80,8 @@ export interface ChatTranscriptProps {
   onSubmitQuestionnaire: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
   googleContext?: GoogleChatCardContext;
+  /** 输入区正上方的稳定插槽容器；通过 Portal 挂载唯一的 CurrentGoogleSetupCard。 */
+  googleSetupSlotContainer?: HTMLElement | null;
   /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
   attachmentFetcher?: AttachmentFetcher | null;
   loading?: boolean;
@@ -126,6 +131,7 @@ export function ChatTranscript({
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
   googleContext,
+  googleSetupSlotContainer = null,
   attachmentFetcher = null,
   loading = false,
   error = null,
@@ -233,6 +239,11 @@ export function ChatTranscript({
       durableWaits: activeDurableWaits,
     }),
   [mergedItems, effectiveClearedThrough, effectiveLive, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots, activeDurableWaits]);
+
+  const currentGoogleSetup = useMemo(
+    () => selectCurrentGoogleSetup(allTurns),
+    [allTurns],
+  );
 
   const activeLiveToolName = useMemo(() => {
     if (liveIsCollaborative || hideToolOutput) return null;
@@ -355,9 +366,21 @@ export function ChatTranscript({
 
   const avatarPreset = resolveBotAvatarPreset(botKey, bot.role, bot.isPrimary);
   const platformBadge = devicePlatform || 'host';
+  const currentGoogleSetupPortal = googleSetupSlotContainer
+    ? createPortal(
+        <CurrentGoogleSetupCard
+          scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+          presentation={currentGoogleSetup}
+          googleContext={googleContext}
+          disabled={disabled || archived}
+        />,
+        googleSetupSlotContainer,
+      )
+    : null;
 
   return (
-    <section
+    <>
+      <section
       className="desktop-transcript bot-chat-messages"
       ref={scrollRef}
       onScroll={onScroll}
@@ -523,6 +546,7 @@ export function ChatTranscript({
                 />
               ) : null}
               <ChatTurnMeta
+                role={turn.role}
                 timestamp={turn.timestamp}
                 durationMs={showTurnDuration ? turn.durationMs : undefined}
                 copyText={copyText}
@@ -550,6 +574,8 @@ export function ChatTranscript({
         t={t}
       /> : null}
       <ErrorNotice error={linkError} onDismiss={() => setLinkError('')} compact />
-    </section>
+      </section>
+      {currentGoogleSetupPortal}
+    </>
   );
 }

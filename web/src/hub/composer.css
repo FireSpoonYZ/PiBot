@@ -362,9 +362,133 @@
   color: var(--color-text-muted, var(--muted));
 }
 
+/* C3: 优先使用原生 CSS field-sizing: content 自动调整本机输入框高度，避免每键 JS reflow */
+@supports (field-sizing: content) {
+  .grok-composer-pill textarea {
+    field-sizing: content;
+    height: auto;
+    min-height: 36px;
+    max-height: 110px;
+  }
+}
+
+/* C6 + C7: 统一浮层停靠栈（跳回最新、浏览器接管、远端草稿/冲突/排队、本机排队、任务提示），绝不压缩消息列表且互不遮挡 */
+.grok-composer-floating-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 0 14px;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.grok-composer-floating-dock:empty {
+  display: none;
+}
+
+.grok-composer-floating-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.grok-composer-floating-slot:empty {
+  display: none;
+}
+
+.grok-composer-floating-slot > * {
+  pointer-events: auto;
+  margin: 0;
+}
+
+.grok-composer-floating-dock > .gws-browser-strip,
+.grok-composer-floating-dock > .cf-queue-strip {
+  pointer-events: auto;
+  margin: 0;
+  animation: grok-composer-capsule-in var(--dur-fast) var(--ease-out) both;
+}
+
+.grok-composer-floating-dock .cf-queue-strip {
+  margin: 0;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-scrim) 16%, transparent);
+}
+
+.grok-composer-floating-dock > .tb-scope.chat-task-dock.is-mobile {
+  padding: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.grok-composer-floating-dock .tb-scope .chat-quote-strip,
+.grok-composer-floating-dock .tb-scope .chat-prompt-card {
+  pointer-events: auto;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-scrim) 16%, transparent);
+}
+
+.grok-composer-floating-dock .gws-browser-strip {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: var(--radius-full);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 42%, var(--color-line));
+  background: color-mix(in srgb, var(--color-surface-2) 94%, var(--color-warning) 6%);
+  backdrop-filter: blur(10px);
+  color: var(--color-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-scrim) 16%, transparent);
+}
+
+.grok-composer-floating-dock .gws-browser-strip-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.grok-composer-floating-dock .gws-browser-strip-left > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--color-warning);
+}
+
+.grok-composer-floating-dock .gws-browser-strip-left > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes grok-composer-capsule-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .composer-voice-bar-col {
     transition: none;
     transform: scaleY(0.55);
+  }
+
+  .grok-composer-floating-dock > .gws-browser-strip,
+  .grok-composer-floating-dock > .cf-queue-strip,
+  .grok-composer-floating-dock .bot-chat-jump-latest {
+    animation: none;
   }
 }

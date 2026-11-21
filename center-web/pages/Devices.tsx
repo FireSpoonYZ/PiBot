@@ -27,6 +27,7 @@ import { api, CenterApiError, type BotLearningPatchConfig } from '../api';
 import { RuntimeStatusSummary } from '../components/RuntimeStatus';
 import { AddDeviceDialog } from '../components/AddDeviceDialog';
 import { SheetModal } from '../components/SheetModal';
+import { Row, Switch } from '../components/primitives';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 interface ModelOption {
@@ -365,6 +366,8 @@ function BotLearningPanel({
   onCancelJob(jobId: string): void;
   onClose(): void;
 }) {
+  const savedAutoReviewEnabled = status.settings.review.enabled !== false;
+  const [autoReviewEnabled, setAutoReviewEnabled] = useState(savedAutoReviewEnabled);
   const [memoryEvery, setMemoryEvery] = useState(String(status.settings.review.memoryEvery));
   const [skillEvery, setSkillEvery] = useState(String(status.settings.review.skillEvery));
   const [intervalHours, setIntervalHours] = useState(String(status.settings.curator.intervalHours));
@@ -376,6 +379,7 @@ function BotLearningPanel({
   const [curatorModelRef, setCuratorModelRef] = useState(status.settings.curatorModelRef ?? '');
 
   useEffect(() => {
+    setAutoReviewEnabled(status.settings.review.enabled !== false);
     setMemoryEvery(String(status.settings.review.memoryEvery));
     setSkillEvery(String(status.settings.review.skillEvery));
     setIntervalHours(String(status.settings.curator.intervalHours));
@@ -401,7 +405,10 @@ function BotLearningPanel({
         </div>
         <p className="secondary" style={{ marginTop: 0, marginBottom: 6 }}>
           记忆复盘计数：{status.counters.turnsSinceMemoryReview} / {status.settings.review.memoryEvery} 轮 · 技能复盘计数：
-          {status.counters.itersSinceSkillReview} / {status.settings.review.skillEvery} 工具步（Bot 空闲静置 15s 后触发；用户插话立即抢占让路并恢复计数）
+          {status.counters.itersSinceSkillReview} / {status.settings.review.skillEvery} 工具步
+          {savedAutoReviewEnabled
+            ? '（Bot 空闲静置 15s 后触发；用户插话立即抢占让路并恢复计数）'
+            : '（自动反思已关闭）'}
         </p>
         <p className="secondary" style={{ marginTop: 0, marginBottom: 6 }}>
           上次自动复盘：{formatTime(status.counters.lastAutomaticReviewAt)} · 上次技能整理：{formatTime(status.counters.lastCuratorRunAt)}
@@ -460,6 +467,7 @@ function BotLearningPanel({
             reviewModelRef: reviewModelRef ? reviewModelRef : null,
             curatorModelRef: curatorModelRef ? curatorModelRef : null,
             review: {
+              ...(autoReviewEnabled === savedAutoReviewEnabled ? {} : { enabled: autoReviewEnabled }),
               memoryEvery: Math.max(1, Math.trunc(Number(memoryEvery) || 10)),
               skillEvery: Math.max(1, Math.trunc(Number(skillEvery) || 10)),
             },
@@ -473,6 +481,13 @@ function BotLearningPanel({
           });
         }}
       >
+        <Row
+          title="自动反思"
+          subtitle="Bot 空闲时自动复盘记忆并提炼技能"
+          trailing={(
+            <Switch label="自动反思" checked={autoReviewEnabled} disabled={busy} onChange={setAutoReviewEnabled} />
+          )}
+        />
         <div className="form-grid">
           <label>
             记忆复盘间隔（用户轮次）

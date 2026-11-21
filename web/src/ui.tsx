@@ -1,5 +1,11 @@
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type SetStateAction } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
+import {
+  INITIAL_ACTION_STATE,
+  reduceActionState,
+  type ActionEvent,
+  type ActionState,
+} from './layout/actionState';
 import './error-notice.css';
 
 // The old "hide" setting only collapsed calls. Keep its stored value for that behavior.
@@ -773,21 +779,43 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   };
 }
 
+export { INITIAL_ACTION_STATE, reduceActionState, type ActionEvent, type ActionState };
+
 export function useAction() {
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function run<T>(operation: () => Promise<T>): Promise<T | undefined> {
-    setError('');
-    setBusy(true);
+  const [state, setState] = useState<ActionState>(INITIAL_ACTION_STATE);
+  const runIdRef = useRef(0);
+
+  const setError = useCallback((next: SetStateAction<string>) => {
+    setState(prev => {
+      const value = typeof next === 'function' ? next(prev.error) : next;
+      return reduceActionState(prev, { type: 'set-error', error: value });
+    });
+  }, []);
+
+  const run = useCallback(async <T,>(operation: () => Promise<T>): Promise<T | undefined> => {
+    const runId = ++runIdRef.current;
+    setState(prev => reduceActionState(prev, { type: 'start' }));
     try {
-      return await operation();
+      const result = await operation();
+      if (runIdRef.current === runId) {
+        setState(prev => reduceActionState(prev, { type: 'succeed' }));
+      }
+      return result;
     } catch (failure) {
-      setError(errorText(failure));
-    } finally {
-      setBusy(false);
+      if (runIdRef.current === runId) {
+        setState(prev => reduceActionState(prev, { type: 'fail', error: errorText(failure) }));
+      }
+      return undefined;
     }
-  }
-  return { error, setError, busy, run };
+  }, []);
+
+  return {
+    error: state.error,
+    errorStale: state.errorStale,
+    setError,
+    busy: state.busy,
+    run,
+  };
 }
 
 export interface ErrorNoticeProps {
@@ -803,6 +831,7 @@ export interface ErrorNoticeProps {
   onDismiss?: () => void;
   compact?: boolean;
   darkGlass?: boolean;
+  stale?: boolean;
 }
 
 export function ErrorNotice({
@@ -818,6 +847,7 @@ export function ErrorNotice({
   onDismiss,
   compact = false,
   darkGlass = false,
+  stale = false,
 }: ErrorNoticeProps) {
   const t = useText();
   const [showDetail, setShowDetail] = useState(false);
@@ -848,7 +878,8 @@ export function ErrorNotice({
 
   return (
     <div
-      className={`inline-error grok-notice-card is-${tone}${compact ? ' is-compact' : ''}${darkGlass ? ' is-dark-glass' : ''}`}
+      className={`inline-error grok-notice-card is-${tone}${compact ? ' is-compact' : ''}${darkGlass ? ' is-dark-glass' : ''}${stale ? ' is-stale' : ''}`}
+      data-stale={stale ? 'true' : undefined}
       role={tone === 'info' || tone === 'success' || tone === 'progress' ? 'status' : 'alert'}
       aria-live="polite"
     >

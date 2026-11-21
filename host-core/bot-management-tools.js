@@ -102,7 +102,7 @@ export function createBotManagementTools({ collaboration, memoRequestId, dataPri
       name: 'manage_bot_learning',
       deferred: true,
       description:
-        "Manage the target Bot's always-on learning service. Actions: status (config, counters and " +
+        "Manage the target Bot's learning service. Actions: status (config, counters and " +
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
         '(start a Host-driven background job and return its job receipt — the job is not finished ' +
         'when the call returns; poll status for the outcome), cancel (jobId or the active job). ' +
@@ -119,13 +119,14 @@ export function createBotManagementTools({ collaboration, memoRequestId, dataPri
         config: {
           type: 'object',
           additionalProperties: false,
-          description: 'Learning settings with CAS: positive review intervals, curator cadence, budget, reviewModelRef, curatorModelRef. Null model refs follow the Bot model; explicit refs must be configured and usable on this Host.',
+          description: 'Learning settings with CAS, including automatic review, review intervals, curator cadence, budget, reviewModelRef, and curatorModelRef. Null model refs follow the Bot model. Explicit refs must be configured and usable on this Host.',
           properties: {
             reviewModelRef: { type: ['string', 'null'] },
             curatorModelRef: { type: ['string', 'null'] },
             review: {
               type: 'object', additionalProperties: false,
               properties: {
+                enabled: { type: 'boolean', description: 'Whether this Bot runs automatic idle reviews for memory and skills.' },
                 memoryEvery: { type: 'integer', minimum: 1, maximum: 10_000 },
                 skillEvery: { type: 'integer', minimum: 1, maximum: 10_000 },
               },

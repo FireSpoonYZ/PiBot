@@ -17,10 +17,10 @@ PiBot 在 Bot 所在的 Host 执行模型和工具。Center 协调学习作业�
 
 ## 空闲触发、抢占让路与计数恢复
 
-- Bot 学习常开，涵盖主会话回合与委派的 Scope 工作回合。回合完成后需经过 **15 秒空闲静置窗口**（无运行回合且队列为空）才向 Center 提交会话增量快照并启动后台 `review`。
+- 自动反思默认开启，可在 Bot 的「技能」设置中关闭。关闭会取消当前 Bot 正在运行的自动复盘。开启时，主会话和委派的 Scope 工作回合完成后，Host 等待 **15 秒空闲静置窗口**（无运行回合且队列为空），再向 Center 提交会话增量快照。计数达到阈值后启动后台 `review`。
 - **前台零延迟抢占**：一旦用户发送新消息、新工作回合启动或主动停止 Bot，Host 立即取消空闲静置计时器并中断正在运行的自动反思作业；若自动 `review` 尚未产生技能或记忆写入即被取消/中断，Center 自动恢复已扣除的轮次与工具步计数，待下次空闲窗口重新复盘。
 - 空闲反思期间，聊天底部与顶栏精灵头像会展示平静的思考/翻阅/记录动画，输入框保持正常发送态；当实际习得或更新了技能/记忆时，精灵短暂展示得意反馈并弹出可点击摘要条直达「✨ 已学技能」；若无新内容保存则静默收起。
-- `manage_bot_learning` 支持查看状态、调整间隔（默认 `memoryEvery=10`、`skillEvery=10`）与过期阈值、开关 `consolidate`、指定模型、手动运行及取消单次作业。`reviewModelRef` 和 `curatorModelRef` 为 `null` 时跟随 Bot 当前有效模型。
+- `manage_bot_learning` 支持查看状态、通过 `review.enabled` 开关自动反思、调整间隔（默认 `memoryEvery=10`、`skillEvery=10`）与过期阈值、开关 `consolidate`、指定模型、手动运行及取消单次作业。`reviewModelRef` 和 `curatorModelRef` 为 `null` 时跟随 Bot 当前有效模型。
 - 手动 `learn` 可通过 `sources` 提供本地文件、目录或 HTTP(S) URL。网页读取使用 Bot 已获授权的 Webfox 能力。来源文件的访问限制见内置管理 Skill 的 `references/learning.md`。
 
 ## 管理接口与部署

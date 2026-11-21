@@ -13,12 +13,14 @@
 // MIT License — Copyright (c) 2026 Lovecast Inc.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import WebSocket from 'ws';
 import {
   buildChromiumLaunchArgs,
   isolateChildBrowserEnvironment,
 } from './desktop-discovery.js';
 import { browserError, DESKTOP_BROWSER_DEFAULT_VIEWPORT } from './desktop-policy.js';
+import { readWindowsDevToolsEndpoint, verifyWindowsDevToolsOwner } from './desktop-windows-endpoint.js';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 25_000;
@@ -613,7 +615,7 @@ function waitForChildExit(child, timeoutMs) {
   });
 }
 
-function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr }) {
+function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoint }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(browserError('CANCELLED', 'Chromium startup aborted.', { outcome: 'not-sent' }));
@@ -621,8 +623,15 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr }) {
     }
 
     let settled = false;
+    let checking = false;
+    let cleanExit = child.exitCode === 0 && !child.signalCode;
+    let pollTimer;
+    const verification = new AbortController();
+    const deadline = Date.now() + timeoutMs;
     const cleanup = () => {
       clearTimeout(timer);
+      clearTimeout(pollTimer);
+      verification.abort();
       if (signal) signal.removeEventListener('abort', onAbort);
       child.stderr?.off('data', onStderr);
       child.off('error', onError);
@@ -643,12 +652,39 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr }) {
       resolve(url);
     };
 
-    const checkStderr = () => {
+    const checkStderr = async () => {
+      if (checking || settled) return;
+      clearTimeout(pollTimer);
+      checking = true;
       try {
-        const url = parseDevToolsListeningUrl(getStderr());
-        if (url) succeed(url);
+        let url = parseDevToolsListeningUrl(getStderr());
+        let fromProfile = false;
+        if (!url && windowsEndpoint && cleanExit) {
+          if (windowsEndpoint.baselineError) throw windowsEndpoint.baselineError;
+          const record = await windowsEndpoint.readEndpoint(windowsEndpoint.profilePath);
+          if (record && record.contents !== windowsEndpoint.baseline?.contents
+              && record.mtimeMs >= windowsEndpoint.startedAt) {
+            url = parseLoopbackDevToolsUrl(record.url);
+            fromProfile = true;
+          }
+        }
+        if (url && !settled) {
+          if (fromProfile) {
+            await windowsEndpoint.verifyOwner({
+              url, executablePath: windowsEndpoint.executablePath, nonce: windowsEndpoint.nonce,
+              signal: verification.signal, timeoutMs: Math.max(1, deadline - Date.now()),
+            });
+          }
+          if (!settled) succeed(url);
+        }
       } catch (err) {
         fail(err);
+      } finally {
+        checking = false;
+        if (!settled && windowsEndpoint && cleanExit) {
+          pollTimer = setTimeout(checkStderr, 50);
+          pollTimer.unref?.();
+        }
       }
     };
 
@@ -671,6 +707,14 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr }) {
         );
         return;
       }
+      // Elevated Chrome may hand off to a de-elevated browser with the same
+      // arguments. Inherited stderr is trusted; profile-file endpoints require
+      // independent listener ownership proof before connecting.
+      if (windowsEndpoint && code === 0 && !exitSignal) {
+        cleanExit = true;
+        void checkStderr();
+        return;
+      }
       fail(
         browserError(
           'BROWSER_START_FAILED',
@@ -680,15 +724,18 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr }) {
     };
 
     const timer = setTimeout(() => {
-      fail(browserError('BROWSER_TIMEOUT', 'Timed out waiting for Chromium DevTools startup.'));
+      fail(browserError('BROWSER_TIMEOUT', windowsEndpoint?.baseline
+        ? 'Timed out waiting for a new Chromium DevTools endpoint. An existing browser may still be using this Bot profile; close that browser before retrying.'
+        : 'Timed out waiting for Chromium DevTools startup.'));
     }, timeoutMs);
-    timer.unref?.();
+    if (!windowsEndpoint) timer.unref?.();
 
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     child.stderr?.on('data', onStderr);
     child.once('error', onError);
     child.once('exit', onExit);
-    checkStderr();
+    if (child.exitCode !== null || child.signalCode !== null) onExit(child.exitCode, child.signalCode);
+    if (!settled) void checkStderr();
   });
 }
 
@@ -708,6 +755,8 @@ export async function launchDesktopChromium({
   signal = undefined,
   spawnImpl = spawn,
   createWebSocket = undefined,
+  readWindowsEndpoint = readWindowsDevToolsEndpoint,
+  verifyWindowsOwner = verifyWindowsDevToolsOwner,
 } = {}) {
   if (signal?.aborted) {
     throw browserError('CANCELLED', 'Chromium launch aborted.', { outcome: 'not-sent' });
@@ -719,6 +768,23 @@ export async function launchDesktopChromium({
     viewport,
     platform,
   });
+  const windowsLoopback = platform === 'win32' && transport === 'loopback';
+  const startupDeadline = Date.now() + startupTimeoutMs;
+  const nonce = windowsLoopback ? randomBytes(32).toString('hex') : null;
+  let baseline = null;
+  let baselineError = null;
+  if (windowsLoopback) {
+    try { baseline = await readWindowsEndpoint(profilePath); } catch (error) { baselineError = error; }
+  }
+  const startedAt = Date.now();
+  if (windowsLoopback) args.unshift(`--pibot-launch-nonce=${nonce}`);
+  if (signal?.aborted) throw browserError('CANCELLED', 'Chromium launch aborted.', { outcome: 'not-sent' });
+  const remainingStartupMs = () => {
+    const remaining = startupDeadline - Date.now();
+    if (remaining <= 0) throw browserError('BROWSER_TIMEOUT', 'Timed out waiting for Chromium DevTools startup.');
+    return remaining;
+  };
+  remainingStartupMs();
   const childEnv = isolateChildBrowserEnvironment(env);
   const stdio =
     transport === 'pipe'
@@ -757,8 +823,8 @@ export async function launchDesktopChromium({
     spawnError = err;
     cdpTransport?.close();
   });
-  child.on('exit', () => {
-    cdpTransport?.close();
+  child.on('exit', (code, exitSignal) => {
+    if (!(windowsLoopback && code === 0 && !exitSignal)) cdpTransport?.close();
   });
 
   const close = async () => {
@@ -801,15 +867,22 @@ export async function launchDesktopChromium({
       cdpTransport = new PipeCdpTransport(writePipe, readPipe);
     } else {
       const wsUrl = await waitForLoopbackUrl(child, {
-        timeoutMs: startupTimeoutMs,
+        timeoutMs: remainingStartupMs(),
         signal,
         getStderr: () => stderrTail,
+        windowsEndpoint: windowsLoopback ? {
+          profilePath, executablePath, nonce, baseline, baselineError, startedAt,
+          readEndpoint: readWindowsEndpoint, verifyOwner: verifyWindowsOwner,
+        } : null,
       });
       cdpTransport = await LoopbackWebSocketCdpTransport.connect(wsUrl, {
-        timeoutMs: startupTimeoutMs,
+        timeoutMs: remainingStartupMs(),
         signal,
         ...(createWebSocket ? { createWebSocket } : {}),
       });
+      if (spawnError || (child.exitCode !== null && !(windowsLoopback && child.exitCode === 0)) || child.signalCode !== null) {
+        throw browserError('BROWSER_START_FAILED', 'Chromium exited while connecting to DevTools.');
+      }
     }
 
     client = new CdpClient(cdpTransport, { defaultTimeoutMs: commandTimeoutMs });
@@ -817,7 +890,7 @@ export async function launchDesktopChromium({
     const browserVersion = await client.send(
       'Browser.getVersion',
       {},
-      { timeoutMs: startupTimeoutMs, signal }
+      { timeoutMs: remainingStartupMs(), signal }
     );
 
     return {

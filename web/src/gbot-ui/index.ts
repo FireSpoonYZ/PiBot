@@ -21,8 +21,31 @@ export { useScopeConversations } from './useScopeConversations';
 export type {
   ScopeConversation,
   ScopeConversationSource,
+  UseScopeConversationsOptions,
   UseScopeConversationsResult,
 } from './useScopeConversations';
+export {
+  ACTIVE_CENTER_URL_STORAGE_KEY,
+  SCOPE_CONVERSATIONS_CACHE_KEY_PREFIX,
+  SCOPE_CONVERSATIONS_CACHE_VERSION,
+  normalizeCenterUrlOrigin,
+  normalizePartitionKey,
+  readActiveCenterUrlCache,
+  readCachedScopeConversations,
+  readInitialCenterPartitionKey,
+  readScopeConversationsCacheEntry,
+  removeCachedScopeConversation,
+  scopeConversationsCacheKey,
+  writeActiveCenterUrlCache,
+  writeCachedScopeConversations,
+} from './scopeCache';
+export type {
+  CachedScopeConversation,
+  ReadInitialCenterPartitionKeyOptions,
+  ScopeCacheStorage,
+  ScopeConversationCacheInput,
+  ScopeConversationsCacheEntry,
+} from './scopeCache';
 export {
   ConversationChatHeader,
   ConversationMessage,

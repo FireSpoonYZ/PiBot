@@ -983,11 +983,15 @@ a.ca-btn:focus {
 }
 
 .ca-dialog-content.is-modal {
-  top: 50%;
+  top: calc(var(--top, env(safe-area-inset-top, 0px)) + min(12vh, 88px));
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   width: min(540px, calc(100vw - var(--space-6, 24px)));
-  max-height: calc(92dvh - var(--top, env(safe-area-inset-top, 0px)) - var(--bottom, env(safe-area-inset-bottom, 0px)));
+  max-height: calc(
+    100dvh - var(--ime-bottom, 0px) - var(--top, env(safe-area-inset-top, 0px)) -
+    max(var(--bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px), 0px) -
+    min(12vh, 88px) - var(--space-6, 24px)
+  );
   border-radius: var(--radius-md, 12px);
 }
 
@@ -1047,7 +1051,11 @@ a.ca-btn:focus {
 }
 
 .ca-dialog-content.is-drawer > .ca-dialog-body {
-  padding-bottom: calc(var(--space-4, 16px) + var(--bottom, env(safe-area-inset-bottom, 0px)));
+  padding-bottom: calc(
+    var(--space-4, 16px) +
+    max(var(--bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px), 0px) +
+    var(--ime-bottom, 0px)
+  );
 }
 
 /* QR box */
@@ -2542,5 +2550,95 @@ a.ca-btn:focus {
   .ca-google-filter-select {
     flex: 1;
     max-width: none;
+  }
+}
+
+/* Keep-alive tab panes, subtle SWR refresh indicator & fixed-height skeletons */
+.ca-tab-pane {
+  position: relative;
+}
+
+.ca-tab-pane.is-hidden {
+  display: none;
+}
+
+@keyframes ca-refresh-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.ca-refresh-bar {
+  position: absolute;
+  top: -8px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: var(--radius-full, 999px);
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  background: color-mix(in srgb, var(--ca-accent) 16%, transparent);
+  transition: opacity var(--dur-fast, 150ms) ease;
+}
+
+.ca-refresh-bar.is-active {
+  opacity: 1;
+}
+
+.ca-refresh-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 34%;
+  border-radius: inherit;
+  background: var(--ca-accent);
+  animation: ca-refresh-slide 1.2s ease-in-out infinite;
+}
+
+.ca-skeleton-card-main {
+  padding: 2px 2px;
+}
+
+.ca-skeleton-subbar {
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--ca-border);
+  background: var(--ca-surface-2);
+}
+
+.ca-skeleton-card .ls-skeleton-row.is-settings {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.ca-skeleton-card .ls-skeleton-row.is-settings + .ls-skeleton-row.is-settings::before {
+  left: 0;
+  background: var(--ca-border);
+}
+
+.ca-remove-error-slot {
+  margin-bottom: var(--space-2, 8px);
+}
+
+.ca-remove-error-slot .grok-notice-card.inline-error {
+  margin: 0;
+}
+
+.ca-inline-error-slot .ca-error-text {
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ca-refresh-bar {
+    transition: none;
+  }
+
+  .ca-refresh-bar::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.65;
   }
 }

@@ -11,9 +11,11 @@ import { openBotManagement } from '../../center-server/bot-management.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 import { runLearningJob } from '../../center-server/learning-engine/index.js';
 import { openLearningService } from '../../center-server/learning/index.js';
+import { openOperations } from '../../center-server/operations/index.js';
 import { openPackageManager } from '../../center-server/packages/index.js';
 import { openSkillManager } from '../../center-server/skills/index.js';
 import { createBotLearning } from '../../host-core/bot-learning.js';
+import { createBotManagementTools } from '../../host-core/bot-management-tools.js';
 import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import { normalizeSkillReviewInput } from '../../host-core/skill-review-protocol.js';
 
@@ -664,8 +666,112 @@ test('center learning defaults consolidate=false and restores automatic review c
   );
 });
 
+test('automatic review can be disabled per Bot through the learning tool or authorized MCP', async () => {
+  const runs = [];
+  const runJob = async ({ mode, config }, { signal }) => {
+    runs.push({ mode, automatic: config.automatic });
+    if (runs.length === 1) {
+      await new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }
+    return { summary: 'Done.' };
+  };
+  await withSkillHarness(async ({ dataRoot, store, getSkills, learning }) => {
+    const target = { deviceId: 'dev-1', botId: 'bot-a' };
+    using legacy = new DatabaseSync(path.join(dataRoot, 'learning.sqlite'));
+    legacy.prepare('INSERT INTO learning_settings VALUES (?, ?, ?, ?)').run(
+      target.deviceId, target.botId, JSON.stringify({ review: { memoryEvery: 2, skillEvery: 4 } }), 1,
+    );
+    const status = () => learning.execute(target, { action: 'status' });
+    assert.equal((await status()).settings.review.enabled, true);
+    const start = {
+      action: 'start', mode: 'review', automatic: true, requestId: 'review-before-disable',
+      turns: 2, iterations: 4,
+      snapshot: {
+        model: 'gpt-test',
+        sessionId: 'conv-1',
+        span: { afterEntryId: 0, throughEntryId: 4 },
+        memory: { enabled: true, canRead: true, canWrite: true, mode: 'read-write' },
+      },
+    };
+    const active = await learning.execute(target, start);
+    assert.ok(active.jobId);
+
+    const driver = createBotLearning({
+      host: { deviceId: target.deviceId, getBot: () => target },
+      getCenterClient: () => ({
+        botLearning: (deviceId, botId, input) => learning.execute({ deviceId, botId }, input),
+      }),
+    });
+    try {
+      const tool = createBotManagementTools({
+        collaboration: { manageBotLearning: ({ botId, input }) => driver.manageBotLearning(botId, input) },
+        memoRequestId: () => 'disable-auto-review',
+      }).find(tool => tool.name === 'manage_bot_learning');
+      assert.equal(tool.properties.config.properties.review.properties.enabled.type, 'boolean');
+      const patch = { ...target, expectedRevision: 1, config: { review: { enabled: false } } };
+      const operations = openOperations({
+        store,
+        bridge: { call: () => assert.fail('Configuring learning must not require a Host bridge call') },
+        owner: (method, route, { params, body }) => {
+          assert.equal(method, 'POST');
+          assert.equal(route, '/api/devices/:deviceId/bots/:botId/learning');
+          return learning.execute(params, body);
+        },
+      });
+      const oauth = { kind: 'oauth', clientId: 'learning-settings' };
+      const configureMcp = (permission, args) => operations.call({
+        ...oauth, scopes: [`pibot:capabilities:${permission}`],
+      }, 'capability_learning_configure', args);
+      await assert.rejects(configureMcp('read', patch), { code: 'FORBIDDEN' });
+      await assert.rejects(configureMcp('write', { ...patch, config: { review: { enabled: 'false' } } }),
+        { code: 'INVALID_ARGUMENT' });
+      const disabled = await tool.run({ ...patch, action: 'configure' }, target, null, {}, {});
+      assert.deepEqual(disabled.settings.review, { enabled: false, memoryEvery: 2, skillEvery: 4 });
+      assert.equal((await learning.execute(target, { action: 'next', jobId: active.jobId })).status, 'cancelled');
+      assert.equal((await learning.execute({ ...target, botId: 'bot-b' }, { action: 'status' })).settings.review.enabled, true);
+
+      const newTurn = {
+        ...start, requestId: 'review-while-disabled',
+        snapshot: { ...start.snapshot, span: { afterEntryId: 4, throughEntryId: 8 } },
+      };
+      const beforeDisabledStart = await status();
+      assert.deepEqual(await learning.execute(target, newTurn), { status: 'deferred', jobId: null, reason: 'disabled' });
+      assert.deepEqual((await status()).counters, beforeDisabledStart.counters);
+
+      for (const [mode, automatic] of [['review', false], ['curate', true]]) {
+        const receipt = await learning.execute(target, { ...start, mode, automatic, requestId: `while-off-${mode}` });
+        assert.ok(receipt.jobId);
+        assert.equal((await learning.execute(target, { action: 'next', jobId: receipt.jobId })).status, 'completed');
+      }
+      const reopened = await openLearningService({ dataRoot, store, skills: getSkills(), runLearningJob: runJob });
+      try {
+        assert.equal((await reopened.execute(target, { action: 'status' })).settings.review.enabled, false);
+      } finally {
+        await reopened.close();
+      }
+
+      const enabled = await configureMcp('write', {
+        ...target, expectedRevision: disabled.settings.revision, config: { review: { enabled: true } },
+      });
+      assert.deepEqual(enabled.settings.review, { enabled: true, memoryEvery: 2, skillEvery: 4 });
+      const resumed = await learning.execute(target, { ...newTurn, requestId: 'review-after-enable' });
+      assert.ok(resumed.jobId);
+      assert.deepEqual(runs, [
+        { mode: 'review', automatic: true }, { mode: 'review', automatic: false },
+        { mode: 'curate', automatic: true }, { mode: 'review', automatic: true },
+      ]);
+    } finally {
+      await driver.close();
+    }
+  }, { runLearningJob: runJob });
+});
+
 test('host bot-learning waits for idle settle, preempts on foreground activity, includes delegated Scope work turns, and emits live mascot states', async () => {
   let botIdle = true;
+  let autoReviewDisabled = true;
+  let snapshotReads = 0;
   const liveStates = [];
   const centerCalls = [];
   const entries = [
@@ -760,7 +866,10 @@ test('host bot-learning waits for idle settle, preempts on foreground activity, 
         centerCalls.push(payload);
         if (payload.action === 'status') {
           return {
-            settings: { reviewModelRef: null, curatorModelRef: null, curator: { minIdleHours: 2 } },
+            settings: {
+              reviewModelRef: null, curatorModelRef: null, curator: { minIdleHours: 2 },
+              ...(autoReviewDisabled ? { review: { enabled: false } } : {}),
+            },
             counters: {
               reviewCursor: activeJobCounter > 0 ? { sessionId: 'conv-1', throughEntryId: 6 } : null,
               jobsCancelled,
@@ -800,9 +909,10 @@ test('host bot-learning waits for idle settle, preempts on foreground activity, 
     getUsableModelRefs: () => new Set(['openai/gpt-test']),
     registry: { install: () => {}, uninstall: () => {} },
     context: {},
-    openPrimaryConversation: async () => ({
-      entries: async () => ({ items: [...entries].reverse(), next: null }),
-    }),
+    openPrimaryConversation: async () => {
+      snapshotReads += 1;
+      return { entries: async () => ({ items: [...entries].reverse(), next: null }) };
+    },
     dropEnvFor: () => {},
     isBotIdle: async () => botIdle,
     onLearningStateChange: (botId, state) => {
@@ -812,6 +922,12 @@ test('host bot-learning waits for idle settle, preempts on foreground activity, 
   });
 
   try {
+    botLearning.noteCompletedSubmission('bot-a', { status: 'done', submissionId: 'sub-1' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(centerCalls.map((call) => call.action), ['status']);
+    assert.equal(snapshotReads, 0, 'disabled automatic review must not build a transcript snapshot');
+    autoReviewDisabled = false;
+
     // 1. Trigger submission, then immediately preempt before the 40ms settle window expires.
     botLearning.noteCompletedSubmission('bot-a', { status: 'done', submissionId: 'sub-1' });
     await new Promise((r) => setTimeout(r, 15));

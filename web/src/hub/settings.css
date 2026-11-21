@@ -15,9 +15,55 @@
 
 .hst-settings .hst-overview:not([hidden]) { display: contents; }
 .hst-settings .hst-overview > * { flex-shrink: 0; }
-.hst-settings .hst-entry-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hst-settings .hst-entry-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.hst-settings .hst-entry-label > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hst-settings .hst-entry-label > .bs-row-sub { max-width: 48%; text-align: end; }
 .hst-settings .hst-device-name > .bs-row-sub { display: block; }
+
+/* 固定尺寸占位与状态徽标槽（S1 / S3） */
+.hst-status-badge-slot { display: inline-flex; align-items: center; justify-content: flex-end; flex: none; }
+.hst-row-sub-slot { display: flex; width: 100%; }
+.hst-row-sub-slot .ls-reserved-slot-inner { overflow-wrap: anywhere; }
+.hst-update-summary-slot { min-width: 60px; align-items: flex-end; text-align: end; }
+.hst-device-status-slot { display: inline-flex; align-items: center; justify-content: flex-end; min-width: 52px; min-height: 22px; flex: none; }
+
+/* 中心管理页保活与重连遮罩（S1） */
+.hst-admin-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hst-admin-body > .grok-subpage-scroll { flex: 1; min-height: 0; }
+.hst-admin-panel-wrap { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.hst-admin-panel-wrap.is-disabled { pointer-events: none; user-select: none; }
+.hst-admin-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-sticky, 10);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-5, 20px) var(--space-4, 16px);
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 62%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+  transition: opacity var(--dur-fast, 150ms) ease;
+}
+.hst-admin-overlay-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: 7px 14px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-surface-2, var(--surface));
+  border: 1px solid var(--color-line, var(--line));
+  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-sm, .8125rem);
+  font-weight: var(--weight-medium, 500);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-scrim) 18%, transparent);
+}
+@keyframes hst-spin { to { transform: rotate(360deg); } }
+.hst-spin { animation: hst-spin 900ms linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .hst-admin-overlay { transition: none; }
+  .hst-spin { animation: none; }
+}
 
 /* Section/Row 外的表单控件与动作行（bs-* 未覆盖的部分） */
 .hst-input-row,
@@ -25,7 +71,7 @@
 .hst-device-row,
 .hst-row-static { position: relative; }
 /* 卡片内 hst 行与 bs-row 之间的分隔线（与 .bs-row + .bs-row::before 同样式） */
-.bs-card :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static) + :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static)::before {
+.bs-card :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static, .ls-skeleton-row) + :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static, .ls-skeleton-row)::before {
   content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--bs-hairline);
 }
 .hst-input-row { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 52px; padding: 10px 14px; }

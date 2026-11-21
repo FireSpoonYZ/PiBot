@@ -1,28 +1,50 @@
 package com.example.launcherprobe;
 
-import android.graphics.Color;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Message;
 import android.os.Process;
 import android.util.Log;
-import android.widget.Toast;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.webkit.ClientCertRequest;
+import android.webkit.HttpAuthHandler;
+import android.webkit.RenderProcessGoneDetail;
+import android.webkit.SafeBrowsingResponse;
+import android.webkit.SslErrorHandler;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.annotation.NonNull;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsAnimationCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.webkit.ScriptHandler;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
+
+import java.util.List;
 
 /**
  * M18 Tauri 界面入口：独立 {@code :tauri_ui} 进程，SDK 退出只结束本进程，
@@ -46,10 +68,13 @@ public class TauriMainActivity extends TauriActivity {
     private volatile boolean resumed;
     private View insetsTarget;
     private WebView activeWebView;
-    private int lastSafeTopDp;
-    private int lastSafeBottomDp;
+    private final WebViewInsetsState insetsState = new WebViewInsetsState();
+    private ScriptHandler documentStartScriptHandler;
+    private boolean documentStartScriptChecked;
+    private boolean documentStartScriptSupported;
     private String launchDeviceId;
     private String launchBotId;
+    private static final String TAG = "TauriMainActivity";
     private static final String TARGET_DEVICE = "assistant_device_id";
     private static final String TARGET_BOT = "assistant_bot_id";
     private static final int LIGHT_BG_COLOR = 0xfffaf9f6;
@@ -93,8 +118,13 @@ public class TauriMainActivity extends TauriActivity {
             controller.setAppearanceLightStatusBars(!appearance.dark);
             controller.setAppearanceLightNavigationBars(!appearance.dark);
         }
-        // edge-to-edge 下窗口底色与前端主背景一致，避免首帧或边缘露白。
+        // edge-to-edge 下窗口底色与前端主背景一致，避免首帧（含首次安装 visibility:hidden）或边缘露白。
+        getWindow().setBackgroundDrawable(new ColorDrawable(bgColor));
         getWindow().getDecorView().setBackgroundColor(bgColor);
+        View content = getWindow().getDecorView().findViewById(android.R.id.content);
+        if (content != null) {
+            content.setBackgroundColor(bgColor);
+        }
         if (activeWebView != null) {
             activeWebView.setBackgroundColor(bgColor);
         }
@@ -176,19 +206,117 @@ public class TauriMainActivity extends TauriActivity {
         });
     }
 
-    private void syncSafeAreaCss() {
-        WebView wv = activeWebView;
-        if (wv == null) return;
-        String js = "if(document.documentElement){"
-                + "document.documentElement.style.setProperty('--safe-area-inset-top','" + lastSafeTopDp + "px');"
-                + "document.documentElement.style.setProperty('--safe-area-inset-bottom','" + lastSafeBottomDp + "px');"
-                + "}";
-        wv.evaluateJavascript(js, null);
+    private float getDisplayDensity(View view) {
+        if (view != null && view.getResources() != null) {
+            return view.getResources().getDisplayMetrics().density;
+        }
+        return getResources().getDisplayMetrics().density;
+    }
+
+    private void removeDocumentStartScript() {
+        ScriptHandler handler = documentStartScriptHandler;
+        documentStartScriptHandler = null;
+        if (handler != null) {
+            try {
+                handler.remove();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Failed to remove previous document-start insets script", e);
+            }
+        }
+    }
+
+    private void updateDocumentStartScript(WebView webView, int topCssPx, int bottomCssPx, int imeBottomCssPx) {
+        if (webView == null || isDestroyed()) return;
+        if (!documentStartScriptChecked) {
+            documentStartScriptChecked = true;
+            try {
+                documentStartScriptSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
+            } catch (RuntimeException e) {
+                documentStartScriptSupported = false;
+                Log.w(TAG, "Failed to probe DOCUMENT_START_SCRIPT support", e);
+            }
+        }
+        if (!documentStartScriptSupported) return;
+        removeDocumentStartScript();
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                String script = WebViewInsetsState.buildDocumentStartScript(topCssPx, bottomCssPx, imeBottomCssPx);
+                documentStartScriptHandler = WebViewCompat.addDocumentStartJavaScript(
+                        webView, script, WebViewInsetsState.ALLOWED_ORIGINS);
+                insetsState.markDocStartRegistered(topCssPx, bottomCssPx, imeBottomCssPx);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Failed to register document-start insets script", e);
+        }
+    }
+
+    private void seedInitialInsets(WebView webView) {
+        if (webView == null) return;
+        if (insetsState.hasInsets()) {
+            if (insetsState.needsDocStartUpdate()) {
+                updateDocumentStartScript(
+                        webView,
+                        insetsState.getSafeTopCssPx(),
+                        insetsState.getSafeBottomCssPx(),
+                        insetsState.getSettledImeBottomCssPx());
+            }
+            return;
+        }
+        View decorView = getWindow().getDecorView();
+        float density = getDisplayDensity(decorView);
+        WindowInsetsCompat rootInsets = decorView != null ? ViewCompat.getRootWindowInsets(decorView) : null;
+        if (rootInsets != null) {
+            Insets bars = rootInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = rootInsets.getInsets(WindowInsetsCompat.Type.ime());
+            int top = WebViewInsetsState.pxToCssPx(bars.top, density);
+            int bottom = WebViewInsetsState.pxToCssPx(bars.bottom, density);
+            int imeBottom = WebViewInsetsState.pxToCssPx(ime.bottom, density);
+            if (insetsState.seedInitialInsets(top, bottom, imeBottom, true)) {
+                updateDocumentStartScript(webView, top, bottom, imeBottom);
+            }
+            return;
+        }
+        try {
+            WindowInsets platformInsets = getWindowManager().getCurrentWindowMetrics().getWindowInsets();
+            WindowInsetsCompat metricsInsets = decorView != null
+                    ? WindowInsetsCompat.toWindowInsetsCompat(platformInsets, decorView)
+                    : WindowInsetsCompat.toWindowInsetsCompat(platformInsets);
+            Insets bars = metricsInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = metricsInsets.getInsets(WindowInsetsCompat.Type.ime());
+            int top = WebViewInsetsState.pxToCssPx(bars.top, density);
+            int bottom = WebViewInsetsState.pxToCssPx(bars.bottom, density);
+            int imeBottom = WebViewInsetsState.pxToCssPx(ime.bottom, density);
+            if (insetsState.seedInitialInsets(top, bottom, imeBottom, false)) {
+                updateDocumentStartScript(webView, top, bottom, imeBottom);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Unable to read initial WindowMetrics insets", e);
+        }
+    }
+
+    private void installInsetsWebViewClient(WebView webView) {
+        WebViewClient existing = webView.getWebViewClient();
+        if (existing instanceof InsetsWebViewClient) return;
+        webView.setWebViewClient(new InsetsWebViewClient(existing));
+    }
+
+    private void reInjectInsetsForPage(WebView webView, String url) {
+        if (webView == null || webView != activeWebView || isDestroyed()) return;
+        if (!WebViewInsetsState.isInjectablePageUrl(url)) return;
+        WebViewInsetsState.PageSyncResult sync = insetsState.onPageReady();
+        if (sync == null) return;
+        webView.evaluateJavascript(
+                WebViewInsetsState.buildInsetsSyncScript(
+                        sync.safeTopCssPx, sync.safeBottomCssPx, sync.imeBottomCssPx, sync.dispatchImeChange),
+                null);
     }
 
     /**
-     * targetSdk 36 全面屏沉浸：WebView 铺满整屏（top=0, bottom=ime.bottom），
-     * 状态栏与手势导航栏安全区通过 CSS 变量单次注入前端，避免原生 padding 与 WebView safe-area 叠加。
+     * targetSdk 36 全面屏沉浸：WebView 铺满整屏（top=0, bottom=0，不再因 IME 弹出压缩 WebView），
+     * 状态栏/导航栏安全区（{@code --safe-area-inset-top/bottom}）与软键盘高度（{@code --ime-bottom}）
+     * 通过单一 CSS 变量通道注入，并借助 {@code WindowInsetsAnimationCompat.Callback} 逐帧同步 IME 动画。
      */
     private void applyContentInsets() {
         View content = getWindow().getDecorView().findViewById(android.R.id.content);
@@ -199,30 +327,121 @@ public class TauriMainActivity extends TauriActivity {
             Insets bars = windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
-            float density = view.getResources().getDisplayMetrics().density;
-            lastSafeTopDp = Math.round(bars.top / Math.max(1f, density));
-            lastSafeBottomDp = ime.bottom > 0 ? 0 : Math.round(bars.bottom / Math.max(1f, density));
-            // 仅在软键盘弹出时让出底部 IME 高度，其余时间 WebView 延伸至状态栏与底部导航栏全屏区域。
-            view.setPadding(bars.left, 0, bars.right, ime.bottom);
-            syncSafeAreaCss();
-            if (activeWebView != null) {
-                activeWebView.postDelayed(this::syncSafeAreaCss, 180);
+            float density = getDisplayDensity(view);
+            int safeTopCssPx = WebViewInsetsState.pxToCssPx(bars.top, density);
+            int safeBottomCssPx = WebViewInsetsState.pxToCssPx(bars.bottom, density);
+            int imeBottomCssPx = WebViewInsetsState.pxToCssPx(ime.bottom, density);
+            // WebView 始终铺满垂直全屏，仅左右让出横屏系统栏/刘海；键盘通过 --ime-bottom 单通道让位。
+            view.setPadding(bars.left, 0, bars.right, 0);
+            WebViewInsetsState.ApplyResult result =
+                    insetsState.onApplyInsets(safeTopCssPx, safeBottomCssPx, imeBottomCssPx);
+            WebView wv = activeWebView;
+            if (wv != null && !isDestroyed()) {
+                if (result.shouldUpdateDocStart) {
+                    updateDocumentStartScript(
+                            wv, result.safeTopCssPx, result.safeBottomCssPx, result.settledImeBottomCssPx);
+                }
+                if (result.shouldSyncFull) {
+                    wv.evaluateJavascript(
+                            WebViewInsetsState.buildInsetsSyncScript(
+                                    result.safeTopCssPx,
+                                    result.safeBottomCssPx,
+                                    result.dispatchedImeBottomCssPx,
+                                    result.dispatchImeChange),
+                            null);
+                } else if (result.shouldSyncImeOnly) {
+                    wv.evaluateJavascript(
+                            WebViewInsetsState.buildImeUpdateScript(result.dispatchedImeBottomCssPx),
+                            null);
+                }
             }
             return windowInsets;
         });
+        ViewCompat.setWindowInsetsAnimationCallback(
+                content,
+                new WindowInsetsAnimationCompat.Callback(
+                        WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                    @Override public void onPrepare(@NonNull WindowInsetsAnimationCompat animation) {
+                        if ((animation.getTypeMask() & WindowInsetsCompat.Type.ime()) != 0) {
+                            insetsState.onImeAnimationPrepare(animation);
+                        }
+                    }
+
+                    @NonNull @Override public WindowInsetsCompat onProgress(
+                            @NonNull WindowInsetsCompat insets,
+                            @NonNull List<WindowInsetsAnimationCompat> runningAnimations) {
+                        boolean imeRunning = insetsState.isImeAnimating();
+                        if (!imeRunning) {
+                            for (WindowInsetsAnimationCompat anim : runningAnimations) {
+                                if ((anim.getTypeMask() & WindowInsetsCompat.Type.ime()) != 0) {
+                                    imeRunning = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (imeRunning) {
+                            int imePx = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom;
+                            int imeCssPx = WebViewInsetsState.pxToCssPx(imePx, getDisplayDensity(content));
+                            WebViewInsetsState.ImeFrameResult frame =
+                                    insetsState.onImeAnimationProgress(imeCssPx);
+                            WebView wv = activeWebView;
+                            if (frame.shouldDispatchIme && wv != null && !isDestroyed()) {
+                                wv.evaluateJavascript(
+                                        WebViewInsetsState.buildImeUpdateScript(frame.imeBottomCssPx),
+                                        null);
+                            }
+                        }
+                        return insets;
+                    }
+
+                    @Override public void onEnd(@NonNull WindowInsetsAnimationCompat animation) {
+                        if ((animation.getTypeMask() & WindowInsetsCompat.Type.ime()) == 0) return;
+                        WindowInsetsCompat rootInsets = ViewCompat.getRootWindowInsets(content);
+                        Integer rootImeCssPx = rootInsets != null
+                                ? WebViewInsetsState.pxToCssPx(
+                                        rootInsets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
+                                        getDisplayDensity(content))
+                                : null;
+                        WebViewInsetsState.ImeFrameResult settled =
+                                insetsState.onImeAnimationEnd(animation, rootImeCssPx);
+                        WebView wv = activeWebView;
+                        if (wv != null && !isDestroyed()) {
+                            if (settled.shouldUpdateDocStart) {
+                                updateDocumentStartScript(
+                                        wv,
+                                        settled.safeTopCssPx,
+                                        settled.safeBottomCssPx,
+                                        settled.imeBottomCssPx);
+                            }
+                            if (settled.shouldDispatchIme) {
+                                wv.evaluateJavascript(
+                                        WebViewInsetsState.buildImeUpdateScript(settled.imeBottomCssPx),
+                                        null);
+                            }
+                        }
+                    }
+                });
         ViewCompat.requestApplyInsets(content);
     }
 
     @Override public void onWebViewCreate(WebView webView) {
         super.onWebViewCreate(webView);
+        removeDocumentStartScript();
+        insetsState.resetForNewWebView();
         activeWebView = webView;
-        AppAppearance appearance = AppAppearance.read(this);
-        webView.setBackgroundColor(appearance.dark ? DARK_BG_COLOR : LIGHT_BG_COLOR);
+        applyAppearance();
         // 仅 debug 构建开启 WebView 检查；release 保持 false，不放松 CSP/Origin/TLS。
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
-        // 此回调早于 Rust 的 setContentView（见上），post 到当前调用栈之后再绑定真实内容容器。
-        webView.post(this::applyContentInsets);
-        webView.postDelayed(this::syncSafeAreaCss, 350);
+        seedInitialInsets(webView);
+        // 此回调早于 wry 的 setWebViewClient 与 setContentView，post 到队列首项（早于 loadUrlMainThread）
+        // 包装 WebViewClient 并绑定内容容器 insets 监听。
+        webView.post(() -> {
+            if (activeWebView != webView || isDestroyed()) return;
+            installInsetsWebViewClient(webView);
+            applyContentInsets();
+            seedInitialInsets(webView);
+            applyAppearance();
+        });
     }
 
     @Override protected void onResume() {
@@ -234,6 +453,9 @@ public class TauriMainActivity extends TauriActivity {
     @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         applyAppearance();
+        if (insetsTarget != null) {
+            ViewCompat.requestApplyInsets(insetsTarget);
+        }
     }
 
     @Override protected void onPause() {
@@ -243,6 +465,13 @@ public class TauriMainActivity extends TauriActivity {
 
     @Override protected void onDestroy() {
         resumed = false;
+        removeDocumentStartScript();
+        if (insetsTarget != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(insetsTarget, null);
+            ViewCompat.setWindowInsetsAnimationCallback(insetsTarget, null);
+            insetsTarget = null;
+        }
+        insetsState.clearAnimations();
         activeWebView = null;
         unregisterReceiver(clientEvents);
         super.onDestroy();
@@ -255,5 +484,170 @@ public class TauriMainActivity extends TauriActivity {
     /** 插件原生前台校验：真实 resumed 且未结束/销毁。 */
     public boolean isUiResumed() {
         return resumed && !isFinishing() && !isDestroyed();
+    }
+
+    /**
+     * 透明代理 Tauri 的 {@code RustWebViewClient}，保留所有拦截/路由/IPC URL 跟踪能力，
+     * 并在页面提交绘制与加载完成时重注入安全区与 IME CSS 变量，防止页面重载后丢失。
+     */
+    private final class InsetsWebViewClient extends WebViewClient {
+        private final WebViewClient delegate;
+
+        InsetsWebViewClient(WebViewClient delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            return delegate != null
+                    ? delegate.shouldOverrideUrlLoading(view, request)
+                    : super.shouldOverrideUrlLoading(view, request);
+        }
+
+        @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+            if (view == activeWebView && WebViewInsetsState.isInjectablePageUrl(url)) {
+                insetsState.onPageStarted();
+            }
+            if (delegate != null) {
+                delegate.onPageStarted(view, url, favicon);
+            } else {
+                super.onPageStarted(view, url, favicon);
+            }
+        }
+
+        @Override public void onPageCommitVisible(WebView view, String url) {
+            if (delegate != null) {
+                delegate.onPageCommitVisible(view, url);
+            } else {
+                super.onPageCommitVisible(view, url);
+            }
+            reInjectInsetsForPage(view, url);
+        }
+
+        @Override public void onPageFinished(WebView view, String url) {
+            if (delegate != null) {
+                delegate.onPageFinished(view, url);
+            } else {
+                super.onPageFinished(view, url);
+            }
+            reInjectInsetsForPage(view, url);
+        }
+
+        @Override public void onLoadResource(WebView view, String url) {
+            if (delegate != null) {
+                delegate.onLoadResource(view, url);
+            } else {
+                super.onLoadResource(view, url);
+            }
+        }
+
+        @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            return delegate != null
+                    ? delegate.shouldInterceptRequest(view, request)
+                    : super.shouldInterceptRequest(view, request);
+        }
+
+        @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            if (delegate != null) {
+                delegate.onReceivedError(view, request, error);
+            } else {
+                super.onReceivedError(view, request, error);
+            }
+        }
+
+        @Override public void onReceivedHttpError(
+                WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
+            if (delegate != null) {
+                delegate.onReceivedHttpError(view, request, errorResponse);
+            } else {
+                super.onReceivedHttpError(view, request, errorResponse);
+            }
+        }
+
+        @Override public void onFormResubmission(WebView view, Message dontResend, Message resend) {
+            if (delegate != null) {
+                delegate.onFormResubmission(view, dontResend, resend);
+            } else {
+                super.onFormResubmission(view, dontResend, resend);
+            }
+        }
+
+        @Override public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+            if (delegate != null) {
+                delegate.doUpdateVisitedHistory(view, url, isReload);
+            } else {
+                super.doUpdateVisitedHistory(view, url, isReload);
+            }
+        }
+
+        @Override public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+            if (delegate != null) {
+                delegate.onReceivedSslError(view, handler, error);
+            } else {
+                super.onReceivedSslError(view, handler, error);
+            }
+        }
+
+        @Override public void onReceivedClientCertRequest(WebView view, ClientCertRequest request) {
+            if (delegate != null) {
+                delegate.onReceivedClientCertRequest(view, request);
+            } else {
+                super.onReceivedClientCertRequest(view, request);
+            }
+        }
+
+        @Override public void onReceivedHttpAuthRequest(
+                WebView view, HttpAuthHandler handler, String host, String realm) {
+            if (delegate != null) {
+                delegate.onReceivedHttpAuthRequest(view, handler, host, realm);
+            } else {
+                super.onReceivedHttpAuthRequest(view, handler, host, realm);
+            }
+        }
+
+        @Override public boolean shouldOverrideKeyEvent(WebView view, KeyEvent event) {
+            return delegate != null
+                    ? delegate.shouldOverrideKeyEvent(view, event)
+                    : super.shouldOverrideKeyEvent(view, event);
+        }
+
+        @Override public void onUnhandledKeyEvent(WebView view, KeyEvent event) {
+            if (delegate != null) {
+                delegate.onUnhandledKeyEvent(view, event);
+            } else {
+                super.onUnhandledKeyEvent(view, event);
+            }
+        }
+
+        @Override public void onScaleChanged(WebView view, float oldScale, float newScale) {
+            if (delegate != null) {
+                delegate.onScaleChanged(view, oldScale, newScale);
+            } else {
+                super.onScaleChanged(view, oldScale, newScale);
+            }
+        }
+
+        @Override public void onReceivedLoginRequest(
+                WebView view, String realm, String account, String args) {
+            if (delegate != null) {
+                delegate.onReceivedLoginRequest(view, realm, account, args);
+            } else {
+                super.onReceivedLoginRequest(view, realm, account, args);
+            }
+        }
+
+        @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+            return delegate != null
+                    ? delegate.onRenderProcessGone(view, detail)
+                    : super.onRenderProcessGone(view, detail);
+        }
+
+        @Override public void onSafeBrowsingHit(
+                WebView view, WebResourceRequest request, int threatType, SafeBrowsingResponse callback) {
+            if (delegate != null) {
+                delegate.onSafeBrowsingHit(view, request, threatType, callback);
+            } else {
+                super.onSafeBrowsingHit(view, request, threatType, callback);
+            }
+        }
     }
 }

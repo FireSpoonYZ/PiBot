@@ -10,6 +10,7 @@ import {
   ExternalLink,
   Globe,
   LayoutDashboard,
+  Loader2,
   PanelLeft,
   Server,
   Settings,
@@ -29,7 +30,10 @@ import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem } from '../../../host-core/index.js';
 import { CenterAdminPanel, type CenterTransport } from '../center-admin';
-import { ErrorNotice, useAction, useCollapseToolOutput, useHideToolOutput, useText } from '../ui';
+import { humanizeError, useAction, useCollapseToolOutput, useHideToolOutput, useText } from '../ui';
+import { useNotice, type NoticeTone } from '../notice';
+import { useConnectionPhaseContext } from '../connection';
+import { LabelStack, ReservedSlot, Skeleton, SkeletonRow } from '../layout';
 import { PlatformLogoIcon, uuid } from '../hub/shared';
 import { Badge, Disclosure, Row, Section } from '../bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from '../ClientUpdateSection';
@@ -55,6 +59,22 @@ export function SettingsCenterAdminScreen({
 }: SettingsCenterAdminScreenProps) {
   const t = useText();
   const centerConn = useCenterConnection();
+  const [everMountedAdmin, setEverMountedAdmin] = useState(() => centerConn.ready || centerConn.displayReady);
+
+  useEffect(() => {
+    if (centerConn.ready || centerConn.displayReady) {
+      setEverMountedAdmin(true);
+    } else if (!centerConn.hasSavedCenter && !centerConn.connecting && !centerConn.reconnecting) {
+      setEverMountedAdmin(false);
+    }
+  }, [centerConn.ready, centerConn.displayReady, centerConn.hasSavedCenter, centerConn.connecting, centerConn.reconnecting]);
+
+  // 仅用于界面展示保活：曾经就绪过或 displayReady 为真时不卸载面板，业务操作仍严格以 centerConn.ready 为准。
+  const showAdminPanel =
+    centerConn.ready ||
+    centerConn.displayReady ||
+    (everMountedAdmin && (centerConn.hasSavedCenter || centerConn.connecting || centerConn.reconnecting));
+  const isReconnectingOverlay = showAdminPanel && !centerConn.ready;
 
   return (
     <main className="grok-subpage grok-page-enter hst-settings" aria-label={t('中心管理', 'Center Admin')}>
@@ -68,11 +88,14 @@ export function SettingsCenterAdminScreen({
           <ArrowLeft size={20} />
         </button>
         <h2 className="grok-subpage-header-title">{t('中心管理', 'Center Admin')}</h2>
-        {centerConn.ready ? (
+        {showAdminPanel ? (
           <button
             type="button"
             className="grok-floating-circle-btn"
-            onClick={() => void centerConn.openManagement()}
+            disabled={!centerConn.ready}
+            onClick={() => {
+              if (centerConn.ready) void centerConn.openManagement();
+            }}
             aria-label={t('在浏览器打开中心管理', 'Open center admin in browser')}
             title={t('在浏览器打开', 'Open in browser')}
           >
@@ -82,35 +105,56 @@ export function SettingsCenterAdminScreen({
           <span className="grok-topbar-spacer" aria-hidden="true" />
         )}
       </header>
-      <div className="grok-subpage-scroll">
-        {!centerConn.ready ? (
-          <div className="hst-form">
-            <Section>
-              <div className="hst-row-static">
-                <span className="bs-row-sub">
-                  {t('尚未连接到中心。请先绑定并连接中心，即可免密管理服务商、模型、能力目录、设备与全局密码库。',
-                    'Not connected to the center yet. Connect first to manage providers, models, capabilities, devices, and vault without a password.')}
-                </span>
-              </div>
-              <div className="hst-actions">
-                <button type="button" className="hst-btn is-primary" onClick={onOpenCenterSettings}>
-                  {t('前往中心连接', 'Connect to center')}
-                </button>
-              </div>
-            </Section>
+      <div className="hst-admin-body">
+        <div className="grok-subpage-scroll" aria-busy={isReconnectingOverlay || undefined}>
+          {!showAdminPanel ? (
+            <div className="hst-form">
+              <Section>
+                <div className="hst-row-static">
+                  <span className="bs-row-sub">
+                    {t('尚未连接到中心。请先绑定并连接中心，即可免密管理服务商、模型、能力目录、设备与全局密码库。',
+                      'Not connected to the center yet. Connect first to manage providers, models, capabilities, devices, and vault without a password.')}
+                  </span>
+                </div>
+                <div className="hst-actions">
+                  <button type="button" className="hst-btn is-primary" onClick={onOpenCenterSettings}>
+                    {t('前往中心连接', 'Connect to center')}
+                  </button>
+                </div>
+              </Section>
+            </div>
+          ) : (
+            <div
+              className={`hst-admin-panel-wrap${isReconnectingOverlay ? ' is-disabled' : ''}`}
+              aria-disabled={isReconnectingOverlay || undefined}
+            >
+              <CenterAdminPanel
+                transport={transport}
+                embedded
+                hideTopbarExternal
+                initialTab={initialTab}
+                centerUrl={centerConn.status?.centerUrl || centerConn.saved?.url}
+                onOpenExternal={() => {
+                  if (centerConn.ready) void centerConn.openManagement();
+                }}
+                onOpenExternalUrl={url => openCenterUrl(url)}
+                onConfigureBot={onConfigureBot}
+                onStartGoogleSetupWizard={onStartGoogleSetupWizard}
+              />
+            </div>
+          )}
+        </div>
+        {isReconnectingOverlay && (
+          <div className="hst-admin-overlay" role="status" aria-live="polite">
+            <div className="hst-admin-overlay-pill">
+              <Loader2 size={15} className="hst-spin" aria-hidden="true" />
+              <span>
+                {centerConn.connecting || centerConn.reconnecting
+                  ? t('正在重新连接中心…', 'Reconnecting to center…')
+                  : t('中心连接暂不可用，等待恢复…', 'Center connection unavailable, waiting to reconnect…')}
+              </span>
+            </div>
           </div>
-        ) : (
-          <CenterAdminPanel
-            transport={transport}
-            embedded
-            hideTopbarExternal
-            initialTab={initialTab}
-            centerUrl={centerConn.status?.centerUrl || centerConn.saved?.url}
-            onOpenExternal={() => void centerConn.openManagement()}
-            onOpenExternalUrl={url => openCenterUrl(url)}
-            onConfigureBot={onConfigureBot}
-            onStartGoogleSetupWizard={onStartGoogleSetupWizard}
-          />
         )}
       </div>
     </main>
@@ -165,12 +209,18 @@ export function HubSettingsView({
   const t = useText();
   const action = useAction();
   const centerConn = useCenterConnection();
+  const connPhase = useConnectionPhaseContext();
+  const { notify, dismiss } = useNotice();
   const updateSummary = useClientUpdateSummary();
   const titleId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollByPage = useRef<Partial<Record<HubSettingsPage, number>>>({});
   const previousPage = useRef<HubSettingsPage | null>(null);
+  const pendingScrollRestoreRef = useRef<{ page: HubSettingsPage; targetTop: number } | null>(null);
+  const programmaticScrollTopRef = useRef<number | null>(null);
+  const onRemoteUpdatedRef = useRef(onRemoteUpdated);
+  onRemoteUpdatedRef.current = onRemoteUpdated;
 
   const [editingCenter, setEditingCenter] = useState(false);
   const [renamingDevice, setRenamingDevice] = useState<{ deviceId: string; generation: number } | null>(null);
@@ -197,8 +247,23 @@ export function HubSettingsView({
   const [formDeviceId, setFormDeviceId] = useState('');
 
   const [voice, setVoice] = useState<HostVoiceSettings>();
+  const [voiceLoaded, setVoiceLoaded] = useState(false);
+  const [remoteApiReady, setRemoteApiReady] = useState(false);
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
+
+  const pageHydrated =
+    page === 'overview'
+      ? centerConn.initialized || voiceLoaded
+      : page === 'connection'
+        ? centerConn.initialized
+        : page === 'devices'
+          ? directoryCurrent || directoryReadFailed || remoteDevices.length > 0 || (centerConn.initialized && !centerConn.connecting)
+          : page === 'manual'
+            ? remoteApiReady
+            : page === 'updates'
+              ? Boolean(updateSummary) || centerConn.initialized
+              : true;
 
   useLayoutEffect(() => {
     const previous = previousPage.current;
@@ -210,15 +275,51 @@ export function HubSettingsView({
     }
     if (previous === 'devices') setRenamingDevice(null);
     setSettingsConfirm(null);
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollByPage.current[page] ?? 0;
+    const targetTop = scrollByPage.current[page] ?? 0;
+    const el = scrollRef.current;
+    if (targetTop <= 0 || pageHydrated) {
+      pendingScrollRestoreRef.current = null;
+      if (el && Math.round(el.scrollTop) !== Math.round(targetTop)) {
+        programmaticScrollTopRef.current = Math.round(targetTop);
+        el.scrollTop = targetTop;
+      }
+    } else {
+      pendingScrollRestoreRef.current = { page, targetTop };
+      if (el && Math.round(el.scrollTop) !== 0) {
+        programmaticScrollTopRef.current = 0;
+        el.scrollTop = 0;
+      }
+    }
     if (previous || page !== 'overview') titleRef.current?.focus({ preventScroll: true });
-  }, [page, centerConn.setToken]);
+  }, [page, pageHydrated, centerConn.setToken]);
+
+  useLayoutEffect(() => {
+    const pending = pendingScrollRestoreRef.current;
+    if (!pending || pending.page !== page || !pageHydrated) return;
+    pendingScrollRestoreRef.current = null;
+    const el = scrollRef.current;
+    if (el && Math.round(el.scrollTop) !== Math.round(pending.targetTop)) {
+      programmaticScrollTopRef.current = Math.round(pending.targetTop);
+      el.scrollTop = pending.targetTop;
+    }
+  }, [page, pageHydrated]);
 
   useEffect(() => {
-    void ensureRemoteApi();
+    let active = true;
+    void ensureRemoteApi().finally(() => {
+      if (active) setRemoteApiReady(true);
+    });
     void BotHost.voiceSettings()
-      .then(v => setVoice(v))
-      .catch(() => {});
+      .then(v => {
+        if (active) setVoice(v);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setVoiceLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
   }, [ensureRemoteApi]);
 
   const activeProfile = localProfiles.find(profile => profile.id === selectedProfileId) ?? localProfiles[0];
@@ -332,16 +433,48 @@ export function HubSettingsView({
       await onRemoteUpdated();
     });
 
-  const showCenterForm = !centerConn.ready || editingCenter;
-  const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url;
-  const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready ? centerConn.deviceId : '');
+  // S1: 展示层按是否保存过中心 + displayReady 决定表单或 4 行操作，避免暂态重连把页面切回表单。
+  // 业务操作与授权门槛仍严格依赖 centerConn.ready。
+  const hasCenterConfigured = centerConn.hasSavedCenter || centerConn.displayReady;
+  const showCenterForm = !hasCenterConfigured || editingCenter;
+  const showCenterActions = hasCenterConfigured && !editingCenter;
+  const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url || (hasCenterConfigured ? centerConn.url : '');
+  const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready || centerConn.displayReady ? centerConn.deviceId : '');
   const centerClientId = centerConn.status?.clientId;
+  const statusLabelOnline = t('已连接', 'Connected');
+  const statusLabelConnecting = t('连接中', 'Connecting');
+  const statusLabelError = t('连接异常', 'Connection issue');
+  const statusLabelOffline = t('未连接', 'Disconnected');
+  const centerBadgePhase = centerConn.ready
+    ? 'online'
+    : centerConn.error
+      ? 'error'
+      : centerConn.connecting || centerConn.reconnecting || (hasCenterConfigured && connPhase.phase === 'connecting')
+        ? 'connecting'
+        : 'offline';
+  const centerBadgeTone = centerBadgePhase === 'online'
+    ? 'success'
+    : centerBadgePhase === 'connecting'
+      ? 'accent'
+      : centerBadgePhase === 'error'
+        ? 'danger'
+        : 'neutral';
+  const centerBadgeLabel = centerBadgePhase === 'online'
+    ? statusLabelOnline
+    : centerBadgePhase === 'connecting'
+      ? statusLabelConnecting
+      : centerBadgePhase === 'error'
+        ? statusLabelError
+        : statusLabelOffline;
   const centerStatus = (
-    <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
-      {centerConn.ready ? t('已连接', 'Connected')
-        : centerConn.connecting ? t('连接中', 'Connecting')
-          : centerConn.error ? t('连接异常', 'Connection issue') : t('未连接', 'Disconnected')}
-    </Badge>
+    <span className="hst-status-badge-slot">
+      <Badge tone={centerBadgeTone}>
+        <LabelStack
+          active={centerBadgeLabel}
+          labels={[statusLabelOnline, statusLabelConnecting, statusLabelError, statusLabelOffline]}
+        />
+      </Badge>
+    </span>
   );
   const pageTitles: Record<HubSettingsPage, string> = {
     overview: t('设置', 'Settings'),
@@ -359,7 +492,77 @@ export function HubSettingsView({
     : remoteDevices.length > 0 && !directoryCurrent
       ? t('显示上次读取的设备，当前状态待确认。', 'Showing previously seen devices. Their current status is unknown.')
       : '';
-  const actionNotice = <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />;
+  const devicesLoading =
+    !directoryCurrent &&
+    !directoryReadFailed &&
+    (remoteConnected || centerConn.connecting || hasCenterConfigured);
+
+  useEffect(() => {
+    if (!action.error) {
+      dismiss('settings:action-error');
+      return;
+    }
+    if (action.errorStale) return;
+    const humanized = humanizeError(action.error, t);
+    const tone: NoticeTone =
+      humanized?.tone === 'warning'
+        ? 'warning'
+        : humanized?.tone === 'success'
+          ? 'success'
+          : humanized?.tone === 'info' || humanized?.tone === 'progress'
+            ? 'info'
+            : 'error';
+    const title = humanized
+      ? humanized.description
+        ? `${humanized.title} — ${humanized.description}`
+        : humanized.title
+      : action.error;
+    notify({
+      id: 'settings:action-error',
+      tone,
+      title,
+      detail: humanized?.detail,
+    });
+  }, [action.error, action.errorStale, t, notify, dismiss]);
+
+  useEffect(() => {
+    if (page !== 'devices' || !directoryNotice) {
+      dismiss('settings:directory');
+      return;
+    }
+    notify({
+      id: 'settings:directory',
+      tone: directoryReadFailed ? 'warning' : 'info',
+      title: directoryNotice,
+      action: remoteConnected
+        ? {
+            label: t('刷新', 'Refresh'),
+            onClick: () => void action.run(() => onRemoteUpdatedRef.current()),
+          }
+        : undefined,
+    });
+  }, [page, directoryNotice, directoryReadFailed, remoteConnected, action.run, t, notify, dismiss]);
+
+  useEffect(() => {
+    if (!centerConn.error) {
+      dismiss('center:connection-error');
+      return;
+    }
+    notify({
+      id: 'center:connection-error',
+      tone: 'error',
+      title: centerConn.error,
+      detail: centerConn.errorCode || undefined,
+    });
+  }, [centerConn.error, centerConn.errorCode, notify, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss('settings:action-error');
+      dismiss('settings:directory');
+      dismiss('center:connection-error');
+    };
+  }, [dismiss]);
 
   return (
     <main className="grok-subpage grok-page-enter hst-settings" aria-labelledby={titleId}>
@@ -387,31 +590,51 @@ export function HubSettingsView({
       <div
         className="grok-subpage-scroll"
         ref={scrollRef}
-        onScroll={event => { scrollByPage.current[page] = event.currentTarget.scrollTop; }}
+        onScroll={event => {
+          const top = event.currentTarget.scrollTop;
+          if (programmaticScrollTopRef.current !== null && Math.abs(top - programmaticScrollTopRef.current) <= 2) {
+            programmaticScrollTopRef.current = null;
+            return;
+          }
+          programmaticScrollTopRef.current = null;
+          if (pendingScrollRestoreRef.current?.page === page) {
+            pendingScrollRestoreRef.current = null;
+          }
+          scrollByPage.current[page] = top;
+        }}
       >
-        {page !== 'overview' && actionNotice}
         {page === 'connection' && (
           <>
             <Section>
               <Row
                 icon={<Globe />}
-                title={centerConn.ready ? t('当前中心', 'Current center') : t('连接状态', 'Connection status')}
-                subtitle={centerAddress}
+                title={hasCenterConfigured ? t('当前中心', 'Current center') : t('连接状态', 'Connection status')}
+                subtitle={
+                  <ReservedSlot minHeight={18} inline align="center" className="hst-row-sub-slot">
+                    {centerAddress ? (
+                      centerAddress
+                    ) : hasCenterConfigured ? (
+                      <Skeleton variant="text" width={160} height={12} inline />
+                    ) : (
+                      t('尚未绑定中心', 'No center connected')
+                    )}
+                  </ReservedSlot>
+                }
                 trailing={centerStatus}
               />
-              {centerConn.ready && !editingCenter && (
+              {showCenterActions && (
                 <>
-                  <Row icon={<LayoutDashboard />} title={t('打开中心管理', 'Open Center Admin')} onClick={() => onOpenCenterAdmin('providers')} chevron />
-                  <Row icon={<ExternalLink />} title={t('在浏览器打开中心管理', 'Open center management in browser')} onClick={centerConn.openManagement} chevron />
+                  <Row icon={<LayoutDashboard />} title={t('打开中心管理', 'Open Center Admin')} disabled={!centerConn.ready} onClick={() => onOpenCenterAdmin('providers')} chevron />
+                  <Row icon={<ExternalLink />} title={t('在浏览器打开中心管理', 'Open center management in browser')} disabled={!centerConn.ready} onClick={centerConn.openManagement} chevron />
                   <Row title={t('更换中心连接', 'Change center')} disabled={centerConn.busy} onClick={() => setEditingCenter(true)} chevron />
                   <Row title={t('断开中心', 'Disconnect from center')} disabled={centerConn.busy} onClick={() => setSettingsConfirm({ kind: 'disconnect-center' })} />
                 </>
               )}
             </Section>
-            {showCenterForm ? (
+            {showCenterForm && (
               <Section title={editingCenter ? t('更换中心连接', 'Change center') : t('连接中心', 'Connect to center')}>
                 <OnboardingPanel onDone={() => setEditingCenter(false)} />
-                {editingCenter && centerConn.ready && (
+                {editingCenter && hasCenterConfigured && (
                   <div className="hst-actions">
                     <button type="button" className="hst-btn" disabled={centerConn.busy} onClick={() => {
                       setEditingCenter(false);
@@ -422,15 +645,43 @@ export function HubSettingsView({
                   </div>
                 )}
               </Section>
-            ) : <ErrorNotice error={centerConn.error} onDismiss={() => centerConn.setError('')} />}
-            {(centerDeviceId || centerClientId) && (
-              <Disclosure title={t('连接详情', 'Connection details')}>
-                <Section>
-                  {centerDeviceId && <Row title={t('设备标识', 'Device ID')} subtitle={centerDeviceId} />}
-                  {centerClientId && <Row title={t('客户端标识', 'Client ID')} subtitle={centerClientId} />}
-                </Section>
-              </Disclosure>
             )}
+            <ReservedSlot minHeight={44} align="start">
+              {(hasCenterConfigured || centerDeviceId || centerClientId) ? (
+                <Disclosure title={t('连接详情', 'Connection details')}>
+                  <Section>
+                    <Row
+                      title={t('设备标识', 'Device ID')}
+                      subtitle={
+                        <ReservedSlot minHeight={18} inline align="center" className="hst-row-sub-slot">
+                          {centerDeviceId ? (
+                            centerDeviceId
+                          ) : centerConn.connecting || !centerConn.initialized ? (
+                            <Skeleton variant="text" width={140} height={12} inline />
+                          ) : (
+                            '—'
+                          )}
+                        </ReservedSlot>
+                      }
+                    />
+                    <Row
+                      title={t('客户端标识', 'Client ID')}
+                      subtitle={
+                        <ReservedSlot minHeight={18} inline align="center" className="hst-row-sub-slot">
+                          {centerClientId ? (
+                            centerClientId
+                          ) : centerConn.connecting || !centerConn.initialized ? (
+                            <Skeleton variant="text" width={140} height={12} inline />
+                          ) : (
+                            '—'
+                          )}
+                        </ReservedSlot>
+                      }
+                    />
+                  </Section>
+                </Disclosure>
+              ) : null}
+            </ReservedSlot>
           </>
         )}
 
@@ -438,13 +689,16 @@ export function HubSettingsView({
           <>
             <Section
               title={t('设备目录', 'Device directory')}
-              action={remoteConnected && (
-                <button type="button" className="bs-link" disabled={action.busy} onClick={() => void action.run(onRemoteUpdated)}>
-                  {t('刷新', 'Refresh')}
-                </button>
-              )}
+              action={
+                <ReservedSlot minHeight={44} inline align="center">
+                  {remoteConnected ? (
+                    <button type="button" className="bs-link" disabled={action.busy} onClick={() => void action.run(onRemoteUpdated)}>
+                      {t('刷新', 'Refresh')}
+                    </button>
+                  ) : null}
+                </ReservedSlot>
+              }
             >
-              {directoryNotice && <Row title={<span role="status" className="bs-row-sub">{directoryNotice}</span>} />}
               {localDeviceId && !remoteDevices.some(device => device.deviceId === localDeviceId) && (
                 <Row icon={<PlatformLogoIcon platform="android" />} title={t('此设备', 'This device')} />
               )}
@@ -479,9 +733,18 @@ export function HubSettingsView({
                           {device.displayName || t('未命名设备', 'Unnamed device')}
                           {device.deviceId === localDeviceId && <span className="bs-row-sub">{t('本机', 'This device')}</span>}
                         </span>
-                        {directoryCurrent && (
-                          <Badge tone={device.online ? 'success' : 'neutral'}>{device.online ? t('在线', 'Online') : t('离线', 'Offline')}</Badge>
-                        )}
+                        <span className="hst-device-status-slot">
+                          {directoryCurrent ? (
+                            <Badge tone={device.online ? 'success' : 'neutral'}>
+                              <LabelStack
+                                active={device.online ? t('在线', 'Online') : t('离线', 'Offline')}
+                                labels={[t('在线', 'Online'), t('离线', 'Offline')]}
+                              />
+                            </Badge>
+                          ) : devicesLoading ? (
+                            <Skeleton variant="pill" width={44} height={20} />
+                          ) : null}
+                        </span>
                         {canRename && remoteIdentity && (
                           <button type="button" className="hst-btn is-ghost" disabled={action.busy} onClick={() => {
                             setRenamingDevice({ deviceId: device.deviceId, generation: remoteIdentity.generation });
@@ -495,9 +758,21 @@ export function HubSettingsView({
                   </div>
                 );
               })}
-              {remoteDevices.length === 0 && !directoryNotice && <Row title={directoryCurrent
-                ? t('暂无目录设备', 'No devices in the directory')
-                : t('设备目录尚未读取', 'Device directory unavailable')} />}
+              {remoteDevices.length === 0 && (
+                devicesLoading ? (
+                  <SkeletonRow
+                    variant="settings"
+                    count={localDeviceId ? 1 : 2}
+                    showAvatar
+                    showTrailing
+                    label={t('正在加载设备目录…', 'Loading device directory…')}
+                  />
+                ) : (
+                  <Row title={directoryCurrent
+                    ? t('暂无目录设备', 'No devices in the directory')
+                    : t('设备目录尚未读取', 'Device directory unavailable')} />
+                )
+              )}
             </Section>
           </>
         )}
@@ -510,7 +785,11 @@ export function HubSettingsView({
           action={
             localProfiles.length > 0 || addingRemote ? (
               <button type="button" className="bs-link" disabled={action.busy} onClick={() => setAddingRemote(v => !v)}>
-                {addingRemote ? t('收起', 'Collapse') : t('新增直连', 'Add direct host')}
+                <LabelStack
+                  active={addingRemote ? t('收起', 'Collapse') : t('新增直连', 'Add direct host')}
+                  labels={[t('收起', 'Collapse'), t('新增直连', 'Add direct host')]}
+                  align="end"
+                />
               </button>
             ) : undefined
           }
@@ -618,7 +897,10 @@ export function HubSettingsView({
                   </button>
                 )}
                 <button type="button" className="hst-btn is-primary" disabled={action.busy || !token.trim()} onClick={() => void connectRemoteProfile()}>
-                  {selectedIsConnected ? t('重新连接', 'Reconnect') : t('连接', 'Connect')}
+                  <LabelStack
+                    active={selectedIsConnected ? t('重新连接', 'Reconnect') : t('连接', 'Connect')}
+                    labels={[t('重新连接', 'Reconnect'), t('连接', 'Connect')]}
+                  />
                 </button>
               </div>
             </div>
@@ -636,7 +918,17 @@ export function HubSettingsView({
                   {centerStatus}
                 </span>
               }
-              subtitle={centerAddress || undefined}
+              subtitle={
+                <ReservedSlot minHeight={18} inline align="center" className="hst-row-sub-slot">
+                  {centerAddress ? (
+                    centerAddress
+                  ) : hasCenterConfigured ? (
+                    <Skeleton variant="text" width={140} height={12} inline />
+                  ) : (
+                    t('尚未绑定中心', 'Not connected')
+                  )}
+                </ReservedSlot>
+              }
               onClick={() => onOpenPage('connection')}
               trailing={
                 <QuickQrScanButton
@@ -649,7 +941,7 @@ export function HubSettingsView({
             <Row
               icon={<LayoutDashboard />}
               title={t('中心管理', 'Center Admin')}
-              subtitle={centerConn.ready
+              subtitle={hasCenterConfigured
                 ? t('服务商、模型、能力目录、设备与全局密码库', 'Providers, models, capabilities, devices & global vault')
                 : t('连接中心后免密管理服务商、模型与设备', 'Connect to center for passwordless management')}
               chevron
@@ -710,11 +1002,6 @@ export function HubSettingsView({
                       placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
                     />
                   </label>
-                  {centerConn.error && (
-                    <div className="hst-row-static">
-                      <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-                    </div>
-                  )}
                   <div className="hst-actions">
                     <button
                       type="button"
@@ -722,7 +1009,10 @@ export function HubSettingsView({
                       disabled={centerConn.busy || action.busy || !centerConn.url.trim() || !centerConn.deviceId.trim()}
                       onClick={() => void saveCenterNetworkAndReconnect()}
                     >
-                      {centerConn.busy ? t('重连中…', 'Reconnecting…') : t('保存并重连', 'Save & Reconnect')}
+                      <LabelStack
+                        active={centerConn.busy ? t('重连中…', 'Reconnecting…') : t('保存并重连', 'Save & Reconnect')}
+                        labels={[t('重连中…', 'Reconnecting…'), t('保存并重连', 'Save & Reconnect')]}
+                      />
                     </button>
                   </div>
                 </div>
@@ -816,7 +1106,15 @@ export function HubSettingsView({
             <Row
               icon={<Download />}
               title={pageTitles.updates}
-              trailing={updateSummary ? <span className="bs-row-sub">{updateSummary}</span> : undefined}
+              trailing={
+                <ReservedSlot minHeight={20} inline align="center" className="hst-update-summary-slot">
+                  {updateSummary ? (
+                    <span className="bs-row-sub">{updateSummary}</span>
+                  ) : hasCenterConfigured ? (
+                    <Skeleton variant="text" width={56} height={12} inline />
+                  ) : null}
+                </ReservedSlot>
+              }
               onClick={() => onOpenPage('updates')}
               chevron
             />
@@ -833,8 +1131,6 @@ export function HubSettingsView({
             </button>
           </div>
         </div>
-
-        {page === 'overview' && actionNotice}
       </div>
 
       <ConfirmDialog

@@ -1,5 +1,5 @@
-// Builtin Bot management skill: durable section that exposes only the
-// name/description catalog of builtin-skills/bot-management/SKILL.md. The model
+// Builtin skills: durable section that exposes only the
+// name/description catalog of bundled SKILL.md files. The model
 // loads SKILL.md and references/*.md through the read tool at the absolute
 // <location> rendered into the catalog; the manual body is never inlined.
 //
@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { section } from '@earendil-works/pi-durable';
 import { formatSkillsForPrompt, loadSkillFromFile } from './third-party/pi-skills.js';
 
-const SKILL_FILE = join(dirname(fileURLToPath(import.meta.url)), 'builtin-skills', 'bot-management', 'SKILL.md');
+const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'builtin-skills');
+const SKILL_NAMES = ['bot-management', 'google-account-connection'];
 
 function invalid(message) {
   return Object.assign(new Error(message), { code: 'SKILL_INVALID' });
@@ -24,11 +25,15 @@ function invalid(message) {
 // cache friendly). A missing or invalid SKILL.md is a packaging failure and
 // throws here instead of silently dropping the built-in skill.
 export function createBotManagementSkillSection() {
-  const { skill, diagnostics } = loadSkillFromFile(SKILL_FILE);
-  if (!skill) {
-    const detail = (diagnostics ?? []).map((d) => d.message).join('; ');
-    throw invalid(`builtin bot-management SKILL.md is missing or invalid at ${SKILL_FILE}${detail ? `: ${detail}` : ''}`);
-  }
-  const catalog = formatSkillsForPrompt([skill]);
+  const skills = SKILL_NAMES.map((name) => {
+    const file = join(SKILL_ROOT, name, 'SKILL.md');
+    const { skill, diagnostics } = loadSkillFromFile(file);
+    if (!skill) {
+      const detail = (diagnostics ?? []).map((d) => d.message).join('; ');
+      throw invalid(`builtin ${name} SKILL.md is missing or invalid at ${file}${detail ? `: ${detail}` : ''}`);
+    }
+    return skill;
+  });
+  const catalog = formatSkillsForPrompt(skills);
   return section('bot-management-skill', () => catalog, { tag: false });
 }

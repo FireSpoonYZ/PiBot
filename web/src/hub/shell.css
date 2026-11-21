@@ -14,7 +14,13 @@
 .hub-top-title {
   flex: 1;
   min-width: 0;
+  height: var(--tap-min);
   margin: 0;
+  padding: 0 var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   text-align: center;
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
@@ -29,6 +35,177 @@
 
 .hub-top-title.is-obscured {
   opacity: 0;
+  pointer-events: none;
+}
+
+.hub-top-status-btn {
+  border-radius: var(--radius-full);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.hub-top-status-btn.is-connecting {
+  color: var(--color-text-muted);
+}
+
+.hub-top-status-btn.is-offline {
+  color: var(--color-warning);
+}
+
+.hub-top-status-btn.is-error {
+  color: var(--color-danger);
+}
+
+@media (hover: hover) {
+  .hub-top-status-btn:hover {
+    background: color-mix(in srgb, var(--color-surface-1) 80%, transparent);
+  }
+}
+
+.hub-top-status-btn:active {
+  background: var(--color-surface-1);
+}
+
+.hub-top-status-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.hub-top-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-top-status-spin {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  animation: spin 900ms linear infinite;
+}
+
+.hub-top-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  flex: none;
+  background: var(--color-text-subtle);
+}
+
+.hub-top-status-dot.is-offline {
+  background: var(--color-warning);
+}
+
+.hub-top-status-dot.is-error {
+  background: var(--color-danger);
+}
+
+/* D1: 顶栏连接状态详情浮层（绝对定位，零布局位移） */
+.hub-conn-popover {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: calc(var(--z-dropdown) + 1);
+  width: min(304px, calc(100vw - 32px));
+  padding: 14px var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
+  box-shadow: 0 12px 36px color-mix(in srgb, var(--color-scrim) 32%, transparent);
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: grok-pop-in 180ms var(--ease-out) both;
+}
+
+.hub-conn-popover-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.hub-conn-popover-head.is-connecting {
+  color: var(--color-text);
+}
+
+.hub-conn-popover-head.is-offline {
+  color: var(--color-warning);
+}
+
+.hub-conn-popover-head.is-error {
+  color: var(--color-danger);
+}
+
+.hub-conn-popover-desc {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.hub-conn-popover-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--color-text-subtle);
+}
+
+.hub-conn-popover-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.hub-conn-popover-btn {
+  position: relative;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-line);
+  background: var(--color-surface-1);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.hub-conn-popover-btn::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min));
+  height: max(100%, var(--tap-min));
+}
+
+.hub-conn-popover-btn.is-primary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-top-status-spin {
+    animation: none;
+  }
+
+  .hub-conn-popover {
+    animation: none;
+  }
 }
 
 .hub-navigation .hub-left-drawer-nav {

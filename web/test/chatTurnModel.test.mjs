@@ -597,6 +597,29 @@ test('hiding tool output keeps a finished tool\'s authoritative pending question
   assert.deepEqual(chatTurnsWithoutToolOutput([{ ...turn, tools: [{ ...tool, durableWait: false }] }]), []);
 });
 
+test('hiding tool output keeps a running Google setup after its tool call has finished', () => {
+  const setup = {
+    id: 'setup', name: 'google_setup', status: 'done',
+    presentation: { kind: 'google-setup', version: 1, botId: 'bot', runId: 'run', state: 'running', card: 'path' },
+  };
+  const finished = {
+    ...setup, id: 'finished', presentation: { ...setup.presentation, state: 'done', card: 'connected' },
+  };
+  const nestedSetup = { ...setup, id: 'nested-setup', parentCallId: 'script' };
+  const nestedPrompt = {
+    id: 'vault', name: 'vault_unlock', status: 'running', presentationLive: true, parentCallId: 'script',
+    presentation: { kind: 'vault-unlock', status: 'pending' },
+  };
+  const script = { id: 'script', name: 'codemode', status: 'done', children: [nestedPrompt, nestedSetup] };
+  const tools = [setup, finished, script];
+  const turn = { id: 'reply', role: 'assistant', entryId: 5, text: '', tools };
+  const calls = { id: 'calls', kind: 'tools', tools };
+
+  assert.deepEqual(chatTurnsWithoutToolOutput([turn])[0]?.tools, [setup, nestedSetup]);
+  const [visible] = chatTurnsWithoutToolOutput([{ ...turn, blocks: [calls] }]);
+  assert.deepEqual(visible?.blocks, [{ ...calls, tools: [setup, nestedSetup] }]);
+});
+
 test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {
   const mkUser = (id, text) => ({
     id,
@@ -652,4 +675,276 @@ test('projectLiveState preserves pi.reset marker across empty, windowed, compact
   );
   assert.deepEqual(normalized.state.history[0], { id: 5, kind: 'pi.reset', messages: [] });
   assert.equal(parseHistoryEntries(emptyAfterClear.history, 0).length, 0);
+});
+
+test('C7 block IDs stay stable when earlier empty/whitespace blocks transition between empty and non-empty', () => {
+  // Persisted assistant content: whitespace-only leading text and thinking blocks still advance
+  // their per-kind counters so trailing blocks keep identical IDs once populated.
+  const withEmptyLeading = [
+    {
+      id: 20,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: '   ' },
+            { type: 'text', text: '   ' },
+            { type: 'toolCall', id: 'tc_read', name: 'read', arguments: { path: 'index.ts' } },
+            { type: 'thinking', thinking: 'Second thought' },
+            { type: 'text', text: 'Final summary' },
+          ],
+        },
+      ],
+    },
+  ];
+  const withPopulatedLeading = [
+    {
+      id: 20,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'First thought' },
+            { type: 'text', text: 'Opening note' },
+            { type: 'toolCall', id: 'tc_read', name: 'read', arguments: { path: 'index.ts' } },
+            { type: 'thinking', thinking: 'Second thought' },
+            { type: 'text', text: 'Final summary' },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const turnsEmpty = parseHistoryEntries(withEmptyLeading);
+  const turnsPopulated = parseHistoryEntries(withPopulatedLeading);
+  assert.equal(turnsEmpty.length, 1);
+  assert.equal(turnsPopulated.length, 1);
+
+  assert.deepEqual(
+    turnsEmpty[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['tools', '20-0-tools-tc_read'],
+      ['thinking', '20-0-thinking-2'],
+      ['text', '20-0-b2'],
+    ],
+  );
+  assert.deepEqual(
+    turnsPopulated[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['thinking', '20-0-thinking-1'],
+      ['text', '20-0-b1'],
+      ['tools', '20-0-tools-tc_read'],
+      ['thinking', '20-0-thinking-2'],
+      ['text', '20-0-b2'],
+    ],
+  );
+
+  // Streaming liveGeneratingBlocks transitioning a leading whitespace chunk to real text
+  // preserves the trailing text and tool block IDs.
+  const streamWhitespace = parseHistoryEntries([], 0, {
+    isBusy: true,
+    liveGeneratingBlocks: [
+      { type: 'text', text: '  \n' },
+      { type: 'toolCall', callId: 'tc_stream', name: 'ls' },
+      { type: 'text', text: 'Streaming tail' },
+    ],
+    liveTools: [{ callId: 'tc_stream', name: 'ls', status: 'running' }],
+  });
+  const streamFilled = parseHistoryEntries([], 0, {
+    isBusy: true,
+    liveGeneratingBlocks: [
+      { type: 'text', text: 'Streaming lead' },
+      { type: 'toolCall', callId: 'tc_stream', name: 'ls' },
+      { type: 'text', text: 'Streaming tail' },
+    ],
+    liveTools: [{ callId: 'tc_stream', name: 'ls', status: 'running' }],
+  });
+
+  assert.deepEqual(
+    streamWhitespace[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['tools', 'live-assistant-tools-tc_stream'],
+      ['text', 'live-assistant-b2'],
+    ],
+  );
+  assert.deepEqual(
+    streamFilled[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['text', 'live-assistant-b1'],
+      ['tools', 'live-assistant-tools-tc_stream'],
+      ['text', 'live-assistant-b2'],
+    ],
+  );
+});
+
+test('C7 inserting raw-history thinking blocks does not shift text or tool block IDs', () => {
+  // Live-projected history entry without thinking blocks.
+  const projectedWithoutThinking = [
+    {
+      id: 40,
+      kind: 'pi.assistant',
+      messages: [
+        {
+          role: 'assistant',
+          text: 'Step 1\nStep 2',
+          blocks: [
+            { type: 'text', text: 'Step 1' },
+            { type: 'toolCall', callId: 'tc_check', name: 'read' },
+            { type: 'text', text: 'Step 2' },
+          ],
+        },
+      ],
+    },
+  ];
+  // Raw history overlay for the same entry with thinking blocks interleaved before and between text.
+  const rawWithThinking = [
+    {
+      id: 40,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Planning step 1' },
+            { type: 'text', text: 'Step 1' },
+            { type: 'toolCall', id: 'tc_check', name: 'read', arguments: { path: 'a.ts' } },
+            { type: 'thinking', thinking: 'Reviewing tool output' },
+            { type: 'text', text: 'Step 2' },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const beforeTurns = parseHistoryEntries(projectedWithoutThinking);
+  const afterTurns = parseHistoryEntries(rawWithThinking);
+  assert.equal(beforeTurns.length, 1);
+  assert.equal(afterTurns.length, 1);
+
+  assert.deepEqual(
+    beforeTurns[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['text', '40-0-b1'],
+      ['tools', '40-0-tools-tc_check'],
+      ['text', '40-0-b2'],
+    ],
+  );
+  assert.deepEqual(
+    afterTurns[0].blocks?.map((b) => [b.kind, b.id]),
+    [
+      ['thinking', '40-0-thinking-1'],
+      ['text', '40-0-b1'],
+      ['tools', '40-0-tools-tc_check'],
+      ['thinking', '40-0-thinking-2'],
+      ['text', '40-0-b2'],
+    ],
+  );
+});
+
+test('C7 tool call block ID stays anchored on first tool ID across 1 -> 2 -> 3 tool additions', () => {
+  // 1) Live streaming growth across 1 -> 2 -> 3 consecutive tools in a single group.
+  const stream1 = parseHistoryEntries([], 0, {
+    isBusy: true,
+    liveGeneratingBlocks: [{ type: 'toolCall', callId: 'call_first', name: 'ls' }],
+    liveTools: [{ callId: 'call_first', name: 'ls', status: 'running' }],
+  });
+  const stream2 = parseHistoryEntries([], 0, {
+    isBusy: true,
+    liveGeneratingBlocks: [
+      { type: 'toolCall', callId: 'call_first', name: 'ls' },
+      { type: 'toolCall', callId: 'call_second', name: 'read' },
+    ],
+    liveTools: [
+      { callId: 'call_first', name: 'ls', status: 'done' },
+      { callId: 'call_second', name: 'read', status: 'running' },
+    ],
+  });
+  const stream3 = parseHistoryEntries([], 0, {
+    isBusy: true,
+    liveGeneratingBlocks: [
+      { type: 'toolCall', callId: 'call_first', name: 'ls' },
+      { type: 'toolCall', callId: 'call_second', name: 'read' },
+      { type: 'toolCall', callId: 'call_third', name: 'grep' },
+    ],
+    liveTools: [
+      { callId: 'call_first', name: 'ls', status: 'done' },
+      { callId: 'call_second', name: 'read', status: 'done' },
+      { callId: 'call_third', name: 'grep', status: 'running' },
+    ],
+  });
+
+  for (const [turns, expectedCount] of [
+    [stream1, 1],
+    [stream2, 2],
+    [stream3, 3],
+  ]) {
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].blocks?.length, 1);
+    assert.equal(turns[0].blocks?.[0].kind, 'tools');
+    assert.equal(turns[0].blocks?.[0].id, 'live-assistant-tools-call_first');
+    assert.equal(turns[0].blocks?.[0].tools.length, expectedCount);
+  }
+
+  // 2) Persisted entry growing from 1 -> 2 -> 3 tools via live overlay and final settled history.
+  const baseEntry = {
+    id: 50,
+    kind: 'pi.assistant',
+    model: [
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'tc_anchor', name: 'ls', arguments: { path: '.' } }],
+      },
+    ],
+  };
+
+  const persisted1 = parseHistoryEntries([baseEntry], 0, {
+    isBusy: true,
+    liveTools: [{ callId: 'tc_anchor', name: 'ls', status: 'running' }],
+  });
+  const persisted2 = parseHistoryEntries([baseEntry], 0, {
+    isBusy: true,
+    liveTools: [
+      { callId: 'tc_anchor', name: 'ls', status: 'done' },
+      { callId: 'tc_two', name: 'read', status: 'running' },
+    ],
+  });
+  const persisted3Live = parseHistoryEntries([baseEntry], 0, {
+    isBusy: true,
+    liveTools: [
+      { callId: 'tc_anchor', name: 'ls', status: 'done' },
+      { callId: 'tc_two', name: 'read', status: 'done' },
+      { callId: 'tc_three', name: 'grep', status: 'running' },
+    ],
+  });
+  const persisted3Settled = parseHistoryEntries([
+    {
+      id: 50,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'toolCall', id: 'tc_anchor', name: 'ls', arguments: { path: '.' } },
+            { type: 'toolCall', id: 'tc_two', name: 'read', arguments: { path: 'a.ts' } },
+            { type: 'toolCall', id: 'tc_three', name: 'grep', arguments: { pattern: 'foo' } },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  for (const [turns, expectedCount] of [
+    [persisted1, 1],
+    [persisted2, 2],
+    [persisted3Live, 3],
+    [persisted3Settled, 3],
+  ]) {
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0].blocks?.length, 1);
+    assert.equal(turns[0].blocks?.[0].kind, 'tools');
+    assert.equal(turns[0].blocks?.[0].id, '50-0-tools-tc_anchor');
+    assert.equal(turns[0].blocks?.[0].tools.length, expectedCount);
+  }
 });

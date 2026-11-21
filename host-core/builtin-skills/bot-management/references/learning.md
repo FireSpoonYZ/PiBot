@@ -7,7 +7,7 @@ Actions: `status | configure | learn | review | curate | cancel`.
 ## What learning is
 
 - A review/teach pass runs in a SEPARATE model context after a finalized successful user submission — it never blocks or mutates the foreground reply, and it never triggers another review (no recursion).
-- Automatic learning is always enabled and triggers after a 15-second idle settle window following primary or delegated Scope work turns. Foreground user turns immediately preempt any active automatic review job and restore unmutated review counters. Each Bot runs at most one learning job at a time. Explicit `learn`, `review` and `curate` runs are recorded as manual jobs.
+- Automatic review is enabled by default. Primary or delegated Scope work turns count toward automatic review after a 15-second idle window. Foreground user turns immediately preempt any active automatic review job and restore unmutated review counters. Each Bot runs at most one learning job at a time. Explicit `learn`, `review` and `curate` runs are recorded as manual jobs.
 - Learning saves versioned Skill revisions directly to the owner Bot (`private` scope by default — owners can share skills to `assigned` Bots or `global` in Center). The skill service requires a fresh read before an edit and protects locked/pinned/shared Skills.
 - Curation marks skills `stale` after `staleAfterDays` (default 14) and auto-archives unused private skills after `archiveAfterDays` (default 30, disabling the Bot binding while preserving history for recovery). Optional LLM consolidation (`curator.consolidate`, default `false`) merges redundant private skills.
 - Host disconnect or shutdown cancels active jobs. Counters and receipts survive restarts, and the job history records interrupted work.
@@ -18,13 +18,13 @@ Actions: `status | configure | learn | review | curate | cancel`.
 - `configure` uses CAS: read the current settings via `status`, then submit changes with the returned `expectedRevision`/config revision.
 - `learn {focus?, sources?}`, `review`, `curate` start a job and return an honest job receipt (`jobId`, `status`): `queued`/`running` is a live handle, NOT a finished result. Report the receipt, then check `status` for the outcome summary — never paraphrase a started job as learned.
 - `cancel {jobId}` is bound to that job; cancellation is reported in the job state.
-- Automatic reviews already cover normal traffic — run manual `learn`/`review` only when the user asks for a teaching pass or a focus area.
+- Run manual `learn`/`review` when the user asks for a teaching pass or a focus area.
 
 ## Flows
 
 Use `manage_bot_learning {action:'status'}` to read the Bot's settings, counters and active or last job.
 
-To configure learning, read `status` and pass the settings revision as `expectedRevision` to `configure`. Adjust positive review intervals, curator timing, budgets, `reviewModelRef` or `curatorModelRef`. Re-read after a conflict. Model refs use `provider/modelId`, and null follows the Bot model. Choose a configured model that the Host can already use.
+To configure learning, read `status` and pass the settings revision as `expectedRevision` to `configure`. Set `config.review.enabled` to `false` to stop automatic memory and skill reviews for the target Bot, including an active automatic review. Set it to `true` to resume automatic reviews. The same action accepts positive review intervals, curator timing, budgets, `reviewModelRef` and `curatorModelRef`. Re-read after a conflict. Model refs use `provider/modelId`, and null follows the Bot model. Choose a configured model that the Host can already use.
 
 Use `learn {requestId, focus?, sources?}`, `review` for recent work or `curate` for Skill maintenance. Curation reports archive candidates and can merge redundant private skills. These actions return `{jobId, status}`. Poll `status` for the outcome and summary.
 

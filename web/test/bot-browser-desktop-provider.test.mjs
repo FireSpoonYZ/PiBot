@@ -1258,6 +1258,42 @@ test('desktop provider closes over-cap popups and handles parallel popups, expli
   }
 });
 
+test('desktop provider retains retry capability after transient startup failure and preserves hard profile failure', async () => {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'pibot-desktop-retry-'));
+  try {
+    for (const failureCode of ['BROWSER_START_FAILED', 'BROWSER_PROFILE_UNWRITABLE']) {
+      const harness = createMockBrowserHarness();
+      let launches = 0;
+      const provider = await createDesktopBrowserProvider({
+        botId: 'bot-retry', profileDir: path.join(tmpDir, failureCode),
+        discoverBrowser: async () => ({ available: true, executablePath: '/usr/bin/chromium', kind: 'chromium', transport: 'pipe' }),
+        launchBrowser: async () => {
+          if (++launches === 1) throw Object.assign(new Error('Original startup diagnostic'), { code: failureCode });
+          return harness.getHandle();
+        },
+      });
+      try {
+        await assert.rejects(provider.perform({ action: 'open' }), { code: failureCode });
+        const status = await provider.perform({ action: 'status' });
+        assert.equal(status.backend.running, false);
+        assert.equal(status.detail, 'Original startup diagnostic');
+        assert.equal(status.canStreamInteract, failureCode === 'BROWSER_START_FAILED');
+        assert.equal(status.available, failureCode === 'BROWSER_START_FAILED');
+        assert.equal(launches, 1);
+        if (failureCode === 'BROWSER_START_FAILED') {
+          await provider.perform({ action: 'open' });
+          assert.equal(launches, 2);
+          assert.equal((await provider.perform({ action: 'status' })).reason, undefined);
+        }
+      } finally {
+        await provider.close();
+      }
+    }
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('desktop provider supports same-page navigation, bounded frames, input revalidation, and blocks forbidden/sensitive bot actions', async () => {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'pibot-desktop-provider-'));
   const harness = createMockBrowserHarness();

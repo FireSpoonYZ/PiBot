@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { ChevronDown, X } from 'lucide-react';
+import { LabelStack, SmoothExpand } from '../layout';
+import { useNotice } from '../notice';
 import { useText } from '../ui';
 import {
   isTaskRevisionConflictError,
@@ -46,27 +48,56 @@ export function TaskChatPromptBanner({
   onCycleWaitingTask,
 }: TaskChatPromptBannerProps) {
   const t = useText();
+  const { notify, dismiss } = useNotice();
+  const panelId = useId();
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const preserveExpandedOnCycleRef = useRef(false);
 
-  useEffect(() => {
-    setError(null);
-  }, [task?.id, task?.revision]);
-
+  const errorNoticeId = `task-prompt-error:${botDeviceId}:${botId}`;
   const hasPrompt = Boolean(
     task && isTaskWaitingForBot(task, botDeviceId, botId) && task.pendingPrompt,
   );
+  const hasQuote = !hasPrompt && Boolean(showQuoteStrip && task);
   const isMobile = variant === 'mobile';
   const dockClass = `tb-scope chat-task-dock${isMobile ? ' is-mobile' : ''}`;
 
+  useEffect(() => {
+    dismiss(errorNoticeId);
+  }, [task?.id, task?.revision, hasPrompt, errorNoticeId, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss(errorNoticeId);
+    };
+  }, [errorNoticeId, dismiss]);
+
+  useEffect(() => {
+    if (!hasPrompt) {
+      preserveExpandedOnCycleRef.current = false;
+      setExpanded(false);
+      return;
+    }
+    if (preserveExpandedOnCycleRef.current) {
+      preserveExpandedOnCycleRef.current = false;
+      return;
+    }
+    setExpanded(false);
+  }, [hasPrompt, task?.id, botDeviceId, botId]);
+
   if (!hasPrompt) {
-    if (!showQuoteStrip || !task) {
+    if (!hasQuote || !task) {
       return null;
     }
     const quoteLabel = focusedStep ? `${task.title} · ${focusedStep.text}` : task.title;
     return (
       <div className={dockClass}>
-        <div className="chat-quote-strip" role="region" aria-label={t('当前消息关联任务', 'Task linked to this message')}>
+        <div
+          key={`quote:${task.id}:${focusedStep?.id ?? ''}`}
+          className="chat-quote-strip chat-task-bar-fade"
+          role="region"
+          aria-label={t('当前消息关联任务', 'Task linked to this message')}
+        >
           <span className="chat-quote-arrow" aria-hidden="true">
             ↳
           </span>
@@ -113,16 +144,22 @@ export function TaskChatPromptBanner({
   const handleConfirm = async () => {
     if (disabled) return;
     setSubmitting(true);
-    setError(null);
+    dismiss(errorNoticeId);
     try {
       await onConfirmPlan(activeTask.id, renderedRevision);
+      setExpanded(false);
       onClearQuote?.();
     } catch (err) {
-      if (isTaskRevisionConflictError(err)) {
-        setError(t('待确认安排刚刚已更新，请核对最新内容或打开任务详情后再确认。', 'The plan awaiting confirmation was just updated. Please review the latest version or open task details before confirming.'));
-      } else {
-        setError(err instanceof Error && err.message ? err.message : String(err || t('确认执行安排失败', 'Failed to confirm plan')));
-      }
+      const message = isTaskRevisionConflictError(err)
+        ? t('待确认安排刚刚已更新，请核对最新内容或打开任务详情后再确认。', 'The plan awaiting confirmation was just updated. Please review the latest version or open task details before confirming.')
+        : err instanceof Error && err.message
+          ? err.message
+          : String(err || t('确认执行安排失败', 'Failed to confirm plan'));
+      notify({
+        id: errorNoticeId,
+        tone: 'error',
+        title: message,
+      });
     } finally {
       setSubmitting(false);
     }
@@ -131,122 +168,166 @@ export function TaskChatPromptBanner({
   const handleAnswer = async (answer: string) => {
     if (disabled) return;
     setSubmitting(true);
-    setError(null);
+    dismiss(errorNoticeId);
     try {
       await onAnswerPrompt(activeTask.id, answer, renderedRevision);
+      setExpanded(false);
       onClearQuote?.();
     } catch (err) {
-      if (isTaskRevisionConflictError(err)) {
-        setError(t('当前任务问题刚刚已更新，请核对最新内容后再回应。', 'This task question was just updated. Please review the latest version before replying.'));
-      } else {
-        setError(err instanceof Error && err.message ? err.message : String(err || t('提交回应失败', 'Failed to submit reply')));
-      }
+      const message = isTaskRevisionConflictError(err)
+        ? t('当前任务问题刚刚已更新，请核对最新内容后再回应。', 'This task question was just updated. Please review the latest version before replying.')
+        : err instanceof Error && err.message
+          ? err.message
+          : String(err || t('提交回应失败', 'Failed to submit reply'));
+      notify({
+        id: errorNoticeId,
+        tone: 'error',
+        title: message,
+      });
     } finally {
       setSubmitting(false);
     }
   };
 
   const visibleSteps = activeTask.steps.filter(s => s.status !== 'cancelled');
+  const barSummary = activeTask.title || prompt.text;
+  const confirmIdleLabel = t('确认安排并开始', 'Confirm and start');
+  const confirmBusyLabel = t('启动中…', 'Starting…');
 
   return (
     <div className={dockClass}>
       <div
-        className="chat-prompt-card"
+        className={`chat-prompt-card${expanded ? ' is-expanded' : ''}`}
         role="region"
         aria-label={prompt.kind === 'plan' ? t('待确认计划', 'Plan awaiting confirmation') : t('待回应问题', 'Question awaiting reply')}
       >
-        <div className="chat-prompt-head">
-          <span className="chat-prompt-dot" aria-hidden="true" />
-          <span className="chat-prompt-kicker">
-            {prompt.kind === 'plan' ? t('待确认安排', 'Confirm plan') : t('待你回应', 'Awaiting reply')}
-          </span>
+        <div
+          key={`prompt:${activeTask.id}:${prompt.kind}`}
+          className="chat-prompt-bar chat-task-bar-fade"
+        >
           <button
             type="button"
-            className="chat-prompt-task-link"
-            aria-label={t(`查看任务详情：${activeTask.title}`, `View task details: ${activeTask.title}`)}
-            title={isMobile ? undefined : activeTask.title}
-            onClick={() => onOpenTaskDetail(activeTask.id, false)}
+            className="chat-prompt-bar-toggle"
+            aria-expanded={expanded}
+            aria-controls={panelId}
+            aria-label={
+              expanded
+                ? t(`收起任务提示：${barSummary}`, `Collapse task prompt: ${barSummary}`)
+                : t(`展开任务提示：${barSummary}`, `Expand task prompt: ${barSummary}`)
+            }
+            title={isMobile ? undefined : barSummary}
+            onClick={() => setExpanded(prev => !prev)}
           >
-            <span className="chat-prompt-task-title">{activeTask.title}</span>
-            <span aria-hidden="true">↗</span>
+            <span className="chat-prompt-dot" aria-hidden="true" />
+            <span className="chat-prompt-kicker">
+              {prompt.kind === 'plan' ? t('待确认安排', 'Confirm plan') : t('待你回应', 'Awaiting reply')}
+            </span>
+            <span className="chat-prompt-bar-sep" aria-hidden="true">
+              ·
+            </span>
+            <span className="chat-prompt-bar-summary">{barSummary}</span>
+            <span className={`chat-prompt-chevron${expanded ? ' is-open' : ''}`} aria-hidden="true">
+              <ChevronDown size={15} />
+            </span>
           </button>
           {waitingTasksCount > 1 && onCycleWaitingTask ? (
             <button
               type="button"
               className="chat-prompt-cycle-btn"
-              onClick={onCycleWaitingTask}
+              onClick={() => {
+                if (expanded) preserveExpandedOnCycleRef.current = true;
+                onCycleWaitingTask();
+              }}
             >
               {t(`切换 (${waitingTaskIndex + 1}/${waitingTasksCount})`, `Switch (${waitingTaskIndex + 1}/${waitingTasksCount})`)}
             </button>
           ) : null}
         </div>
 
-        <p className="chat-prompt-text">{prompt.text}</p>
-
-        {prompt.kind === 'plan' && visibleSteps.length > 0 ? (
-          <ol className="chat-plan-steps">
-            {visibleSteps.map(step => {
-              const matched = step.botId
-                ? bots.find(
-                    b =>
-                      (step.deviceId ? b.deviceId === step.deviceId : true) &&
-                      b.botId === step.botId,
-                  )
-                : undefined;
-              const ownerName =
-                matched?.name ||
-                step.botName ||
-                (step.botId ? t('未知 Bot', 'Unknown Bot') : t('待接手', 'Unassigned'));
-              return (
-                <li key={step.id}>
-                  {step.text}{' '}
-                  <span className="chat-plan-step-bot">{t(`（${ownerName}）`, `(${ownerName})`)}</span>
-                </li>
-              );
-            })}
-          </ol>
-        ) : null}
-
-        {error ? (
-          <div className="tasks-error-strip" role="alert">
-            <span>{error}</span>
-          </div>
-        ) : null}
-
-        {prompt.kind === 'plan' ? (
-          <div className="chat-prompt-actions">
-            <button
-              type="button"
-              className="tb-primary-btn"
-              disabled={disabled}
-              onClick={() => void handleConfirm()}
-            >
-              {submitting ? t('启动中…', 'Starting…') : t('确认安排并开始', 'Confirm and start')}
-            </button>
-            <button
-              type="button"
-              className="tb-secondary-btn"
-              disabled={disabled}
-              onClick={() => onOpenTaskDetail(activeTask.id, true)}
-            >
-              {t('编辑步骤', 'Edit steps')}
-            </button>
-          </div>
-        ) : prompt.options && prompt.options.length > 0 ? (
-          <div className="chat-prompt-actions">
-            {prompt.options.map(option => (
+        <SmoothExpand open={expanded} className="chat-prompt-expand">
+          <div id={panelId} className="chat-prompt-body">
+            <div className="chat-prompt-head">
               <button
-                key={option}
                 type="button"
-                className="option-pill"
-                disabled={disabled}
-                onClick={() => void handleAnswer(option)}
+                className="chat-prompt-task-link"
+                tabIndex={expanded ? undefined : -1}
+                aria-label={t(`查看任务详情：${activeTask.title}`, `View task details: ${activeTask.title}`)}
+                title={isMobile ? undefined : activeTask.title}
+                onClick={() => onOpenTaskDetail(activeTask.id, false)}
               >
-                {option}
+                <span className="chat-prompt-task-title">{activeTask.title}</span>
+                <span aria-hidden="true">↗</span>
               </button>
-            ))}
+            </div>
+
+            <p className="chat-prompt-text">{prompt.text}</p>
+
+            {prompt.kind === 'plan' && visibleSteps.length > 0 ? (
+              <ol className="chat-plan-steps">
+                {visibleSteps.map(step => {
+                  const matched = step.botId
+                    ? bots.find(
+                        b =>
+                          (step.deviceId ? b.deviceId === step.deviceId : true) &&
+                          b.botId === step.botId,
+                      )
+                    : undefined;
+                  const ownerName =
+                    matched?.name ||
+                    step.botName ||
+                    (step.botId ? t('未知 Bot', 'Unknown Bot') : t('待接手', 'Unassigned'));
+                  return (
+                    <li key={step.id}>
+                      {step.text}{' '}
+                      <span className="chat-plan-step-bot">{t(`（${ownerName}）`, `(${ownerName})`)}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
+
+            {prompt.kind === 'plan' ? (
+              <div className="chat-prompt-actions">
+                <button
+                  type="button"
+                  className="tb-primary-btn"
+                  tabIndex={expanded ? undefined : -1}
+                  disabled={disabled}
+                  onClick={() => void handleConfirm()}
+                >
+                  <LabelStack
+                    active={submitting ? confirmBusyLabel : confirmIdleLabel}
+                    labels={[confirmIdleLabel, confirmBusyLabel]}
+                  />
+                </button>
+                <button
+                  type="button"
+                  className="tb-secondary-btn"
+                  tabIndex={expanded ? undefined : -1}
+                  disabled={disabled}
+                  onClick={() => onOpenTaskDetail(activeTask.id, true)}
+                >
+                  {t('编辑步骤', 'Edit steps')}
+                </button>
+              </div>
+            ) : prompt.options && prompt.options.length > 0 ? (
+              <div className="chat-prompt-actions">
+                {prompt.options.map(option => (
+                  <button
+                    key={option}
+                    type="button"
+                    className="option-pill"
+                    tabIndex={expanded ? undefined : -1}
+                    disabled={disabled}
+                    onClick={() => void handleAnswer(option)}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-        ) : null}
+        </SmoothExpand>
       </div>
     </div>
   );

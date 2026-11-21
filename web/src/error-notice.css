@@ -4,7 +4,9 @@
   border: 1px solid var(--color-line, var(--line)); background: var(--surface-elevated, var(--color-surface-2, var(--bg)));
   color: var(--color-text, var(--text)); font-size: var(--text-sm, .8125rem); line-height: 1.5; overflow-wrap: anywhere;
   box-shadow: none; animation: none;
+  transition: opacity var(--dur-fast, 150ms) ease;
 }
+.grok-notice-card.inline-error.is-stale { opacity: .55; }
 .grok-notice-card.inline-error.is-info { --notice-accent: var(--color-text-muted, var(--muted)); }
 .grok-notice-card.inline-error.is-warning { --notice-accent: var(--color-warning, var(--warn)); }
 .grok-notice-card.inline-error.is-success { --notice-accent: var(--color-success, var(--ok, var(--accent))); }
@@ -38,4 +40,7 @@
 }
 @media (pointer: coarse) {
   .grok-notice-card .grok-notice-action-pill, .grok-notice-card .grok-notice-dismiss-btn, .grok-notice-card .grok-notice-detail-toggle { min-width: var(--tap-min, 44px); min-height: var(--tap-min, 44px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grok-notice-card.inline-error { transition: none; }
 }

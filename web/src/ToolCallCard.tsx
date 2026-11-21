@@ -69,6 +69,8 @@ export interface ToolCallCardProps {
   variant?: 'mobile' | 'desktop';
   requesterName?: string;
   collapseOutput: boolean;
+  /** 仅作初始展开态（省略时回退 !collapseOutput）；用户手动切换后不再被自动覆写。 */
+  defaultOpen?: boolean;
   presentationOnly?: boolean;
   /** 内部嵌套层级计数（默认 0），移动端精简模式用于限制最大缩进 2 层。 */
   depth?: number;
@@ -89,6 +91,7 @@ export function ToolCallCard({
   variant,
   requesterName,
   collapseOutput,
+  defaultOpen,
   presentationOnly = false,
   depth = 0,
   googleContext,
@@ -102,7 +105,6 @@ export function ToolCallCard({
   const isCoarse = useIsCoarsePointer();
   const mobileCompact = isCoarse && variant !== 'desktop';
   const [argSummaryExpanded, setArgSummaryExpanded] = useState(false);
-  const [compactExpanded, setCompactExpanded] = useState(!collapseOutput);
   const [expandedArgKeys, setExpandedArgKeys] = useState<Record<string, boolean>>({});
   const [showRawArgs, setShowRawArgs] = useState(false);
   const presentation = readToolPresentation(tool.presentation);
@@ -160,16 +162,34 @@ export function ToolCallCard({
     : undefined;
   const hasDetails = codemode || args !== undefined || tool.output !== undefined || tool.outputTruncated ||
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
-  const hasLiveChildPresentation = tool.status === 'running' && Boolean(
-    tool.children?.some(child => child.presentationLive === true && Boolean(readToolPresentation(child.presentation))) ||
-    (tool.children && pendingToolPrompts(tool.children).length > 0),
+  const hasVisibleChildPresentation = Boolean(
+    tool.children && (
+      (tool.status === 'running' && tool.children.some(child => {
+        const childPres = readToolPresentation(child.presentation);
+        return child.presentationLive === true && childPres !== null && childPres.kind !== 'google-setup';
+      })) ||
+      pendingToolPrompts(tool.children, tool.status === 'running').length > 0
+    ),
   );
-  useEffect(() => {
-    setCompactExpanded(!collapseOutput || (mobileCompact && hasLiveChildPresentation));
-  }, [collapseOutput, mobileCompact, hasLiveChildPresentation]);
+  // 严格把 defaultOpen / !collapseOutput 作为初始态，在渲染期同步推导自动展开；
+  // 一旦用户手动切换展开/收起，永不再由 props 或异步子调用变化自动覆盖。
+  const [initialOpen] = useState<boolean>(() => defaultOpen ?? !collapseOutput);
+  const [userCompactOpen, setUserCompactOpen] = useState<boolean | null>(null);
+  const [userDetailsOpen, setUserDetailsOpen] = useState<boolean | null>(null);
+  const [autoExpandedForChild, setAutoExpandedForChild] = useState<boolean>(
+    () => mobileCompact && hasVisibleChildPresentation,
+  );
+  if (mobileCompact && hasVisibleChildPresentation && !autoExpandedForChild && userCompactOpen === null) {
+    setAutoExpandedForChild(true);
+  }
+  const compactExpanded = userCompactOpen ?? (initialOpen || autoExpandedForChild);
+  const detailsOpen = userDetailsOpen ?? initialOpen;
   const hasCompactBody = hasDetails || Boolean(tool.argSummary || tool.error || tool.children?.length ||
     tool.nestedCallsTruncated || (codemode && tool.status !== 'running' && tool.children === undefined));
-  const presentationActive = resolveToolPresentationActive(tool, presentation, active, disabled);
+  const isGoogleSetupHistory = presentation?.kind === 'google-setup';
+  const presentationActive = isGoogleSetupHistory
+    ? false
+    : resolveToolPresentationActive(tool, presentation, active, disabled);
   const presentationCard = presentation ? (
     <ToolPresentationCard
       key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
@@ -178,7 +198,7 @@ export function ToolCallCard({
       disabled={disabled}
       variant={variant === 'desktop' ? 'desktop' : undefined}
       requesterName={requesterName}
-      googleContext={googleContext}
+      googleContext={isGoogleSetupHistory ? undefined : googleContext}
       onSubmit={presentation.kind === 'questionnaire' && onSubmitQuestionnaire
         ? input => onSubmitQuestionnaire(presentation.installationId, input)
         : undefined}
@@ -189,6 +209,13 @@ export function ToolCallCard({
     />
   ) : null;
   if (presentationOnly) return presentationCard;
+  if (isGoogleSetupHistory) {
+    return (
+      <div key={`${scopeKey}:${tool.id}`} role="listitem" className="gws-history-listitem">
+        {presentationCard}
+      </div>
+    );
+  }
 
   const renderChildren = () =>
     tool.children && tool.children.length > 0 ? (
@@ -207,6 +234,7 @@ export function ToolCallCard({
             variant={variant}
             requesterName={requesterName}
             collapseOutput={collapseOutput}
+            defaultOpen={defaultOpen}
             depth={depth + 1}
             googleContext={googleContext}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
@@ -231,7 +259,7 @@ export function ToolCallCard({
             type="button"
             className={`tool-call-header tool-call-compact-toggle${compactExpanded ? ' is-expanded' : ''}`}
             aria-expanded={compactExpanded}
-            onClick={() => setCompactExpanded(v => !v)}
+            onClick={() => setUserCompactOpen(!compactExpanded)}
           >
             <span className="tool-call-icon" aria-hidden="true">{icon}</span>
             <span className="tool-call-name">{tool.name}</span>
@@ -380,7 +408,16 @@ export function ToolCallCard({
           ) : null}
 
           {hasDetails ? (
-            <details className="tool-call-details" open={!collapseOutput}>
+            <details
+              className="tool-call-details"
+              open={detailsOpen}
+              onToggle={event => {
+                const nextOpen = event.currentTarget.open;
+                if (nextOpen !== detailsOpen) {
+                  setUserDetailsOpen(nextOpen);
+                }
+              }}
+            >
               <summary>{codemode ? t('脚本与输出', 'Script and output') : t('调用详情', 'Call details')}</summary>
               {script !== undefined ? (
                 <div className="tool-call-section">

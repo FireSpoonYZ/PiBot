@@ -1,7 +1,9 @@
-import type { RefObject, TouchEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject, type TouchEvent } from 'react';
 import { PanelLeft, Plus, RefreshCw, Search, Sparkles, Users, X } from 'lucide-react';
 import { mobileHaptic } from '../native/tauri-host';
-import { useCenterConnection } from '../native/CenterGate';
+import type { ConnectionPhase } from '../connection';
+import { useNotice } from '../notice';
+import { Skeleton, SkeletonRow, useBottomChromeMeasure, useFlipList } from '../layout';
 import {
   ConversationGroupAvatar,
   ConversationRow,
@@ -16,11 +18,15 @@ import {
   type GrokAvatarPreset,
 } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
-import { ErrorNotice, useText } from '../ui';
+import { humanizeError, useText } from '../ui';
 import { PlatformLogoIcon, type BotPreviewMeta, type UnifiedBotItem } from '../hub/shared';
 import { Chips } from '../bot-settings/primitives';
 import { HubPrimaryHero } from './HubParts';
 import type { HubContextMenuState, HubListEntry } from './types';
+
+const HUB_ROOMS_ERROR_NOTICE_ID = 'hub-rooms-error';
+const HUB_PINS_ERROR_NOTICE_ID = 'hub-pins-error';
+const HUB_ACTION_ERROR_NOTICE_ID = 'hub-action-error';
 
 export interface HubScreenProps {
   visible: boolean;
@@ -28,6 +34,9 @@ export interface HubScreenProps {
   leftDrawerOpen: boolean;
   navigationTriggerRef: RefObject<HTMLButtonElement | null>;
   onOpenLeftDrawer(): void;
+  connectionPhase: ConnectionPhase;
+  connectionDetail: string;
+  ipcReconnecting: boolean;
   hubRefreshing: boolean;
   pullDistance: number;
   pullThreshold: number;
@@ -49,19 +58,16 @@ export interface HubScreenProps {
   onOpenContextMenu(menu: HubContextMenuState): void;
   hubFilter: 'all' | 'bots' | 'rooms';
   onChangeHubFilter(next: 'all' | 'bots' | 'rooms'): void;
-  directoryError: string;
   chatPinsError: string | null;
   actionError: string;
-  onDismissDirectoryError(): void;
-  onDismissActionError(): void;
   onOpenCenterSettings(): void;
   onTriggerRefresh(): void;
-  hasRemoteBots: boolean;
   remoteConnected: boolean;
   hasLocalHost: boolean;
+  hasConfiguredCenter: boolean;
+  botsHydrated: boolean;
+  roomConversationsHydrated: boolean;
   roomConversationsError: string | null;
-  roomConversationsLoaded: boolean;
-  roomConversationsLoading: boolean;
   onRefreshRoomConversations(): void;
   visibleHubItems: HubListEntry[];
   visiblePinnedKeys: string[];
@@ -82,6 +88,9 @@ export function HubScreen({
   leftDrawerOpen,
   navigationTriggerRef,
   onOpenLeftDrawer,
+  connectionPhase,
+  connectionDetail,
+  ipcReconnecting,
   hubRefreshing,
   pullDistance,
   pullThreshold,
@@ -103,19 +112,16 @@ export function HubScreen({
   onOpenContextMenu,
   hubFilter,
   onChangeHubFilter,
-  directoryError,
   chatPinsError,
   actionError,
-  onDismissDirectoryError,
-  onDismissActionError,
   onOpenCenterSettings,
   onTriggerRefresh,
-  hasRemoteBots,
   remoteConnected,
   hasLocalHost,
+  hasConfiguredCenter,
+  botsHydrated,
+  roomConversationsHydrated,
   roomConversationsError,
-  roomConversationsLoaded,
-  roomConversationsLoading,
   onRefreshRoomConversations,
   visibleHubItems,
   visiblePinnedKeys,
@@ -130,7 +136,132 @@ export function HubScreen({
   onChangeSearchQuery,
 }: HubScreenProps) {
   const t = useText();
-  const centerConn = useCenterConnection();
+  const { notify, dismiss } = useNotice();
+  const [connPopoverOpen, setConnPopoverOpen] = useState(false);
+
+  const bottomBarRef = useRef<HTMLElement | null>(null);
+  const listRef = useRef<HTMLUListElement | null>(null);
+  useBottomChromeMeasure(bottomBarRef, visible);
+
+  const flipKeys = useMemo(() => visibleHubItems.map(entry => entry.pinKey), [visibleHubItems]);
+  useFlipList(flipKeys, listRef, { enabled: visible });
+
+  const tRef = useRef(t);
+  tRef.current = t;
+  const actionsRef = useRef({
+    onRefreshRoomConversations,
+    onTriggerRefresh,
+    onOpenCenterSettings,
+  });
+  actionsRef.current = {
+    onRefreshRoomConversations,
+    onTriggerRefresh,
+    onOpenCenterSettings,
+  };
+
+  useEffect(() => {
+    if (!visible || connectionPhase === 'online' || hubAddMenuOpen) {
+      setConnPopoverOpen(false);
+    }
+  }, [visible, connectionPhase, hubAddMenuOpen]);
+
+  useEffect(() => {
+    if (!connPopoverOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setConnPopoverOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [connPopoverOpen]);
+
+  // H5: 群聊加载失败走 F1 浮层通知，带重试按钮；成功或离页立即清除。
+  useEffect(() => {
+    const err = visible ? roomConversationsError?.trim() : '';
+    if (!err) {
+      dismiss(HUB_ROOMS_ERROR_NOTICE_ID);
+      return;
+    }
+    const t = tRef.current;
+    notify({
+      id: HUB_ROOMS_ERROR_NOTICE_ID,
+      tone: 'error',
+      title: t('群聊列表加载失败', 'Failed to load groups'),
+      detail: err,
+      action: {
+        label: t('重试', 'Retry'),
+        onClick: () => actionsRef.current.onRefreshRoomConversations(),
+      },
+    });
+  }, [visible, roomConversationsError, notify, dismiss]);
+
+  // H2: 置顶同步异常与操作失败路由到 F1 浮层，不插入列表文档流。
+  useEffect(() => {
+    const err = visible ? chatPinsError?.trim() : '';
+    if (!err) {
+      dismiss(HUB_PINS_ERROR_NOTICE_ID);
+      return;
+    }
+    const t = tRef.current;
+    notify({
+      id: HUB_PINS_ERROR_NOTICE_ID,
+      tone: 'warning',
+      title: t('置顶状态保存失败', 'Failed to save pinned chats'),
+      detail: err,
+    });
+  }, [visible, chatPinsError, notify, dismiss]);
+
+  useEffect(() => {
+    const err = visible ? actionError.trim() : '';
+    if (!err) {
+      dismiss(HUB_ACTION_ERROR_NOTICE_ID);
+      return;
+    }
+    const humanized = humanizeError(err, tRef.current);
+    const title = humanized?.title || err;
+    const detailParts = [humanized?.description, humanized?.detail].filter(Boolean);
+    notify({
+      id: HUB_ACTION_ERROR_NOTICE_ID,
+      tone: 'error',
+      title,
+      detail: detailParts.length > 0 ? detailParts.join('\n') : undefined,
+    });
+  }, [visible, actionError, notify, dismiss]);
+
+  useEffect(() => () => {
+    dismiss(HUB_ROOMS_ERROR_NOTICE_ID);
+    dismiss(HUB_PINS_ERROR_NOTICE_ID);
+    dismiss(HUB_ACTION_ERROR_NOTICE_ID);
+  }, [dismiss]);
+
+  const titleObscured = hubRefreshing || pullDistance > 4;
+  const hubHydrated =
+    hubFilter === 'rooms'
+      ? roomConversationsHydrated
+      : hubFilter === 'bots'
+        ? botsHydrated
+        : botsHydrated && (roomConversationsHydrated || (!hasConfiguredCenter && !hasLocalHost));
+
+  const statusText =
+    connectionPhase === 'connecting'
+      ? t('连接中…', 'Connecting…')
+      : connectionPhase === 'offline'
+        ? t('离线', 'Offline')
+        : t('连接异常', 'Connection issue');
+
+  const statusHeading =
+    connectionPhase === 'connecting'
+      ? (ipcReconnecting ? t('正在恢复本地服务…', 'Reconnecting local service…') : t('正在恢复连接…', 'Reconnecting…'))
+      : connectionPhase === 'offline'
+        ? t('与中心未连接', 'Disconnected from center')
+        : t('中心连接异常', 'Center connection issue');
+
+  const statusDescription =
+    connectionDetail.trim() ||
+    (connectionPhase === 'connecting'
+      ? t('正在同步中心连接与远端设备在线状态。', 'Syncing center connection and remote device availability.')
+      : connectionPhase === 'offline'
+        ? t('当前未连接到中心，远端设备状态待确认。', 'Not connected to center; remote device status is pending.')
+        : t('中心连接出现错误，请检查网络或中心配置。', 'Center connection failed. Check your network or center settings.'));
 
   return (
     <main
@@ -151,7 +282,28 @@ export function HubScreen({
           <PanelLeft size={20} strokeWidth={2} />
         </button>
 
-        <h1 className={`hub-top-title${hubRefreshing || pullDistance > 4 ? ' is-obscured' : ''}`}>PiBot</h1>
+        {connectionPhase === 'online' ? (
+          <h1 className={`hub-top-title${titleObscured ? ' is-obscured' : ''}`}>PiBot</h1>
+        ) : (
+          <button
+            type="button"
+            className={`hub-top-title hub-top-status-btn is-${connectionPhase}${titleObscured ? ' is-obscured' : ''}`}
+            aria-haspopup="dialog"
+            aria-expanded={connPopoverOpen}
+            aria-label={`${statusText} - ${t('查看连接详情', 'View connection details')}`}
+            onClick={() => {
+              if (hubAddMenuOpen) onCloseHubAddMenu();
+              setConnPopoverOpen(v => !v);
+            }}
+          >
+            {connectionPhase === 'connecting' ? (
+              <RefreshCw size={15} strokeWidth={2.2} className="hub-top-status-spin" aria-hidden="true" />
+            ) : (
+              <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
+            )}
+            <span className="hub-top-status-label">{statusText}</span>
+          </button>
+        )}
 
         {(() => {
           const isSpinning = hubRefreshing;
@@ -197,10 +349,59 @@ export function HubScreen({
           aria-label={t('新建', 'New')}
           aria-haspopup="menu"
           aria-expanded={hubAddMenuOpen}
-          onClick={onToggleHubAddMenu}
+          onClick={() => {
+            setConnPopoverOpen(false);
+            onToggleHubAddMenu();
+          }}
         >
           <Plus size={22} strokeWidth={2.2} />
         </button>
+
+        {connPopoverOpen && connectionPhase !== 'online' && (
+          <>
+            <div className="grok-menu-backdrop" onClick={() => setConnPopoverOpen(false)} />
+            <div
+              className="hub-conn-popover"
+              role="dialog"
+              aria-label={t('连接状态详情', 'Connection status details')}
+            >
+              <div className={`hub-conn-popover-head is-${connectionPhase}`}>
+                {connectionPhase === 'connecting' ? (
+                  <RefreshCw size={15} className="hub-top-status-spin" aria-hidden="true" />
+                ) : (
+                  <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
+                )}
+                <span>{statusHeading}</span>
+              </div>
+              <p className="hub-conn-popover-desc">{statusDescription}</p>
+              <p className="hub-conn-popover-hint">
+                {t('提示：在首页下拉也可立即检查并尝试恢复连接。', 'Tip: Pull down on Hub to check and retry connecting.')}
+              </p>
+              <div className="hub-conn-popover-actions">
+                <button
+                  type="button"
+                  className="hub-conn-popover-btn"
+                  onClick={() => {
+                    setConnPopoverOpen(false);
+                    onTriggerRefresh();
+                  }}
+                >
+                  {t('立即重试', 'Retry now')}
+                </button>
+                <button
+                  type="button"
+                  className="hub-conn-popover-btn is-primary"
+                  onClick={() => {
+                    setConnPopoverOpen(false);
+                    onOpenCenterSettings();
+                  }}
+                >
+                  {t('去设置', 'Settings')}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
 
         {hubAddMenuOpen && (
           <>
@@ -252,10 +453,23 @@ export function HubScreen({
               onOpen={() => onOpenBotChat(primaryBot)}
               onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: primaryBot }); }}
             />
+          ) : !botsHydrated ? (
+            <div
+              className="hub-hero-button hub-hero-card hub-hero-skeleton"
+              role="status"
+              aria-busy="true"
+              aria-label={t('正在加载主 Bot…', 'Loading primary Bot…')}
+            >
+              <Skeleton variant="circle" width={64} height={64} />
+              <div className="hub-hero-card-text">
+                <Skeleton variant="text" width="44%" height={16} />
+                <Skeleton variant="pill" width={64} height={20} />
+              </div>
+            </div>
           ) : (
             <button
               type="button"
-              className="hub-hero-button"
+              className="hub-hero-button hub-hero-card hub-hero-placeholder"
               onClick={onOpenPrimaryCreate}
               aria-label={t('创建主 Bot', 'Create Primary Bot')}
             >
@@ -266,7 +480,13 @@ export function HubScreen({
                 platformBadge={<PlatformLogoIcon platform="android" size={11} />}
                 size={64}
               />
-              <span className="hub-hero-name">{t('创建主 Bot', 'Create Primary Bot')}</span>
+              <div className="hub-hero-card-text">
+                <span className="hub-hero-name">{t('创建主 Bot', 'Create Primary Bot')}</span>
+                <span className="hub-bot-host-badge local">
+                  <PlatformLogoIcon platform="android" size={12} />
+                  <span className="hub-bot-host-text">{t('本机', 'Local')}</span>
+                </span>
+              </div>
             </button>
           )}
         </section>
@@ -285,135 +505,145 @@ export function HubScreen({
               ]}
             />
           </div>
-          <ErrorNotice
-            compact
-            error={directoryError || (!centerConn.ready ? centerConn.error : '') || chatPinsError || actionError}
-            actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
-            onAction={!centerConn.ready && centerConn.status?.error ? onOpenCenterSettings : directoryError ? onTriggerRefresh : undefined}
-            onDismiss={directoryError ? onDismissDirectoryError : actionError ? onDismissActionError : undefined}
-          />
-          {hasRemoteBots && !remoteConnected && (
-            <p className="hub-empty-list" role="status">
-              {centerConn.connecting
-                ? t('正在恢复连接，远端设备状态待确认…', 'Reconnecting; remote device status is unknown…')
-                : t('与中心未连接，远端设备状态待确认。下拉可尝试恢复。', 'Disconnected from center. Pull down to check and reconnect.')}
-            </p>
-          )}
-          {roomConversationsError ? (
-            <ErrorNotice
-              compact
-              title={t('群聊列表加载失败', 'Failed to load groups')}
-              detail={roomConversationsError}
-              actionLabel={t('重试', 'Retry')}
-              onAction={onRefreshRoomConversations}
-            />
-          ) : null}
           {visibleHubItems.length === 0 ? (
-            hubFilter === 'rooms' && !roomConversationsLoaded && roomConversationsLoading ? null : (
-            <div className="hub-empty-list">
-              <p>
-                {searchQuery.trim()
-                  ? t('没有匹配的 Bot 或群聊', 'No matching bots or groups')
-                  : hubFilter === 'rooms'
-                    ? t('还没有群聊，点右上角 + 创建群聊', 'No group chats yet. Tap + in the top right to create one')
-                    : t('点击上方主 Bot 直接开始对话，或点右上角 + 新建 Bot 或群聊', 'Tap the primary Bot above to chat, or + to create a Bot or group chat')}
-              </p>
-            </div>
+            !searchQuery.trim() && !hubHydrated ? (
+              <SkeletonRow
+                variant="hub"
+                count={3}
+                label={t('正在加载列表…', 'Loading list…')}
+              />
+            ) : (
+              <div className="hub-empty-list">
+                <p>
+                  {searchQuery.trim()
+                    ? t('没有匹配的 Bot 或群聊', 'No matching bots or groups')
+                    : hubFilter === 'rooms'
+                      ? t('还没有群聊，点右上角 + 创建群聊', 'No group chats yet. Tap + in the top right to create one')
+                      : t('点击上方主 Bot 直接开始对话，或点右上角 + 新建 Bot 或群聊', 'Tap the primary Bot above to chat, or + to create a Bot or group chat')}
+                </p>
+              </div>
             )
           ) : (
-            visibleHubItems.map(entry => {
-              if (entry.room) {
-                const room = entry.room;
+            <ul ref={listRef} className="hub-bot-list-items">
+              {visibleHubItems.map(entry => {
+                if (entry.room) {
+                  const room = entry.room;
+                  const rowNode = (
+                    <ConversationRow
+                      className="hub-bot-row"
+                      title={room.title}
+                      preview={room.lastPreview}
+                      timestamp={room.lastActivityAt}
+                      groupLabel={t('群聊', 'Group chat')}
+                      pinned={entry.pinned}
+                      unread={unreadConversationKeys.has(entry.pinKey)}
+                      avatar={
+                        <ConversationGroupAvatar
+                          members={room.scope.scope.members}
+                          bots={knownBots}
+                          size={40}
+                        />
+                      }
+                      onOpen={() => onOpenScopeConversation(room, false)}
+                      onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, room }); }}
+                    />
+                  );
+                  return (
+                    <li
+                      key={entry.pinKey}
+                      className="hub-bot-list-item"
+                      data-flip-key={entry.pinKey}
+                    >
+                      {entry.pinned ? (
+                        <SortablePinnedChat
+                          chatKey={entry.pinKey}
+                          keys={visiblePinnedKeys}
+                          onReorder={onReorderPinnedKeys}
+                        >
+                          {rowNode}
+                        </SortablePinnedChat>
+                      ) : (
+                        rowNode
+                      )}
+                    </li>
+                  );
+                }
+                const item = entry.bot!;
+                const meta = botMetaMap[item.key];
+                const offline = botIsOffline(item);
+                const statusUnknown = item.hostKind === 'local' ? !hasLocalHost : !remoteConnected;
+                const isRemoteConnecting = item.hostKind === 'remote' && connectionPhase === 'connecting';
+                const statusDotClass =
+                  isRemoteConnecting || statusUnknown
+                    ? 'is-connecting'
+                    : offline
+                      ? 'is-offline'
+                      : 'is-online';
+                const connectionLabel =
+                  isRemoteConnecting || statusUnknown
+                    ? t('连接状态待确认', 'Connection status unknown')
+                    : offline
+                      ? t('离线', 'Offline')
+                      : t('在线', 'Online');
+                const cachedPreview = meta?.lastText?.trim();
+                // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
+                const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
+                  (cachedPreview === meta?.subtitle?.trim() ||
+                   cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…'); // i18n-ok
+                const itemScopeKey = scopeForBot(item);
+                const isClearNotice = ((itemScopeKey && clearedMap[itemScopeKey] !== undefined) || clearedMap[item.key] !== undefined) &&
+                  (cachedPreview === '对话已清空' || cachedPreview === 'History cleared'); // i18n-ok
+                const preview = item.lastPreview?.trim() ||
+                  (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
                 const rowNode = (
                   <ConversationRow
-                    key={entry.pinKey}
                     className="hub-bot-row"
-                    title={room.title}
-                    preview={room.lastPreview}
-                    timestamp={room.lastActivityAt}
-                    groupLabel={t('群聊', 'Group chat')}
-                    pinned={entry.pinned}
+                    title={item.role}
+                    preview={preview}
+                    timestamp={entry.sortMs || null}
+                    connectionLabel={connectionLabel}
                     unread={unreadConversationKeys.has(entry.pinKey)}
+                    pinned={entry.pinned}
                     avatar={
-                      <ConversationGroupAvatar
-                        members={room.scope.scope.members}
-                        bots={knownBots}
-                        size={40}
-                      />
+                      <span className="hub-bot-avatar-wrap">
+                        <GrokBotAvatar
+                          preset={resolveBotAvatarPreset(botAvatarKey(item), item.role, Boolean(item.isPrimary))}
+                          offline={isRemoteConnecting ? false : offline}
+                          size={40}
+                        />
+                        <span className={`hub-bot-status-dot ${statusDotClass}`} aria-hidden="true" />
+                      </span>
                     }
-                    onOpen={() => onOpenScopeConversation(room, false)}
-                    onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, room }); }}
+                    onOpen={() => onOpenBotChat(item)}
+                    onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
                   />
                 );
-                return entry.pinned ? (
-                  <SortablePinnedChat
+                return (
+                  <li
                     key={entry.pinKey}
-                    chatKey={entry.pinKey}
-                    keys={visiblePinnedKeys}
-                    onReorder={onReorderPinnedKeys}
+                    className="hub-bot-list-item"
+                    data-flip-key={entry.pinKey}
                   >
-                    {rowNode}
-                  </SortablePinnedChat>
-                ) : (
-                  rowNode
+                    {entry.pinned ? (
+                      <SortablePinnedChat
+                        chatKey={entry.pinKey}
+                        keys={visiblePinnedKeys}
+                        onReorder={onReorderPinnedKeys}
+                      >
+                        {rowNode}
+                      </SortablePinnedChat>
+                    ) : (
+                      rowNode
+                    )}
+                  </li>
                 );
-              }
-              const item = entry.bot!;
-              const meta = botMetaMap[item.key];
-              const offline = botIsOffline(item);
-              const statusUnknown = item.hostKind === 'local' ? !hasLocalHost : !remoteConnected;
-              const connectionLabel = statusUnknown
-                ? t('连接状态待确认', 'Connection status unknown')
-                : offline ? t('离线', 'Offline') : t('在线', 'Online');
-              const cachedPreview = meta?.lastText?.trim();
-              // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
-              const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
-                (cachedPreview === meta?.subtitle?.trim() ||
-                 cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…'); // i18n-ok
-              const itemScopeKey = scopeForBot(item);
-              const isClearNotice = ((itemScopeKey && clearedMap[itemScopeKey] !== undefined) || clearedMap[item.key] !== undefined) &&
-                (cachedPreview === '对话已清空' || cachedPreview === 'History cleared'); // i18n-ok
-              const preview = item.lastPreview?.trim() ||
-                (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
-              const rowNode = (
-                <ConversationRow
-                  key={entry.pinKey}
-                  className="hub-bot-row"
-                  title={item.role}
-                  preview={preview}
-                  timestamp={entry.sortMs || null}
-                  connectionLabel={connectionLabel}
-                  unread={unreadConversationKeys.has(entry.pinKey)}
-                  pinned={entry.pinned}
-                  avatar={
-                    <GrokBotAvatar
-                      preset={resolveBotAvatarPreset(botAvatarKey(item), item.role, Boolean(item.isPrimary))}
-                      offline={offline}
-                      size={40}
-                    />
-                  }
-                  onOpen={() => onOpenBotChat(item)}
-                  onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
-                />
-              );
-              return entry.pinned ? (
-                <SortablePinnedChat
-                  key={entry.pinKey}
-                  chatKey={entry.pinKey}
-                  keys={visiblePinnedKeys}
-                  onReorder={onReorderPinnedKeys}
-                >
-                  {rowNode}
-                </SortablePinnedChat>
-              ) : (
-                rowNode
-              );
-            })
+              })}
+            </ul>
           )}
         </section>
       </div>
 
-      <footer className="hub-bottom-bar">
+      <footer ref={bottomBarRef} className="hub-bottom-bar">
         <label className="hub-search-box">
           <Search size={18} className="hub-search-icon" />
           <input

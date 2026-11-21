@@ -5,6 +5,7 @@ import type { DevicesDirectoryItem, MessageMember } from '../../../host-core/ind
 import { GrokBotAvatar, resolveBotAvatarPreset, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { ErrorNotice, FloatingPillToast, useText } from '../ui';
+import { LabelStack, ReservedSlot } from '../layout';
 import { PlatformLogoIcon, type GroupCreateAttempt, type UnifiedBotItem } from '../hub/shared';
 import { Switch } from '../components/ui';
 import type { ActionController, CreateBotAttempt } from './types';
@@ -105,7 +106,10 @@ export function CreateBotScreen({
           disabled={action.busy || !editName.trim()}
           onClick={onSave}
         >
-          {action.busy ? t('保存中', 'Saving') : t('完成', 'Done')}
+          <LabelStack
+            active={action.busy ? t('保存中', 'Saving') : t('完成', 'Done')}
+            labels={[t('保存中', 'Saving'), t('完成', 'Done')]}
+          />
         </button>
       </header>
 
@@ -304,7 +308,9 @@ export function CreateBotScreen({
           </div>
         </div>
 
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        <ReservedSlot minHeight={52} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
+        </ReservedSlot>
       </div>
       {primaryBackNotice && (
         <div className="bot-edit-toast-anchor">
@@ -372,6 +378,14 @@ export function CreateGroupScreen({
     ? !groupCreating
     : !groupCreating && activeMembers.length >= 2 && activeMembers.length <= 64 && [...groupTitle.trim()].length <= 120;
 
+  const createGroupIdleLabel = groupCreateAttempt
+    ? t('按原请求重试', 'Retry')
+    : activeMembers.length >= 2
+      ? t(`创建 (${activeMembers.length})`, `Create (${activeMembers.length})`)
+      : t('创建', 'Create');
+  const createGroupBusyLabel = t('创建中…', 'Creating…');
+  const createGroupActiveLabel = groupCreating ? createGroupBusyLabel : createGroupIdleLabel;
+
   return (
     <main className="grok-subpage grok-page-enter" aria-label={t('创建群聊', 'Create Group Chat')}>
       <header className="grok-subpage-topbar">
@@ -391,13 +405,10 @@ export function CreateGroupScreen({
           disabled={!canSubmit}
           onClick={onCreateGroup}
         >
-          {groupCreating
-            ? t('创建中…', 'Creating…')
-            : groupCreateAttempt
-              ? t('按原请求重试', 'Retry')
-              : activeMembers.length >= 2
-                ? t(`创建 (${activeMembers.length})`, `Create (${activeMembers.length})`)
-                : t('创建', 'Create')}
+          <LabelStack
+            active={createGroupActiveLabel}
+            labels={[createGroupBusyLabel, createGroupIdleLabel, t('创建', 'Create'), t('按原请求重试', 'Retry')]}
+          />
         </button>
       </header>
 
@@ -570,7 +581,9 @@ export function CreateGroupScreen({
             'Combine local and remote bots in one group chat; include at least one bot on an online host.')}
         </p>
 
-        <ErrorNotice error={groupCreateError} onDismiss={onDismissGroupCreateError} />
+        <ReservedSlot minHeight={52} align="start">
+          <ErrorNotice error={groupCreateError} stale={groupCreating} onDismiss={onDismissGroupCreateError} />
+        </ReservedSlot>
       </div>
     </main>
   );

@@ -1,9 +1,10 @@
-// 单 Bot 完整技能闭环页：空闲自动提炼总开关 + 立即复盘 + 新建技能（含 YAML frontmatter 自动补齐）
+// 单 Bot 完整技能闭环页：自动反思设置 + 立即复盘 + 新建技能（含 YAML frontmatter 自动补齐）
 // + 聚合技能列表（支持自动全局启用）+ 内置多文件编辑器（只读包一键转为可编辑副本）+ 可用范围切换。
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Copy, Edit3, Lock, Pin, Plus, RefreshCw, Sparkles, Trash2, Unlock } from 'lucide-react';
 import type {
   BotLearningSettings,
+  BotLearningSettingsPatch,
   BotLearningStatus,
   Installation,
   InstallationSkillFilesResponse,
@@ -14,7 +15,7 @@ import type { CenterBotCapabilityEntry } from '../../../host-core/desktop-client
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { ConfirmDialog } from '../components/ui/dialog';
 import { ErrorNotice, errorText, useText } from '../ui';
-import { centerAdminRequest, isCenterAuthOrBindError, newRequestId, pollCenterOperation } from './centerAdminBroker';
+import { centerAdminRequest, errorCodeOf, isCenterAuthOrBindError, newRequestId, pollCenterOperation } from './centerAdminBroker';
 import {
   Badge,
   Chips,
@@ -154,6 +155,7 @@ export function BotSkillsPage({
   const t = useText();
   const advIdPrefix = useId();
   const aliveRef = useRef(true);
+  const learningRevisionRef = useRef(-1);
   const lastActiveSkillEveryRef = useRef(10);
 
   const [loading, setLoading] = useState(true);
@@ -206,8 +208,10 @@ export function BotSkillsPage({
   }, []);
 
   const loadAll = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    setError('');
+    if (!silent) {
+      setLoading(true);
+      setError('');
+    }
     try {
       const [capsRes, reviewsRes, learningRes] = await Promise.all([
         api.broker(identity, 'center_bot_capabilities_get', { deviceId, botId }),
@@ -226,11 +230,14 @@ export function BotSkillsPage({
       setAuthIssue('none');
       setCapabilities((capsRes ?? []).filter(entry => entry.installation.kind === 'skill'));
       setLearnedItems(Array.isArray(reviewsRes?.items) ? reviewsRes.items : []);
-      if (learningRes) {
+      if (learningRes && learningRes.settings.revision >= learningRevisionRef.current) {
         setLearning(learningRes);
-        setLearningDraft(learningRes.settings);
-        if (learningRes.settings.review.skillEvery < 1000) {
-          lastActiveSkillEveryRef.current = learningRes.settings.review.skillEvery;
+        if (learningRes.settings.revision > learningRevisionRef.current) {
+          learningRevisionRef.current = learningRes.settings.revision;
+          setLearningDraft(learningRes.settings);
+          if (learningRes.settings.review.skillEvery < 1000) {
+            lastActiveSkillEveryRef.current = learningRes.settings.review.skillEvery;
+          }
         }
       }
     } catch (failure) {
@@ -341,44 +348,46 @@ export function BotSkillsPage({
     [unifiedSkills],
   );
 
-  // 保存学习策略（严格只传 allowlist 字段，绝不传 enabled）
   const saveLearningConfig = useCallback(async (
-    nextSettings: BotLearningSettings,
+    config: BotLearningSettingsPatch,
+    expectedRevision: number,
     successText: string,
   ) => {
-    if (!learning) return;
     setBusyKey('learning');
     setError('');
+    setNotice('');
     try {
-      const response = await centerAdminRequest<{ settings: BotLearningSettings }>(api, identity, {
+      const { settings: updatedSettings } = await centerAdminRequest<{ settings: BotLearningSettings }>(api, identity, {
         method: 'POST',
         path: `${botBasePath}/learning`,
-        body: {
-          action: 'configure',
-          expectedRevision: nextSettings.revision,
-          config: {
-            review: nextSettings.review,
-            curator: nextSettings.curator,
-            budget: nextSettings.budget,
-            reviewModelRef: nextSettings.reviewModelRef,
-            curatorModelRef: nextSettings.curatorModelRef,
-          },
-        },
+        body: { action: 'configure', expectedRevision, config },
       });
       if (!aliveRef.current) return;
-      const updatedSettings = response?.settings ?? nextSettings;
-      setLearning(prev => prev ? { ...prev, settings: updatedSettings } : prev);
-      setLearningDraft(updatedSettings);
-      if (updatedSettings.review.skillEvery < 1000) {
-        lastActiveSkillEveryRef.current = updatedSettings.review.skillEvery;
+      if (updatedSettings.revision >= learningRevisionRef.current) {
+        learningRevisionRef.current = updatedSettings.revision;
+        setLearning(prev => prev ? { ...prev, settings: updatedSettings } : prev);
+        setLearningDraft(updatedSettings);
+        if (updatedSettings.review.skillEvery < 1000) {
+          lastActiveSkillEveryRef.current = updatedSettings.review.skillEvery;
+        }
       }
       setNotice(successText);
     } catch (failure) {
+      if (aliveRef.current && errorCodeOf(failure) === 'REVISION_CONFLICT') await loadAll(true);
       if (aliveRef.current) handleFailure(failure);
     } finally {
       if (aliveRef.current) setBusyKey(null);
     }
-  }, [api, identity, botBasePath, learning, handleFailure]);
+  }, [api, identity, botBasePath, handleFailure, loadAll]);
+
+  const toggleAutomaticReflection = (enabled: boolean) => {
+    if (!learning) return;
+    return saveLearningConfig(
+      { review: { enabled } },
+      learning.settings.revision,
+      enabled ? t('已开启自动反思', 'Automatic reflection enabled') : t('已关闭自动反思', 'Automatic reflection disabled'),
+    );
+  };
 
   const toggleAutoExtract = async (enabled: boolean) => {
     if (!learning) return;
@@ -388,12 +397,28 @@ export function BotSkillsPage({
     }
     const nextSkillEvery = enabled ? (lastActiveSkillEveryRef.current || 10) : 10000;
     await saveLearningConfig(
-      {
-        ...current,
-        review: { ...current.review, skillEvery: nextSkillEvery },
-      },
+      { review: { skillEvery: nextSkillEvery } },
+      current.revision,
       enabled ? t('已开启空闲时自动提炼技能', 'Auto skill extraction enabled') : t('已暂停自动提炼技能', 'Auto skill extraction paused'),
     );
+  };
+
+  const saveAdvancedLearningConfig = () => {
+    if (!learningDraft) return;
+    const { review, curator, budget, reviewModelRef, curatorModelRef, revision } = learningDraft;
+    return saveLearningConfig({
+      review: { memoryEvery: review.memoryEvery, skillEvery: review.skillEvery },
+      curator: {
+        intervalHours: curator.intervalHours,
+        minIdleHours: curator.minIdleHours,
+        staleAfterDays: curator.staleAfterDays,
+        archiveAfterDays: curator.archiveAfterDays,
+        consolidate: curator.consolidate,
+      },
+      budget,
+      reviewModelRef,
+      curatorModelRef,
+    }, revision, t('学习策略已保存', 'Learning policy saved'));
   };
 
   const triggerReview = async () => {
@@ -1300,7 +1325,8 @@ export function BotSkillsPage({
     );
   } else {
     // --- View C: 主列表视图 ---
-    const autoExtractEnabled = Boolean(learning && learning.settings.review.skillEvery < 1000);
+    const autoReviewEnabled = learning?.settings.review.enabled !== false;
+    const autoExtractEnabled = autoReviewEnabled && Boolean(learning && learning.settings.review.skillEvery < 1000);
     const jobActive = learning?.activeJob?.status === 'queued' || learning?.activeJob?.status === 'running';
 
     view = (
@@ -1318,7 +1344,7 @@ export function BotSkillsPage({
               <button
                 type="button"
                 className="bs-btn is-small"
-                disabled={busyKey === 'review'}
+                disabled={busyKey !== null}
                 onClick={() => void cancelActiveJob()}
               >
                 {t('复盘中 · 取消', 'Reviewing · Cancel')}
@@ -1327,7 +1353,7 @@ export function BotSkillsPage({
               <button
                 type="button"
                 className="bs-btn is-small"
-                disabled={!learning || busyKey === 'review'}
+                disabled={!learning || busyKey !== null}
                 onClick={() => void triggerReview()}
               >
                 <RefreshCw aria-hidden="true" className={busyKey === 'review' ? 'bs-spin' : undefined} />
@@ -1348,17 +1374,31 @@ export function BotSkillsPage({
         {learning ? (
           <div className="bs-skills-learning-card">
             <Row
+              title={t('自动反思', 'Automatic reflection')}
+              subtitle={t('Bot 空闲时自动复盘记忆并提炼技能', 'Review memories and extract skills when the Bot is idle')}
+              trailing={(
+                <Switch
+                  checked={autoReviewEnabled}
+                  label={t('自动反思', 'Automatic reflection')}
+                  disabled={busyKey !== null}
+                  onChange={next => void toggleAutomaticReflection(next)}
+                />
+              )}
+            />
+            <Row
               title={t('空闲时自动提炼技能', 'Auto-extract skills when idle')}
               subtitle={
-                autoExtractEnabled
-                  ? t(`每 ${learning.settings.review.skillEvery} 轮交互自动复盘提炼可复用技能`, `Reviews every ${learning.settings.review.skillEvery} iterations`)
-                  : t('已暂停自动提炼，仍可随时点击「立即复盘」', 'Automatic extraction paused; manual review still available')
+                !autoReviewEnabled
+                  ? t('开启自动反思后可调整', 'Turn on automatic reflection to change this setting')
+                  : autoExtractEnabled
+                    ? t(`每 ${learning.settings.review.skillEvery} 个工具步复盘提炼可复用技能`, `Reviews every ${learning.settings.review.skillEvery} tool iterations`)
+                    : t('可随时点击「立即复盘」', 'Use Review now to run a manual review')
               }
               trailing={(
                 <Switch
                   checked={autoExtractEnabled}
                   label={t('空闲时自动提炼技能', 'Auto-extract skills when idle')}
-                  disabled={busyKey === 'learning'}
+                  disabled={!autoReviewEnabled || busyKey !== null}
                   onChange={next => void toggleAutoExtract(next)}
                 />
               )}
@@ -1477,8 +1517,8 @@ export function BotSkillsPage({
                   <button
                     type="button"
                     className="bs-btn is-primary is-small"
-                    disabled={busyKey === 'learning'}
-                    onClick={() => void saveLearningConfig(learningDraft, t('学习策略已保存', 'Learning policy saved'))}
+                    disabled={busyKey !== null}
+                    onClick={() => void saveAdvancedLearningConfig()}
                   >
                     {t('保存策略', 'Save policy')}
                   </button>

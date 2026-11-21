@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
+import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
 import type { CenterApi } from './transport';
 import type { JsonObject, JsonSchema, JsonValue } from './types';
@@ -172,7 +173,10 @@ function CredentialField({
             disabled={!secret || busy}
             onClick={() => void handleSaveSecret()}
           >
-            {busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
+            <LabelStack
+              active={busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
+              labels={[t('保存密钥', 'Save secret'), t('保存中…', 'Saving…')]}
+            />
           </button>
         </div>
       )}
@@ -574,7 +578,11 @@ export function SchemaConfigForm({
                 checked={hasOverride}
                 onChange={e => toggleOverride(e.target.checked)}
               />
-              <span>{hasOverride ? t('覆盖全局设置', 'Override global') : t('继承全局默认', 'Inherit global')}</span>
+              <LabelStack
+                active={hasOverride ? t('覆盖全局设置', 'Override global') : t('继承全局默认', 'Inherit global')}
+                labels={[t('覆盖全局设置', 'Override global'), t('继承全局默认', 'Inherit global')]}
+                align="start"
+              />
             </label>
           )}
         </div>
@@ -633,7 +641,7 @@ export function SchemaConfigForm({
             <span>{rawOpen ? '▾' : '▸'} {t('高级 JSON 配置', 'Advanced JSON config')}</span>
           </button>
           {rawOpen && (
-            <div className="ca-disclosure-body">
+            <div className="ca-disclosure-body smooth-expand-mount">
               <textarea
                 rows={6}
                 className="ca-textarea ca-mono"
@@ -641,7 +649,9 @@ export function SchemaConfigForm({
                 value={rawText}
                 onChange={e => setRawText(e.target.value)}
               />
-              {rawError && <p className="ca-error-text">{rawError}</p>}
+              <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+                {rawError ? <p className="ca-error-text">{rawError}</p> : null}
+              </ReservedSlot>
               {!disabled && (
                 <div className="ca-inline-end ca-mt-2">
                   <button
@@ -661,7 +671,10 @@ export function SchemaConfigForm({
       {submitLabel && (
         <div className="ca-form-actions">
           <button type="submit" className="ca-btn ca-btn-primary" disabled={disabled || submitBusy}>
-            {submitBusy ? t('保存中…', 'Saving…') : submitLabel}
+            <LabelStack
+              active={submitBusy ? t('保存中…', 'Saving…') : submitLabel}
+              labels={[submitLabel, t('保存中…', 'Saving…')]}
+            />
           </button>
         </div>
       )}

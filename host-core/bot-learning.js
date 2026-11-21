@@ -1154,6 +1154,12 @@ export function createBotLearning({
     if (closing || (preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
     const status = await client.botLearning(host.deviceId, botId, { action: 'status' });
     if (closing || (preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
+    if (status?.settings?.review?.enabled === false) {
+      pendingBotChecks.delete(botId);
+      preemptedRetryBots.delete(botId);
+      pendingWorkDeltas.delete(botId);
+      return;
+    }
     if (isBotIdle && !(await isBotIdle(bot))) {
       if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId, 50);
       return;
@@ -1190,6 +1196,7 @@ export function createBotLearning({
     pendingBotChecks.delete(botId);
     preemptedRetryBots.delete(botId);
     pendingWorkDeltas.delete(botId);
+    if (receipt?.reason === 'disabled') return;
     // Center 已受理本次增量（无论是否成 job）：推进游标，未受理的下次完结补报。
     reportCursors.set(botId, Math.max(reportCursors.get(botId) ?? 0, snapshot.span.throughEntryId));
     if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) {
@@ -1226,13 +1233,7 @@ export function createBotLearning({
       for (const key of ['reviewModelRef', 'curatorModelRef']) {
         if (input.config?.[key] != null) assertUsableModel(input.config[key]);
       }
-      const forward = { ...input, action: 'configure' };
-      const result = await client.botLearning(host.deviceId, botId, forward);
-      if (input.config?.enabled === false) {
-        const job = jobs.get(botId);
-        if (job) abortJob(job);
-      }
-      return result;
+      return client.botLearning(host.deviceId, botId, { ...input, action: 'configure' });
     }
     if (action === 'cancel') {
       const job = jobs.get(botId);

@@ -39,7 +39,9 @@ import type { RoomApiResolver } from '../../desktop/web/src/scope-api';
 import {
   ConversationContextMenu,
   conversationTitle,
+  readInitialCenterPartitionKey,
   useScopeConversations,
+  writeActiveCenterUrlCache,
   type ScopeConversation,
   type ScopeConversationSource,
 } from './gbot-ui';
@@ -65,12 +67,14 @@ import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
+import { selectCurrentGoogleSetup } from './google/currentGoogleSetup';
 import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
   GoogleChatCardContext,
   GoogleSetupControlCall,
   GoogleSetupControlState,
+  GoogleSetupPresentation,
 } from './google/types';
 import { BotBoard } from './BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from './useBotBoard';
@@ -195,7 +199,10 @@ import { MobileClientUpdatePrompt } from './ClientUpdateSection';
 import './hub/schedules.css';
 import { ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
 import { parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
-import { decideChatAutoScroll, isNearChatBottom } from './hub/chatScrollLogic';
+import { decideChatAutoScroll, hasIncomingChatContent, type ChatScrollMetrics } from './hub/chatScrollLogic';
+import { useConnectionPhase, useConnectionPhaseContext, type ConnectionPhase } from './connection';
+import { useNotice } from './notice';
+import { isScrollNearBottom, useStickToBottom } from './layout';
 import {
   useIsCoarsePointer,
   type ActiveEditingTurn,
@@ -203,6 +210,7 @@ import {
   type CenterAdminTab,
   type ChatPending,
   type ChatPendingEntry,
+  type ChatScrollAnchor,
   type CreateBotAttempt,
   type HubSettingsPage,
   type MobileBotItem,
@@ -227,6 +235,81 @@ import {
   ScopesSubpageScreen,
 } from './screens/LibraryScreens';
 import { ChatScreen } from './screens/ChatScreen';
+
+const CACHED_LOCAL_DEVICE_ID_KEY = 'e-launcher:cached-local-device-id-v1';
+const HUB_DIRECTORY_SYNC_NOTICE_ID = 'hub-directory-sync';
+const BOT_BOARD_WARNING_NOTICE_ID = 'bot-board-warning';
+
+function readCachedLocalDeviceId(): string {
+  try {
+    return localStorage.getItem(CACHED_LOCAL_DEVICE_ID_KEY)?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeCachedLocalDeviceId(deviceId: string | undefined): void {
+  const trimmed = deviceId?.trim() || '';
+  if (!trimmed) return;
+  try {
+    localStorage.setItem(CACHED_LOCAL_DEVICE_ID_KEY, trimmed);
+  } catch {
+    // Ignore storage quota / privacy mode errors.
+  }
+}
+
+function readFallbackCenterClientDeviceId(): string {
+  try {
+    return localStorage.getItem('center-client-device-id')?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+function captureChatScrollAnchor(el: HTMLElement | null): ChatScrollAnchor | null {
+  if (!el || el.clientHeight <= 0) return null;
+  if (isScrollNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight)) {
+    return { atBottom: true };
+  }
+  const containerRect = el.getBoundingClientRect();
+  const turns = el.querySelectorAll<HTMLElement>('[data-turn-id]');
+  for (const node of turns) {
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom > containerRect.top + 1) {
+      const turnId = node.getAttribute('data-turn-id') || '';
+      if (turnId) {
+        return {
+          atBottom: false,
+          turnId,
+          offsetTop: rect.top - containerRect.top,
+          scrollTop: el.scrollTop,
+        };
+      }
+    }
+  }
+  return { atBottom: false, scrollTop: el.scrollTop };
+}
+
+function restoreChatScrollAnchor(el: HTMLElement, anchor: ChatScrollAnchor): boolean {
+  if (anchor.atBottom) {
+    el.scrollTop = el.scrollHeight;
+    return true;
+  }
+  if (anchor.turnId) {
+    const turns = el.querySelectorAll<HTMLElement>('[data-turn-id]');
+    for (const node of turns) {
+      if (node.getAttribute('data-turn-id') === anchor.turnId) {
+        const containerRect = el.getBoundingClientRect();
+        const rect = node.getBoundingClientRect();
+        const delta = (rect.top - containerRect.top) - (anchor.offsetTop ?? 0);
+        el.scrollTop = Math.max(0, el.scrollTop + delta);
+        return isScrollNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+      }
+    }
+  }
+  el.scrollTop = Math.max(0, anchor.scrollTop);
+  return isScrollNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+}
 
 function buildScopedLiveBinding(
   bot: UnifiedBotItem | null | undefined,
@@ -268,6 +351,10 @@ export function HostPage({
   onOpenSystemSettings,
 }: HostPageProps = {}) {
   const t = useText();
+  const tRef = useRef(t);
+  tRef.current = t;
+  const { notify, dismiss } = useNotice();
+  const shellConnPhase = useConnectionPhaseContext();
   const [hideToolOutput] = useHideToolOutput();
   const [collapseToolOutput] = useCollapseToolOutput();
   const action = useAction();
@@ -335,6 +422,13 @@ export function HostPage({
   // 最新 localHost 的 ref：让 hostRunning/phase 读取始终拿到当前值，不依赖 useMemo 闭包快照。
   const localHostRef = useRef<HostSnapshot | undefined>(localHost);
   localHostRef.current = localHost;
+  const [cachedLocalDeviceId, setCachedLocalDeviceId] = useState<string>(() => readCachedLocalDeviceId());
+  useEffect(() => {
+    const id = localHost?.deviceId?.trim();
+    if (!id) return;
+    writeCachedLocalDeviceId(id);
+    setCachedLocalDeviceId(prev => (prev === id ? prev : id));
+  }, [localHost?.deviceId]);
   const [localBots, setLocalBots] = useState<HostBot[]>(() => {
     try {
       const raw = localStorage.getItem('e-launcher:cached-local-bots-v1');
@@ -343,6 +437,15 @@ export function HostPage({
       return [];
     }
   });
+  // H5: 首帧 localHost 尚未返回前同步回退缓存的 deviceId，避免本机 Bot 先按 remote: 渲染再迁移。
+  const resolvedLocalDeviceId = useMemo(() => {
+    const fromHost = localHost?.deviceId?.trim();
+    if (fromHost) return fromHost;
+    if (cachedLocalDeviceId) return cachedLocalDeviceId;
+    const fromBots = localBots[0]?.deviceId?.trim();
+    if (fromBots) return fromBots;
+    return readFallbackCenterClientDeviceId();
+  }, [localHost?.deviceId, cachedLocalDeviceId, localBots]);
   const [localBotsLoaded, setLocalBotsLoaded] = useState(false);
   const localBotsFlight = useRef<LocalBotsFlight | null>(null);
   const localBotsPending = useRef<LocalBotsScope | null>(null);
@@ -356,7 +459,11 @@ export function HostPage({
   const [remoteIdentity, setRemoteIdentity] = useState<DesktopIdentity | null>(null);
   const [remoteConnected, setRemoteConnected] = useState(false);
   const [remoteBots, setRemoteBots] = useState<CachedRemoteBot[]>(() => readCachedRemoteBots());
+  const [remoteBotsSettled, setRemoteBotsSettled] = useState(false);
   const [directoryError, setDirectoryError] = useState('');
+  const directoryFailStreakRef = useRef(0);
+  const lastNotifiedDirErrorRef = useRef('');
+  const triggerHubRefreshRef = useRef<() => Promise<void>>(async () => {});
   const directoryFlight = useRef(false);
   const directoryGeneration = useRef(0);
   const chatLoadGeneration = useRef(0);
@@ -579,44 +686,6 @@ export function HostPage({
   const observeIdRef = useRef<string | undefined>(undefined);
   const observeTargetRef = useRef<(ScopedLiveBinding & { observationId: string }) | undefined>(undefined);
   const remoteObserveRef = useRef<{ close(): Promise<void> } | null>(null);
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const chatScrollRestoreRef = useRef<number | null>(null);
-  const chatScrollRestorePending = useRef(false);
-  const chatStickToBottomRef = useRef(true);
-  const chatJumpingToBottomRef = useRef(false);
-  const chatJumpTimerRef = useRef<number | null>(null);
-  const [chatHasNewContent, setChatHasNewContent] = useState(false);
-  const forceChatScrollBottom = useCallback(() => {
-    if (chatJumpTimerRef.current !== null) {
-      window.clearTimeout(chatJumpTimerRef.current);
-      chatJumpTimerRef.current = null;
-    }
-    chatJumpingToBottomRef.current = false;
-    chatStickToBottomRef.current = true;
-    setChatHasNewContent(false);
-    const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, []);
-  const jumpToLatestMessages = useCallback(() => {
-    const el = chatScrollRef.current;
-    chatStickToBottomRef.current = true;
-    chatJumpingToBottomRef.current = true;
-    setChatHasNewContent(false);
-    if (chatJumpTimerRef.current !== null) window.clearTimeout(chatJumpTimerRef.current);
-    chatJumpTimerRef.current = window.setTimeout(() => {
-      chatJumpingToBottomRef.current = false;
-      chatJumpTimerRef.current = null;
-    }, 800);
-    if (!el) return;
-    if (typeof el.scrollTo === 'function') {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, []);
-  useEffect(() => () => {
-    if (chatJumpTimerRef.current !== null) window.clearTimeout(chatJumpTimerRef.current);
-  }, []);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const updateBotMeta = useCallback((botKey: string, patch: Partial<BotPreviewMeta>) => {
@@ -809,6 +878,36 @@ export function HostPage({
     }
   }, [activeCenter, hasRemoteConfigured, getOrCreateRemoteClient, ensureRemoteApi]);
 
+  const reportDirectoryFailure = useCallback((errMsg: string) => {
+    const trimmed = errMsg.trim();
+    setDirectoryError(trimmed);
+    if (!trimmed) {
+      directoryFailStreakRef.current = 0;
+      lastNotifiedDirErrorRef.current = '';
+      dismiss(HUB_DIRECTORY_SYNC_NOTICE_ID);
+      return;
+    }
+    directoryFailStreakRef.current += 1;
+    // H2: 连续失败 >= 2 次才弹出 F1 浮层通知，避免 2 秒轮询偶发抖动闪烁。
+    if (directoryFailStreakRef.current >= 2 && lastNotifiedDirErrorRef.current !== trimmed) {
+      lastNotifiedDirErrorRef.current = trimmed;
+      const t = tRef.current;
+      notify({
+        id: HUB_DIRECTORY_SYNC_NOTICE_ID,
+        tone: 'error',
+        title: t('设备目录同步失败', 'Device directory sync failed'),
+        detail: trimmed,
+        action: {
+          label: t('刷新', 'Refresh'),
+          onClick: () => {
+            lastNotifiedDirErrorRef.current = '';
+            void triggerHubRefreshRef.current();
+          },
+        },
+      });
+    }
+  }, [notify, dismiss]);
+
   const syncRemoteBots = useCallback(async () => {
     const api = remoteClientRef.current?.api;
     const identity = api?.identity;
@@ -840,21 +939,32 @@ export function HostPage({
         writeCachedRemoteBots(merged);
         return merged;
       });
-      setDirectoryError(formatActionableDirectoryError(directory.errors, directory.devices));
+      const actionableError = formatActionableDirectoryError(directory.errors, directory.devices);
+      reportDirectoryFailure(actionableError);
     } catch (error) {
-      if (generation === directoryGeneration.current) setDirectoryError(errorText(error));
+      if (generation === directoryGeneration.current) reportDirectoryFailure(errorText(error));
     } finally {
       directoryFlight.current = false;
+      setRemoteBotsSettled(true);
     }
-  }, []);
+  }, [reportDirectoryFailure]);
 
   useEffect(() => {
     directoryGeneration.current += 1;
-    if (!active || !remoteConnected || !remoteIdentity) return;
+    if (!active || !remoteConnected || !remoteIdentity) {
+      directoryFailStreakRef.current = 0;
+      lastNotifiedDirErrorRef.current = '';
+      dismiss(HUB_DIRECTORY_SYNC_NOTICE_ID);
+      return;
+    }
     void syncRemoteBots();
     const timer = window.setInterval(() => { if (!document.hidden) void syncRemoteBots(); }, 2000);
     return () => { window.clearInterval(timer); directoryGeneration.current += 1; };
-  }, [active, remoteConnected, remoteIdentity?.profileId, remoteIdentity?.generation, syncRemoteBots]);
+  }, [active, remoteConnected, remoteIdentity?.profileId, remoteIdentity?.generation, syncRemoteBots, dismiss]);
+
+  useEffect(() => () => {
+    dismiss(HUB_DIRECTORY_SYNC_NOTICE_ID);
+  }, [dismiss]);
 
   useEffect(() => {
     if (!remoteIdentity?.targetDeviceId) return;
@@ -872,7 +982,7 @@ export function HostPage({
     const remoteLocalByIdentity = new Map<string, CachedRemoteBot>();
     const localByIdentity = new Map(localBots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
     for (const bot of remoteBots) {
-      if (bot.deviceId !== localHost?.deviceId) continue;
+      if (!resolvedLocalDeviceId || bot.deviceId !== resolvedLocalDeviceId) continue;
       const key = JSON.stringify([bot.deviceId, bot.botId]);
       remoteLocalByIdentity.set(key, bot);
       if (!localByIdentity.has(key)) localByIdentity.set(key, bot);
@@ -911,7 +1021,7 @@ export function HostPage({
     const api = remoteClientRef.current?.api;
     const activeProfileId = remoteIdentity?.profileId || remoteProfiles[0]?.id || 'default';
     const remoteByIdentity = new Map(remoteBots
-      .filter(bot => bot.deviceId !== localHost?.deviceId && !localByIdentity.has(JSON.stringify([bot.deviceId, bot.botId])))
+      .filter(bot => (!resolvedLocalDeviceId || bot.deviceId !== resolvedLocalDeviceId) && !localByIdentity.has(JSON.stringify([bot.deviceId, bot.botId])))
       .map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
     const allRemote: MobileBotItem[] = [...remoteByIdentity.values()].map(b => {
       const key = `remote:${activeProfileId}:${b.deviceId}:${b.botId}`;
@@ -966,13 +1076,104 @@ export function HostPage({
 
     const allItems = [...(primary ? [primary] : []), ...regularBots, ...archived];
     return { primaryBot: primary, listBotItems: regularBots, archivedBots: archived, allBotItems: allItems };
-  }, [localBots, remoteBots, remoteDevices, remoteProfiles, remoteConnected, remoteIdentity, localHost?.deviceId, botMetaMap, avatarVersion, t]);
+  }, [localBots, remoteBots, remoteDevices, remoteProfiles, remoteConnected, remoteIdentity, resolvedLocalDeviceId, botMetaMap, avatarVersion, t]);
+
+  // F2 + D1: 合并外壳 IPC/中心重连与远端状态，冷启动存在远端 Bot 缓存时首帧即进入 'connecting'。
+  const cachedRemoteBotsCount = useMemo(
+    () => remoteBots.filter(bot => !resolvedLocalDeviceId || bot.deviceId !== resolvedLocalDeviceId).length,
+    [remoteBots, resolvedLocalDeviceId],
+  );
+  const hasConfiguredCenter = centerConn.hasSavedCenter || hasRemoteConfigured;
+  const connectionPhase: ConnectionPhase = useConnectionPhase({
+    ipcReconnecting: shellConnPhase.ipcReconnecting,
+    centerReconnecting: shellConnPhase.centerReconnecting || centerConn.reconnecting,
+    centerConnecting: shellConnPhase.centerConnecting || centerConn.connecting,
+    centerReady: centerConn.ready,
+    centerError: centerConn.error || shellConnPhase.centerError || null,
+    hasConfiguredCenter,
+    remoteConnected,
+    hasCachedRemoteBots: cachedRemoteBotsCount > 0,
+  });
+  const connectionDetail =
+    centerConn.error ||
+    shellConnPhase.detail ||
+    (centerConn.status?.error ? errorText(centerConn.status.error) : '') ||
+    '';
+
+  const localBotsHydrated =
+    localBots.length > 0 ||
+    (localHost !== undefined && (localBotsLoaded || localHost.phase !== 'running'));
+  const remoteBotsHydrated =
+    !hasConfiguredCenter ||
+    remoteBots.length > 0 ||
+    remoteBotsSettled ||
+    directoryReadFailed ||
+    (!remoteConnected && !centerConn.connecting && connectionPhase !== 'connecting');
+  const botsHydrated = localBotsHydrated && remoteBotsHydrated;
 
   const activeBot = useMemo<MobileBotItem | null>(() => {
     if (!activeBotKey) return null;
     if (primaryBot && activeBotKey === primaryBot.key) return primaryBot;
     return allBotItems.find(b => b.key === activeBotKey) ?? null;
   }, [activeBotKey, primaryBot, allBotItems]);
+
+  // C4: 查找导航栈中最顶层的 chat 条目，并以其 botKey 解析保活 ChatScreen 的目标 Bot，
+  // 防止 chat(A) -> bot-profile(A) -> ... -> bot-profile(B) 时误切换隐藏态 ChatScreen 的 Bot 或重挂 RemotePendingComposer。
+  const topmostChatEntry = useMemo(() => {
+    for (let i = nav.stack.length - 1; i >= 0; i -= 1) {
+      if (nav.stack[i].screen === 'chat') return nav.stack[i];
+    }
+    return null;
+  }, [nav.stack]);
+  const chatScreenBot = useMemo<MobileBotItem | null>(() => {
+    if (!topmostChatEntry) return null;
+    if (screen === 'chat' && activeBot) return activeBot;
+    const targetKey = topmostChatEntry.botKey;
+    if (targetKey) {
+      if (primaryBot && targetKey === primaryBot.key) return primaryBot;
+      const found = allBotItems.find(b => b.key === targetKey);
+      if (found) return found;
+    }
+    return activeBot;
+  }, [topmostChatEntry, screen, activeBot, primaryBot, allBotItems]);
+
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatMessagesContentRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollAnchorsRef = useRef(new Map<string, ChatScrollAnchor>());
+  const pendingChatAnchorRestoreRef = useRef<{ targetKey: string; anchor: ChatScrollAnchor } | null>(null);
+  const chatTargetKeyRef = useRef('');
+  const [chatHasNewContent, setChatHasNewContent] = useState(false);
+  const chatStick = useStickToBottom(chatScrollRef, chatMessagesContentRef, {
+    enabled: screen === 'chat' && Boolean(chatScreenBot),
+    onStickChange: stuck => {
+      if (stuck) {
+        setChatHasNewContent(prev => (prev ? false : prev));
+      }
+    },
+  });
+  const saveCurrentChatAnchor = useCallback(() => {
+    if (nav.stackRef.current.at(-1)?.screen !== 'chat') return;
+    const key = chatTargetKeyRef.current;
+    if (!key) return;
+    const anchor = captureChatScrollAnchor(chatScrollRef.current);
+    if (anchor) {
+      chatScrollAnchorsRef.current.set(key, anchor);
+    }
+  }, [nav.stackRef]);
+  const forceChatScrollBottom = useCallback(() => {
+    setChatHasNewContent(false);
+    if (chatTargetKeyRef.current) {
+      chatScrollAnchorsRef.current.set(chatTargetKeyRef.current, { atBottom: true });
+    }
+    chatStick.scrollToBottom({ behavior: 'auto', forceStick: true });
+  }, [chatStick.scrollToBottom]);
+  const jumpToLatestMessages = useCallback(() => {
+    setChatHasNewContent(false);
+    if (chatTargetKeyRef.current) {
+      chatScrollAnchorsRef.current.set(chatTargetKeyRef.current, { atBottom: true });
+    }
+    chatStick.scrollToBottom({ behavior: 'smooth', forceStick: true });
+  }, [chatStick.scrollToBottom]);
 
   /** 群聊/私聊读取来源：本机走只读适配器，远端按 host 分组固定其真实 identity，不污染全局 identity。
       离线仍保留同账户来源（hook 内部停请求、保留最近快照）；targetApi 只按真实设备在线状态收敛。 */
@@ -1138,36 +1339,59 @@ export function HostPage({
     [memberCandidatesSig],
   );
 
+  // H4: 置顶与群聊缓存分区提升到 useScopeConversations 之前，首帧直接同步读取 active-center-url 缓存。
+  const pinStorageScope = useMemo(
+    () =>
+      readInitialCenterPartitionKey({
+        activeCenterUrl: activeCenter,
+        savedCenterUrl: centerConn.saved?.url,
+        centerConnUrl: centerConn.url,
+        allowCachedCenterUrl: !centerConn.initialized || centerConn.hasSavedCenter,
+        remoteProfileId: remoteIdentity?.profileId,
+        remoteKind: remoteIdentity?.kind,
+        localDeviceId: resolvedLocalDeviceId || undefined,
+      }),
+    [
+      activeCenter,
+      centerConn.initialized,
+      centerConn.hasSavedCenter,
+      centerConn.saved?.url,
+      centerConn.url,
+      remoteIdentity?.profileId,
+      remoteIdentity?.kind,
+      resolvedLocalDeviceId,
+    ],
+  );
+
+  useEffect(() => {
+    const liveUrl = (activeCenter || centerConn.saved?.url || '').trim();
+    if (liveUrl) {
+      writeActiveCenterUrlCache(liveUrl);
+    } else if (centerConn.initialized && !centerConn.hasSavedCenter && !activeCenter) {
+      writeActiveCenterUrlCache(null);
+    }
+  }, [activeCenter, centerConn.initialized, centerConn.hasSavedCenter, centerConn.saved?.url]);
+
+  const awaitingRoomSources =
+    hasConfiguredCenter &&
+    !remoteConnected &&
+    (centerConn.connecting || connectionPhase === 'connecting');
+
   const {
     items: roomConversations,
-    loaded: roomConversationsLoaded,
-    loading: roomConversationsLoading,
+    hasHydrated: roomConversationsHydrated,
     error: roomConversationsError,
     refresh: refreshRoomConversations,
     markDeleted: markRoomConversationDeleted,
-  } = useScopeConversations(scopeConversationSources, active && screen === 'hub', 'room');
+  } = useScopeConversations(scopeConversationSources, active && screen === 'hub', 'room', {
+    partitionKey: pinStorageScope,
+    awaitingSources: awaitingRoomSources,
+  });
   // 下拉刷新用最新 refresh：ref 免除把 hook 返回值塞进 triggerHubRefresh 依赖。
   const refreshRoomConversationsRef = useRef(refreshRoomConversations);
   refreshRoomConversationsRef.current = refreshRoomConversations;
   const markRoomConversationDeletedRef = useRef(markRoomConversationDeleted);
   markRoomConversationDeletedRef.current = markRoomConversationDeleted;
-
-  // 置顶分区：按 activeCenter 或本机稳定账号标识（不含 generation）。
-  const pinStorageScope = useMemo(() => {
-    const centerRaw = (activeCenter || centerConn.saved?.url || centerConn.url || '').trim();
-    if (centerRaw) {
-      try {
-        return `center:${new URL(centerRaw).origin}`;
-      } catch {
-        return `center:${centerRaw}`;
-      }
-    }
-    if (remoteIdentity?.profileId) {
-      return `profile:${remoteIdentity.profileId}:${remoteIdentity.kind}`;
-    }
-    const localDev = localHost?.deviceId || localBots[0]?.deviceId || 'local';
-    return `local:${localDev}`;
-  }, [activeCenter, centerConn.saved?.url, centerConn.url, remoteIdentity?.profileId, remoteIdentity?.kind, localHost?.deviceId, localBots]);
 
   const boardTargets: BotBoardTarget[] = allBotItems.filter(bot => !bot.archivedAt).map(bot => ({
     key: botBoardKey(pinStorageScope, bot.deviceId, bot.botId),
@@ -1610,9 +1834,7 @@ export function HostPage({
   );
 
   const openScopeConversation = (item: ScopeConversation, initialSettingsOpen = false) => {
-    if (screen === 'chat' && chatScrollRef.current) {
-      chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
-    }
+    saveCurrentChatAnchor();
     setHubContextMenu(null);
     setHubAddMenuOpen(false);
     setChatTopMenuOpen(false);
@@ -1629,10 +1851,8 @@ export function HostPage({
   };
 
   const openBotDmList = (bot: UnifiedBotItem) => {
-    // 从聊天进入私聊时记录 scrollTop：返回主聊天由 layout effect 恢复并跳过一次自动滚底。
-    if (screen === 'chat' && chatScrollRef.current) {
-      chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
-    }
+    // 从聊天进入私聊时记录滚动锚点：返回主聊天时恢复原位，不强制滚底。
+    saveCurrentChatAnchor();
     // 进入私聊前收起主聊天临时控件（更多菜单/输入框菜单/搜索），返回时不拦截逐级返回。
     setHubContextMenu(null);
     setChatTopMenuOpen(false);
@@ -2358,9 +2578,24 @@ export function HostPage({
   ]);
 
   const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'board' | 'tasks' | 'archived-bots') => {
+    // 仅在从当前聊天压入另一聊天（原 chat 留在栈内）时保存原聊天锚点；
+    // 本次新进入的目标 Bot 清空旧锚点，保证从 Hub/Board/Tasks/通知全新进入始终滚至最新消息。
+    if (screen === 'chat' && nav.stackRef.current.at(-1)?.botKey !== bot.key) {
+      saveCurrentChatAnchor();
+    }
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
     const scopeKey = scopeForBot(bot);
+    const targetPrefix = `${bot.key}|`;
+    chatScrollAnchorsRef.current.delete(`${bot.key}|${scopeKey}`);
+    for (const key of chatScrollAnchorsRef.current.keys()) {
+      if (key.startsWith(targetPrefix)) {
+        chatScrollAnchorsRef.current.delete(key);
+      }
+    }
+    if (pendingChatAnchorRestoreRef.current?.targetKey.startsWith(targetPrefix)) {
+      pendingChatAnchorRestoreRef.current = null;
+    }
     const scopeCutoff = getCutoff(bot.key, scopeKey);
     // 同一非空 scope 重进（前台恢复/回主页再进入）保留已加载历史与实时投影；不同 scope 才清空，防跨 Bot/跨 center 串消息。
     const sameScope = Boolean(scopeKey) && currentChatScope.current === scopeKey;
@@ -2404,9 +2639,6 @@ export function HostPage({
       setTaskReturnId(null);
       setJumpedTaskQuote(null);
     }
-    chatScrollRestoreRef.current = null;
-    chatStickToBottomRef.current = true;
-    chatJumpingToBottomRef.current = false;
     setChatHasNewContent(false);
     if (screen === 'bot-edit') {
       nav.replaceTop({ screen: 'chat', botKey: bot.key });
@@ -2467,6 +2699,7 @@ export function HostPage({
   );
 
   const openBotProfile = (bot: UnifiedBotItem) => {
+    saveCurrentChatAnchor();
     setHubContextMenu(null);
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
@@ -2477,6 +2710,7 @@ export function HostPage({
   };
 
   const openBotSchedules = (bot: UnifiedBotItem) => {
+    saveCurrentChatAnchor();
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
@@ -2925,6 +3159,7 @@ export function HostPage({
         invalidateBoard(boardKey);
         applyCutoff(bot.key, scopeKey, cleared?.clearedThroughEntryId ?? 0, { recordZero: true });
         chatHistoryCacheRef.current.delete(scopeKey);
+        chatScrollAnchorsRef.current.delete(`${bot.key}|${scopeKey}`);
         if (preClearPendingRequestId) removePending(scopeKey, preClearPendingRequestId);
         // 仅当当前草稿正是 "/clear" 命令文本时清掉；保留无关草稿、图片附件与文件引用。
         if (draftSnapshot.trim() === '/clear' && readChatDraft(scopeKey) === draftSnapshot) {
@@ -3702,7 +3937,10 @@ ${newer}` : draftSnapshot;
           throw new Error(t('无法连接目标节点', 'Target host unavailable'));
         }
         const deletedScopeKey = scopeForBot(bot);
-        if (deletedScopeKey) chatHistoryCacheRef.current.delete(deletedScopeKey);
+        if (deletedScopeKey) {
+          chatHistoryCacheRef.current.delete(deletedScopeKey);
+          chatScrollAnchorsRef.current.delete(`${bot.key}|${deletedScopeKey}`);
+        }
         chatPins.removePin(botPinKey(bot));
         setBotConfirmModal(null);
         if (activeBotKey === bot.key) {
@@ -4822,6 +5060,11 @@ ${newer}` : draftSnapshot;
     });
   }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots, activeDurableWaits]);
 
+  const currentGoogleSetup = useMemo(
+    () => selectCurrentGoogleSetup(allChatTurns),
+    [allChatTurns],
+  );
+
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),
     [botActivity],
@@ -4854,13 +5097,11 @@ ${newer}` : draftSnapshot;
     markViewedBoardResult(visibleAssistantTextEntryIds(visibleTurns));
   }, [visibleTurns, markViewedBoardResult]);
 
-  const latestTurnToolCount = visibleTurns.at(-1)?.tools?.length ?? 0;
-
-  // 从私聊/群聊返回聊天时恢复离开前 scrollTop：layout effect 先置位，
-  // 同一提交内的自动滚底 effect 看到 pending 标记即跳过这一次。
+  // F6 + C4: 尺寸变化贴底完全交由 useStickToBottom(ResizeObserver)；
+  // 本 effect 仅负责：返回/重挂时的锚点恢复、首次进入/切换目标贴底、未贴底且有新消息时显示「↓ 新消息」胶囊。
   const prevChatEnteredRef = useRef(false);
   const prevChatTargetKeyRef = useRef('');
-  const prevChatMetricsRef = useRef({
+  const prevChatMetricsRef = useRef<ChatScrollMetrics>({
     turnsCount: 0,
     latestTurnId: '',
     latestTurnLen: 0,
@@ -4873,20 +5114,17 @@ ${newer}` : draftSnapshot;
   const latestDisplayedTurnId = latestDisplayedTurn?.id ?? '';
   const latestDisplayedTurnLen = latestDisplayedTurn?.text.length ?? 0;
   const latestDisplayedTurnTools = latestDisplayedTurn?.tools?.length ?? 0;
-  const chatTargetKey = `${activeBot?.key ?? ''}|${activeChatScope}`;
+  const chatScreenScope = chatScreenBot ? scopeForBot(chatScreenBot) : '';
+  const chatTargetKey = `${chatScreenBot?.key ?? activeBot?.key ?? ''}|${chatScreenScope || activeChatScope}`;
+  chatTargetKeyRef.current = chatTargetKey;
+  const hasChatInStack = Boolean(topmostChatEntry);
+  const chatScreenMounted = Boolean(topmostChatEntry && chatScreenBot);
+
   useLayoutEffect(() => {
-    if (screen !== 'chat') return;
-    const saved = chatScrollRestoreRef.current;
-    if (saved === null) return;
-    chatScrollRestoreRef.current = null;
-    chatScrollRestorePending.current = true;
-    const el = chatScrollRef.current;
-    if (el) {
-      el.scrollTop = saved;
-      chatStickToBottomRef.current = isNearChatBottom(el.scrollHeight, saved, el.clientHeight);
+    if (!hasChatInStack) {
+      chatScrollAnchorsRef.current.clear();
+      pendingChatAnchorRestoreRef.current = null;
     }
-  }, [screen]);
-  useLayoutEffect(() => {
     if (screen !== 'chat') {
       prevChatEnteredRef.current = false;
       return;
@@ -4894,7 +5132,7 @@ ${newer}` : draftSnapshot;
     const el = chatScrollRef.current;
     if (!el) return;
 
-    const currentMetrics = {
+    const currentMetrics: ChatScrollMetrics = {
       turnsCount: displayedChatTurns.length,
       latestTurnId: latestDisplayedTurnId,
       latestTurnLen: latestDisplayedTurnLen,
@@ -4904,73 +5142,91 @@ ${newer}` : draftSnapshot;
       failureNotice: failureNotice ?? '',
     };
     const prev = prevChatMetricsRef.current;
-    const justEntered = !prevChatEnteredRef.current;
+    const entering = !prevChatEnteredRef.current;
     const targetChanged = prevChatTargetKeyRef.current !== chatTargetKey;
     prevChatEnteredRef.current = true;
     prevChatTargetKeyRef.current = chatTargetKey;
     prevChatMetricsRef.current = currentMetrics;
 
-    const restorePending = chatScrollRestorePending.current;
-    if (restorePending) {
-      // 本帧是返回恢复，不覆盖刚置回的 scrollTop；后续贴底时新消息仍自动滚底。
-      chatScrollRestorePending.current = false;
+    let restorePending = false;
+    if (entering || targetChanged) {
+      const savedAnchor = chatScrollAnchorsRef.current.get(chatTargetKey);
+      if (savedAnchor) {
+        if (!savedAnchor.atBottom && savedAnchor.turnId && displayedChatTurns.length === 0) {
+          pendingChatAnchorRestoreRef.current = { targetKey: chatTargetKey, anchor: savedAnchor };
+          chatStick.setStuck(false);
+          restorePending = true;
+        } else {
+          pendingChatAnchorRestoreRef.current = null;
+          const atBottom = restoreChatScrollAnchor(el, savedAnchor);
+          if (atBottom) {
+            chatStick.scrollToBottom({ behavior: 'auto', forceStick: true });
+          } else {
+            chatStick.setStuck(false);
+          }
+          restorePending = true;
+        }
+      } else {
+        pendingChatAnchorRestoreRef.current = null;
+      }
+    } else if (
+      pendingChatAnchorRestoreRef.current &&
+      pendingChatAnchorRestoreRef.current.targetKey === chatTargetKey &&
+      displayedChatTurns.length > 0
+    ) {
+      const pendingAnchor = pendingChatAnchorRestoreRef.current.anchor;
+      pendingChatAnchorRestoreRef.current = null;
+      const atBottom = restoreChatScrollAnchor(el, pendingAnchor);
+      if (atBottom) {
+        chatStick.scrollToBottom({ behavior: 'auto', forceStick: true });
+      } else {
+        chatStick.setStuck(false);
+      }
+      restorePending = true;
     }
 
+    const incoming = hasIncomingChatContent(prev, currentMetrics);
     const decision = decideChatAutoScroll({
       restorePending,
-      justEntered,
+      entering,
       targetChanged,
-      stickToBottom: chatStickToBottomRef.current,
-      jumpingToBottom: chatJumpingToBottomRef.current,
+      stickToBottom: chatStick.isStuckRef.current,
       searchOpen: chatSearchOpen,
-      prevMetrics: prev,
+      hasIncomingContent: incoming,
       currentMetrics,
-      scrollHeight: el.scrollHeight,
-      scrollTop: el.scrollTop,
-      clientHeight: el.clientHeight,
     });
-
-    chatStickToBottomRef.current = decision.nextStickToBottom;
-    chatJumpingToBottomRef.current = decision.nextJumpingToBottom;
 
     switch (decision.action) {
       case 'skip-restore':
-      case 'noop':
         break;
       case 'force-bottom':
-      case 'scroll-bottom':
         setChatHasNewContent(false);
-        el.scrollTop = el.scrollHeight;
-        break;
-      case 'smooth-bottom':
-        setChatHasNewContent(false);
-        if (typeof el.scrollTo === 'function') {
-          el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-        } else {
-          el.scrollTop = el.scrollHeight;
-        }
-        break;
-      case 'reset-empty':
-        setChatHasNewContent(false);
+        chatStick.scrollToBottom({ behavior: 'auto', forceStick: true });
         break;
       case 'show-jump-pill':
         setChatHasNewContent(true);
         break;
+      case 'noop':
+        if (decision.nextStickToBottom !== chatStick.isStuckRef.current) {
+          chatStick.setStuck(decision.nextStickToBottom);
+        }
+        if (displayedChatTurns.length === 0 && !displayGeneratingText) {
+          setChatHasNewContent(false);
+        }
+        break;
     }
   }, [
     screen,
+    hasChatInStack,
+    chatScreenMounted,
     chatTargetKey,
     displayedChatTurns.length,
     latestDisplayedTurnId,
     latestDisplayedTurnLen,
-    latestDisplayedTurnTools,
-    visibleTurns.length,
-    latestTurnToolCount,
-    displayGeneratingText,
-    isBotBusy,
-    displayLiveToolName,
-    failureNotice,
+    displayGeneratingText.length,
     chatSearchOpen,
+    chatStick.scrollToBottom,
+    chatStick.setStuck,
   ]);
 
   const [hubRefreshing, setHubRefreshing] = useState(false);
@@ -4983,6 +5239,7 @@ ${newer}` : draftSnapshot;
   const triggerHubRefresh = useCallback(async () => {
     if (hubRefreshRunning.current) return;
     hubRefreshRunning.current = true;
+    lastNotifiedDirErrorRef.current = '';
     setHubRefreshing(true);
     try {
       const results = await Promise.allSettled([
@@ -4995,13 +5252,14 @@ ${newer}` : draftSnapshot;
         // 下拉刷新同时刷新群聊列表：await 实际读取结束才收起刷新态（静默失败由 hook 自身 error 呈现）。
         refreshRoomConversationsRef.current(),
       ]);
-      if (results[1].status === 'rejected') setDirectoryError(errorText(results[1].reason));
+      if (results[1].status === 'rejected') reportDirectoryFailure(errorText(results[1].reason));
     } finally {
       hubRefreshRunning.current = false;
       setHubRefreshing(false);
       setPullDistance(0);
     }
-  }, [onRefreshConnection, ensureRemoteApi, syncLocalBots, syncRemoteBots]);
+  }, [onRefreshConnection, ensureRemoteApi, syncLocalBots, syncRemoteBots, reportDirectoryFailure]);
+  triggerHubRefreshRef.current = triggerHubRefresh;
 
   const popScreen = useCallback((): boolean => {
     const currentStack = nav.stackRef.current;
@@ -5011,6 +5269,17 @@ ${newer}` : draftSnapshot;
       restoreProfileManageFocus.current = true;
     }
     if (leaving.screen === 'chat') {
+      // 出栈退出 chat 时清除该会话的滚动锚点（除非栈底仍有同 Bot 的 chat 条目），避免再次从 Hub 进入时跳回旧历史。
+      const remainingStack = currentStack.slice(0, -1);
+      const sameChatStillInStack = Boolean(
+        leaving.botKey && remainingStack.some(entry => entry.screen === 'chat' && entry.botKey === leaving.botKey),
+      );
+      if (!sameChatStillInStack && chatTargetKeyRef.current) {
+        chatScrollAnchorsRef.current.delete(chatTargetKeyRef.current);
+        if (pendingChatAnchorRestoreRef.current?.targetKey === chatTargetKeyRef.current) {
+          pendingChatAnchorRestoreRef.current = null;
+        }
+      }
       chatLoadGeneration.current += 1;
       profileLoadGeneration.current += 1;
       scheduleLoadGeneration.current += 1;
@@ -5037,8 +5306,9 @@ ${newer}` : draftSnapshot;
   }, [nav.pop, nav.stackRef, cancelActiveObservation, taskReturnId, refreshDirectoryAfterConfig]);
 
   const openCenterSettings = useCallback(() => {
+    saveCurrentChatAnchor();
     nav.push({ screen: 'settings', settingsPage: 'connection' });
-  }, [nav.push]);
+  }, [nav.push, saveCurrentChatAnchor]);
 
   const openInAppCenterAdmin = useCallback((tab: CenterAdminTab = 'providers') => {
     setCenterAdminTab(tab);
@@ -5285,7 +5555,11 @@ ${newer}` : draftSnapshot;
     }
   };
 
-  useEffect(() => {
+  // C3: 支持 CSS field-sizing: content 时跳过 JS 高度计算；不支持时在 useLayoutEffect 中同步计算。
+  useLayoutEffect(() => {
+    if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content')) {
+      return;
+    }
     const el = composerTextareaRef.current;
     if (!el) return;
     if (!effectiveLocalDraft) {
@@ -5627,8 +5901,9 @@ ${newer}` : draftSnapshot;
   );
   const openBotBrowser = useCallback(() => {
     if (!activeBot) return;
+    saveCurrentChatAnchor();
     nav.push({ screen: 'bot-browser', botKey: activeBot.key });
-  }, [activeBot, nav]);
+  }, [activeBot, nav, saveCurrentChatAnchor]);
   const mobileGoogleContext = useMemo<GoogleChatCardContext | undefined>(() => {
     if (!activeBot) return undefined;
     const brokerApi = remoteClientRef.current?.api ?? null;
@@ -5776,6 +6051,58 @@ ${newer}` : draftSnapshot;
     () => (activeBot ? formatBotModelSummary(activeBot, { connectedToCenter }) : null),
     [activeBot, connectedToCenter],
   );
+  const chatScreenModelSummary = useMemo(
+    () => (chatScreenBot ? formatBotModelSummary(chatScreenBot, { connectedToCenter }) : null),
+    [chatScreenBot, connectedToCenter],
+  );
+
+  // C4: 当保活 ChatScreen 隐藏且 activeBot 临时切去其它 Bot 资料页时，保留隐藏态原 Bot 的已渲染轮次不闪烁。
+  const lastChatScreenTurnsRef = useRef<{
+    botKey: string | null;
+    turns: typeof visibleTurns;
+    currentGoogleSetup: GoogleSetupPresentation | undefined;
+  }>({
+    botKey: null,
+    turns: [],
+    currentGoogleSetup: undefined,
+  });
+  if (screen === 'chat' && chatScreenBot) {
+    lastChatScreenTurnsRef.current = {
+      botKey: chatScreenBot.key,
+      turns: visibleTurns,
+      currentGoogleSetup,
+    };
+  }
+  const useCachedHiddenChatScreen = Boolean(
+    screen !== 'chat' &&
+    chatScreenBot &&
+    chatScreenBot.key !== activeBot?.key &&
+    lastChatScreenTurnsRef.current.botKey === chatScreenBot.key,
+  );
+  const chatScreenVisibleTurns = useCachedHiddenChatScreen
+    ? lastChatScreenTurnsRef.current.turns
+    : visibleTurns;
+  const chatScreenGoogleSetup = useCachedHiddenChatScreen
+    ? lastChatScreenTurnsRef.current.currentGoogleSetup
+    : currentGoogleSetup;
+
+  // C7: board.storageError 路由到 F1 浮层通知，移除文档流内 .bot-board-warning。
+  useEffect(() => {
+    const msg = screen === 'chat' ? board.storageError?.trim() : '';
+    if (!msg) {
+      dismiss(BOT_BOARD_WARNING_NOTICE_ID);
+      return;
+    }
+    notify({
+      id: BOT_BOARD_WARNING_NOTICE_ID,
+      tone: 'warning',
+      title: msg,
+    });
+  }, [screen, board.storageError, notify, dismiss]);
+
+  useEffect(() => () => {
+    dismiss(BOT_BOARD_WARNING_NOTICE_ID);
+  }, [dismiss]);
   // ---
   // @lane-hooks:errors
   // ---
@@ -5783,6 +6110,8 @@ ${newer}` : draftSnapshot;
   // ---
   // @lane-hooks:scopes
   const navigateFromSidebar = (next: RootScreen) => {
+    chatScrollAnchorsRef.current.clear();
+    pendingChatAnchorRestoreRef.current = null;
     if (screen === 'tasks' && next !== 'tasks') {
       if (globalTasks.createDraft.trim()) globalTasks.markDraftLeftUnpublished();
       setCreatingTask(false);
@@ -5798,6 +6127,11 @@ ${newer}` : draftSnapshot;
       className={`bot-hub-shell${screen === 'bot-screen' || screen === 'bot-browser' ? ' is-fullscreen-computer' : ''}`}
     >
       <MobileClientUpdatePrompt active={active} onOpenUpdates={() => {
+        if (screen === 'chat') {
+          saveCurrentChatAnchor();
+          nav.push({ screen: 'settings', settingsPage: 'updates' });
+          return;
+        }
         navigateFromSidebar('settings');
         nav.push({ screen: 'settings', settingsPage: 'updates' });
       }} />
@@ -5928,7 +6262,6 @@ ${newer}` : draftSnapshot;
           if (bot) openBotChat(bot, 'board');
         }}
       />}
-      {screen === 'chat' && board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
       {(screen === 'hub' || screen === 'chat' || screen === 'conversation' || screen === 'dm' || screen === 'group-create') && (
         <HubScreen
           visible={screen === 'hub'}
@@ -5936,6 +6269,9 @@ ${newer}` : draftSnapshot;
           leftDrawerOpen={leftDrawerOpen}
           navigationTriggerRef={navigationTriggerRef}
           onOpenLeftDrawer={() => setLeftDrawerOpen(true)}
+          connectionPhase={connectionPhase}
+          connectionDetail={connectionDetail}
+          ipcReconnecting={shellConnPhase.ipcReconnecting}
           hubRefreshing={hubRefreshing}
           pullDistance={pullDistance}
           pullThreshold={PULL_THRESHOLD}
@@ -5965,19 +6301,16 @@ ${newer}` : draftSnapshot;
           onOpenContextMenu={setHubContextMenu}
           hubFilter={hubFilter}
           onChangeHubFilter={setHubFilter}
-          directoryError={directoryError}
           chatPinsError={chatPins.error}
           actionError={action.error}
-          onDismissDirectoryError={() => setDirectoryError('')}
-          onDismissActionError={() => action.setError('')}
           onOpenCenterSettings={openCenterSettings}
           onTriggerRefresh={() => void triggerHubRefresh()}
-          hasRemoteBots={remoteBots.length > 0}
           remoteConnected={remoteConnected}
           hasLocalHost={Boolean(localHost)}
+          hasConfiguredCenter={hasConfiguredCenter}
+          botsHydrated={botsHydrated}
+          roomConversationsHydrated={roomConversationsHydrated}
           roomConversationsError={roomConversationsError}
-          roomConversationsLoaded={roomConversationsLoaded}
-          roomConversationsLoading={roomConversationsLoading}
           onRefreshRoomConversations={() => refreshRoomConversations()}
           visibleHubItems={visibleHubItems}
           visiblePinnedKeys={visiblePinnedKeys}
@@ -5994,16 +6327,20 @@ ${newer}` : draftSnapshot;
       )}
 
       {/* ==================== SCREEN 2: BOT CHAT VIEW (15845.jpg) ==================== */}
-      {/* dm 子页从聊天进入时保持 chat DOM（隐藏不卸载）：返回主聊天滚动位置不丢。 */}
-      {(screen === 'chat' || (screen === 'dm' && nav.previous?.screen === 'chat')) && activeBot && (
+      {/* C4: 只要导航栈中存在 chat 条目即保持 ChatScreen 挂载（隐藏不卸载），返回原 Bot 聊天不丢滚动与草稿状态。 */}
+      {topmostChatEntry && chatScreenBot && (
         <ChatScreen
           visible={screen === 'chat'}
           anyDrawerOpen={anyDrawerOpen}
-          activeBot={activeBot}
-          activeChatScope={activeChatScope}
+          activeBot={chatScreenBot}
+          activeChatScope={chatScreenScope}
           hasRemoteConfigured={hasRemoteConfigured}
           remoteConnected={remoteConnected}
-          activeBotModelSummary={activeBotModelSummary}
+          connectionPhase={connectionPhase}
+          connectionDetail={connectionDetail}
+          ipcReconnecting={shellConnPhase.ipcReconnecting}
+          onRetryConnection={() => void triggerHubRefresh()}
+          activeBotModelSummary={chatScreenModelSummary}
           coarsePointer={coarsePointer}
           inTauriUi={inTauriUi}
           collapseToolOutput={collapseToolOutput}
@@ -6015,7 +6352,11 @@ ${newer}` : draftSnapshot;
           onToggleChatTopMenu={() => setChatTopMenuOpen(v => !v)}
           onCloseChatTopMenu={() => setChatTopMenuOpen(false)}
           onBack={() => {
-            if (!popScreen()) nav.resetTo({ screen: 'hub' });
+            if (!popScreen()) {
+              chatScrollAnchorsRef.current.clear();
+              pendingChatAnchorRestoreRef.current = null;
+              nav.resetTo({ screen: 'hub' });
+            }
           }}
           onOpenBotProfile={openBotProfile}
           onOpenBotDmList={openBotDmList}
@@ -6034,26 +6375,22 @@ ${newer}` : draftSnapshot;
             setChatSearchQuery('');
           }}
           chatScrollRef={chatScrollRef}
-          onMessagesScroll={e => {
-            const el = e.currentTarget;
-            const nearBottom = isNearChatBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
-            if (nearBottom) {
-              chatJumpingToBottomRef.current = false;
-              if (chatJumpTimerRef.current !== null) {
-                window.clearTimeout(chatJumpTimerRef.current);
-                chatJumpTimerRef.current = null;
-              }
-              chatStickToBottomRef.current = true;
-              setChatHasNewContent(prev => (prev ? false : prev));
-            } else if (!chatJumpingToBottomRef.current) {
-              chatStickToBottomRef.current = false;
+          chatMessagesContentRef={chatMessagesContentRef}
+          onMessagesScroll={() => {
+            chatStick.handleScroll();
+            const el = chatScrollRef.current;
+            if (screen !== 'chat' || !el || el.clientHeight <= 0 || !chatTargetKey) return;
+            if (chatStick.isStuckRef.current) {
+              chatScrollAnchorsRef.current.set(chatTargetKey, { atBottom: true });
+            } else {
+              chatScrollAnchorsRef.current.set(chatTargetKey, {
+                atBottom: false,
+                scrollTop: el.scrollTop,
+              });
             }
           }}
-          onCancelJumpToBottom={() => {
-            if (chatJumpingToBottomRef.current) chatJumpingToBottomRef.current = false;
-          }}
           chatHistoryLoading={chatHistoryLoading}
-          visibleTurns={visibleTurns}
+          visibleTurns={chatScreenVisibleTurns}
           latestTurn={latestTurn}
           latestTurnHasError={latestTurnHasError}
           activeEditing={activeEditing}
@@ -6081,19 +6418,22 @@ ${newer}` : draftSnapshot;
           clearNotice={clearNotice}
           chatHasNewContent={chatHasNewContent}
           onJumpToLatest={jumpToLatestMessages}
-          onOpenLearnedSkills={() => nav.push({ screen: 'bot-skills', botKey: activeBot.key })}
+          onOpenLearnedSkills={() => {
+            saveCurrentChatAnchor();
+            nav.push({ screen: 'bot-skills', botKey: chatScreenBot.key });
+          }}
           onOpenCenterSettings={openCenterSettings}
           turnAttachmentFetcher={
-            activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current
-              ? remoteAttachmentFetcher(remoteClientRef.current.api, activeBot.remoteIdentity, activeBot.botId)
+            chatScreenBot.hostKind === 'remote' && chatScreenBot.remoteIdentity && remoteClientRef.current
+              ? remoteAttachmentFetcher(remoteClientRef.current.api, chatScreenBot.remoteIdentity, chatScreenBot.botId)
               : localAttachmentFetcher
           }
           onStartEditTurn={turn => {
             setBubbleActionTurn(null);
             setComposerImageError('');
             setEditingTurn({
-              botKey: activeBot.key,
-              scopeKey: activeChatScope,
+              botKey: chatScreenBot.key,
+              scopeKey: chatScreenScope,
               entryId: turn.entryId,
               text: turn.text,
               attachments: turn.attachments ? turn.attachments.map(a => ({ ...a })) : [],
@@ -6104,6 +6444,7 @@ ${newer}` : draftSnapshot;
           onSubmitQuestionnaire={submitQuestionnaire}
           onSubmitVaultUnlock={submitVaultUnlock}
           googleContext={mobileGoogleContext}
+          currentGoogleSetup={chatScreenGoogleSetup}
           onOpenBrowser={openBotBrowser}
           browserTakeoverHint={browserTakeoverHint}
           canStopBot={canStopBot}
@@ -6130,6 +6471,7 @@ ${newer}` : draftSnapshot;
           taskBotOptions={taskBotOptions}
           taskBannerBusy={taskBannerBusy}
           onOpenTaskDetail={(tid, openEdit) => {
+            saveCurrentChatAnchor();
             setActiveTaskId(tid);
             setCreatingTask(false);
             setTaskInitialEditMode(Boolean(openEdit));
@@ -6140,7 +6482,7 @@ ${newer}` : draftSnapshot;
             await executeTaskChatAction({
               kind: 'confirm_plan',
               scopeKey: taskScopeKey,
-              botKey: `${activeBot.deviceId}:${activeBot.botId}`,
+              botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
               taskId: tid,
               taskTitle: target?.title ?? tid,
             });
@@ -6150,7 +6492,7 @@ ${newer}` : draftSnapshot;
             await executeTaskChatAction({
               kind: 'answer_prompt',
               scopeKey: taskScopeKey,
-              botKey: `${activeBot.deviceId}:${activeBot.botId}`,
+              botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
               taskId: tid,
               taskTitle: target?.title ?? tid,
               answer,
@@ -6163,7 +6505,7 @@ ${newer}` : draftSnapshot;
               await executeTaskChatAction({
                 kind: 'confirm_plan',
                 scopeKey: taskScopeKey,
-                botKey: `${activeBot.deviceId}:${activeBot.botId}`,
+                botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
                 taskId: tid,
                 taskTitle: target?.title ?? tid,
               });
@@ -6178,7 +6520,7 @@ ${newer}` : draftSnapshot;
               await executeTaskChatAction({
                 kind: 'answer_prompt',
                 scopeKey: taskScopeKey,
-                botKey: `${activeBot.deviceId}:${activeBot.botId}`,
+                botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
                 taskId: tid,
                 taskTitle: target?.title ?? tid,
                 answer,
@@ -6189,13 +6531,13 @@ ${newer}` : draftSnapshot;
           }}
           onClearJumpedTaskQuote={() => setJumpedTaskQuote(null)}
           onCycleWaitingTask={() => {
-            const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
+            const botKey = `${chatScreenBot.deviceId}:${chatScreenBot.botId}`;
             setJumpedTaskQuote(null);
             setWaitingTaskOffsetByBot(prev => ({ ...prev, [botKey]: (prev[botKey] ?? 0) + 1 }));
           }}
           offlineNotice={offlineNotice}
           onDismissOfflineNotice={() => setOfflineNotice(undefined)}
-          onShowOfflineNotice={text => setOfflineNotice({ botKey: activeBot.key, text })}
+          onShowOfflineNotice={text => setOfflineNotice({ botKey: chatScreenBot.key, text })}
           remoteApi={remoteClientRef.current?.api ?? null}
           chatDraft={chatDraft}
           slashBusy={slashBusy}
@@ -6207,49 +6549,49 @@ ${newer}` : draftSnapshot;
           onSubmitEditedTurn={() => void submitEditedTurn()}
           onRunSlashCommand={runSlashCommand}
           onAbortRemote={async () => {
-            await requestStopBot(activeBot);
+            await requestStopBot(chatScreenBot);
           }}
           onRemoteFallbackTransferred={() => {
-            if (currentChatScope.current === activeChatScope) {
+            if (currentChatScope.current === chatScreenScope) {
               setChatDraft('');
               setChatDraftAttachments([]);
               setComposerImageError('');
             }
-            writeChatDraft(activeChatScope, '');
-            writeChatDraftAttachments(activeChatScope, []);
+            writeChatDraft(chatScreenScope, '');
+            writeChatDraftAttachments(chatScreenScope, []);
           }}
           onRemoteStarted={(requestId, text, draft, delivery) => {
-            const old = pendingByBot.current.get(activeChatScope)?.pending;
+            const old = pendingByBot.current.get(chatScreenScope)?.pending;
             const attachmentIds = draft.attachments?.map(a => a.id).filter(Boolean);
             const pending: ChatPending = old?.requestId === requestId ? old : {
-              botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft,
+              botKey: chatScreenBot.key, scopeKey: chatScreenScope, requestId, text, draft,
               ...(attachmentIds?.length ? { attachments: attachmentIds } : {}),
               ...(delivery ? { delivery } : {}),
               phase: 'sending',
               submittedAt: Date.now(),
-              afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(effectiveChatLive?.lastEntryId) || 0, getCutoff(activeBot.key, activeChatScope)),
+              afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(effectiveChatLive?.lastEntryId) || 0, getCutoff(chatScreenBot.key, chatScreenScope)),
             };
-            if (currentChatScope.current === activeChatScope) chatSubmissionRef.current = pending;
-            const entry = pendingByBot.current.get(activeChatScope);
+            if (currentChatScope.current === chatScreenScope) chatSubmissionRef.current = pending;
+            const entry = pendingByBot.current.get(chatScreenScope);
             updatePending({ pending, receipt: entry?.pending.requestId === requestId ? entry.receipt : undefined }, false);
           }}
           onRemotePersist={requestId => {
-            const entry = pendingByBot.current.get(activeChatScope);
-            return Boolean(activeChatScope && entry?.pending.requestId === requestId && updatePending(entry));
+            const entry = pendingByBot.current.get(chatScreenScope);
+            return Boolean(chatScreenScope && entry?.pending.requestId === requestId && updatePending(entry));
           }}
           onRemoteQueued={(requestId, pendingId) => {
-            const entry = pendingByBot.current.get(activeChatScope);
+            const entry = pendingByBot.current.get(chatScreenScope);
             if (entry?.pending.requestId === requestId) updatePending({ ...entry, pending: { ...entry.pending, pendingId } });
           }}
           onRemoteAccepted={receipt => {
-            const entry = pendingByBot.current.get(activeChatScope);
+            const entry = pendingByBot.current.get(chatScreenScope);
             if (entry?.pending.requestId === receipt.requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: (receipt as TurnAdmissionCarrier).admission ?? null }, receipt });
           }}
           onRemoteUnconfirmed={requestId => {
-            const entry = pendingByBot.current.get(activeChatScope);
+            const entry = pendingByBot.current.get(chatScreenScope);
             if (entry?.pending.requestId === requestId && !entry.receipt) updatePending({ ...entry, pending: { ...entry.pending, phase: 'recovering' } });
           }}
-          onRemoteNotSent={requestId => removePending(activeChatScope, requestId)}
+          onRemoteNotSent={requestId => removePending(chatScreenScope, requestId)}
           onForceScrollBottom={forceChatScrollBottom}
           pendingRemoteQuote={pendingRemoteQuote}
           onConsumedRemoteQuote={() => setPendingRemoteQuote(null)}
@@ -6259,9 +6601,9 @@ ${newer}` : draftSnapshot;
               capturedTaskContext?.linkedTask ?? activeBotLinkedTask,
               rawText,
               {
-                deviceId: capturedTaskContext?.deviceId ?? activeBot.deviceId,
-                botId: capturedTaskContext?.botId ?? activeBot.botId,
-                role: capturedTaskContext?.botRole ?? activeBot.role,
+                deviceId: capturedTaskContext?.deviceId ?? chatScreenBot.deviceId,
+                botId: capturedTaskContext?.botId ?? chatScreenBot.botId,
+                role: capturedTaskContext?.botRole ?? chatScreenBot.role,
               },
               capturedTaskContext?.scopeKey ?? taskScopeKey,
             );
@@ -6317,19 +6659,19 @@ ${newer}` : draftSnapshot;
                 }
               } else {
                 const submission = {
-                  botKey: activeBot.key,
+                  botKey: chatScreenBot.key,
                   requestId: uuid(),
                   afterEntryId: Math.max(
                     maxHistoryEntryId(chatHistory),
                     Number(effectiveChatLive?.lastEntryId) || 0,
-                    getCutoff(activeBot.key, activeChatScope),
+                    getCutoff(chatScreenBot.key, chatScreenScope),
                   ),
                 };
                 chatSubmissionRef.current = submission;
                 setChatReceipt(undefined);
                 const snap = await ensureLocalHostRunning();
                 if (!snap || snap.phase !== 'running' || chatSubmissionRef.current !== submission) return;
-                const targetBotId = activeBot.botId;
+                const targetBotId = chatScreenBot.botId;
                 const cap = { botId: targetBotId, requestId: submission.requestId };
                 setVoicePartialText('');
                 setVoiceLevel(0);
@@ -6349,7 +6691,7 @@ ${newer}` : draftSnapshot;
           isStoppingChat={isStoppingChat}
           isLlmRunningChat={isLlmRunningChat}
           showLocalComposerStop={showLocalComposerStop}
-          isDeletingActiveBot={deletingBots.current.has(activeBot.key)}
+          isDeletingActiveBot={deletingBots.current.has(chatScreenBot.key)}
           onSendMessage={delivery => void sendMessage(delivery)}
         />
       )}

@@ -2,25 +2,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import {
   Download,
-  ExternalLink,
   Plus,
   RefreshCw,
   Trash2,
   Upload,
   Webhook,
 } from 'lucide-react';
+import { LabelStack } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   CaDisclosure,
   CaModal,
   CaNotice,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   CaSwitch,
+  CaToolbarSkeleton,
   CopyButton,
   botKey,
   formatTime,
+  useCaTabNotices,
   useUiLocale,
 } from './primitives';
 import type {
@@ -117,31 +122,74 @@ function eventStatusMeta(
   }
 }
 
+interface OpsCacheData {
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  routes: WebhookRoute[];
+  events: WebhookEvent[];
+  releases: ClientReleaseRecord[];
+}
+
 export function OpsTab({
   api,
+  active = true,
+  cacheKey = 'default',
   onOpenExternal,
 }: {
   api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
   onOpenExternal?: () => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
 
+  const initialCache = useMemo(
+    () => readTabCache<OpsCacheData>(cacheKey, 'ops')?.data ?? null,
+    [cacheKey],
+  );
   const [segment, setSegment] = useState<'webhooks' | 'releases'>('webhooks');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState('');
 
   // Shared device/bot directory for Webhook target picker
-  const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [bots, setBots] = useState<CenterBotRef[]>([]);
+  const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
+  const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
 
   // Webhooks state
-  const [routes, setRoutes] = useState<WebhookRoute[]>([]);
-  const [events, setEvents] = useState<WebhookEvent[]>([]);
+  const [routes, setRoutes] = useState<WebhookRoute[]>(() => initialCache?.routes ?? []);
+  const [events, setEvents] = useState<WebhookEvent[]>(() => initialCache?.events ?? []);
   const [selectedRouteFilter, setSelectedRouteFilter] = useState<string>('all');
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
   const [togglingRouteId, setTogglingRouteId] = useState<string | null>(null);
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('ops', active);
+
+  const setError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('error', msg, { tone: 'danger' });
+      else clearNotice('error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('notice', msg, { tone: 'ok' });
+      else clearNotice('notice');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Webhook drawer state
   const [hookModalOpen, setHookModalOpen] = useState(false);
@@ -151,11 +199,18 @@ export function OpsTab({
   const [hookInstruction, setHookInstruction] = useState('');
   const [hookEnabled, setHookEnabled] = useState(true);
   const [hookBusy, setHookBusy] = useState(false);
-  const [hookError, setHookError] = useState('');
   const [revealedToken, setRevealedToken] = useState<{ url: string; token: string } | null>(null);
 
+  const setHookError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('hook-error', msg, { tone: 'danger' });
+      else clearNotice('hook-error');
+    },
+    [clearNotice, showNotice],
+  );
+
   // Releases state
-  const [releases, setReleases] = useState<ClientReleaseRecord[]>([]);
+  const [releases, setReleases] = useState<ClientReleaseRecord[]>(() => initialCache?.releases ?? []);
   const [releaseFile, setReleaseFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [relVersion, setRelVersion] = useState('');
@@ -170,9 +225,25 @@ export function OpsTab({
   const [relSignature, setRelSignature] = useState('');
   const [relAutoPublish, setRelAutoPublish] = useState(true);
   const [relBusy, setRelBusy] = useState(false);
-  const [relError, setRelError] = useState('');
-  const [relNeedsBrowser, setRelNeedsBrowser] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const setRelError = useCallback(
+    (msg: string, needsBrowser = false) => {
+      if (msg) {
+        const t = tRef.current;
+        showNotice('release-error', msg, {
+          tone: 'danger',
+          action:
+            needsBrowser && onOpenExternal
+              ? { label: t('在浏览器打开上传', 'Open in browser to upload'), onClick: onOpenExternal }
+              : undefined,
+        });
+      } else {
+        clearNotice('release-error');
+      }
+    },
+    [clearNotice, onOpenExternal, showNotice],
+  );
 
   const platformCombinations = useMemo(() => getPlatformCombinations(t), [t]);
 
@@ -212,31 +283,77 @@ export function OpsTab({
     setRoutes(hookRes.items);
     setReleases(relRes.releases);
     await loadWebhookEventsForRoutes(hookRes.items);
-  }, [api, loadWebhookEventsForRoutes]);
+    hasLoadedRef.current = true;
+    cacheKeyRef.current = cacheKey;
+    setHasLoaded(true);
+    setInitialError('');
+    clearNotice('load-error');
+  }, [api, cacheKey, clearNotice, loadWebhookEventsForRoutes]);
+
+  const runLoad = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    if (hasLoadedRef.current) setRefreshing(true);
+    try {
+      await loadAll();
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      const t = tRef.current;
+      const msg = errorMessage(err, t('加载触发与版本数据失败', 'Failed to load triggers and releases'));
+      if (hasLoadedRef.current) {
+        if (activeRef.current) {
+          showNotice('load-error', msg, {
+            tone: 'danger',
+            action: {
+              label: t('重试', 'Retry'),
+              onClick: () => void runLoad(),
+            },
+          });
+        }
+      } else {
+        setInitialError(msg);
+      }
+    } finally {
+      if (gen === loadGenRef.current) setRefreshing(false);
+    }
+  }, [loadAll, showNotice]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    loadAll()
-      .catch(err => {
-        if (active) setError(errorMessage(err, t('加载触发与版本数据失败', 'Failed to load triggers and releases')));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void runLoad();
+  }, [runLoad]);
+
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || initialError)) {
+      void runLoad();
+    }
+  }, [active, initialError, runLoad]);
+
+  useEffect(() => {
     return () => {
-      active = false;
+      loadGenRef.current += 1;
     };
-  }, [loadAll, t]);
+  }, []);
 
-  // 5s silent auto-refresh for Webhook events while Webhook segment is active
   useEffect(() => {
-    if (segment !== 'webhooks' || routes.length === 0) return;
+    if (!hasLoaded || cacheKeyRef.current !== cacheKey) return;
+    writeTabCache<OpsCacheData>(cacheKey, 'ops', {
+      devices,
+      bots,
+      routes,
+      events,
+      releases,
+    });
+  }, [bots, cacheKey, devices, events, hasLoaded, releases, routes]);
+
+  // 5s silent auto-refresh for Webhook events while tab and Webhook segment are active
+  useEffect(() => {
+    if (!active || segment !== 'webhooks' || routes.length === 0) return;
     const timer = window.setInterval(() => {
       void loadWebhookEventsForRoutes(routes);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [loadWebhookEventsForRoutes, routes, segment]);
+  }, [active, loadWebhookEventsForRoutes, routes, segment]);
 
   // Webhook Handlers
   const openCreateWebhook = () => {
@@ -376,7 +493,6 @@ export function OpsTab({
   // Release File Drop / Selection
   const handleFilesSelected = async (fileList: FileList | File[]) => {
     setRelError('');
-    setRelNeedsBrowser(false);
     const files = Array.from(fileList);
     if (files.length === 0) return;
 
@@ -468,7 +584,6 @@ export function OpsTab({
 
     setRelBusy(true);
     setRelError('');
-    setRelNeedsBrowser(false);
     try {
       const created = await api.createClientRelease(meta, releaseFile);
       let finalRecord = created;
@@ -486,10 +601,8 @@ export function OpsTab({
           : t(`版本 v${finalRecord.version} 已保存为草稿`, `Release v${finalRecord.version} saved as draft`),
       );
     } catch (err) {
-      if (err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA') {
-        setRelNeedsBrowser(true);
-      }
-      setRelError(errorMessage(err, t('上传版本失败', 'Failed to upload release')));
+      const needsBrowser = err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA';
+      setRelError(errorMessage(err, t('上传版本失败', 'Failed to upload release')), needsBrowser);
     } finally {
       setRelBusy(false);
     }
@@ -534,25 +647,39 @@ export function OpsTab({
     return events.filter(ev => ev.routeId === selectedRouteFilter);
   }, [events, selectedRouteFilter]);
 
-  if (loading) {
-    return <div className="ca-empty">{t('正在加载触发与版本管理…', 'Loading triggers & releases…')}</div>;
+  if (!hasLoaded && !initialError) {
+    return (
+      <div className="ca-form-stack">
+        <CaToolbarSkeleton leftWidth={210} rightWidth={112} />
+        <CaSectionSkeleton rows={3} headWidth={120} trailingWidth={48} label={t('正在加载触发与版本管理…', 'Loading triggers & releases…')} />
+        <CaSectionSkeleton rows={3} lines={1} headWidth={176} trailingWidth={132} />
+      </div>
+    );
+  }
+
+  if (!hasLoaded && initialError) {
+    return (
+      <section className="ca-section">
+        <div className="ca-section-body">
+          <CaNotice
+            tone="danger"
+            action={
+              <button type="button" className="ca-btn ca-btn-sm" onClick={() => void runLoad()}>
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>{t('重试', 'Retry')}</span>
+              </button>
+            }
+          >
+            {initialError}
+          </CaNotice>
+        </div>
+      </section>
+    );
   }
 
   return (
     <div>
-      {error && <CaNotice tone="danger">{error}</CaNotice>}
-      {notice && (
-        <CaNotice
-          tone="ok"
-          action={
-            <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              {t('关闭', 'Close')}
-            </button>
-          }
-        >
-          {notice}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
       <div className="ca-toolbar">
         <CaSegmented
@@ -575,7 +702,7 @@ export function OpsTab({
 
       {segment === 'webhooks' ? (
         <div className="ca-form-stack">
-          {/* Webhook 触发入口列表 */}
+          {/* Webhook routes list */}
           <section className="ca-section">
             <div className="ca-section-head">
               <h3 className="ca-section-title">
@@ -627,7 +754,7 @@ export function OpsTab({
             </div>
           </section>
 
-          {/* 最近触发记录（每 5 秒静默自动刷新） */}
+          {/* Recent webhook trigger events (5s silent auto-refresh) */}
           <section className="ca-section">
             <div className="ca-section-head">
               <h3 className="ca-section-title">{t('最近触发记录（自动刷新）', 'Recent Trigger Events (Auto-refresh)')}</h3>
@@ -690,7 +817,7 @@ export function OpsTab({
                       </div>
 
                       {expanded && (
-                        <div className="ca-cred-box ca-full-w">
+                        <div className="ca-cred-box ca-full-w smooth-expand-mount">
                           <div className="ca-muted ca-mono">requestId: {ev.requestId}</div>
                           <div className="ca-muted ca-mono">idempotencyKey: {ev.idempotencyKey}</div>
                           {ev.admission && (
@@ -711,28 +838,12 @@ export function OpsTab({
         </div>
       ) : (
         <div className="ca-form-stack">
-          {/* 单一文件拖放上传区 + 自动推导元数据 */}
+          {/* Single file dropzone + auto-inferred metadata */}
           <section className="ca-section">
             <div className="ca-section-head">
               <h3 className="ca-section-title">{t('上传客户端安装包', 'Upload Client Package')}</h3>
             </div>
             <form className="ca-section-body ca-form-stack" onSubmit={e => void handleUploadRelease(e)}>
-              {relError && (
-                <CaNotice
-                  tone="danger"
-                  action={
-                    relNeedsBrowser && onOpenExternal ? (
-                      <button type="button" className="ca-btn ca-btn-sm" onClick={onOpenExternal}>
-                        <ExternalLink size={13} aria-hidden="true" />
-                        <span>{t('在浏览器打开上传', 'Open in browser to upload')}</span>
-                      </button>
-                    ) : undefined
-                  }
-                >
-                  {relError}
-                </CaNotice>
-              )}
-
               <input
                 ref={fileInputRef}
                 type="file"
@@ -886,17 +997,22 @@ export function OpsTab({
                   <span>{t('上传后立即发布给客户端检查更新', 'Publish immediately for client update checks')}</span>
                 </label>
                 <button type="submit" className="ca-btn ca-btn-primary ca-btn-sm" disabled={relBusy || !releaseFile}>
-                  {relBusy
-                    ? t('上传中…', 'Uploading…')
-                    : relAutoPublish
-                      ? t('上传并发布', 'Upload & Publish')
-                      : t('保存为草稿', 'Save Draft')}
+                  <LabelStack
+                    active={
+                      relBusy
+                        ? t('上传中…', 'Uploading…')
+                        : relAutoPublish
+                          ? t('上传并发布', 'Upload & Publish')
+                          : t('保存为草稿', 'Save Draft')
+                    }
+                    labels={[t('上传并发布', 'Upload & Publish'), t('保存为草稿', 'Save Draft'), t('上传中…', 'Uploading…')]}
+                  />
                 </button>
               </div>
             </form>
           </section>
 
-          {/* 已上传版本列表 */}
+          {/* Uploaded releases list */}
           <section className="ca-section">
             <div className="ca-section-head">
               <h3 className="ca-section-title">
@@ -935,7 +1051,10 @@ export function OpsTab({
                         disabled={relBusy}
                         onClick={() => void handleTogglePublishRelease(rec)}
                       >
-                        {rec.published ? t('撤回', 'Unpublish') : t('发布', 'Publish')}
+                        <LabelStack
+                          active={rec.published ? t('撤回', 'Unpublish') : t('发布', 'Publish')}
+                          labels={[t('发布', 'Publish'), t('撤回', 'Unpublish')]}
+                        />
                       </button>
                     </div>
                   </div>
@@ -946,10 +1065,13 @@ export function OpsTab({
         </div>
       )}
 
-      {/* Webhook 创建 / 编辑抽屉（支持修改目标 deviceId / botId） */}
+      {/* Webhook create / edit drawer */}
       <CaModal
         open={hookModalOpen}
-        onOpenChange={setHookModalOpen}
+        onOpenChange={open => {
+          if (!open) setHookError('');
+          setHookModalOpen(open);
+        }}
         title={
           editingRoute
             ? t(`编辑触发入口 · ${editingRoute.name}`, `Edit Webhook · ${editingRoute.name}`)
@@ -958,8 +1080,6 @@ export function OpsTab({
         variant="drawer"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSaveWebhook(e)}>
-          {hookError && <CaNotice tone="danger">{hookError}</CaNotice>}
-
           {revealedToken && (
             <div className="ca-cred-box">
               <div className="ca-field-label">
@@ -1080,11 +1200,19 @@ export function OpsTab({
                 {t('关闭', 'Close')}
               </button>
               <button type="submit" className="ca-btn ca-btn-primary" disabled={hookBusy}>
-                {hookBusy
-                  ? t('保存中…', 'Saving…')
-                  : editingRoute
-                    ? t('保存修改', 'Save Changes')
-                    : t('创建入口', 'Create Webhook')}
+                <LabelStack
+                  active={
+                    hookBusy
+                      ? t('保存中…', 'Saving…')
+                      : editingRoute
+                        ? t('保存修改', 'Save Changes')
+                        : t('创建入口', 'Create Webhook')
+                  }
+                  labels={[
+                    editingRoute ? t('保存修改', 'Save Changes') : t('创建入口', 'Create Webhook'),
+                    t('保存中…', 'Saving…'),
+                  ]}
+                />
               </button>
             </div>
           </div>

@@ -1,9 +1,16 @@
 // gbot-ui lane：跨来源 scope 会话列表 hook（只读）。
 // 数据来源为既有 listScopeStates/scopeHistory 读取 API，不改 host 协议；
 // 每来源显式冻结 DesktopIdentity，不修改全局 identity。
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ScopeReadApi } from '../../../desktop/web/src/scope-api';
-import type { DesktopIdentity } from '../../../desktop/web/src/scope-api';
+// 传入 partitionKey 时支持首帧同步从 localStorage 恢复同分区缓存，在线刷新后原地更新并写回缓存（F4 / H3 / H5）。
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DesktopIdentity, ScopeReadApi } from '../../../desktop/web/src/scope-api';
+import type {
+  DesktopObservationEvent,
+  DesktopUiSnapshot,
+  LiveTarget,
+  ObservationHandle,
+  RemoteControlMethodMap,
+} from '../../../desktop/web/src/types';
 import type {
   MessageHistoryPage,
   ScopeInfo,
@@ -14,6 +21,14 @@ import type {
 import { useText } from '../ui';
 import { conversationTitle } from './ConversationChat';
 import type { ConversationBot } from './ConversationChat';
+import {
+  normalizePartitionKey,
+  readScopeConversationsCacheEntry,
+  removeCachedScopeConversation,
+  writeCachedScopeConversations,
+  type CachedScopeConversation,
+  type ScopeCacheStorage,
+} from './scopeCache';
 
 export interface ScopeConversationSource {
   api: ScopeReadApi;
@@ -37,11 +52,31 @@ export interface ScopeConversation {
   lastActivityAt: string | null | undefined;
 }
 
+export interface UseScopeConversationsOptions {
+  /**
+   * 持久化缓存分区键（如 Host.tsx 的 pinStorageScope / Desktop 的 profileKey）。
+   * 传入后首帧同步从 localStorage 恢复该分区群聊列表，切换分区同步切换缓存，
+   * 在线刷新后原地更新并写回缓存。缺省或空串时不启用跨重启 localStorage 缓存，保持既有调用方完全兼容。
+   */
+  partitionKey?: string | null;
+  /**
+   * 宿主仍在等待更多来源接入（例如远端 Center 尚未就绪、仅本机来源先连上）。
+   * 为 true 时保留缓存中尚未出现在 sources 里的其他账号会话，避免本机先返回把远端群聊短暂冲掉。
+   */
+  awaitingSources?: boolean;
+  /** 可选自定义存储后端（单元测试注入用；缺省使用 window.localStorage）。 */
+  storage?: ScopeCacheStorage | null;
+}
+
 export interface UseScopeConversationsResult {
   items: ScopeConversation[];
   loading: boolean;
   /** 当前来源及会话类型已完成至少一次在线读取。 */
   loaded: boolean;
+  /** 当前分区是否已完成首屏水合（命中本地缓存或至少完成一次在线读取）；用于区分骨架行与空态（H5）。 */
+  hasHydrated: boolean;
+  /** hasHydrated 的同义别名，便于调用方按语义读取。 */
+  hasInitialData: boolean;
   error: string | null;
   /** 等待本轮（或与在途合并后的）实际刷新结束。 */
   refresh: () => Promise<void>;
@@ -55,6 +90,17 @@ const HISTORY_CONCURRENCY = 3;
 const LIST_PAGE_LIMIT = 20;
 
 type ScopeKind = 'room' | 'dm';
+
+interface PartitionItemsState {
+  cacheKey: string | null;
+  items: ScopeConversation[];
+  hydrated: boolean;
+}
+
+interface AccountSnapshot {
+  items: ScopeConversation[];
+  history: Map<string, { preview: string; at: string | null }>;
+}
 
 function isPeerOfflineError(e: unknown): boolean {
   if (!e || typeof e !== 'object') return false;
@@ -100,9 +146,137 @@ function sourceKey(s: ScopeConversationSource): string {
 }
 
 /** 离线保留同账户最近快照：键为账户级（不含 generation）。 */
-function accountKey(s: ScopeConversationSource): string {
-  const id = s.identity;
+function accountKeyOfIdentity(id: DesktopIdentity): string {
   return id.profileId + '|' + id.kind + '|' + id.targetDeviceId;
+}
+
+function accountKey(s: ScopeConversationSource): string {
+  return accountKeyOfIdentity(s.identity);
+}
+
+/**
+ * 为冷启动缓存项构造安全离线只读 ScopeReadApi 占位：
+ * 在真实 source 连上前点击缓存群聊也能安全打开详情（transportConnected=false），
+ * 真实 source 就绪后由调用方按 identity 无缝升级为 liveApi。
+ */
+function createOfflineScopeReadApi(identity: DesktopIdentity): ScopeReadApi {
+  const frozenIdentity: DesktopIdentity = {
+    profileId: identity.profileId,
+    targetDeviceId: identity.targetDeviceId,
+    generation: 0,
+    kind: identity.kind,
+  };
+  return {
+    identity: frozenIdentity,
+    identityForTarget(targetDeviceId: string): DesktopIdentity {
+      return { ...frozenIdentity, targetDeviceId };
+    },
+    snapshot: null as DesktopUiSnapshot | null,
+    transportConnected: false,
+    async call<M extends keyof RemoteControlMethodMap>(
+      _id: DesktopIdentity,
+      _method: M,
+      _params: RemoteControlMethodMap[M]['params'],
+    ): Promise<RemoteControlMethodMap[M]['result']> {
+      throw Object.assign(new Error('Offline'), {
+        code: 'OFFLINE',
+        message: 'Offline',
+        outcome: 'not-sent' as const,
+      });
+    },
+    observe(
+      _id: DesktopIdentity,
+      _target: LiveTarget,
+      _onEvent: (event: DesktopObservationEvent) => void,
+    ): ObservationHandle {
+      return {
+        ready: Promise.resolve(),
+        close: async () => {},
+      };
+    },
+    reportError(): void {
+      // Offline cached placeholder: ignore error reports.
+    },
+  };
+}
+
+function resolveCachedTitle(
+  item: ScopeConversation,
+  bots: readonly ConversationBot[],
+  t?: (zh: string, en: string) => string,
+): string {
+  const customTitle = typeof item.scope.scope.title === 'string' ? item.scope.scope.title.trim() : '';
+  if (customTitle) return customTitle;
+  if (
+    bots.length > 0 &&
+    item.scope.scope.members.some((m) =>
+      bots.some((b) => b.deviceId === m.deviceId && b.botId === m.botId),
+    )
+  ) {
+    return conversationTitle(item.scope.scope, bots, t);
+  }
+  return item.title || conversationTitle(item.scope.scope, bots, t);
+}
+
+function hydrateCachedScopeConversations(
+  cached: readonly CachedScopeConversation[],
+  kind?: ScopeKind,
+  deletedScopeIds?: ReadonlySet<string>,
+): ScopeConversation[] {
+  const out: ScopeConversation[] = [];
+  for (const entry of cached) {
+    if (isScopeDeleted(entry.scope) || deletedScopeIds?.has(entry.scope.scope.scopeId)) continue;
+    if (kind && entry.scope.scope.kind !== kind) continue;
+    const identity: DesktopIdentity = {
+      profileId: entry.identity.profileId,
+      targetDeviceId: entry.identity.targetDeviceId,
+      generation: 0,
+      kind: entry.identity.kind,
+    };
+    out.push({
+      key: entry.key,
+      api: createOfflineScopeReadApi(identity),
+      identity,
+      scope: entry.scope,
+      title: entry.title,
+      lastPreview: entry.lastPreview,
+      lastActivityAt: entry.lastActivityAt,
+    });
+  }
+  return mergeItems(out, deletedScopeIds);
+}
+
+function sameConversationList(
+  a: readonly ScopeConversation[],
+  b: readonly ScopeConversation[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (
+      x.key !== y.key ||
+      x.api !== y.api ||
+      x.title !== y.title ||
+      x.lastPreview !== y.lastPreview ||
+      x.lastActivityAt !== y.lastActivityAt ||
+      x.scope.scope.scopeId !== y.scope.scope.scopeId ||
+      x.scope.scope.revision !== y.scope.scope.revision ||
+      x.scope.isAuthority !== y.scope.isAuthority ||
+      x.scope.authorityDeviceId !== y.scope.authorityDeviceId
+    ) {
+      return false;
+    }
+    const xm = x.scope.scope.members;
+    const ym = y.scope.scope.members;
+    if (xm.length !== ym.length) return false;
+    for (let j = 0; j < xm.length; j += 1) {
+      if (xm[j]!.deviceId !== ym[j]!.deviceId || xm[j]!.botId !== ym[j]!.botId) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 interface SourceSnapshot {
@@ -252,18 +426,111 @@ export function useScopeConversations(
   sources: ScopeConversationSource[],
   pageActive = true,
   kind?: ScopeKind,
+  options?: string | UseScopeConversationsOptions | null,
 ): UseScopeConversationsResult {
   const t = useText();
   const tRef = useRef(t);
   tRef.current = t;
+
+  const rawPartitionKey = typeof options === 'string' ? options : options?.partitionKey;
+  const awaitingSources =
+    typeof options === 'object' && options !== null ? Boolean(options.awaitingSources) : false;
+  const customStorage =
+    typeof options === 'object' && options !== null ? options.storage : undefined;
+
+  const storageRef = useRef<ScopeCacheStorage | null | undefined>(customStorage);
+  storageRef.current = customStorage;
+  const awaitingSourcesRef = useRef(awaitingSources);
+  awaitingSourcesRef.current = awaitingSources;
+
+  // 同一分区下 dm 与 room 缓存独立隔离，避免 DM 列表覆写群聊缓存；
+  // room 与未指定 kind 直接复用 partitionKey，与 readCachedScopeConversations(partitionKey) 一致。
+  const cacheKey = useMemo(() => {
+    const trimmed = typeof rawPartitionKey === 'string' ? rawPartitionKey.trim() : '';
+    if (!trimmed) return null;
+    const normalized = normalizePartitionKey(trimmed);
+    return kind === 'dm' ? `${normalized}|dm` : normalized;
+  }, [rawPartitionKey, kind]);
+  const cacheKeyRef = useRef<string | null>(cacheKey);
+  cacheKeyRef.current = cacheKey;
+
   // sources/bots 数组可能每次渲染重建：稳定键由内容计算（非引用），
-  // ref 持有最新值；只有键/kind/可见性变化才重载，避免请求循环。
+  // ref 持有最新值；只有键/kind/分区/可见性变化才重载，避免请求循环。
   const sourcesKey = sources.map(sourceKey).join('\n');
-  const resultKey = `${kind ?? ''}\n${sourcesKey}`;
+  const resultKey = `${cacheKey ?? ''}\n${kind ?? ''}\n${sourcesKey}`;
   const sourcesRef = useRef(sources);
   sourcesRef.current = sources;
 
-  const [items, setItems] = useState<ScopeConversation[]>([]);
+  /** 按分区隔离的已确认删除墓碑集：防止滞后副本、轮询失败回退或离线快照复活已删群，也不跨分区串味。 */
+  const deletedByPartitionRef = useRef<Map<string, Set<string>>>(new Map());
+  const getDeletedSet = useCallback((targetCacheKey: string | null): Set<string> => {
+    const bucket = targetCacheKey ?? '__ephemeral__';
+    let set = deletedByPartitionRef.current.get(bucket);
+    if (!set) {
+      set = new Set<string>();
+      deletedByPartitionRef.current.set(bucket, set);
+    }
+    return set;
+  }, []);
+
+  /** 按分区隔离的每来源账户级最近数据（离线快照 + history 失败时的旧预览来源）。 */
+  const snapshotsByPartitionRef = useRef<Map<string, Map<string, AccountSnapshot>>>(new Map());
+  const getSnapshotsMap = useCallback(
+    (targetCacheKey: string | null): Map<string, AccountSnapshot> => {
+      const bucket = targetCacheKey ?? '__ephemeral__';
+      let map = snapshotsByPartitionRef.current.get(bucket);
+      if (!map) {
+        map = new Map<string, AccountSnapshot>();
+        snapshotsByPartitionRef.current.set(bucket, map);
+      }
+      return map;
+    },
+    [],
+  );
+
+  const readPartitionState = useCallback(
+    (targetCacheKey: string | null): PartitionItemsState => {
+      if (!targetCacheKey) {
+        return { cacheKey: null, items: [], hydrated: false };
+      }
+      const entry = readScopeConversationsCacheEntry(targetCacheKey, storageRef.current);
+      if (!entry.hit) {
+        return { cacheKey: targetCacheKey, items: [], hydrated: false };
+      }
+      const deletedSet = getDeletedSet(targetCacheKey);
+      return {
+        cacheKey: targetCacheKey,
+        items: hydrateCachedScopeConversations(entry.items, kind, deletedSet),
+        hydrated: true,
+      };
+    },
+    [kind, getDeletedSet],
+  );
+
+  // 首帧同步从 localStorage 读取当前分区缓存（H3 / H5）。
+  const [partitionState, setPartitionState] = useState<PartitionItemsState>(() =>
+    readPartitionState(cacheKey),
+  );
+  // 分区切换时当拍同步读取新分区缓存，不经过空白中间帧，也绝不把旧分区写入新分区。
+  const activePartitionState = useMemo<PartitionItemsState>(
+    () => (partitionState.cacheKey === cacheKey ? partitionState : readPartitionState(cacheKey)),
+    [partitionState, cacheKey, readPartitionState],
+  );
+  const partitionCacheRef = useRef<{ cacheKey: string | null; items: ScopeConversation[] }>({
+    cacheKey: partitionState.cacheKey,
+    items: partitionState.items,
+  });
+
+  useEffect(() => {
+    if (partitionState.cacheKey !== cacheKey) {
+      partitionCacheRef.current = {
+        cacheKey: activePartitionState.cacheKey,
+        items: activePartitionState.items,
+      };
+      setPartitionState(activePartitionState);
+    }
+  }, [cacheKey, partitionState.cacheKey, activePartitionState]);
+
   const [loading, setLoading] = useState(false);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -273,13 +540,9 @@ export function useScopeConversations(
   const flightRef = useRef<Promise<void> | null>(null);
   /** 唯一待刷新槽：在途被 force 置位，当前轮结算后链内续一轮；单个布尔非队列。 */
   const pendingRef = useRef(false);
-  /** 最新单轮读取体：链内每轮经 ref 取最新 kind/pageActive/docVisible/sources。 */
+  /** 最新单轮读取体：链内每轮经 ref 取最新 kind/pageActive/docVisible/sources/cacheKey。 */
   const readRoundRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const mountedRef = useRef(true);
-  /** 每来源账户级最近数据（离线快照 + history 失败时的旧预览来源）。 */
-  const snapshotRef = useRef<Map<string, { items: ScopeConversation[]; history: Map<string, { preview: string; at: string | null }> }>>(new Map());
-  /** 跨来源已确认删除的 scopeId 墓碑集：防止滞后副本、轮询失败回退或离线快照复活已删群。 */
-  const deletedScopeIdsRef = useRef<Set<string>>(new Set());
   /** 文档可见性：隐藏时暂停读取与定时，恢复时立即刷新一轮。 */
   const [docVisible, setDocVisible] = useState(() =>
     typeof document === 'undefined' ? true : document.visibilityState !== 'hidden',
@@ -296,14 +559,18 @@ export function useScopeConversations(
 
   /**
    * 单轮真实读取体：每轮开始 bump seq（旧响应一律抛弃），stillValid 守卫每个 await 后早退；
-   * pageActive/docVisible 关闭或全部来源离线时不发网络请求，只按当前账户快照收敛显示。
-   * 渲染期写入 ref，刷新链内每轮经它取最新 kind/pageActive/docVisible/sources。
+   * pageActive/docVisible 关闭或全部来源离线时不发网络请求，保留当前分区缓存与账户快照。
+   * 渲染期写入 ref，刷新链内每轮经它取最新 kind/pageActive/docVisible/sources/cacheKey。
    */
   readRoundRef.current = async () => {
     if (!mountedRef.current) return;
     const seq = ++seqRef.current;
-    const stillValid = () => mountedRef.current && seq === seqRef.current;
-    const snapshots = snapshotRef.current;
+    const roundCacheKey = cacheKeyRef.current;
+    const roundAwaitingSources = awaitingSourcesRef.current;
+    const stillValid = () =>
+      mountedRef.current && seq === seqRef.current && roundCacheKey === cacheKeyRef.current;
+    const snapshots = getSnapshotsMap(roundCacheKey);
+    const deletedScopeIds = getDeletedSet(roundCacheKey);
     const all = sourcesRef.current;
     const currentKind = kind;
     const translate = tRef.current;
@@ -311,8 +578,9 @@ export function useScopeConversations(
     const errors: string[] = [];
     /** 是否有在线来源参与读取：有则 mergedPool 为权威（空列表也覆盖旧快照）。 */
     let onlineAttempted = false;
+    /** 本轮是否至少有一个在线来源成功返回（全失败时不覆盖本地持久缓存）。 */
+    let anyOnlineSucceeded = false;
 
-    const deletedScopeIds = deletedScopeIdsRef.current;
     const purgeSnapshots = (idsToPurge: ReadonlySet<string>) => {
       if (idsToPurge.size === 0) return;
       for (const snap of snapshots.values()) {
@@ -325,12 +593,38 @@ export function useScopeConversations(
       }
     };
 
-    // 当前账户快照集（不含网络结果）：隐藏/离线/换账户等待期间只恢复它，不留旧账户项或已删项。
+    // 读取当前分区已持久化的缓存项，按账户分组供离线回退、历史回退与首屏保活。
+    const cachedItemsForPartition: ScopeConversation[] = roundCacheKey
+      ? (partitionCacheRef.current.cacheKey === roundCacheKey
+          ? partitionCacheRef.current.items
+          : hydrateCachedScopeConversations(
+              readScopeConversationsCacheEntry(roundCacheKey, storageRef.current).items,
+              currentKind,
+              deletedScopeIds,
+            ))
+      : [];
+    const cachedByAccount = new Map<string, ScopeConversation[]>();
+    for (const item of cachedItemsForPartition) {
+      const scopeId = item.scope.scope.scopeId;
+      if (deletedScopeIds.has(scopeId) || isScopeDeleted(item.scope)) continue;
+      if (currentKind && item.scope.scope.kind !== currentKind) continue;
+      const acc = accountKeyOfIdentity(item.identity);
+      const bucket = cachedByAccount.get(acc);
+      if (bucket) bucket.push(item);
+      else cachedByAccount.set(acc, [item]);
+    }
+    const fallbackBots: readonly ConversationBot[] =
+      all.find((s) => (s.bots?.length ?? 0) > 0)?.bots ?? [];
+    const presentAccounts = new Set(all.map(accountKey));
+    const online = pageActive && docVisible ? all.filter((s) => s.api.transportConnected) : [];
+
+    // 当前账户快照集（不含本轮网络结果）：结合内存快照与同分区持久化缓存，避免冷启动首帧被清空。
     const snapPool: ScopeConversation[] = [];
     for (const s of all) {
-      const snap = snapshots.get(accountKey(s));
+      const acc = accountKey(s);
+      const snap = snapshots.get(acc);
+      const bots = s.bots ?? [];
       if (snap) {
-        const bots = s.bots ?? [];
         for (const item of snap.items) {
           const scopeId = item.scope.scope.scopeId;
           if (deletedScopeIds.has(scopeId) || isScopeDeleted(item.scope)) continue;
@@ -340,36 +634,111 @@ export function useScopeConversations(
             title: conversationTitle(item.scope.scope, bots, translate),
           });
         }
+      } else {
+        const cachedAcc = cachedByAccount.get(acc);
+        if (cachedAcc) {
+          for (const item of cachedAcc) {
+            snapPool.push({
+              ...item,
+              api: s.api,
+              identity: s.identity,
+              title: resolveCachedTitle(item, bots, translate),
+            });
+          }
+        }
       }
     }
+    // 离线、页面未激活、或仍在等待更多来源接入时，保留同分区缓存中尚未出现在 sources 里的其他账号项。
+    if (
+      roundCacheKey !== null &&
+      (!pageActive || !docVisible || online.length === 0 || roundAwaitingSources)
+    ) {
+      for (const [acc, list] of cachedByAccount) {
+        if (presentAccounts.has(acc)) continue;
+        for (const item of list) {
+          snapPool.push({
+            ...item,
+            title: resolveCachedTitle(item, fallbackBots, translate),
+          });
+        }
+      }
+    }
+
+    const commitItems = (
+      nextItems: ScopeConversation[],
+      nextHydratedFlag: boolean,
+    ): void => {
+      setPartitionState((prev) => {
+        const sameKey = prev.cacheKey === roundCacheKey;
+        const hydrated = (sameKey && prev.hydrated) || nextHydratedFlag;
+        if (sameKey && prev.hydrated === hydrated && sameConversationList(prev.items, nextItems)) {
+          return prev;
+        }
+        return {
+          cacheKey: roundCacheKey,
+          items: nextItems,
+          hydrated,
+        };
+      });
+    };
+
     if (pageActive && docVisible) {
-      const online = all.filter((s) => s.api.transportConnected);
-      // 先把显示收敛到当前账户快照（网络读取完成前不留旧账户项）。
-      setItems(mergeItems(snapPool, deletedScopeIds));
+      if (roundCacheKey === null) {
+        // 未启用分区缓存（如 Desktop 旧路径）：保持既有行为，网络读取前先收敛到当前账户快照不留旧账户项。
+        commitItems(mergeItems(snapPool, deletedScopeIds), false);
+      } else if (snapPool.length > 0) {
+        // 启用分区缓存时绝不先清空为空数组；仅在已有快照/缓存时原地刷新标题与实时 api 引用。
+        commitItems(mergeItems(snapPool, deletedScopeIds), true);
+      }
+
       if (online.length === 0) {
-        // 无在线来源：离线快照即最终结果。
+        // 无在线来源：离线快照/同分区缓存即最终结果。
         mergedPool.push(...snapPool);
       } else {
         onlineAttempted = true;
         // loading 由整条刷新链持有，链末统一释放。
         setLoading(true);
         const roundRemovedIds = new Set<string>();
-        const onlineAuthorityMap = new Map<string, { source: ScopeConversationSource; activeIds: Set<string> }>();
+        const onlineAuthorityMap = new Map<
+          string,
+          { source: ScopeConversationSource; activeIds: Set<string> }
+        >();
         for (const source of online) {
           const label = source.label ?? source.identity.targetDeviceId;
           const acc = accountKey(source);
           const prev = snapshots.get(acc);
+          const cachedAcc = cachedByAccount.get(acc);
+          let prevHistory = prev?.history;
+          if (!prevHistory && cachedAcc && cachedAcc.length > 0) {
+            prevHistory = new Map<string, { preview: string; at: string | null }>();
+            for (const item of cachedAcc) {
+              if (item.lastActivityAt !== undefined || item.lastPreview) {
+                prevHistory.set(item.scope.scope.scopeId, {
+                  preview: item.lastPreview,
+                  at: item.lastActivityAt ?? null,
+                });
+              }
+            }
+          }
           try {
-            const snap = await loadSource(source, currentKind, prev?.history, deletedScopeIds, stillValid);
+            const snap = await loadSource(
+              source,
+              currentKind,
+              prevHistory,
+              deletedScopeIds,
+              stillValid,
+            );
             if (!stillValid()) return;
+            anyOnlineSucceeded = true;
             for (const deletedId of snap.deletedScopeIds) {
               deletedScopeIds.add(deletedId);
               roundRemovedIds.add(deletedId);
             }
             const activeIds = new Set(snap.scopes.map((s) => s.scope.scopeId));
             onlineAuthorityMap.set(source.identity.targetDeviceId, { source, activeIds });
-            if (prev) {
-              for (const prevItem of prev.items) {
+            const prevItemsForDiff = prev?.items ?? cachedAcc;
+            if (prevItemsForDiff) {
+              for (const prevItem of prevItemsForDiff) {
                 if (currentKind && prevItem.scope.scope.kind !== currentKind) continue;
                 const prevId = prevItem.scope.scope.scopeId;
                 if (!activeIds.has(prevId)) {
@@ -392,16 +761,21 @@ export function useScopeConversations(
             if (!stillValid()) return;
             const msg = errText(e);
             if (msg === 'stale') return;
-            // 单来源失败：保留同账户未删除旧项；若只是对端节点离线则按离线快照静默回退，不弹冗余错误横幅。
-            if (prev) {
-              const bots = source.bots ?? [];
-              for (const item of prev.items) {
+            // 单来源失败：保留同账户未删除旧项（优先内存快照，次选本地持久化缓存）。
+            const bots = source.bots ?? [];
+            const fallbackItems = prev?.items ?? cachedAcc;
+            if (fallbackItems) {
+              for (const item of fallbackItems) {
                 const scopeId = item.scope.scope.scopeId;
                 if (deletedScopeIds.has(scopeId) || isScopeDeleted(item.scope)) continue;
                 if (currentKind && item.scope.scope.kind !== currentKind) continue;
                 mergedPool.push({
                   ...item,
-                  title: conversationTitle(item.scope.scope, bots, translate),
+                  api: source.api,
+                  identity: source.identity,
+                  title: prev
+                    ? conversationTitle(item.scope.scope, bots, translate)
+                    : resolveCachedTitle(item, bots, translate),
                 });
               }
             }
@@ -416,7 +790,12 @@ export function useScopeConversations(
         for (const item of mergedPool) {
           const scopeId = item.scope.scope.scopeId;
           const authDeviceId = item.scope.authorityDeviceId;
-          if (item.scope.isAuthority || !authDeviceId || deletedScopeIds.has(scopeId) || probedOrphans.has(scopeId)) {
+          if (
+            item.scope.isAuthority ||
+            !authDeviceId ||
+            deletedScopeIds.has(scopeId) ||
+            probedOrphans.has(scopeId)
+          ) {
             continue;
           }
           const authOnline = onlineAuthorityMap.get(authDeviceId);
@@ -445,34 +824,96 @@ export function useScopeConversations(
         // 离线来源的同账户缓存项并入结果（排除本轮在线已确认删除或移除的群聊，防止离线快照复活）。
         for (const s of all) {
           if (s.api.transportConnected) continue;
-          const cached = snapshots.get(accountKey(s));
-          if (!cached) continue;
+          const acc = accountKey(s);
           const bots = s.bots ?? [];
-          cached.items = cached.items.filter(
-            (item) =>
-              !deletedScopeIds.has(item.scope.scope.scopeId) &&
-              !roundRemovedIds.has(item.scope.scope.scopeId) &&
-              !isScopeDeleted(item.scope),
-          );
-          for (const item of cached.items) {
-            if (currentKind && item.scope.scope.kind !== currentKind) continue;
-            mergedPool.push({
-              ...item,
-              title: conversationTitle(item.scope.scope, bots, translate),
-            });
+          const cached = snapshots.get(acc);
+          if (cached) {
+            cached.items = cached.items.filter(
+              (item) =>
+                !deletedScopeIds.has(item.scope.scope.scopeId) &&
+                !roundRemovedIds.has(item.scope.scope.scopeId) &&
+                !isScopeDeleted(item.scope),
+            );
+            for (const item of cached.items) {
+              if (currentKind && item.scope.scope.kind !== currentKind) continue;
+              mergedPool.push({
+                ...item,
+                title: conversationTitle(item.scope.scope, bots, translate),
+              });
+            }
+          } else {
+            const persisted = cachedByAccount.get(acc);
+            if (persisted) {
+              for (const item of persisted) {
+                const scopeId = item.scope.scope.scopeId;
+                if (
+                  deletedScopeIds.has(scopeId) ||
+                  roundRemovedIds.has(scopeId) ||
+                  isScopeDeleted(item.scope)
+                ) {
+                  continue;
+                }
+                if (currentKind && item.scope.scope.kind !== currentKind) continue;
+                mergedPool.push({
+                  ...item,
+                  api: s.api,
+                  identity: s.identity,
+                  title: resolveCachedTitle(item, bots, translate),
+                });
+              }
+            }
+          }
+        }
+        // 仍有远端来源待接入或本轮全部在线来源均失败时，保留同分区缓存里尚未进入 sources 的其他账号项。
+        if (roundCacheKey !== null && (roundAwaitingSources || !anyOnlineSucceeded)) {
+          for (const [acc, list] of cachedByAccount) {
+            if (presentAccounts.has(acc)) continue;
+            for (const item of list) {
+              const scopeId = item.scope.scope.scopeId;
+              if (
+                deletedScopeIds.has(scopeId) ||
+                roundRemovedIds.has(scopeId) ||
+                isScopeDeleted(item.scope)
+              ) {
+                continue;
+              }
+              const authOnline = item.scope.authorityDeviceId
+                ? onlineAuthorityMap.get(item.scope.authorityDeviceId)
+                : undefined;
+              if (authOnline && !authOnline.activeIds.has(scopeId)) {
+                continue;
+              }
+              mergedPool.push({
+                ...item,
+                title: resolveCachedTitle(item, fallbackBots, translate),
+              });
+            }
           }
         }
       }
     }
     if (!stillValid()) return;
     // 隐藏/页面非激活：不发请求；离线来源快照已在上方并入 mergedPool，
-    // 隐藏时 mergedPool 为空，改用当前账户快照收敛显示（不留旧账户列表）。
-    setItems(
-      mergeItems(
-        onlineAttempted || mergedPool.length > 0 ? mergedPool : snapPool,
-        deletedScopeIds,
-      ),
+    // 隐藏时 mergedPool 为空，改用当前账户快照与同分区缓存收敛显示。
+    const finalItems = mergeItems(
+      onlineAttempted || mergedPool.length > 0 ? mergedPool : snapPool,
+      deletedScopeIds,
     );
+
+    if (roundCacheKey !== null) {
+      const shouldPersist = anyOnlineSucceeded && (!roundAwaitingSources || finalItems.length > 0);
+      if (shouldPersist) {
+        partitionCacheRef.current = { cacheKey: roundCacheKey, items: finalItems };
+        writeCachedScopeConversations(roundCacheKey, finalItems, storageRef.current);
+      } else if (finalItems.length > 0) {
+        partitionCacheRef.current = { cacheKey: roundCacheKey, items: finalItems };
+      }
+      const nextHydrated = finalItems.length > 0 || (onlineAttempted && !roundAwaitingSources);
+      commitItems(finalItems, nextHydrated);
+    } else {
+      commitItems(finalItems, onlineAttempted);
+    }
+
     // 只上报第一条来源错误：多来源拼接（"A: …；B: …"）会把原始异常整串暴露给用户，
     // 单条错误也能保持 humanizeError 的 KNOWN_CODE_PREFIX（"CODE: message"）可解析。
     setError(errors.length > 0 ? errors[0] : null);
@@ -514,33 +955,67 @@ export function useScopeConversations(
 
   const refresh = useCallback((): Promise<void> => load(true), [load]);
 
-  const markDeleted = useCallback((scopeId: string): void => {
-    if (!scopeId) return;
-    deletedScopeIdsRef.current.add(scopeId);
-    for (const snap of snapshotRef.current.values()) {
-      snap.items = snap.items.filter((item) => item.scope.scope.scopeId !== scopeId);
-      snap.history.delete(scopeId);
-    }
-    if (mountedRef.current) {
-      setItems((prev) => prev.filter((item) => item.scope.scope.scopeId !== scopeId));
-    }
-  }, []);
+  const markDeleted = useCallback(
+    (scopeId: string): void => {
+      if (!scopeId) return;
+      const activeCacheKey = cacheKeyRef.current;
+      getDeletedSet(activeCacheKey).add(scopeId);
+      const snapshots = getSnapshotsMap(activeCacheKey);
+      for (const snap of snapshots.values()) {
+        snap.items = snap.items.filter((item) => item.scope.scope.scopeId !== scopeId);
+        snap.history.delete(scopeId);
+      }
+      if (partitionCacheRef.current.cacheKey === activeCacheKey) {
+        partitionCacheRef.current = {
+          cacheKey: activeCacheKey,
+          items: partitionCacheRef.current.items.filter(
+            (item) => item.scope.scope.scopeId !== scopeId,
+          ),
+        };
+      }
+      if (activeCacheKey !== null) {
+        removeCachedScopeConversation(activeCacheKey, scopeId, storageRef.current);
+      }
+      if (mountedRef.current) {
+        setPartitionState((prev) => ({
+          ...prev,
+          items: prev.items.filter((item) => item.scope.scope.scopeId !== scopeId),
+        }));
+      }
+    },
+    [getDeletedSet, getSnapshotsMap],
+  );
 
-  // 初次/换来源（sourcesKey）/换 kind/pageActive/可见性恢复：请求一轮合并刷新——
+  // 初次/换来源（sourcesKey）/换 kind/换分区/待接入来源状态变化/pageActive/可见性恢复：请求一轮合并刷新——
   // 无在途链立即开启；有则作废旧轮并入唯一待刷新槽，链内续读最新闭包的一轮。
   useEffect(() => {
     void load(true);
-  }, [load, sourcesKey, kind, pageActive, docVisible]);
+  }, [load, sourcesKey, kind, pageActive, docVisible, cacheKey, awaitingSources]);
 
   // 可见且 pageActive 时每 5 秒刷新；定时在途直接丢弃，不占待刷新槽。
   useEffect(() => {
     if (!pageActive || !docVisible) return;
     const timer = window.setInterval(() => { void load(false); }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [load, pageActive, docVisible, sourcesKey, kind]);
+  }, [load, pageActive, docVisible, sourcesKey, kind, cacheKey]);
 
   // 卸载时作废旧响应；在途链经 mountedRef/while 条件自然终止，不再续网络。
   useEffect(() => () => { seqRef.current += 1; }, []);
 
-  return { items, loading, loaded: loadedKey === resultKey, error, refresh, markDeleted };
+  const loaded = loadedKey === resultKey;
+  const hasHydrated =
+    cacheKey !== null
+      ? activePartitionState.hydrated || (loaded && partitionState.cacheKey === cacheKey)
+      : loaded || activePartitionState.items.length > 0;
+
+  return {
+    items: activePartitionState.items,
+    loading,
+    loaded,
+    hasHydrated,
+    hasInitialData: hasHydrated,
+    error,
+    refresh,
+    markDeleted,
+  };
 }

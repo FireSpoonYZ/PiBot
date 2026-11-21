@@ -1,0 +1,278 @@
+/* Layout stability primitives & utilities (F5). */
+
+:root {
+  interpolate-size: allow-keywords;
+  --bottom-chrome: 0px;
+}
+
+/* ------------------------------------------------------------------ */
+/* ReservedSlot                                                        */
+/* ------------------------------------------------------------------ */
+
+.ls-reserved-slot {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+.ls-reserved-slot.is-inline {
+  display: inline-flex;
+  width: auto;
+  vertical-align: middle;
+}
+
+.ls-reserved-slot.is-align-start {
+  justify-content: flex-start;
+}
+
+.ls-reserved-slot.is-align-center {
+  justify-content: center;
+}
+
+.ls-reserved-slot.is-align-end {
+  justify-content: flex-end;
+}
+
+.ls-reserved-slot-inner {
+  width: 100%;
+  min-width: 0;
+  opacity: 1;
+  transition: opacity var(--dur-fast, 150ms) ease;
+}
+
+.ls-reserved-slot-inner.is-empty {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ls-reserved-slot-inner.is-swapping {
+  animation: ls-slot-fade-in var(--dur-fast, 150ms) ease;
+}
+
+@keyframes ls-slot-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ------------------------------------------------------------------ */
+/* LabelStack                                                          */
+/* ------------------------------------------------------------------ */
+
+.ls-label-stack {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+  vertical-align: middle;
+}
+
+.ls-label-stack.is-align-start {
+  justify-items: start;
+}
+
+.ls-label-stack.is-align-end {
+  justify-items: end;
+}
+
+.ls-label-stack-item {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+
+.ls-label-stack-item.is-placeholder {
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Skeleton & SkeletonRow                                              */
+/* ------------------------------------------------------------------ */
+
+@keyframes ls-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.ls-skeleton-bar {
+  display: block;
+  width: 100%;
+  height: 14px;
+  border-radius: var(--radius-sm, 8px);
+  background-color: var(--color-surface-1, var(--surface));
+  background-image: linear-gradient(
+    90deg,
+    var(--color-surface-1, var(--surface)) 25%,
+    var(--color-surface-3, var(--line)) 50%,
+    var(--color-surface-1, var(--surface)) 75%
+  );
+  background-size: 200% 100%;
+  animation: ls-skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+.ls-skeleton-bar.is-inline {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.ls-skeleton-bar.is-text {
+  height: 1em;
+  border-radius: 6px;
+}
+
+.ls-skeleton-bar.is-rect {
+  height: 16px;
+  border-radius: var(--radius-sm, 8px);
+}
+
+.ls-skeleton-bar.is-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-full, 999px);
+  flex: none;
+}
+
+.ls-skeleton-bar.is-pill {
+  height: 22px;
+  border-radius: var(--radius-full, 999px);
+}
+
+.ls-skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  width: 100%;
+  min-width: 0;
+}
+
+.ls-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.ls-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 12px);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ls-skeleton-row.is-hub {
+  height: 62px;
+  min-height: 62px;
+  padding: 10px var(--space-2, 8px);
+  gap: 14px;
+}
+
+.ls-skeleton-row.is-settings {
+  position: relative;
+  height: 52px;
+  min-height: 52px;
+  padding: 10px 14px;
+  gap: var(--space-3, 12px);
+}
+
+.ls-skeleton-row.is-settings + .ls-skeleton-row.is-settings::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 14px;
+  right: 0;
+  height: 1px;
+  background: var(--bs-hairline, var(--color-line, var(--line)));
+}
+
+.ls-skeleton-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ls-skeleton-row-trailing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Smooth height-transition utilities (user-initiated expandable UI)   */
+/* ------------------------------------------------------------------ */
+
+.smooth-expand {
+  overflow: hidden;
+  height: auto;
+  opacity: 1;
+  transition:
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    opacity var(--dur-fast, 150ms) ease,
+    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+}
+
+.smooth-expand-mount {
+  overflow: hidden;
+  height: auto;
+  opacity: 1;
+  transition:
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    opacity var(--dur-fast, 150ms) ease;
+}
+
+@starting-style {
+  .smooth-expand-mount {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.smooth-collapse,
+.smooth-expand.is-collapsed,
+.smooth-expand[data-collapsed="true"] {
+  overflow: hidden;
+  height: 0;
+  min-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    opacity var(--dur-fast, 150ms) ease,
+    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    visibility 0s linear var(--dur-base, 220ms);
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .ls-reserved-slot-inner,
+  .smooth-expand,
+  .smooth-expand-mount,
+  .smooth-collapse,
+  .smooth-expand.is-collapsed,
+  .smooth-expand[data-collapsed="true"] {
+    transition: none;
+  }
+
+  .ls-reserved-slot-inner.is-swapping {
+    animation: none;
+  }
+
+  .ls-skeleton-bar {
+    animation: none;
+    background-image: none;
+  }
+}
