@@ -19,6 +19,7 @@ function fakeLaunch({ exitCode = 0, stderr = '' } = {}) {
     options: {
       executablePath: 'C:\\Browser\\chrome.exe', profilePath: 'C:\\Bot\\profile',
       platform: 'win32', transport: 'loopback', startupTimeoutMs: 1_000,
+      checkWindowsProfileInUse: async () => false,
       spawnImpl(_file, args) {
         assert.match(args[0], /^--pibot-launch-nonce=[a-f0-9]{64}$/);
         const child = new EventEmitter();
@@ -88,6 +89,23 @@ test('Windows unchanged stale endpoint never connects and signals that the profi
     verifyWindowsOwner: async () => assert.fail('stale endpoint must not be queried'),
   }), error => error.code === 'BROWSER_TIMEOUT' && error.data?.profileInUse === true &&
     /existing browser/.test(error.message));
+  assert.equal(fake.connected, 0);
+});
+
+test('Windows clean exit recovers a proven occupied profile without waiting for startup timeout', async () => {
+  const fake = fakeLaunch();
+  let checked;
+  await assert.rejects(launchDesktopChromium({
+    ...fake.options,
+    readWindowsEndpoint: async () => endpoint,
+    verifyWindowsOwner: async () => assert.fail('must not attach to the previous listener'),
+    checkWindowsProfileInUse: async (details) => {
+      checked = details;
+      return true;
+    },
+  }), error => error.code === 'BROWSER_START_FAILED' && error.data?.profileInUse === true);
+  assert.equal(checked.url, endpoint.url);
+  assert.equal(checked.profilePath, fake.options.profilePath);
   assert.equal(fake.connected, 0);
 });
 

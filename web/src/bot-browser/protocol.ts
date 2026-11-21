@@ -34,6 +34,7 @@ export interface BrowserView {
   lease?: string;
   sensitive?: boolean;
   sensitiveReason?: string;
+  fallbackToSystemBrowser?: boolean;
   attentionRequested?: boolean;
   attentionMessage?: string;
   stepText?: string;
@@ -274,6 +275,9 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
     ...(lease ? { lease } : {}),
     ...(sensitive ? { sensitive: true } : {}),
     ...(sensitiveReason ? { sensitiveReason } : {}),
+    ...(obj.fallbackToSystemBrowser === true || obj.requiresSystemBrowser === true
+      ? { fallbackToSystemBrowser: true }
+      : {}),
     ...(attentionRequested ? { attentionRequested: true } : {}),
     ...(attentionMessage ? { attentionMessage } : {}),
     ...(stepText ? { stepText } : {}),

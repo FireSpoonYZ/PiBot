@@ -666,7 +666,11 @@ test('URL policy, sensitive classification, and human-only guards enforce hard b
   assert.equal(normalizeNavigationUrl('chrome://settings'), null);
   assert.equal(normalizeNavigationUrl('https://user:pass@example.com/'), null);
 
-  assert.equal(classifySensitivePage({ url: 'https://accounts.google.com/signin' }).sensitive, true);
+  const login = classifySensitivePage({
+    url: 'https://accounts.google.com/v3/signin/identifier?service=cloudconsole',
+  });
+  assert.equal(login.sensitive, true);
+  assert.equal(login.authUseSystemBrowser, false);
   assert.equal(classifySensitivePage({ url: 'https://accounts.google.com/o/oauth2/v2/auth' }).authUseSystemBrowser, true);
   assert.equal(
     classifySensitivePage({

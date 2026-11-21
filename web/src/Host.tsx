@@ -6823,7 +6823,6 @@ ${newer}` : draftSnapshot;
               void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
               if (url) void openExternalUrl(url).catch(() => {});
             }}
-            onOpenSystemGoogleAuth={() => openInAppCenterAdmin('google')}
             onClose={() => {
               if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
             }}

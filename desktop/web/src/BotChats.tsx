@@ -4636,7 +4636,6 @@ function PrimaryChatPane({
                       void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
                       if (url) void openExternalUrl(url).catch(() => {});
                     }}
-                    onOpenSystemGoogleAuth={() => setInspectorTab('capabilities')}
                     onClose={() => setInspectorTab(null)}
                   />
                 </div>

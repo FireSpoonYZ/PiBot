@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent, PointerEvent } from 'react';
+import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import {
   AlertTriangle,
   ExternalLink,
@@ -34,6 +34,7 @@ export interface BotBrowserViewportProps {
   isHolder: boolean;
   canSendInput: boolean;
   isSensitive: boolean;
+  signInTakeoverAction?: ReactNode;
   zoom: number;
   hostLabel?: string;
   onZoomChange: (nextZoom: number) => void;
@@ -71,6 +72,7 @@ export function BotBrowserViewport({
   isHolder,
   canSendInput,
   isSensitive,
+  signInTakeoverAction,
   zoom,
   hostLabel,
   onZoomChange,
@@ -438,24 +440,35 @@ export function BotBrowserViewport({
           <div className="bb-state-icon bb-state-icon--shield" aria-hidden="true">
             <Shield size={22} />
           </div>
-          <h3 className="bb-state-title">
-            {isHolder
-              ? t('此步骤受敏感保护，Host 已停止推流', 'Protected sensitive step')
-              : t('已启用隐私遮罩', 'Privacy shield active')}
-          </h3>
-          <p className="bb-state-desc">
-            {frameRedactedReason ||
-              view.sensitiveReason ||
-              (isHolder
-                ? t('当前页面涉及登录、验证或凭据创建，Host 已阻断画面回传与 Bot 观察。请在外部系统浏览器完成。', 'This page involves login, verification, or credentials. Streaming and Bot observation are blocked; complete this step in your system browser.')
-                : t('当前页面包含登录、验证或敏感凭据，不对旁观端显示实时画面，也不保存截图。', 'This page contains sensitive login or credential content. Live frames are hidden from bystanders and never saved.'))}
-          </p>
-          <div className="bb-state-actions">
-            <button type="button" className="bb-btn bb-btn--primary" onClick={onRequestExternalGuide}>
-              <ExternalLink size={14} aria-hidden="true" />
-              <span>{t('在系统浏览器中继续', 'Open in system browser')}</span>
-            </button>
-          </div>
+          {signInTakeoverAction ? (
+            <>
+              <h3 className="bb-state-title">{t('登录 Google', 'Sign in to Google')}</h3>
+              <p className="bb-state-desc">
+                {t('接管后可在这里登录。Bot 会暂停操作。', 'Take over to sign in here. The Bot will pause.')}
+              </p>
+              <div className="bb-state-actions">{signInTakeoverAction}</div>
+            </>
+          ) : (
+            <>
+              <h3 className="bb-state-title">
+                {isHolder
+                  ? t('此步骤受敏感保护，Host 已停止推流', 'Protected sensitive step')
+                  : t('已启用隐私遮罩', 'Privacy shield active')}
+              </h3>
+              <p className="bb-state-desc">
+                {frameRedactedReason || view.sensitiveReason ||
+                  t('实时画面受到隐私保护。', 'Live frames are protected by the privacy shield.')}
+              </p>
+              {view.fallbackToSystemBrowser ? (
+                <div className="bb-state-actions">
+                  <button type="button" className="bb-btn bb-btn--primary" onClick={onRequestExternalGuide}>
+                    <ExternalLink size={14} aria-hidden="true" />
+                    <span>{t('在系统浏览器中继续', 'Open in system browser')}</span>
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     );

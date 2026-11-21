@@ -74,7 +74,6 @@ export interface BotBrowserPanelProps {
   mode?: 'auto' | 'sidebar' | 'fullscreen';
   connected?: boolean;
   onSwitchToExternalGuide?: (url?: string) => void;
-  onOpenSystemGoogleAuth?: () => void;
   onCancelTask?: () => void | Promise<void>;
   className?: string;
 }
@@ -114,7 +113,6 @@ export function BotBrowserPanel({
   mode = 'auto',
   connected = true,
   onSwitchToExternalGuide,
-  onOpenSystemGoogleAuth,
   onCancelTask,
   className,
 }: BotBrowserPanelProps) {
@@ -981,6 +979,8 @@ export function BotBrowserPanel({
   const isAvailableInteractive = Boolean(
     connected && view?.available && view?.canStreamInteract && !streamDegraded,
   );
+  const signInTakeover = isAvailableInteractive && pageVisible && Boolean(view?.pageId) &&
+    isSensitive && urlMeta.isGoogleAuth && !isHolder && !view?.fallbackToSystemBrowser && !frameRedacted;
 
   // Concise, honest status pill label & semantic tone.
   const statusInfo = (() => {
@@ -1111,7 +1111,7 @@ export function BotBrowserPanel({
         onClick={() => void handleTakeover()}
       >
         <Unlock size={14} aria-hidden="true" />
-        <span>{t('接管此页', 'Take over')}</span>
+        <span>{signInTakeover ? t('接管并登录', 'Take over and sign in') : t('接管此页', 'Take over')}</span>
       </button>
     );
   })();
@@ -1150,7 +1150,7 @@ export function BotBrowserPanel({
         </div>
 
         <div className="bb-header-right">
-          {resolvedMode === 'sidebar' ? primaryActionButton : null}
+          {resolvedMode === 'sidebar' && !signInTakeover ? primaryActionButton : null}
           {mode === 'auto' && !isMobileViewport ? (
             <button
               type="button"
@@ -1331,7 +1331,7 @@ export function BotBrowserPanel({
 
       {/* Contextual banners — shown only when actionable */}
       <div className="bb-banners">
-        {view?.attentionRequested && view.phase === 'bot' && isAvailableInteractive ? (
+        {view?.attentionRequested && view.phase === 'bot' && isAvailableInteractive && !signInTakeover ? (
           <div className="bb-banner bb-banner--warn" role="status">
             <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
             <div className="bb-banner-body">
@@ -1446,26 +1446,6 @@ export function BotBrowserPanel({
           </div>
         ) : null}
 
-        {urlMeta.isGoogleAuth && view?.available ? (
-          <div className="bb-banner bb-banner--shield" role="status">
-            <Shield size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {t('Google API 授权须在系统浏览器完成，此处网页登录不会同步为 Bot 的 Google 权限。', 'Google API authorization must use your system browser. Web login here does not grant Google API access to Bots.')}
-              </div>
-            </div>
-            {onOpenSystemGoogleAuth ? (
-              <button
-                type="button"
-                className="bb-btn bb-btn--secondary bb-btn--sm"
-                onClick={onOpenSystemGoogleAuth}
-              >
-                {t('在系统浏览器授权', 'Authorize in browser')}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-
         {errorBanner ? (
           <div className="bb-banner bb-banner--danger" role="alert">
             <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
@@ -1510,6 +1490,7 @@ export function BotBrowserPanel({
         isHolder={isHolder}
         canSendInput={canSendInput}
         isSensitive={isSensitive}
+        signInTakeoverAction={signInTakeover ? primaryActionButton : null}
         zoom={zoom}
         hostLabel={hostLabel}
         onZoomChange={setZoom}
@@ -1604,7 +1585,7 @@ export function BotBrowserPanel({
       <footer className={`bb-footer ${resolvedMode === 'fullscreen' ? 'bb-footer--mobile' : ''}`}>
         {resolvedMode === 'fullscreen' ? (
           <div className="bb-footer-mobile-row">
-            <div className="bb-footer-primary">{primaryActionButton}</div>
+            {!signInTakeover ? <div className="bb-footer-primary">{primaryActionButton}</div> : null}
             <button
               type="button"
               className="bb-btn bb-btn--ghost bb-btn--sm"

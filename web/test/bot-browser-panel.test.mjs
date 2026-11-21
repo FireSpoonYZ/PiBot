@@ -317,6 +317,8 @@ test('classifyPageUrl and normalizeNavigateUrl enforce Google auth awareness and
   assert.equal(auth.isGoogleAuth, true);
   assert.equal(auth.isKnownSensitiveUrl, true);
   assert.equal(auth.isSecure, true);
+  assert.equal(parseBrowserView({ available: true, fallbackToSystemBrowser: true })?.fallbackToSystemBrowser, true);
+  assert.equal(parseBrowserView({ available: true, sensitive: true })?.fallbackToSystemBrowser, undefined);
 
   const cloud = classifyPageUrl('https://console.cloud.google.com/apis/credentials');
   assert.equal(cloud.isGoogleAuth, false);

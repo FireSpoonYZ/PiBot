@@ -806,12 +806,15 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   );
 
   // 5. On password/login sensitive page (non-secret-dialog), bystander phone cannot view frame while desktop holds lease.
-  await service.control({
+  const login = await service.control({
     action: 'navigate',
     botId: 'bot-a',
     lease: taken.lease,
-    url: 'https://accounts.google.com/v3/signin',
+    url: 'https://accounts.google.com/v3/signin/identifier?service=cloudconsole',
   }, desktop);
+  assert.equal(login.sensitive, true);
+  assert.equal(login.fallbackToSystemBrowser, false);
+  assert.equal(classifyPageSensitivity({ url: 'https://accounts.google.com/v3/signin/oauth/consent' }).fallbackToSystemBrowser, true);
   await assert.rejects(
     () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
     { code: 'BROWSER_SENSITIVE_BLOCKED' }
@@ -819,6 +822,10 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   // Active holder CAN view non-secret sensitive page during takeover (e.g. to finish sign-in or navigate away).
   const holderFrame = await service.control({ action: 'frame', botId: 'bot-a', lease: taken.lease }, desktop);
   assert.equal(holderFrame.mimeType, 'image/png');
+  await assert.rejects(
+    () => service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop),
+    { code: 'BROWSER_HANDBACK_BLOCKED_SENSITIVE' }
+  );
 
   // 6. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
   const gmailSens = classifyPageSensitivity({ url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox' });

@@ -88,9 +88,9 @@ export function windowsCommandLineArgs(commandLine) {
   return args;
 }
 
-export async function verifyWindowsDevToolsOwner({ url, executablePath, nonce, signal, timeoutMs }) {
+async function readWindowsDevToolsProcess({ url, signal, timeoutMs }) {
   const port = Number(new URL(url).port);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/.test(nonce)) throw unsafe();
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw unsafe();
   // Only the validated numeric port enters the script. No browser/profile paths
   // or command-line values are evaluated by PowerShell.
   const script = `
@@ -114,7 +114,32 @@ Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [uint32]$owners[0]) | Se
   });
   let owner;
   try { owner = JSON.parse(stdout.replace(/^\uFEFF/, '')); } catch { throw unsafe(); }
-  if (typeof owner?.ExecutablePath !== 'string' || typeof owner?.CommandLine !== 'string'
-      || path.win32.normalize(owner.ExecutablePath).toLowerCase() !== path.win32.normalize(executablePath).toLowerCase()
+  if (typeof owner?.ExecutablePath !== 'string' || typeof owner?.CommandLine !== 'string') throw unsafe();
+  return owner;
+}
+
+function normalizeWindowsPath(value) {
+  return path.win32.normalize(value).toLowerCase();
+}
+
+export async function verifyWindowsDevToolsOwner({ url, executablePath, nonce, signal, timeoutMs }) {
+  if (!/^[a-f0-9]{64}$/.test(nonce)) throw unsafe();
+  const owner = await readWindowsDevToolsProcess({ url, signal, timeoutMs });
+  if (normalizeWindowsPath(owner.ExecutablePath) !== normalizeWindowsPath(executablePath)
       || !windowsCommandLineArgs(owner.CommandLine).includes(`--pibot-launch-nonce=${nonce}`)) throw unsafe();
+}
+
+export async function isWindowsDevToolsProfileInUse({ url, executablePath, profilePath, nonce, signal, timeoutMs }) {
+  try {
+    const owner = await readWindowsDevToolsProcess({ url, signal, timeoutMs });
+    if (normalizeWindowsPath(owner.ExecutablePath) !== normalizeWindowsPath(executablePath)) return false;
+    const args = windowsCommandLineArgs(owner.CommandLine);
+    const profileArgs = args.filter(arg => arg.startsWith('--user-data-dir='));
+    return profileArgs.length === 1 &&
+      normalizeWindowsPath(profileArgs[0].slice('--user-data-dir='.length)) === normalizeWindowsPath(profilePath) &&
+      !args.includes(`--pibot-launch-nonce=${nonce}`);
+  } catch {
+    // An inconclusive ownership check leaves the regular startup wait in place.
+    return false;
+  }
 }

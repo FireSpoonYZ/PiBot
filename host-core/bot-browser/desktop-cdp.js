@@ -20,9 +20,14 @@ import {
   isolateChildBrowserEnvironment,
 } from './desktop-discovery.js';
 import { browserError, DESKTOP_BROWSER_DEFAULT_VIEWPORT } from './desktop-policy.js';
-import { readWindowsDevToolsEndpoint, verifyWindowsDevToolsOwner } from './desktop-windows-endpoint.js';
+import {
+  isWindowsDevToolsProfileInUse,
+  readWindowsDevToolsEndpoint,
+  verifyWindowsDevToolsOwner,
+} from './desktop-windows-endpoint.js';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
+const WINDOWS_PROFILE_OCCUPANCY_TIMEOUT_MS = 2_500;
 const DEFAULT_COMMAND_TIMEOUT_MS = 25_000;
 const CLOSE_GRACE_MS = 2_000;
 const MAX_CDP_MESSAGE_BYTES = 24 * 1024 * 1024;
@@ -628,6 +633,7 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
     let checking = false;
     let cleanExit = child.exitCode === 0 && !child.signalCode;
     let unchangedProfileEndpoint = false;
+    let checkedProfileOccupancy = false;
     let pollTimer;
     const verification = new AbortController();
     const deadline = Date.now() + timeoutMs;
@@ -655,6 +661,12 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
       resolve(url);
     };
 
+    const failProfileInUse = () => {
+      fail(browserError('BROWSER_START_FAILED', 'Chromium is already using this Bot browser profile.', {
+        data: { profileInUse: true },
+      }));
+    };
+
     const checkStderr = async () => {
       if (checking || settled) return;
       clearTimeout(pollTimer);
@@ -666,6 +678,20 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
           if (windowsEndpoint.baselineError) throw windowsEndpoint.baselineError;
           const record = await windowsEndpoint.readEndpoint(windowsEndpoint.profilePath);
           unchangedProfileEndpoint = Boolean(record && record.contents === windowsEndpoint.baseline?.contents);
+          if (unchangedProfileEndpoint && !checkedProfileOccupancy && !settled) {
+            checkedProfileOccupancy = true;
+            // A clean wrapper exit can mean a new de-elevated browser is
+            // still starting. Keep polling while independently checking whether
+            // the previous listener's process already owns this exact profile.
+            void windowsEndpoint.isProfileInUse({
+              url: record.url, executablePath: windowsEndpoint.executablePath,
+              profilePath: windowsEndpoint.profilePath, nonce: windowsEndpoint.nonce,
+              signal: verification.signal,
+              timeoutMs: Math.max(1, Math.min(WINDOWS_PROFILE_OCCUPANCY_TIMEOUT_MS, deadline - Date.now())),
+            }).then(inUse => {
+              if (inUse && unchangedProfileEndpoint) failProfileInUse();
+            });
+          }
           if (record && record.contents !== windowsEndpoint.baseline?.contents
               && record.mtimeMs >= windowsEndpoint.startedAt) {
             url = parseLoopbackDevToolsUrl(record.url);
@@ -701,9 +727,7 @@ function waitForLoopbackUrl(child, { timeoutMs, signal, getStderr, windowsEndpoi
     };
     const onExit = (code, exitSignal) => {
       if (windowsEndpoint && code === CHROMIUM_PROFILE_IN_USE_EXIT_CODE && !exitSignal) {
-        fail(browserError('BROWSER_START_FAILED', 'Chromium reported that the Bot browser profile is in use.', {
-          data: { profileInUse: true },
-        }));
+        failProfileInUse();
         return;
       }
       const stderr = getStderr();
@@ -769,6 +793,7 @@ export async function launchDesktopChromium({
   createWebSocket = undefined,
   readWindowsEndpoint = readWindowsDevToolsEndpoint,
   verifyWindowsOwner = verifyWindowsDevToolsOwner,
+  checkWindowsProfileInUse = isWindowsDevToolsProfileInUse,
 } = {}) {
   if (signal?.aborted) {
     throw browserError('CANCELLED', 'Chromium launch aborted.', { outcome: 'not-sent' });
@@ -885,6 +910,7 @@ export async function launchDesktopChromium({
         windowsEndpoint: windowsLoopback ? {
           profilePath, executablePath, nonce, baseline, baselineError, startedAt,
           readEndpoint: readWindowsEndpoint, verifyOwner: verifyWindowsOwner,
+          isProfileInUse: checkWindowsProfileInUse,
         } : null,
       });
       cdpTransport = await LoopbackWebSocketCdpTransport.connect(wsUrl, {
