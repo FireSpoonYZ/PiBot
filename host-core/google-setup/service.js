@@ -1561,9 +1561,9 @@ export function createGoogleSetupService(options = {}) {
       defineTool({
         name: 'google_setup',
         description:
-          'Connect the user\'s Google Workspace account (连接谷歌账号、绑定 Google、登录 Gmail, GOOGLE_ACCOUNT_NOT_CONNECTED) through Center. Explicit Gemini/Vertex API-key requests use model-provider setup. ' +
-          'Call action="show" first on a Google connection request to read current mode, steps, blockers, exact owner card buttons, and executable step instructions. ' +
-          'Continue any active wizard card. Call action="start" only if no wizard is active and the requested connection is still pending. In Code Mode Only, invoke this registered tool through codemode. ' +
+          'Manage the Center Google Web OAuth setup wizard for this bot (three modes: do-it-for-me, guide-here, guide-browser). ' +
+          'Call action="show" at the start of every turn to read current mode, steps, blockers, exact owner card buttons, and executable step instructions. ' +
+          'Call action="start" to initiate setup (or check whether Center already has a ready shared Google connection). ' +
           'Use action="set" for non-sensitive fields (account, accounts, kind, projectId, services, browserPageId), ' +
           'action="step" to mark non-sensitive steps active/done/skipped/failed, ' +
           'action="need_user" to lock and hand off sensitive steps (User Data Policy checkbox in branding, Web OAuth Client Secret in client, system-browser OAuth in connect) or after 2 misses, ' +

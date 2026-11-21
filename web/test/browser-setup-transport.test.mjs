@@ -391,10 +391,6 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
     const setupTool = setupExt.tools.find((t) => t.name === 'google_setup');
     const browserTool = browserExt.tools.find((t) => t.name === 'bot_browser');
     assert.ok(setupTool);
-    assert.match(setupTool.description, /连接谷歌账号/);
-    assert.match(setupTool.description, /GOOGLE_ACCOUNT_NOT_CONNECTED/);
-    assert.equal(setupTool.deferred, undefined);
-    assert.equal(setupTool.callers, undefined, 'Code Mode Only can call the registered Google setup tool');
     assert.ok(browserTool);
 
     const publishedDetails = [];

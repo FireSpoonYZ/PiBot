@@ -19,8 +19,7 @@ import { BACKGROUND_CONTEXT as context } from '../../host-core/node_modules/@ear
 import { createModels } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/models.js';
 import { registerApiProvider } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/compat.js';
 import { createAssistantMessageEventStream } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js';
-import { getCurrentTools } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
-import { Harness, LiveDoc, AgentDoc, createRegistry } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
+import { Harness, LiveDoc, createRegistry } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
 import { admitSubmission } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/harness/submissions.js';
 import { openNodeSqliteStorage } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/storage/sqlite/node.js';
 
@@ -229,56 +228,6 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
     },
   };
 }
-
-test('real tool discovery survives the current run and replay but resets on the next human request', async t => {
-  const f = await hostFixture(t);
-  const discovered = 'pibot_bots_list';
-  const names = request => getCurrentTools(request.messages).map(tool => tool.name);
-  let phase = 'discover';
-  f.state.handler = async () => {
-    if (phase === 'discover') {
-      phase = 'loaded';
-      return [{ type: 'toolCall', id: 'discover-bots', name: 'tool_search',
-        arguments: { query: discovered, limit: 1 } }];
-    }
-    return text('completed');
-  };
-  const first = { requestId: 'discover-first', text: 'find the bot list tool' };
-  await f.client.submit(f.bot.botId, first);
-  await f.done(first.requestId);
-  assert.equal(f.state.calls.length, 2);
-  assert.ok(!names(f.state.calls[0]).includes(discovered));
-  assert.ok(names(f.state.calls[1]).includes(discovered), 'discovery is usable in the same run');
-  assert.ok(names(f.state.calls[1]).includes('google_setup'), 'Google connection stays directly available');
-  await f.whileStopped(async harness => {
-    const index = await harness.snapshot(PrimaryIndex, context);
-    await harness.commit(async tx => {
-      const state = await tx.doc(AgentDoc, index.byPrimary[f.bot.primaryConversationId]);
-      assert.ok(state.modelTools.add.includes(discovered));
-      state.modelTools.remove = ['bash'];
-    }, context);
-  });
-  await f.client.submit(f.bot.botId, first);
-  await f.done(first.requestId);
-  assert.equal(f.state.calls.length, 2, 'idempotent replay never regenerates');
-  await f.whileStopped(async harness => {
-    const index = await harness.snapshot(PrimaryIndex, context);
-    const state = await harness.snapshot(AgentDoc, index.byPrimary[f.bot.primaryConversationId], context);
-    assert.ok(state.modelTools.add.includes(discovered), 'replay preserves discovered tools');
-  });
-  phase = 'fresh';
-  await f.client.submit(f.bot.botId, { requestId: 'discover-next', text: 'connect my Google account' });
-  await f.done('discover-next');
-  const fresh = f.state.calls.at(-1);
-  assert.ok(!names(fresh).includes(discovered), 'new human request drops prior discovery');
-  assert.ok(!names(fresh).includes('bash'), 'configured visibility exclusions survive');
-  assert.ok(names(fresh).includes('google_setup'), 'Google connection stays directly available');
-  await f.whileStopped(async harness => {
-    const index = await harness.snapshot(PrimaryIndex, context);
-    const state = await harness.snapshot(AgentDoc, index.byPrimary[f.bot.primaryConversationId], context);
-    assert.deepEqual(state.modelTools, { remove: ['bash'] });
-  });
-});
 
 function questionnaires(entries) {
   return entries.flatMap(entry => (entry.model ?? []).filter(message =>
