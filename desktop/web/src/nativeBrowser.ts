@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { NativeBrowserPresenter } from '../../../web/src/bot-browser/nativePresentation';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
+import { nextBrowserHostReconnectDelay } from './vendor/orca/browserHostReconnectDelay';
 
 type NativeResult = Record<string, unknown>;
 type RendererCommand = { operation: string; operationId: string; pageId: string } & NativeResult;
@@ -22,23 +23,23 @@ function discoverLocalHost() {
   return directRoute;
 }
 
-const sessions = new WeakMap<DesktopPanelApi, Map<string, DesktopNativeBrowser>>();
+// This module runs inside the single trusted desktop window. Capture subscriptions can
+// change generation (and recreate target API proxies) without replacing its guest pages.
+const sessions = new Map<string, DesktopNativeBrowser>();
 
 export function desktopNativeBrowser(api: DesktopPanelApi, identity: DesktopIdentity, botId: string) {
-  let browsers = sessions.get(api);
-  if (!browsers) sessions.set(api, browsers = new Map());
-  const key = JSON.stringify([identity.profileId, identity.generation, identity.targetDeviceId, botId]);
-  let native = browsers.get(key);
+  const key = JSON.stringify([identity.profileId, identity.kind, identity.targetDeviceId, botId]);
+  let native = sessions.get(key);
   if (!native) {
-    native = new DesktopNativeBrowser(api, identity, botId, browsers, key);
-    browsers.set(key, native);
+    native = new DesktopNativeBrowser(api, identity, botId, key);
+    sessions.set(key, native);
   }
   native.identity = identity;
   return native;
 }
 
 export class DesktopNativeBrowser implements NativeBrowserPresenter {
-  private readonly rendererId = crypto.randomUUID();
+  private rendererId = crypto.randomUUID();
   private readonly pages = new Map<string, string>();
   private readonly hidden = new Map<string, number>();
   private local = false;
@@ -47,19 +48,23 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
   private preparing: Promise<boolean> | null = null;
   private lastAttempt = 0;
   private lastPlacement: RenderPlacement | null = null;
+  private windowClosedByHost = false;
   private proxyUrl: string | undefined;
 
   constructor(
     private readonly api: DesktopPanelApi,
     public identity: DesktopIdentity,
     private readonly botId: string,
-    private readonly sessions: Map<string, DesktopNativeBrowser>,
     private readonly key: string,
   ) {}
 
   private activeConnection() {
-    const identity = this.api.identity;
-    return identity?.profileId === this.identity.profileId && identity.generation === this.identity.generation;
+    try {
+      const identity = this.api.identityForTarget(this.identity.targetDeviceId);
+      return identity.profileId === this.identity.profileId && identity.kind === this.identity.kind;
+    } catch {
+      return false;
+    }
   }
 
   private control<T>(input: Record<string, unknown>) {
@@ -78,6 +83,7 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
       this.startPolling();
       return true;
     }
+    if (this.polling && !this.attached) return false;
     if (this.lastPlacement === placement && Date.now() - this.lastAttempt < 1_500) return false;
     this.lastPlacement = placement;
     this.lastAttempt = Date.now();
@@ -91,7 +97,7 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
       return this.attached && !(await this.detachIdle());
     }
     if (this.attached) return true;
-    const active = [...this.sessions.values()].filter(session => session.attached);
+    const active = [...sessions.values()].filter(session => session.attached);
     if (active.length >= 3) {
       const idle = active.find(session => !session.pages.size && !session.preparing);
       if (!idle || !(await idle.detachIdle())) return false;
@@ -99,13 +105,10 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
     const result = await this.control<{ accepted: boolean }>({ action: 'rendererAttach', rendererId: this.rendererId });
     if (!result.accepted) return false;
     try {
-      if (!this.local) {
-        const egress = await broker<{ proxyUrl: string }>('browser_egress_open', {
-          targetDeviceId: this.identity.targetDeviceId, botId: this.botId, rendererId: this.rendererId,
-        });
-        if (!egress.proxyUrl) throw Error('Remote browser route is unavailable');
-        this.proxyUrl = egress.proxyUrl;
-      }
+      const egress = await broker<{ proxyUrl: string | null }>('browser_egress_open', {
+        targetDeviceId: this.identity.targetDeviceId, botId: this.botId, rendererId: this.rendererId,
+      });
+      this.proxyUrl = egress.proxyUrl ?? undefined;
       if (!this.activeConnection()) throw Error('Browser connection changed');
     } catch {
       await this.control({ action: 'rendererDetach', rendererId: this.rendererId }).catch(() => {});
@@ -144,17 +147,19 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
   private async execute(command: RendererCommand) {
     const { operationId: _operationId, operation, pageId, elementRef, ...params } = command;
     if (operation === 'create') {
+      const rendererId = this.rendererId;
       const opened = await this.native('create', pageId, {
         ...params, ...(this.proxyUrl ? { proxyUrl: this.proxyUrl } : {}),
         hostId: this.identity.targetDeviceId, botId: this.botId,
       });
       if (typeof opened.guestId !== 'string') throw Error('Native browser did not open');
-      this.pages.set(pageId, opened.guestId);
-      if (!this.attached || !this.activeConnection()) {
-        await this.native('close', pageId).catch(() => {});
-        this.pages.delete(pageId);
+      if (rendererId !== this.rendererId || !this.attached || !this.activeConnection()) {
+        await invoke('desktop_browser_guest', {
+          request: { operation: 'close', holder: rendererId, guestId: opened.guestId },
+        }).catch(() => {});
         throw Error('Browser connection changed');
       }
+      this.pages.set(pageId, opened.guestId);
       return opened;
     }
     if (!this.pages.has(pageId)) throw { code: 'BROWSER_STALE_PAGE' };
@@ -174,6 +179,7 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
     this.polling = true;
     void (async () => {
       let failures = 0;
+      let rendererGone = false;
       try {
         while (this.attached && this.activeConnection()) {
           try {
@@ -181,29 +187,29 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
               action: 'rendererNext', rendererId: this.rendererId,
             });
             failures = 0;
-            if (command) {
+            if (command && this.attached && this.activeConnection()) {
               void this.executeAndReply(command);
             }
           } catch (error) {
             if ((error as { code?: string })?.code === 'BROWSER_FORBIDDEN') {
-              await this.closeGuests();
+              rendererGone = true;
               break;
             }
             if (!this.attached || !this.activeConnection()) break;
-            failures += 1;
-            if (failures === 8) {
-              await Promise.allSettled([...this.pages.keys()].map(id => this.hide(id)));
-            }
-            const retryDelay = failures < 8 ? 800 : 3_000;
+            const retryDelay = nextBrowserHostReconnectDelay({
+              baseDelayMs: 100, attempt: failures++, remainingMs: 2_000, browserHostClientId: this.rendererId,
+            });
             await new Promise(resolve => window.setTimeout(resolve, retryDelay));
           }
         }
       } finally {
-        this.polling = false;
-        if (!this.activeConnection()) {
+        if (rendererGone || !this.activeConnection()) {
           await this.closeGuests();
-          if (this.sessions.get(this.key) === this) this.sessions.delete(this.key);
+          this.rendererId = crypto.randomUUID();
+          this.lastAttempt = 0;
+          if (!this.activeConnection() && sessions.get(this.key) === this) sessions.delete(this.key);
         }
+        this.polling = false;
       }
     })();
   }
@@ -238,7 +244,17 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
       await this.prepare(placement).catch(() => {});
       if (this.attached) this.startPolling();
     }
-    return this.control<NativeResult>(input);
+    if (input.action === 'open' && placement === 'client' && !this.attached) {
+      throw { code: 'BROWSER_UNAVAILABLE', message: 'Desktop browser is not ready.' };
+    }
+    if (input.action === 'open' && placement === 'server' && !this.local && this.windowClosedByHost) {
+      input = { ...input, placement: 'server' };
+    }
+    const result = await this.control<NativeResult>(input);
+    if (input.action === 'status' || input.action === 'open') {
+      this.windowClosedByHost = result.reason === 'client_browser_window_closed';
+    }
+    return result;
   }
 
   async present({ pageId, expiresAt, rect }: Parameters<NativeBrowserPresenter['present']>[0]) {

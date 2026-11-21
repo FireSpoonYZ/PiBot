@@ -42,6 +42,7 @@ import {
   buildBrowserRequest,
   canAcceptManualInput,
   classifyBrowserError,
+  classifyClientBrowserUnavailable,
   classifyPageUrl,
   confirmTakeoverLease,
   inspectFrameRedaction,
@@ -447,9 +448,16 @@ export function BotBrowserPanel({
         clearCachedFrame();
       }
 
+      if (!nextView.available || !nextView.canStreamInteract || !nextView.pageId) {
+        pendingStreamFrameRef.current = null;
+      }
+
       if (!nextView.available || !nextView.canStreamInteract) {
         streamFailSinceRef.current = null;
         setFrameRedacted(false);
+      } else if (prevView && (!prevView.available || !prevView.canStreamInteract)) {
+        streamDegradedRef.current = false;
+        setStreamDegraded(false);
       }
 
       if (!urlEditingRef.current) {
@@ -1369,6 +1377,7 @@ export function BotBrowserPanel({
     !view?.fallbackToSystemBrowser && !frameRedacted;
   const showExternalRecovery = connected && pageVisible && !externalConfirmOpen &&
     (urlMeta.isGoogleSignInRejected || (frameRestricted && view?.fallbackToSystemBrowser));
+  const clientUnavailableKind = classifyClientBrowserUnavailable(view);
   const canRetry = connected && !nativeReady &&
     (view ? !view.available || !view.canStreamInteract || streamDegraded : !loadingStatus);
 
@@ -1381,6 +1390,12 @@ export function BotBrowserPanel({
       return { tone: 'muted', text: t('连接中…', 'Connecting…'), spinning: true };
     }
     if (!isAvailableInteractive || !view) {
+      if (clientUnavailableKind === 'window-closed') {
+        return { tone: 'warn', text: t('桌面浏览器窗口已关闭', 'Desktop browser window closed'), spinning: false };
+      }
+      if (clientUnavailableKind === 'disconnected') {
+        return { tone: 'warn', text: t('桌面浏览器暂未连上', 'Desktop browser disconnected'), spinning: false };
+      }
       return { tone: 'warn', text: t('实时浏览不可用', 'Live view unavailable'), spinning: false };
     }
     if (isHandingBack) {
@@ -1841,6 +1856,24 @@ export function BotBrowserPanel({
 
       {/* Contextual banners — shown only when actionable */}
       <div className="bb-banners">
+        {connected && clientUnavailableKind !== null ? (
+          <div className="bb-banner bb-banner--warn" role="status">
+            <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
+            <div className="bb-banner-body">
+              <div className="bb-banner-title">
+                {clientUnavailableKind === 'window-closed'
+                  ? t('桌面浏览器窗口已关闭，当前已停止共享。', 'The desktop browser window was closed and sharing has stopped.')
+                  : t('桌面浏览器暂未连上，正在等待恢复连接。', 'The desktop browser is temporarily disconnected and waiting to reconnect.')}
+              </div>
+              <div className="bb-banner-sub">
+                {clientUnavailableKind === 'window-closed'
+                  ? t('重新打开 Pi Bot 桌面窗口后，可开始新的共享会话。', 'Reopen the Pi Bot desktop window to start a new sharing session.')
+                  : t('如果桌面窗口仍开着，短暂断线后会重新连接到原页面。', 'If the desktop window is still open, a brief interruption will reconnect to the same page.')}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {view?.attentionRequested && view.attentionMessage && view.phase === 'bot' && isAvailableInteractive && !signInTakeover ? (
           <div className="bb-banner bb-banner--warn" role="status">
             <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />

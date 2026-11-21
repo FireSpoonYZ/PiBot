@@ -12,6 +12,8 @@ import {
   BROWSER_MAX_ACTIVE_SESSIONS,
   BROWSER_MAX_FRAME_BASE64_BYTES,
   BROWSER_MAX_TABS_PER_BOT,
+  CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
+  CLIENT_BROWSER_WINDOW_CLOSED_REASON,
   botBrowserProfileDirectory,
   browserError,
   isPlainObject,
@@ -232,11 +234,39 @@ export function createBotBrowserService(options = {}) {
       },
     });
     entry = {
-      state, provider: null, providerPromise: null, streamCaptures: new Map(),
-      renderer: null, presentation: null, dismissing: null, presentationChanges: 0, opening: 0, closing: false,
+      state, provider: null, providerPromise: null, providerEpoch: 0, streamCaptures: new Map(),
+      renderer: null, closedClientRenderer: null, closedRendererIds: new Set(),
+      presentation: null, dismissing: null, presentationChanges: 0, opening: 0, closing: false,
     };
     entries.set(botId, entry);
     return entry;
+  }
+
+  function recordClosedRendererId(entry, rendererId) {
+    if (!rendererId) return;
+    entry.closedRendererIds.add(rendererId);
+    if (entry.closedRendererIds.size > 64) {
+      const oldest = entry.closedRendererIds.values().next().value;
+      if (oldest !== undefined) entry.closedRendererIds.delete(oldest);
+    }
+  }
+
+  function desktopWindowClosedError() {
+    return browserError('BROWSER_UNAVAILABLE', CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE, {
+      reason: CLIENT_BROWSER_WINDOW_CLOSED_REASON,
+    });
+  }
+
+  function staleProviderError(entry) {
+    if (closed || entry.state.closed) return browserError('BROWSER_CLOSED');
+    if (entry.closedClientRenderer) return desktopWindowClosedError();
+    return browserError('BROWSER_CLOSED');
+  }
+
+  function assertProviderCurrent(entry, provider) {
+    if (closed || entry.state.closed || entry.provider !== provider) {
+      throw staleProviderError(entry);
+    }
   }
 
   async function loadDefaultProviderFactory() {
@@ -256,13 +286,24 @@ export function createBotBrowserService(options = {}) {
 
   async function ensureProvider(entry, { allowUnavailable = false } = {}) {
     if (closed || entry.closing) throw browserError('BROWSER_CLOSED');
+    if (entry.closedClientRenderer && !entry.provider) {
+      entry.state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+      if (allowUnavailable) return null;
+      throw desktopWindowClosedError();
+    }
     if (entry.provider) return entry.provider;
     if (entry.providerPromise) {
       const existing = await entry.providerPromise;
-      if (existing || allowUnavailable) return existing;
+      if (existing && entry.provider === existing) return existing;
+      if (entry.closedClientRenderer) {
+        if (allowUnavailable) return null;
+        throw desktopWindowClosedError();
+      }
+      if (allowUnavailable) return null;
       throw browserError('BROWSER_UNAVAILABLE', entry.state.reason || 'Bot browser provider is unavailable.');
     }
 
+    const startEpoch = entry.providerEpoch;
     entry.providerPromise = (async () => {
       try {
         const factory = customProviderFactory ?? (await loadDefaultProviderFactory());
@@ -273,13 +314,17 @@ export function createBotBrowserService(options = {}) {
           deviceId: host.deviceId,
           ...(nativeBridge ? { nativeBridge } : {}),
         }));
-        if (closed) {
+        if (closed || entry.closing || entry.providerEpoch !== startEpoch || entry.renderer || entry.closedClientRenderer) {
           await provider.close().catch(() => {});
           return null;
         }
         entry.provider = provider;
         return provider;
       } catch (err) {
+        if (entry.providerEpoch !== startEpoch || entry.renderer || entry.closedClientRenderer) {
+          if (allowUnavailable) return null;
+          throw staleProviderError(entry);
+        }
         const reason = err?.message || 'browser_provider_unavailable';
         entry.state.setUnavailable(reason);
         if (allowUnavailable) return null;
@@ -307,6 +352,8 @@ export function createBotBrowserService(options = {}) {
       entry.provider = null;
       entry.renderer = null;
       entry.presentation = null;
+      entry.providerEpoch += 1;
+      entry.streamCaptures.clear();
       try { await provider.close(); } finally { entry.closing = false; }
     }
   }
@@ -398,7 +445,7 @@ export function createBotBrowserService(options = {}) {
       canStreamInteract: state.canStreamInteract,
       ...(authority.canControl && authority.role !== 'system' ? { supportsSharedInput: true } : {}),
       ...(state.sharedInput ? { sharedInput: true } : {}),
-      ...(entry?.renderer ? { renderPlacement: 'client' } : {}),
+      ...(entry?.renderer || entry?.closedClientRenderer ? { renderPlacement: 'client' } : {}),
       ...(localRenderer ? { rendererId: entry.renderer.rendererId, nativePresentation: true } : {}),
       ...(entry?.provider?.nativePresentation && authority.transport === 'local' ? { nativePresentation: true } : {}),
       canIsolateSensitivePages: state.capabilities.privateSecretIsolation,
@@ -522,16 +569,18 @@ export function createBotBrowserService(options = {}) {
     if (!auth.canControl || auth.transport === 'system') throw browserError('BROWSER_FORBIDDEN');
     const renderer = entry.renderer;
     if (req.action === 'rendererAttach') {
-      if (entry.closing) return { accepted: false };
+      if (entry.closing || entry.closedRendererIds.has(req.rendererId)) return { accepted: false };
       if (renderer?.clientId === auth.clientId && renderer.rendererId === req.rendererId) {
-        return { accepted: true, rendererId: renderer.rendererId };
+        return { accepted: true, rendererId: renderer.rendererId, windowCloseProtocol: 1 };
       }
-      if (state.hasInFlightBotOp || state.queuedBotOpCount || entry.opening || entry.providerPromise ||
-          entry.presentationChanges || entry.dismissing || renderer?.online()) return { accepted: false };
+      if (state.phase === 'taking' || state.hasInFlightBotOp || state.queuedBotOpCount || entry.opening ||
+          entry.providerPromise || entry.presentationChanges || entry.dismissing || renderer?.online()) {
+        return { accepted: false };
+      }
+      if (renderer && renderer.clientId !== auth.clientId) return { accepted: false };
 
       const occupied = state.hasActiveSession || renderer?.hasTabs();
-      const replaceExpired = occupied && renderer?.clientId === auth.clientId && entry.provider === renderer &&
-        !state.sensitivity.sensitive && (state.phase === 'bot' || (state.sharedInput && state.isActiveLeaseHolder(auth)));
+      const replaceExpired = Boolean(renderer && renderer.clientId === auth.clientId && entry.provider === renderer);
       if (occupied && !replaceExpired) return { accepted: false };
 
       const previous = entry.provider;
@@ -539,12 +588,20 @@ export function createBotBrowserService(options = {}) {
         rendererId: req.rendererId, clientId: auth.clientId, maxTabs: maxTabsPerBot, maxFrameBytes: maxFrameBase64Bytes,
       });
       // Revoke the old presentation while fencing its renderer and tab IDs in this turn.
-      if (replaceExpired) void dismissPresentation(entry).catch(() => {});
+      if (replaceExpired) {
+        recordClosedRendererId(entry, renderer.rendererId);
+        if (entry.presentation?.renderer === renderer) entry.presentation = null;
+        else if (entry.presentation) void dismissPresentation(entry).catch(() => {});
+      }
       entry.renderer = replacement;
       entry.provider = replacement;
+      entry.closedClientRenderer = null;
+      entry.providerEpoch += 1;
+      entry.streamCaptures.clear();
       if (previous) void previous.close().catch(() => {});
       if (replaceExpired) state.resetAfterRelease();
-      return { accepted: true, rendererId: req.rendererId };
+      state.syncProviderResult(replacement.status());
+      return { accepted: true, rendererId: req.rendererId, windowCloseProtocol: 1 };
     }
     if (req.action === 'nativeGrant' || req.action === 'nativeDismiss') {
       if (req.action === 'nativeGrant' && (entry.closing || entry.presentationChanges || entry.dismissing)) {
@@ -601,10 +658,32 @@ export function createBotBrowserService(options = {}) {
         // commands immediately and invalidate the old session and any lease.
         entry.provider = null;
         entry.renderer = null;
+        entry.providerEpoch += 1;
+        entry.streamCaptures.clear();
         const closing = renderer.close();
         state.resetAfterRelease();
         await closing;
         return { ok: true };
+      case 'rendererClose': {
+        // Synchronously fence the closing renderer, cached lease/tabs, presentation, and in-flight commands.
+        entry.renderer = null;
+        if (entry.provider === renderer) entry.provider = null;
+        entry.closedClientRenderer = { clientId: auth.clientId, rendererId: renderer.rendererId };
+        recordClosedRendererId(entry, renderer.rendererId);
+        entry.providerEpoch += 1;
+        entry.streamCaptures.clear();
+        if (entry.presentation?.renderer === renderer) entry.presentation = null;
+        else if (entry.presentation) void dismissPresentation(entry).catch(() => {});
+        const closingRenderer = renderer.close(
+          'BROWSER_UNAVAILABLE',
+          CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
+          { reason: CLIENT_BROWSER_WINDOW_CLOSED_REASON },
+        );
+        state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+        state.resetAfterRelease();
+        await closingRenderer;
+        return { ok: true };
+      }
       default: throw browserError('INVALID_ARGUMENT');
     }
   }
@@ -646,12 +725,15 @@ export function createBotBrowserService(options = {}) {
           await refreshProviderStatus(entry, { allowUnavailable: true });
           return buildControlViewDto(state, auth, { includeLeaseToken: false });
         }
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
         if (req.shared) {
           const preempt = req.force === true || req.preempt === true;
           const replacesOwnLease = !req.lease && state.sharedInput && state.isActiveLeaseHolder(auth);
           const share = async () => {
             const latest = await refreshProviderStatus(entry, { allowUnavailable: true });
-            if (!latest) throw browserError('BROWSER_STREAM_UNAVAILABLE');
+            if (!latest) throw entry.closedClientRenderer ? desktopWindowClosedError() : browserError('BROWSER_STREAM_UNAVAILABLE');
             if (req.pageId && req.pageId !== state.pageId) throw browserError('BROWSER_STALE_PAGE');
             if (req.sessionId && req.sessionId !== state.sessionId) throw browserError('BROWSER_STALE_PAGE');
             return state.beginSharedInput({
@@ -662,6 +744,11 @@ export function createBotBrowserService(options = {}) {
             });
           };
           const token = preempt || replacesOwnLease ? await changePresentationOwner(entry, share) : await share();
+          if (entry.closedClientRenderer && !entry.provider) {
+            state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+            state.resetAfterRelease();
+            throw desktopWindowClosedError();
+          }
           return buildControlViewDto(state, auth, { includeLeaseToken: true, presentedLease: token });
         }
         const take = () => state.beginTakeover({
@@ -673,6 +760,11 @@ export function createBotBrowserService(options = {}) {
           onTakeoverHook: onTakeover,
         });
         const result = req.force || req.preempt ? await changePresentationOwner(entry, take) : await take();
+        if (entry.closedClientRenderer && !entry.provider) {
+          state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+          state.resetAfterRelease();
+          throw desktopWindowClosedError();
+        }
         // Sync current page/tabs WITHOUT reloading or creating a new tab.
         await refreshProviderStatus(entry, { allowUnavailable: true });
         return buildControlViewDto(state, auth, {
@@ -740,6 +832,7 @@ export function createBotBrowserService(options = {}) {
         }
         const provider = await ensureProvider(entry, { allowUnavailable: true });
         if (!provider) {
+          if (entry.closedClientRenderer) throw desktopWindowClosedError();
           throw browserError('BROWSER_STREAM_UNAVAILABLE', state.reason || 'Bot browser is unavailable on this host.');
         }
         if (!state.available || !state.pageId) {
@@ -825,6 +918,9 @@ export function createBotBrowserService(options = {}) {
             rawFrame = await capture();
           }
         } catch (err) {
+          if (entry.provider !== provider) {
+            throw entry.closedClientRenderer ? desktopWindowClosedError() : browserError('BROWSER_STREAM_UNAVAILABLE');
+          }
           throw mapProviderError(err, state);
         }
 
@@ -930,14 +1026,17 @@ export function createBotBrowserService(options = {}) {
               ...(Number.isSafeInteger(state.documentGeneration) ? { documentGeneration: state.documentGeneration } : {}),
               expectedDocumentGeneration: state.documentGeneration,
               beforeInput: () => {
+                assertProviderCurrent(entry, provider);
                 state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
                 state.assertInputFreshness({ pageId: req.pageId, revision: req.revision, frameSeq: req.frameSeq });
               },
               event: formatProviderInputEvent(req.event),
             });
           } catch (providerErr) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(providerErr, state);
           }
+          assertProviderCurrent(entry, provider);
           if (isPlainObject(res)) {
             state.syncProviderResult(res);
           }
@@ -953,14 +1052,23 @@ export function createBotBrowserService(options = {}) {
 
       case 'open': {
         assertControlMutationAllowed(state, auth, { ...req, revision: undefined });
+        if (req.placement === 'server' && entry.renderer) {
+          throw browserError('BROWSER_ACTION_BLOCKED', 'Cannot switch to host browser while a client renderer is active.');
+        }
         entry.opening += 1;
         try {
           const safeUrl = req.url !== undefined
             ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
             : undefined;
+          if (entry.closedClientRenderer && !entry.provider && req.placement !== 'server') {
+            throw desktopWindowClosedError();
+          }
           if (!state.hasActiveSession) await reclaimIdleBotSessionsIfNeeded(req.botId);
           if (state.tabs.length >= maxTabsPerBot) {
             throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
+          }
+          if (req.placement === 'server' && entry.closedClientRenderer && !entry.renderer) {
+            entry.closedClientRenderer = null;
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
           let res;
@@ -972,8 +1080,10 @@ export function createBotBrowserService(options = {}) {
               ...(safeUrl !== undefined ? { url: safeUrl } : {}),
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state);
           }
+          assertProviderCurrent(entry, provider);
           state.ensureSessionId();
           state.syncProviderResult({ available: true, ...res });
           return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
@@ -985,6 +1095,9 @@ export function createBotBrowserService(options = {}) {
       case 'navigate': {
         assertControlMutationAllowed(state, auth, req);
         const safeUrl = validateNavigationUrl(req.url, { actor: 'human', allowBlank: false });
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
         if (req.pageId) state.assertOwnsPage(req.pageId);
         const provider = await ensureProvider(entry, { allowUnavailable: false });
         let res;
@@ -997,8 +1110,10 @@ export function createBotBrowserService(options = {}) {
             url: safeUrl,
           });
         } catch (err) {
+          if (entry.provider !== provider) throw staleProviderError(entry);
           throw mapProviderError(err, state);
         }
+        assertProviderCurrent(entry, provider);
         state.ensureSessionId();
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
@@ -1010,6 +1125,9 @@ export function createBotBrowserService(options = {}) {
       case 'select':
       case 'closeTab': {
         assertControlMutationAllowed(state, auth, req);
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
         if (req.pageId) state.assertOwnsPage(req.pageId);
         const targetPageId = req.pageId ?? state.pageId;
         if (!targetPageId) {
@@ -1026,8 +1144,10 @@ export function createBotBrowserService(options = {}) {
             ...(req.action === 'reload' && req.ignoreCache !== undefined ? { ignoreCache: req.ignoreCache } : {}),
           });
         } catch (err) {
+          if (entry.provider !== provider) throw staleProviderError(entry);
           throw mapProviderError(err, state);
         }
+        assertProviderCurrent(entry, provider);
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
       }
@@ -1115,6 +1235,9 @@ export function createBotBrowserService(options = {}) {
               throw err;
             }
           }
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (!state.hasActiveSession) {
             await reclaimIdleBotSessionsIfNeeded(botId);
           }
@@ -1133,8 +1256,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult({ available: true, ...res });
@@ -1169,6 +1294,9 @@ export function createBotBrowserService(options = {}) {
             }
             throw err;
           }
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           const provider = await ensureProvider(entry, { allowUnavailable: false });
@@ -1184,8 +1312,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult(res);
@@ -1212,6 +1342,9 @@ export function createBotBrowserService(options = {}) {
         case 'reload':
         case 'select':
         case 'closeTab': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if ((action === 'select' || action === 'closeTab') && !reqPageId) {
             throw browserError('INVALID_ARGUMENT', `${action} requires pageId`);
           }
@@ -1233,8 +1366,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
           if (action !== 'closeTab' && (state.sensitivity.blockBotObserve || state.sensitivity.blockBotAct)) {
@@ -1257,6 +1392,9 @@ export function createBotBrowserService(options = {}) {
         }
 
         case 'snapshot': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1291,8 +1429,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
           const sanitized = sanitizeSnapshotForBot(res, state.sensitivity);
@@ -1323,6 +1463,9 @@ export function createBotBrowserService(options = {}) {
         }
 
         case 'act': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1375,8 +1518,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
 
@@ -1407,6 +1552,9 @@ export function createBotBrowserService(options = {}) {
         }
 
         case 'screenshot': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1442,8 +1590,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           const validated = validateFramePayload(rawFrame, rawArgs.limits?.maxBytes ?? maxFrameBase64Bytes);
           const framePageId = validated.pageId ?? targetPageId;

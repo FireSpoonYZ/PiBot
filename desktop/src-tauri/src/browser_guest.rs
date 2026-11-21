@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -18,7 +18,7 @@ const LEASE: Duration = Duration::from_secs(6);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
-pub struct BrowserGuests(Mutex<HashMap<String, Guest>>);
+pub struct BrowserGuests(Mutex<HashMap<String, Guest>>, AtomicBool);
 struct Guest {
     holder: String,
     title: String,
@@ -136,6 +136,25 @@ pub fn hide_all(app: &AppHandle) {
         }
     }
 }
+pub fn begin_window_close(app: &AppHandle) -> Option<Vec<String>> {
+    let guests = app.state::<BrowserGuests>();
+    if guests.1.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    let ids = guests.0.lock()
+        .map(|mut entries| entries.drain().map(|(id, _)| id).collect())
+        .unwrap_or_default();
+    Some(ids)
+}
+
+pub fn close_drained_guests(app: &AppHandle, ids: Vec<String>) {
+    for id in ids {
+        if let Some(view) = app.get_webview(&id) {
+            let _ = view.close();
+        }
+    }
+}
+
 pub fn start_watchdog(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(500));
@@ -185,6 +204,9 @@ pub async fn desktop_browser_guest(
     request: Request,
 ) -> Result<Value, BridgeError> {
     crate::ensure_main_webview(&webview)?;
+    if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
+        return Err(error("Browser window is closing"));
+    }
     if !valid_id(&request.holder) {
         return Err(error("Invalid holder"));
     }
@@ -243,6 +265,9 @@ pub async fn desktop_browser_guest(
                 .0
                 .lock()
                 .map_err(|_| error("Guest registry unavailable"))?;
+            if state.1.load(Ordering::Acquire) {
+                return Err(error("Browser window is closing"));
+            }
             if entries.len() >= 16 {
                 return Err(error("Too many browser guests"));
             }
@@ -316,6 +341,10 @@ pub async fn desktop_browser_guest(
                 return Err(error(e.to_string()));
             }
         };
+        if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
+            let _ = view.close();
+            return Err(error("Browser window is closing"));
+        }
         if let Err(failure) = view.navigate(url) {
             let _ = view.close();
             if let Ok(mut entries) = app.state::<BrowserGuests>().0.lock() {
@@ -360,6 +389,9 @@ pub async fn desktop_browser_guest(
     } else {
         None
     };
+    if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
+        return Err(error("Browser window is closing"));
+    }
     if let Some(expected) = request.document_generation {
         let state = app.state::<BrowserGuests>();
         let entries = state
@@ -491,6 +523,9 @@ pub async fn desktop_browser_guest(
                 "true"
             };
             evaluate(&view, &guarded(guard, request.expected_url.as_deref())).await?;
+            if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
+                return Err(error("Browser window is closing"));
+            }
             return input(&view, event).await;
         }
         "waitCheck" => {
@@ -524,6 +559,9 @@ pub async fn desktop_browser_guest(
             let mut result = frame(&view).await?;
             let state = status(&app, id)?;
             evaluate(&view, &guarded("true", request.expected_url.as_deref())).await?;
+            if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
+                return Err(error("Browser window is closing"));
+            }
             if before["documentGeneration"] != state["documentGeneration"]
                 || before["url"] != state["url"]
             {

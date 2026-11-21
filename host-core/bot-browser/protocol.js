@@ -100,6 +100,10 @@ export const BROWSER_ERROR_CODES = Object.freeze([
 
 const KNOWN_ERROR_CODE_SET = new Set(BROWSER_ERROR_CODES);
 
+export const CLIENT_BROWSER_WINDOW_CLOSED_REASON = 'client_browser_window_closed';
+export const CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE =
+  'The desktop browser window was closed. Reopen the Pi Bot desktop window to use the browser again.';
+
 const SAFE_DEFAULT_MESSAGES = Object.freeze({
   INVALID_ARGUMENT: 'Invalid browser request.',
   BOT_NOT_FOUND: 'Bot not found on this host.',
@@ -136,7 +140,7 @@ const SAFE_DEFAULT_MESSAGES = Object.freeze({
 
 const CONTROL_ACTION_FIELDS = Object.freeze({
   status: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease'],
-  open: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
+  open: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision', 'placement'],
   navigate: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
   back: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   forward: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
@@ -211,7 +215,11 @@ export function safeBrowserError(error, fallbackCode = 'BROWSER_BACKEND_FAILED')
   const code = typeof error?.code === 'string' && KNOWN_ERROR_CODE_SET.has(error.code)
     ? error.code
     : fallbackCode;
-  const err = browserError(code, SAFE_DEFAULT_MESSAGES[code]);
+  const safeMessage =
+    code === 'BROWSER_UNAVAILABLE' && error?.details?.reason === CLIENT_BROWSER_WINDOW_CLOSED_REASON
+      ? CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE
+      : SAFE_DEFAULT_MESSAGES[code];
+  const err = browserError(code, safeMessage);
   if (error?.outcome === 'not-sent' || error?.outcome === 'unconfirmed') {
     err.outcome = error.outcome;
   }
@@ -560,6 +568,12 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   }
   if (input.url !== undefined) {
     normalized.url = assertBoundedString(input.url, 'url', { min: 1, max: MAX_URL_BYTES, maxBytes: MAX_URL_BYTES });
+  }
+  if (input.placement !== undefined) {
+    if (action !== 'open' || input.placement !== 'server') {
+      throw browserError('INVALID_ARGUMENT', 'placement only supports "server" on open');
+    }
+    normalized.placement = 'server';
   }
   if (input.force !== undefined) {
     if (typeof input.force !== 'boolean') throw browserError('INVALID_ARGUMENT', 'force must be boolean');

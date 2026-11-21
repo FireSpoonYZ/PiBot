@@ -15,10 +15,14 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
   let activePageId = null;
   let frameSeq = 0;
   let closed = false;
+  let closeCode = 'BROWSER_CLOSED';
+  let closeMessage = undefined;
+  let closeDetails = undefined;
   let seenAt = Date.now();
   let waiting = null;
   let mutation = Promise.resolve();
 
+  const closedError = () => browserError(closeCode, closeMessage, closeDetails);
   const online = () => !closed && Date.now() - seenAt < ACTIVE_MS;
   function takeCommand() {
     for (const record of commands.values()) {
@@ -30,17 +34,18 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
   }
 
   function request(operation, pageId, params = {}, signal) {
+    if (closed) return Promise.reject(closedError());
     if (!online()) return Promise.reject(browserError('BROWSER_UNAVAILABLE'));
     if (commands.size >= 16) return Promise.reject(browserError('BROWSER_BUSY'));
     if (signal?.aborted) return Promise.reject(browserError('CANCELLED'));
     const operationId = randomUUID();
     return new Promise((resolve, reject) => {
-      const finish = (value, code) => {
+      const finish = (value, code, message, details) => {
         if (!commands.delete(operationId)) return;
         clearTimeout(timer);
         signal?.removeEventListener('abort', abort);
         if (!code) resolve(value);
-        else reject(browserError(code, undefined, { outcome: record.dispatched ? 'unconfirmed' : 'not-sent' }));
+        else reject(browserError(code, message, { ...details, outcome: record.dispatched ? 'unconfirmed' : 'not-sent' }));
       };
       const abort = () => finish(null, 'CANCELLED');
       const timer = setTimeout(() => finish(null, 'BROWSER_TIMEOUT'), COMMAND_MS);
@@ -53,7 +58,7 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
   }
 
   function next() {
-    if (closed) throw browserError('BROWSER_CLOSED');
+    if (closed) throw closedError();
     seenAt = Date.now();
     if (waiting) throw browserError('BROWSER_BUSY');
     const command = takeCommand();
@@ -71,6 +76,7 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
   }
 
   function reply({ operationId, result, code }) {
+    if (closed) return { accepted: false };
     const record = commands.get(operationId);
     if (!record?.dispatched) return { accepted: false };
     seenAt = Date.now();
@@ -128,13 +134,16 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
 
   async function perform(input) {
     const { action, signal } = input;
+    if (closed) throw closedError();
     if (!online() && action === 'status') return status();
     if (action === 'open') {
       if (pages.size >= maxTabs) throw browserError('BROWSER_TAB_LIMIT');
       const url = validateNavigationUrl(input.url ?? 'about:blank', { actor: input.actor, allowBlank: true });
       const pageId = randomUUID();
       const page = { url, title: '', documentGeneration: 0, hints: null };
-      update(page, await navigate('create', pageId, url, signal));
+      const created = await navigate('create', pageId, url, signal);
+      if (closed) throw closedError();
+      update(page, created);
       pages.set(pageId, page);
       activePageId = pageId;
       return status();
@@ -156,34 +165,43 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
     }
     if (action === 'closeTab') {
       await request('close', pageId, {}, signal);
+      if (closed) throw closedError();
       pages.delete(pageId);
       if (activePageId === pageId) activePageId = Array.from(pages.keys()).at(-1) ?? null;
       return status();
     }
     if (action === 'status') {
       const live = await request('status', pageId, {}, signal);
+      if (closed) throw closedError();
       update(page, live);
       return { ...status(), canGoBack: live.canGoBack, canGoForward: live.canGoForward };
     }
     if (action === 'navigate' || ['back', 'forward', 'reload'].includes(action)) {
       const url = action === 'navigate' ? validateNavigationUrl(input.url, { actor: input.actor }) : null;
-      update(page, await navigate(action, pageId, url, signal));
+      const moved = await navigate(action, pageId, url, signal);
+      if (closed) throw closedError();
+      update(page, moved);
       return status();
     }
 
-    update(page, await request('status', pageId, {}, signal));
+    const before = await request('status', pageId, {}, signal);
+    if (closed) throw closedError();
+    update(page, before);
     const isWait = action === 'act' && input.act.kind === 'wait';
     guard(page, isWait ? { ...input, documentGeneration: undefined } : input, action === 'frame');
     const documentGeneration = page.documentGeneration;
     if (action === 'frame') {
       const captured = await request('frame', pageId, { documentGeneration, expectedUrl: page.url }, signal);
-      update(page, await request('status', pageId, {}, signal));
+      const after = await request('status', pageId, {}, signal);
+      if (closed) throw closedError();
+      update(page, after);
       guard(page, { ...input, documentGeneration }, true);
       const frame = validateFramePayload(captured, maxFrameBytes);
       return { ...frame, pageId, seq: ++frameSeq, url: page.url, title: page.title, hints: page.hints, documentGeneration };
     }
     if (action === 'snapshot') {
       const snapshot = await request('snapshot', pageId, { documentGeneration, expectedUrl: page.url }, signal);
+      if (closed) throw closedError();
       update(page, snapshot);
       guard(page, { ...input, documentGeneration });
       const refs = Array.isArray(snapshot.elements) ? snapshot.elements.filter(item =>
@@ -197,6 +215,7 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
       if (input.actor !== 'human') throw browserError('BROWSER_FORBIDDEN');
       input.beforeInput?.();
       await request('input', pageId, { event: input.event, documentGeneration, expectedUrl: page.url }, signal);
+      if (closed) throw closedError();
       return { ...status(), ok: true };
     }
     if (action === 'act') {
@@ -237,14 +256,16 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
           ...target, action: kind, elementRef: Number(ref.slice(1)), ...(value !== undefined ? { text: value } : {}),
         }, signal);
       }
-      update(page, await request('status', pageId, {}, signal));
+      const after = await request('status', pageId, {}, signal);
+      if (closed) throw closedError();
+      update(page, after);
       return { ...status(), ok: true, kind };
     }
     throw browserError('INVALID_ARGUMENT');
   }
 
   return {
-    rendererId, clientId, online, next, reply,
+    rendererId, clientId, online, status, next, reply,
     hasTabs: () => pages.size > 0,
     ports: () => [...new Set([...Array.from(pages.values(), page => page.url), ...pendingUrls]
       .map(url => Number(new URL(url).port)).filter(Boolean))],
@@ -255,12 +276,17 @@ export function createClientBrowserRenderer({ rendererId, clientId, maxTabs, max
       mutation = task.catch(() => {});
       return task;
     },
-    async close() {
+    async close(code = 'BROWSER_CLOSED', message = undefined, details = undefined) {
       if (closed) return;
       closed = true;
+      closeCode = code;
+      closeMessage = message;
+      closeDetails = details;
       waiting?.(null);
-      for (const record of commands.values()) record.finish(null, 'BROWSER_CLOSED');
+      for (const record of commands.values()) record.finish(null, code, message, details);
       pages.clear();
+      pendingUrls.clear();
+      activePageId = null;
     },
   };
 }

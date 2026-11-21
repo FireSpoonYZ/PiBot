@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
 import { createClientBrowserRenderer } from '../../host-core/bot-browser/client-renderer.js';
+import { normalizeBrowserControl } from '../../host-core/browser-setup-protocol.js';
 import {
   BROWSER_ERROR_CODES,
+  CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
   botBrowserProfileDirectory,
   normalizeBotActInput,
+  safeBrowserError,
 } from '../../host-core/bot-browser/protocol.js';
 import {
   checkBotActionSensitivity,
@@ -1605,4 +1608,276 @@ test('human frame retains pre-capture gate, never relaxes secret risk, and prese
   assert.equal(mock.calls.filter((c) => c.action === 'frame').length, frameCallsBeforePreCheck);
 
   await service.close();
+});
+
+test('rendererClose fences owner client window, blocks other clients and Host fallback, and allows same-owner reopen or explicit server open', async (t) => {
+  assert.equal(BROWSER_ERROR_CODES.includes('BROWSER_DESKTOP_WINDOW_CLOSED'), false);
+  const safeClosedErr = safeBrowserError({
+    code: 'BROWSER_UNAVAILABLE',
+    message: 'internal secret detail',
+    details: { reason: 'client_browser_window_closed' },
+  });
+  assert.equal(safeClosedErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(safeClosedErr.message, CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE);
+  assert.equal(safeClosedErr.details?.reason, 'client_browser_window_closed');
+  const safeOtherErr = safeBrowserError({
+    code: 'BROWSER_UNAVAILABLE',
+    message: 'should not be reflected',
+    details: { reason: 'arbitrary_reason' },
+  });
+  assert.equal(safeOtherErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(safeOtherErr.message, 'Bot browser is unavailable on this host.');
+  assert.deepEqual(
+    normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01' }),
+    { action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'short' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01', extra: true }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.equal(
+    normalizeBrowserControl({ action: 'open', botId: 'bot-a', placement: 'server' }).placement,
+    'server',
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'open', botId: 'bot-a', placement: 'client' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'status', botId: 'bot-a', placement: 'server' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+
+  const host = createFakeHost(['bot-a']);
+  const mock = createMockProviderFactory();
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const desktop = ownerAuth('desktop-1', 'Win-Desktop');
+  const otherDesktop = ownerAuth('desktop-2', 'Other-Desktop');
+  const remotePhone = ownerAuth('phone-1', 'Remote-Phone');
+  const firstRenderer = 'desktop-renderer-01';
+  const reopenedRenderer = 'desktop-renderer-02';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const openOnRenderer = async (rendererId, url, title = 'Page') => {
+    const pending = control({ action: 'open', url });
+    const { command } = await control({ action: 'rendererNext', rendererId });
+    assert.equal(command.operation, 'create');
+    await control({
+      action: 'rendererReply',
+      rendererId,
+      operationId: command.operationId,
+      result: { url, title, documentGeneration: 1 },
+    });
+    return pending;
+  };
+
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: firstRenderer }),
+    { accepted: true, rendererId: firstRenderer, windowCloseProtocol: 1 },
+  );
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: firstRenderer }),
+    { accepted: true, rendererId: firstRenderer, windowCloseProtocol: 1 },
+  );
+  const sensitiveUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const opened = await openOnRenderer(firstRenderer, sensitiveUrl, 'Google Sign-in');
+  assert.equal(opened.sensitive, true);
+  assert.equal(opened.tabs.length, 1);
+
+  const takeoverPromise = control({ action: 'takeover' });
+  const { command: statusCmd } = await control({ action: 'rendererNext', rendererId: firstRenderer });
+  assert.equal(statusCmd.operation, 'status');
+  await control({
+    action: 'rendererReply',
+    rendererId: firstRenderer,
+    operationId: statusCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const taken = await takeoverPromise;
+  assert.equal(taken.phase, 'human');
+  assert.ok(taken.lease);
+
+  // Active client renderer cannot be replaced by placement: 'server' or closed by another client / wrong rendererId.
+  await assert.rejects(
+    () => control({ action: 'open', placement: 'server', lease: taken.lease }),
+    { code: 'BROWSER_ACTION_BLOCKED' },
+  );
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: firstRenderer }, otherDesktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: reopenedRenderer }, desktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+  assert.equal(mock.created.size, 0);
+
+  // Start an in-flight command, then close the desktop browser window synchronously.
+  const inFlightNav = control({
+    action: 'navigate',
+    pageId: opened.pageId,
+    lease: taken.lease,
+    url: 'https://example.org/after-signin',
+  });
+  const { command: navCmd } = await control({ action: 'rendererNext', rendererId: firstRenderer });
+  assert.equal(navCmd.operation, 'navigate');
+
+  assert.deepEqual(
+    await control({ action: 'rendererClose', rendererId: firstRenderer }),
+    { ok: true },
+  );
+  await assert.rejects(
+    () => inFlightNav,
+    (err) => err?.code === 'BROWSER_UNAVAILABLE' && err?.details?.reason === 'client_browser_window_closed',
+  );
+
+  // Subsequent status reports explicit window close with no tabs/pages and no Host Chromium fallback.
+  const statusAfterClose = await control({ action: 'status' }, remotePhone);
+  assert.equal(statusAfterClose.available, false);
+  assert.equal(statusAfterClose.canStreamInteract, false);
+  assert.equal(statusAfterClose.reason, 'client_browser_window_closed');
+  assert.equal(statusAfterClose.renderPlacement, 'client');
+  assert.equal(statusAfterClose.rendererId, undefined);
+  assert.equal(statusAfterClose.pageId, undefined);
+  assert.equal(statusAfterClose.sessionId, undefined);
+  assert.deepEqual(statusAfterClose.tabs, []);
+  assert.equal(statusAfterClose.phase, 'bot');
+  assert.equal(statusAfterClose.sensitive, false);
+  assert.equal(statusAfterClose.isHolder, false);
+  assert.equal(mock.created.size, 0);
+
+  const [botTool] = service.toolsForBot();
+  const botStatus = parseToolJson(await botTool.execute({ action: 'status' }, { conversationId: 1 }, {}));
+  assert.equal(botStatus.available, false);
+  assert.equal(botStatus.canStreamInteract, false);
+  assert.equal(botStatus.reason, 'client_browser_window_closed');
+  assert.deepEqual(botStatus.tabs, []);
+
+  const botOpen = await botTool.execute({ action: 'open', url: 'https://example.org/' }, { conversationId: 1 }, {});
+  assert.equal(botOpen.isError, true);
+  const botOpenErr = parseToolJson(botOpen);
+  assert.equal(botOpenErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(botOpenErr.reason, 'client_browser_window_closed');
+  assert.equal(botOpenErr.message, CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE);
+
+  await assert.rejects(
+    () => control({ action: 'open', url: 'https://example.org/' }),
+    (err) => err?.code === 'BROWSER_UNAVAILABLE' && err?.details?.reason === 'client_browser_window_closed',
+  );
+  assert.equal(mock.created.size, 0);
+
+  // Closed renderer cannot operate or re-attach; same owner can attach a fresh renderer cleanly.
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: firstRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  await assert.rejects(() => control({ action: 'rendererClose', rendererId: firstRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  assert.equal((await control({ action: 'rendererAttach', rendererId: firstRenderer })).accepted, false);
+
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: reopenedRenderer }),
+    { accepted: true, rendererId: reopenedRenderer, windowCloseProtocol: 1 },
+  );
+  const reopenedStatus = await control({ action: 'status' });
+  assert.equal(reopenedStatus.available, true);
+  assert.equal(reopenedStatus.canStreamInteract, true);
+  assert.equal(reopenedStatus.renderPlacement, 'client');
+  assert.equal(reopenedStatus.rendererId, reopenedRenderer);
+  assert.equal(reopenedStatus.pageId, undefined);
+  assert.deepEqual(reopenedStatus.tabs, []);
+  assert.equal(reopenedStatus.sensitive, false);
+  assert.equal(mock.created.size, 0);
+
+  // Explicit owner open with placement:'server' works only after explicit close with no active renderer.
+  assert.deepEqual(
+    await control({ action: 'rendererClose', rendererId: reopenedRenderer }),
+    { ok: true },
+  );
+  const serverOpened = await control({ action: 'open', url: 'https://example.org/host', placement: 'server' });
+  assert.equal(serverOpened.available, true);
+  assert.equal(serverOpened.renderPlacement, undefined);
+  assert.equal(serverOpened.tabs.length, 1);
+  assert.equal(mock.created.size, 1);
+});
+
+test('abnormal exit with sensitive page allows same-owner fresh renderer replacement while rejecting other clients', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const host = createFakeHost(['bot-a']);
+  const mock = createMockProviderFactory();
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const desktop = ownerAuth('desktop-1', 'Win-Desktop');
+  const otherDesktop = ownerAuth('desktop-2', 'Other-Desktop');
+  const crashedRenderer = 'crashed-renderer-01';
+  const freshRenderer = 'restarted-renderer-02';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+
+  assert.equal((await control({ action: 'rendererAttach', rendererId: crashedRenderer })).accepted, true);
+  const sensitiveUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const openPending = control({ action: 'open', url: sensitiveUrl });
+  const { command: createCmd } = await control({ action: 'rendererNext', rendererId: crashedRenderer });
+  await control({
+    action: 'rendererReply',
+    rendererId: crashedRenderer,
+    operationId: createCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const opened = await openPending;
+  assert.equal(opened.sensitive, true);
+
+  const takeoverPromise = control({ action: 'takeover' });
+  const { command: statusCmd } = await control({ action: 'rendererNext', rendererId: crashedRenderer });
+  await control({
+    action: 'rendererReply',
+    rendererId: crashedRenderer,
+    operationId: statusCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const taken = await takeoverPromise;
+  assert.equal(taken.phase, 'human');
+
+  // Transient disconnect (> TTL) keeps the guest intact instead of destroying it.
+  t.mock.timers.setTime(Date.now() + 12_001);
+  const disconnected = await control({ action: 'status' });
+  assert.equal(disconnected.available, false);
+  assert.equal(disconnected.reason, 'client_browser_disconnected');
+  assert.equal(disconnected.renderPlacement, 'client');
+  assert.equal(disconnected.pageId, opened.pageId);
+
+  // Other clients cannot replace or close the expired renderer.
+  assert.equal((await control({ action: 'rendererAttach', rendererId: freshRenderer }, otherDesktop)).accepted, false);
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: crashedRenderer }, otherDesktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+
+  // Same authenticated owner can attach a fresh renderer; old sensitive page and lease are wiped without carryover.
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: freshRenderer }),
+    { accepted: true, rendererId: freshRenderer, windowCloseProtocol: 1 },
+  );
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: crashedRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  assert.equal((await control({ action: 'rendererAttach', rendererId: crashedRenderer })).accepted, false);
+
+  const clean = await control({ action: 'status' });
+  assert.equal(clean.available, true);
+  assert.equal(clean.canStreamInteract, true);
+  assert.equal(clean.renderPlacement, 'client');
+  assert.equal(clean.rendererId, freshRenderer);
+  assert.equal(clean.phase, 'bot');
+  assert.equal(clean.pageId, undefined);
+  assert.deepEqual(clean.tabs, []);
+  assert.equal(clean.sensitive, false);
+  assert.equal(mock.created.size, 0);
 });

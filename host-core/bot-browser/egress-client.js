@@ -1,32 +1,97 @@
 import { Agent, createServer, request as httpRequest } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { BrowserEgressChannel } from './egress-channel.js';
 import { EGRESS_MAX_STREAMS, readBrowserEgress } from './egress-protocol.js';
 
-export function createBrowserEgressClient({ send, available = () => true }) {
+export function browserEgressIdentityDigest(parts) {
+  return createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
+}
+
+export function createBrowserEgressClient(options = {}) {
+  const { send, available = () => true, identity = null } = options;
   const streams = new Map();
   const proxies = new Set();
   let closed = false;
-  function reset() {
-    closed = true;
-    for (const proxy of [...proxies]) proxy.close();
-    for (const channel of streams.values()) channel.destroy();
+  let pinnedIdentity = typeof identity === 'string' && identity.length > 0 ? identity : null;
+  let activeTransport = typeof send === 'function'
+    ? { send, available, identity: pinnedIdentity, active: true, handle: null }
+    : null;
+
+  function destroyStreams() {
+    for (const channel of [...streams.values()]) channel.destroy();
     streams.clear();
   }
+
+  function detachTransport(transport) {
+    if (!activeTransport) return;
+    if (transport !== undefined && activeTransport !== transport && activeTransport.handle !== transport) return;
+    activeTransport.active = false;
+    activeTransport = null;
+    destroyStreams();
+  }
+
+  function attachTransport(transport) {
+    if (closed) {
+      throw Object.assign(new Error('Browser egress closed'), { code: 'NOT_CONNECTED' });
+    }
+    if (!transport || typeof transport.send !== 'function') {
+      throw Object.assign(new Error('Invalid browser egress transport'), { code: 'INVALID_ARGUMENT' });
+    }
+    const nextIdentity = typeof transport.identity === 'string' && transport.identity.length > 0
+      ? transport.identity
+      : null;
+    if (!nextIdentity) {
+      throw Object.assign(new Error('Browser egress transport requires an identity digest'), { code: 'CONTROL_IDENTITY_MISMATCH' });
+    }
+    if (pinnedIdentity !== null && nextIdentity !== pinnedIdentity) {
+      throw Object.assign(new Error('Browser egress identity mismatch'), { code: 'CONTROL_IDENTITY_MISMATCH' });
+    }
+    if (activeTransport && activeTransport !== transport && activeTransport.handle !== transport) {
+      detachTransport(activeTransport);
+    }
+    if (pinnedIdentity === null) pinnedIdentity = nextIdentity;
+    activeTransport = {
+      send: transport.send,
+      available: typeof transport.available === 'function' ? transport.available : () => true,
+      identity: nextIdentity,
+      active: true,
+      handle: transport,
+    };
+    return activeTransport;
+  }
+
+  function reset() {
+    closed = true;
+    if (activeTransport) {
+      activeTransport.active = false;
+      activeTransport = null;
+    }
+    for (const proxy of [...proxies]) proxy.close();
+    destroyStreams();
+  }
+
   async function openBrowserEgress({ targetDeviceId, botId, rendererId }) {
-    if (closed || !available() || proxies.size >= 8) throw new Error('Browser egress unavailable');
+    const openingTransport = activeTransport;
+    if (closed || !openingTransport || !openingTransport.active || !openingTransport.available() || proxies.size >= 8) {
+      throw new Error('Browser egress unavailable');
+    }
     const sockets = new Set();
     const ownStreams = new Set();
     let stopped = false;
     function tunnel(host, port) {
-      if (stopped || closed || streams.size >= EGRESS_MAX_STREAMS) throw new Error('Browser egress busy');
+      const transport = activeTransport;
+      if (stopped || closed || !transport || !transport.active || !transport.available()) {
+        throw new Error('Browser egress unavailable');
+      }
+      if (streams.size >= EGRESS_MAX_STREAMS) throw new Error('Browser egress busy');
       const id = randomUUID();
       const frame = readBrowserEgress({ type: 'browser-egress', op: 'open', id, targetDeviceId, botId, rendererId, host, port });
-      const channel = new BrowserEgressChannel(id, send, () => { streams.delete(id); ownStreams.delete(channel); });
+      const transportSend = (outFrame) => (transport.active && activeTransport === transport ? transport.send(outFrame) : false);
+      const channel = new BrowserEgressChannel(id, transportSend, () => { streams.delete(id); ownStreams.delete(channel); });
       channel.on('error', () => {});
       streams.set(id, channel);
       ownStreams.add(channel);
-      const sent = send(frame);
+      const sent = transportSend(frame);
       if (sent === false || sent?.ok === false) channel.destroy();
       return channel;
     }
@@ -83,17 +148,30 @@ export function createBrowserEgressClient({ send, available = () => true }) {
     });
     const proxy = { proxyUrl: null, close() {
       stopped = true; proxies.delete(proxy);
-      for (const channel of ownStreams) channel.destroy();
-      for (const socket of sockets) socket.destroy();
+      for (const channel of [...ownStreams]) channel.destroy();
+      for (const socket of [...sockets]) socket.destroy();
       server.close();
     } };
     proxies.add(proxy);
     try {
       await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-      if (stopped || closed) throw new Error('Browser egress closed');
+      if (stopped || closed || !activeTransport || !activeTransport.active || !activeTransport.available()) {
+        throw new Error('Browser egress closed');
+      }
       proxy.proxyUrl = `http://127.0.0.1:${server.address().port}`;
       return proxy;
     } catch (error) { proxy.close(); throw error; }
   }
-  return { openBrowserEgress, reset, handle(frame) { streams.get(frame.id)?.accept(frame); } };
+  return {
+    openBrowserEgress,
+    attachTransport,
+    detachTransport,
+    reset,
+    close: reset,
+    handle(frame, sourceTransport) {
+      if (closed || !activeTransport) return;
+      if (sourceTransport !== undefined && activeTransport !== sourceTransport && activeTransport.handle !== sourceTransport) return;
+      streams.get(frame.id)?.accept(frame);
+    },
+  };
 }

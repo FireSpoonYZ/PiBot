@@ -8,7 +8,10 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createBrowserEgressClient } from '../../host-core/bot-browser/egress-client.js';
 import { createBrowserEgressHost } from '../../host-core/bot-browser/egress-host.js';
+import { openDesktopClient } from '../../host-core/desktop-client.js';
 import { openRelayRegistry } from '../../host-core/relay-registry.js';
 import { openRelayServer } from '../../host-core/relay-server.js';
 import { openRemoteControl } from '../../host-core/remote-control-client.js';
@@ -17,7 +20,7 @@ import { readServerFrame } from '../../host-core/relay-protocol.js';
 const wsModule = createRequire(new URL('../../host-core/package.json', import.meta.url))('ws');
 const WebSocket = wsModule.default ?? wsModule;
 
-async function fixture(t) {
+async function fixture(t, handleControl) {
   const root = await mkdtemp(join(tmpdir(), 'pibot-browser-egress-'));
   const credentials = ['egress-host', 'egress-viewer', 'egress-other-viewer'].map((deviceId) => ({
     deviceId, token: randomBytes(24).toString('base64url'),
@@ -67,7 +70,7 @@ async function fixture(t) {
     execute: async (deviceId, method, params, options) => {
       calls.push({ deviceId, method, params, caller: options.caller });
       return {
-        allowed: allowed && params.botId === 'bot-egress' && params.rendererId === 'renderer-egress' &&
+        allowed: allowed && params.botId === 'bot-egress' && params.rendererId === 'renderer-egress-fixture' &&
           options.caller.fromDeviceId === credentials[1].deviceId,
         // Deliberately include the private port: the adapter's mandatory deny
         // must take precedence over even an overly permissive renderer grant.
@@ -86,6 +89,11 @@ async function fixture(t) {
         const frame = readServerFrame(data, binary);
         if (frame.type === 'ready') resolve();
         else if (frame.type === 'browser-egress') receiver.handle(frame);
+        else if (frame.type === 'control-request' && handleControl) {
+          hostSocket.send(JSON.stringify({
+            type: 'control-result', routeId: frame.routeId, ok: true, result: handleControl(frame),
+          }));
+        }
       } catch (error) { reject(error); }
     });
   });
@@ -94,13 +102,13 @@ async function fixture(t) {
   await ready;
   remote = await openRemoteControl({ url: relay.url, ...credentials[1] });
   otherRemote = await openRemoteControl({ url: relay.url, ...credentials[2] });
-  const openProxy = (client = remote, rendererId = 'renderer-egress') => client.openBrowserEgress({
+  const openProxy = (client = remote, rendererId = 'renderer-egress-fixture') => client.openBrowserEgress({
     targetDeviceId: credentials[0].deviceId, botId: 'bot-egress', rendererId,
   });
   const proxy = await openProxy();
   return {
     proxy, openProxy, remote, otherRemote, receiver, calls, siteRequests, siteSockets,
-    sitePort, privatePort, privateRequests: () => privateRequests,
+    sitePort, privatePort, relayUrl: relay.url, credentials, root, privateRequests: () => privateRequests,
     deny: () => { allowed = false; },
   };
 }
@@ -207,4 +215,127 @@ test('browser egress: Host reset closes live tunnels and client shutdown removes
   f.remote.close();
   await assert.rejects(throughProxy(f.proxy, `http://127.0.0.1:${f.sitePort}/`));
   await assert.rejects(f.openProxy(), /unavailable/);
+});
+
+test('browser egress: loopback proxy survives same-pairing reconnect and rejects foreign pairing', { timeout: 15000 }, async (t) => {
+  const f = await fixture(t);
+  const browserEgress = createBrowserEgressClient();
+  let first = null;
+  let second = null;
+  t.after(() => {
+    first?.close();
+    second?.close();
+    browserEgress.reset();
+  });
+
+  first = await openRemoteControl({ url: f.relayUrl, ...f.credentials[1], browserEgress });
+  assert.equal(first.browserWindowLifecycle, true);
+  const proxy = await first.openBrowserEgress({
+    targetDeviceId: f.credentials[0].deviceId,
+    botId: 'bot-egress',
+    rendererId: 'renderer-egress-fixture',
+  });
+  const originalProxyUrl = proxy.proxyUrl;
+
+  const socket = await openConnect(proxy, f.sitePort);
+  t.after(() => socket.destroy());
+  const gotResponse = once(socket, 'data');
+  socket.write(`GET /hold HTTP/1.1\r\nHost: 127.0.0.1:${f.sitePort}\r\n\r\n`);
+  await gotResponse;
+
+  // Transient socket drop closes live tunnels while keeping the loopback listener alive.
+  const closed = once(socket, 'close');
+  const hostSocketsClosed = [...f.siteSockets].map((peer) => once(peer, 'close'));
+  first.close();
+  await closed;
+  await Promise.all(hostSocketsClosed);
+  assert.equal(f.siteSockets.size, 0);
+  assert.equal((await throughProxy(proxy, `http://127.0.0.1:${f.sitePort}/offline`)).status, 502);
+  assert.equal(f.siteRequests.length, 0);
+
+  // A different authenticated pairing must never attach to the existing proxy listener.
+  await assert.rejects(
+    openRemoteControl({ url: f.relayUrl, ...f.credentials[2], browserEgress }),
+    (err) => err?.code === 'CONTROL_IDENTITY_MISMATCH',
+  );
+  assert.equal((await throughProxy(proxy, `http://127.0.0.1:${f.sitePort}/still-offline`)).status, 502);
+  assert.equal(f.siteRequests.length, 0);
+
+  // Reconnecting with the same pairing resumes requests through the exact same proxyUrl.
+  second = await openRemoteControl({ url: f.relayUrl, ...f.credentials[1], browserEgress });
+  assert.equal(second.browserWindowLifecycle, true);
+  assert.equal(proxy.proxyUrl, originalProxyUrl);
+  const reply = await throughProxy(proxy, `http://127.0.0.1:${f.sitePort}/reconnected`, ['same-pairing']);
+  assert.equal(reply.status, 200);
+  assert.equal(reply.body, 'response:same-pairing');
+  assert.equal(f.siteRequests.length, 1);
+  assert.equal(f.siteRequests[0].path, '/reconnected');
+
+  // Explicit teardown removes the loopback listener.
+  browserEgress.reset();
+  await assert.rejects(throughProxy(proxy, `http://127.0.0.1:${f.sitePort}/after-reset`));
+});
+
+test('desktop window sends one close on the same paired route after reconnecting', { timeout: 10_000 }, async (t) => {
+  const rendererId = 'renderer-egress-fixture';
+  const botId = 'bot-egress';
+  const browserActions = [];
+  let centerUrl, desktop, center;
+  t.after(async () => {
+    await desktop?.close();
+    if (center) {
+      center.closeAllConnections();
+      await new Promise(resolve => center.close(resolve));
+    }
+  });
+  const f = await fixture(t, ({ method, params }) => {
+    if (method === 'getServiceStatus') return { center: { state: 'ready', centerUrl } };
+    assert.equal(method, 'browserControl');
+    browserActions.push(params.action);
+    if (params.action === 'rendererAttach') return { accepted: true, rendererId, windowCloseProtocol: 1 };
+    if (params.action === 'rendererNext') return { command: null };
+    assert.deepEqual(params, { action: 'rendererClose', botId, rendererId });
+    return { ok: true };
+  });
+  desktop = openDesktopClient({ dataRoot: join(f.root, 'desktop') });
+  let events;
+  center = createServer((req, res) => {
+    if (req.url === '/api/host/events') {
+      events = res;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': ready\n\n');
+      return;
+    }
+    assert.equal(req.url, '/api/host/connection');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ linkUrl: f.relayUrl }));
+  });
+  await new Promise(resolve => center.listen(0, '127.0.0.1', resolve));
+  centerUrl = `http://127.0.0.1:${center.address().port}`;
+  const viewer = f.credentials[1];
+  const targetDeviceId = f.credentials[0].deviceId;
+  const call = (action) => desktop.request('call', {
+    targetDeviceId, method: 'browserControl', params: { action, botId, rendererId },
+  });
+  await desktop.request('center_connect', { url: centerUrl, deviceId: viewer.deviceId, deviceToken: viewer.token });
+  await call('rendererAttach');
+  const proxy = await desktop.request('browser_egress_open', { targetDeviceId, botId, rendererId });
+  const page = `http://127.0.0.1:${f.sitePort}/same-page`;
+  assert.equal((await throughProxy(proxy, page)).status, 200);
+
+  const previous = events;
+  previous.destroy();
+  const deadline = AbortSignal.timeout(5_000);
+  while (events === previous || (await desktop.request('center_status')).state !== 'ready') {
+    await delay(25, undefined, { signal: deadline });
+  }
+  await call('rendererNext');
+  assert.equal((await throughProxy(proxy, page)).status, 200);
+
+  await desktop.request('browser_window_close');
+  await desktop.request('browser_window_close');
+  assert.deepEqual(browserActions, ['rendererAttach', 'rendererNext', 'rendererClose']);
+  assert.equal((await desktop.request('status')).phase, 'connected');
+  await assert.rejects(throughProxy(proxy, page));
+  await assert.rejects(call('rendererNext'), { code: 'NOT_CONNECTED' });
 });

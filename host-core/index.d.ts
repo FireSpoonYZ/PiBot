@@ -2587,6 +2587,7 @@ export interface BrowserControlInput {
   maxBytes?: number;
   quality?: number;
   url?: string;
+  placement?: 'server';
   holderLabel?: string;
   force?: boolean;
   preempt?: boolean;

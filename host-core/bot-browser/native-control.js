@@ -6,6 +6,7 @@ const FIELDS = new Map([
   ['rendererNext', ['rendererId']],
   ['rendererReply', ['rendererId', 'operationId', 'result', 'code']],
   ['rendererDetach', ['rendererId']],
+  ['rendererClose', ['rendererId']],
   ['rendererEgressAuthorize', ['rendererId']],
   ['nativeGrant', ['pageId', 'lease']],
   ['nativeDismiss', ['pageId', 'lease']],

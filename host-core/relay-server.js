@@ -192,6 +192,7 @@ export async function openRelayServer(options = {}) {
     });
     wss.on('headers', (headers, req) => {
       if (req.headers['x-pibot-browser-egress'] === '1') headers.push('X-PiBot-Browser-Egress: 1');
+      if (req.headers['x-pibot-browser-window-lifecycle'] === '1') headers.push('X-PiBot-Browser-Window-Lifecycle: 1');
       const negotiated = upgradeLiveExtensions.get(req);
       const value = formatLiveExtensionsHeader(negotiated);
       if (value !== null) {

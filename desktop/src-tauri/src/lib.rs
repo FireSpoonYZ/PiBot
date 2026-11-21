@@ -7,7 +7,7 @@ pub mod updates;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, RunEvent, State, Webview, ipc::Channel, webview::PageLoadEvent};
+use tauri::{AppHandle, Manager, RunEvent, State, Webview, WindowEvent, ipc::Channel, webview::PageLoadEvent};
 use tauri_plugin_dialog::DialogExt;
 
 pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
@@ -158,6 +158,25 @@ pub fn run() {
     .manage(bridge)
     .manage(browser_guest::BrowserGuests::default())
     .manage(updates::UpdateState::default())
+    .on_window_event(|window, event| {
+      if window.label() != "main" {
+        return;
+      }
+      if let WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let app = window.app_handle().clone();
+        let Some(guest_ids) = browser_guest::begin_window_close(&app) else {
+          return;
+        };
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+          browser_guest::close_drained_guests(&app, guest_ids);
+          let bridge = app.state::<DesktopBridge>().inner().clone();
+          bridge.notify_browser_window_close().await;
+          let _ = window.destroy();
+        });
+      }
+    })
     // Reload/navigation kills every observer Channel owned by the old
     // document; evict them before the new page's JS installs its watches.
     .on_page_load(|webview, payload| {

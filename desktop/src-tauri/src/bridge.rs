@@ -330,6 +330,16 @@ impl DesktopBridge {
     self.dispatch_request(&session, "browser_local_route", params).await
   }
 
+  pub(crate) async fn notify_browser_window_close(&self) {
+    if let Some(session) = self.current_healthy_session() {
+      // Closing a window must neither start a broker nor wait on the network.
+      let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        self.dispatch_request(&session, "browser_window_close", json!({})),
+      ).await;
+    }
+  }
+
   pub async fn observe(
     &self,
     app: &AppHandle,
@@ -708,7 +718,8 @@ impl DesktopBridge {
             .unwrap_or_else(|| BridgeError::new("DISCONNECTED", "desktop client unavailable", "not-sent")),
         );
       }
-      if guard.pending.len() >= MAX_PENDING_CALLS {
+      let request_limit = MAX_PENDING_CALLS + usize::from(op == "browser_window_close");
+      if guard.pending.len() >= request_limit {
         return Err(BridgeError::new(
           "RPC_BUSY",
           "maximum in-flight broker requests reached",

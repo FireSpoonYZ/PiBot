@@ -709,6 +709,15 @@ export function mapKeyboardEventKey(key: string): string | null {
   return SPECIAL_KEY_MAP[key] ?? null;
 }
 
+export type ClientBrowserUnavailableKind = 'window-closed' | 'disconnected' | null;
+
+export function classifyClientBrowserUnavailable(view: BrowserView | null): ClientBrowserUnavailableKind {
+  if (!view || view.available) return null;
+  if (view.reason === 'client_browser_window_closed') return 'window-closed';
+  if (view.reason === 'client_browser_disconnected') return 'disconnected';
+  return null;
+}
+
 export function buildBrowserRequest(
   action: BrowserControlAction,
   params: {

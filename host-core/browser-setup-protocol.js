@@ -54,7 +54,7 @@ const MAX_SERVICES_COUNT = 16;
 
 const WIRE_BROWSER_FIELDS = Object.freeze({
   status: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease']),
-  open: new Set(['action', 'botId', 'scopeId', 'pageId', 'revision', 'url', 'lease']),
+  open: new Set(['action', 'botId', 'scopeId', 'pageId', 'revision', 'url', 'lease', 'placement']),
   navigate: new Set(['action', 'botId', 'scopeId', 'pageId', 'url', 'lease', 'revision']),
   back: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   forward: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
