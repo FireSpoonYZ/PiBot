@@ -91,6 +91,15 @@
         "googleSetupWaitingCard"
       ],
       "note": "Card selection only. No Orca transcript or persistent store imports."
+    },
+    "google-setup-card-turn.js": {
+      "source": "src/main/runtime/rpc/methods/bots-google-setup.ts",
+      "upstreamSha256": "19f709ab607c8a930c7eea1c5872b130dbea09d625cc55a322677c59dd523818",
+      "sha256": "15e211a6ef8ad994754932b9aabed4004731bd7fb9da8c015e8ccfa749f4b369",
+      "statements": [
+        "googleSetupAnswerLine"
+      ],
+      "note": "Upstream card-answer text formatter. Pi Bot delivers it through its authenticated Host turn queue."
     }
   }
 }

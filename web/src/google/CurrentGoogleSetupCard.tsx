@@ -24,6 +24,7 @@ import { googleStepTitle } from './googleCopy';
 import { GoogleSetupWizard } from './GoogleSetupWizard';
 import type {
   GoogleChatCardContext,
+  GoogleSetupControlCall,
   GoogleSetupControlState,
   GoogleSetupPresentation,
 } from './types';
@@ -34,6 +35,7 @@ export interface CurrentGoogleSetupCardProps {
   presentation?: GoogleSetupPresentation;
   googleContext?: GoogleChatCardContext;
   disabled?: boolean;
+  active?: boolean;
 }
 
 interface ScopedLiveState {
@@ -54,18 +56,21 @@ export function CurrentGoogleSetupCard({
   presentation,
   googleContext,
   disabled = false,
+  active = true,
 }: CurrentGoogleSetupCardProps) {
   const t = useText();
   const mountedRef = useRef(true);
   const requestSeqRef = useRef(0);
-  const inFlightKeyRef = useRef<string | null>(null);
+  const statusInFlightRef = useRef(new Map<string, Promise<GoogleSetupControlState>>());
+  const mutationRef = useRef({ scopeKey, pending: 0, epoch: 0 });
 
   const activePresentation = isActiveGoogleSetupPresentation(presentation) ? presentation : undefined;
   const presentationRunId = activePresentation?.runId?.trim() ?? '';
   const botId = activePresentation?.botId || googleContext?.botId || '';
   const callGoogleSetup = googleContext?.callGoogleSetup;
   const canQueryHost = Boolean(
-    activePresentation &&
+    active &&
+      activePresentation &&
       presentationRunId &&
       botId &&
       callGoogleSetup &&
@@ -77,6 +82,11 @@ export function CurrentGoogleSetupCard({
   const activePresentationRunIdRef = useRef(presentationRunId);
   activeScopeRef.current = scopeKey;
   activePresentationRunIdRef.current = presentationRunId;
+  const canQueryHostRef = useRef(canQueryHost);
+  canQueryHostRef.current = canQueryHost;
+  if (mutationRef.current.scopeKey !== scopeKey) {
+    mutationRef.current = { scopeKey, pending: 0, epoch: 0 };
+  }
 
   const orderByScopeRef = useRef<{ scopeKey: string; state: SetupResponseOrderState }>({
     scopeKey,
@@ -84,7 +94,6 @@ export function CurrentGoogleSetupCard({
   });
   if (orderByScopeRef.current.scopeKey !== scopeKey) {
     orderByScopeRef.current = { scopeKey, state: EMPTY_ORDER };
-    inFlightKeyRef.current = null;
   }
 
   const [scoped, setScoped] = useState<ScopedLiveState>(() => ({
@@ -125,26 +134,30 @@ export function CurrentGoogleSetupCard({
     );
   }, [presentationRunId, scopeKey]);
 
-  // Fetch initial status once per (scopeKey, runId) and only refresh when presentation
-  // indicates genuinely newer revision/copy/step/blocker state than what we already hold.
+  // New transcript presentations still trigger an immediate refresh. Owner actions on
+  // another client can advance the Host without producing a new transcript entry.
   const needsStatusFetch =
     canQueryHost &&
     (!initialChecked ||
       shouldRefreshGoogleSetupStatus(currentLiveSetup, activePresentation, currentActiveRunId));
 
-  useEffect(() => {
-    if (!needsStatusFetch || !callGoogleSetup || !botId || !presentationRunId) return;
-    const fetchKey = `${scopeKey}::${presentationRunId}`;
-    if (inFlightKeyRef.current === fetchKey) return;
+  const refreshStatus = useCallback(() => {
+    if (!canQueryHostRef.current || document.hidden || !callGoogleSetup || !botId || !presentationRunId) return;
+    const mutation = mutationRef.current;
+    if (mutation.pending > 0) return;
+    const fetchKey = JSON.stringify([scopeKey, botId]);
+    if (statusInFlightRef.current.has(fetchKey)) return;
 
     const reqScopeKey = scopeKey;
     const reqPresentationRunId = presentationRunId;
     const reqSeq = ++requestSeqRef.current;
-    inFlightKeyRef.current = fetchKey;
+    const mutationEpoch = mutation.epoch;
+    const statusRequest = callGoogleSetup({ botId, action: 'status' });
+    statusInFlightRef.current.set(fetchKey, statusRequest);
 
-    void callGoogleSetup({ botId, action: 'status' })
+    void statusRequest
       .then(next => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || mutation !== mutationRef.current || mutationEpoch !== mutation.epoch) return;
         if (
           reqScopeKey !== activeScopeRef.current ||
           reqPresentationRunId !== activePresentationRunIdRef.current
@@ -182,7 +195,7 @@ export function CurrentGoogleSetupCard({
         });
       })
       .catch(() => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || mutation !== mutationRef.current || mutationEpoch !== mutation.epoch) return;
         if (
           reqScopeKey !== activeScopeRef.current ||
           reqPresentationRunId !== activePresentationRunIdRef.current
@@ -202,22 +215,56 @@ export function CurrentGoogleSetupCard({
         );
       })
       .finally(() => {
-        if (inFlightKeyRef.current === fetchKey) {
-          inFlightKeyRef.current = null;
-        }
+        statusInFlightRef.current.delete(fetchKey);
       });
+  }, [botId, callGoogleSetup, presentationRunId, scopeKey]);
+
+  useEffect(() => {
+    if (needsStatusFetch) refreshStatus();
   }, [
-    botId,
-    callGoogleSetup,
+    refreshStatus,
     needsStatusFetch,
-    presentationRunId,
-    scopeKey,
     activePresentation?.revision,
     activePresentation?.copy,
     activePresentation?.step,
     activePresentation?.card,
     activePresentation?.blockerKind,
   ]);
+
+  const canPollStatus = canQueryHost && !disabled && !currentLiveSetup?.unavailable &&
+    shouldShowCurrentGoogleSetup(activePresentation, currentLiveSetup, currentActiveRunId);
+
+  useEffect(() => {
+    if (!canPollStatus) return;
+    refreshStatus();
+    const timer = window.setInterval(refreshStatus, 5000);
+    window.addEventListener('focus', refreshStatus);
+    document.addEventListener('visibilitychange', refreshStatus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshStatus);
+      document.removeEventListener('visibilitychange', refreshStatus);
+    };
+  }, [canPollStatus, refreshStatus]);
+
+  const callWizardSetup = useCallback<GoogleSetupControlCall>(async input => {
+    if (!callGoogleSetup) throw new Error('Google setup control is unavailable.');
+    // Keep background status out of the wizard's mutation/receipt sequence, including
+    // its explicit status read after a revision conflict.
+    const mutation = mutationRef.current;
+    mutation.pending += 1;
+    mutation.epoch += 1;
+    try {
+      if (input.action === 'status') {
+        const pendingStatus = statusInFlightRef.current.get(JSON.stringify([scopeKey, botId]));
+        if (pendingStatus) await pendingStatus.catch(() => undefined);
+      }
+      return await callGoogleSetup(input);
+    } finally {
+      mutation.pending -= 1;
+      mutation.epoch += 1;
+    }
+  }, [botId, callGoogleSetup, scopeKey]);
 
   const handleWizardSetupChange = useCallback(
     (next: GoogleSetupControlState, meta: { action: string }) => {
@@ -352,7 +399,7 @@ export function CurrentGoogleSetupCard({
           managedStatus
           compactChat
           externalSetup={currentLiveSetup}
-          callGoogleSetup={callGoogleSetup}
+          callGoogleSetup={callGoogleSetup ? callWizardSetup : undefined}
           onOpenBrowser={googleContext.onOpenBrowser}
           onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
           onOpenCapabilities={googleContext.onOpenCapabilities}

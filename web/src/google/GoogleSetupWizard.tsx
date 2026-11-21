@@ -406,6 +406,7 @@ export function GoogleSetupWizard({
   const [unavailableReason, setUnavailableReason] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [resumeRetry, setResumeRetry] = useState<{ scope: string; runId: string; step?: string | null } | null>(null);
   const [showDirectConfig, setShowDirectConfig] = useState(false);
   const [signInConfig, setSignInConfig] = useState<{
     open: boolean;
@@ -475,6 +476,22 @@ export function GoogleSetupWizard({
         setUnavailableReason('');
       }
       setSetup(next);
+      const hasResumeResult = action !== 'status' && action !== 'external' && next.applied !== false &&
+        !isStaleGoogleSetupResult(next) && typeof next.resumeQueued === 'boolean';
+      if (hasResumeResult) {
+        setError('');
+        setNotice('');
+      }
+      setResumeRetry(retry => {
+        if (hasResumeResult) {
+          return next.resumeQueued === false && next.id
+            ? { scope: reqScope, runId: next.id, step: next.step }
+            : null;
+        }
+        return retry?.scope === reqScope && retry.runId === next.id && retry.step === next.step && next.state === 'running'
+          ? retry
+          : null;
+      });
       setProjectIdDraft(draft =>
         draft?.scope === reqScope && draft.runId === next.id &&
           normalizeSetupMode(next.mode ?? undefined) === 'guide-browser' && !next.projectId
@@ -1024,7 +1041,9 @@ export function GoogleSetupWizard({
         return;
       case 'resume':
       case 'continue':
-        await sendControl({ action: 'resume' }, { displayedSetup: snapshot });
+        await sendCardAnswer('step', ['resume'], captured =>
+          sendControl({ action: 'resume' }, { displayedSetup: captured }),
+        );
         return;
       case 'start-over':
         if (snapshot?.id) {
@@ -1084,11 +1103,7 @@ export function GoogleSetupWizard({
   const handleChooseKind = async (kind: 'personal' | 'work') => {
     if (!kindPending || !canAnswerKind || submittingRef.current) return;
     setNotice('');
-    const updated = await sendCardAnswer('kind', [kind]);
-    if (updated?.resumeQueued === false && updated.applied !== false) {
-      setNotice(t('受众已保存。请在聊天里告诉 Bot「继续当前 Google 配置」。',
-        'Audience saved. In chat, ask the bot to continue the current Google setup.'));
-    }
+    await sendCardAnswer('kind', [kind]);
   };
   const kindSelection = kindPending && !nonAdminBlocked && !unavailableReason ? (
     <div className={compactChat ? 'gws-compact-body' : 'gws-section-block'}>
@@ -1113,6 +1128,22 @@ export function GoogleSetupWizard({
     (Array.isArray(setup?.blocker?.actions) && setup.blocker.actions.length > 0
       ? setup.blocker.actions
       : setup?.actions) ?? [];
+  const resumeRetryNotice = resumeRetry?.scope === effectiveScopeKey && resumeRetry.runId === setup?.id &&
+    resumeRetry.step === setup?.step && setup?.state === 'running' ? (
+      <div className={compactChat ? 'gws-compact-body' : 'gws-section-block'}>
+        <p className={compactChat ? 'gws-compact-notice' : 'gws-notice'} role="status">
+          {t('向导进度已保存。Bot 续跑请求提交失败。', 'Setup progress is saved. The request to resume the bot failed.')}
+        </p>
+        {!setup.blocker && !setup.unavailable && !effectiveReadOnly && callGoogleSetup ? (
+          <div className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
+            <button type="button" className="gws-btn is-primary is-sm" disabled={busy}
+              onClick={() => void handleBlockerAction({ id: 'continue' })}>
+              {compactBlockerLabel({ id: 'continue' }, t)}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    ) : null;
 
   if (compactChat) {
     const canMutateChat = !effectiveReadOnly && Boolean(setup?.id) && !setup?.unavailable;
@@ -1836,6 +1867,7 @@ export function GoogleSetupWizard({
           </div>
         ) : null}
 
+        {resumeRetryNotice}
         {notice ? <p className="gws-compact-notice" role="status">{notice}</p> : null}
         {error ? (
           <div className="gws-compact-error" role="alert">
@@ -2276,6 +2308,7 @@ export function GoogleSetupWizard({
         />
       ) : null}
 
+      {resumeRetryNotice}
       {notice ? <p className="gws-notice" role="status">{notice}</p> : null}
       {error ? (
         <div className="gws-error" role="alert">

@@ -129,8 +129,8 @@ export function createTurnAdmission(deps) {
       ? { sourceType: item.origin.sender.sourceType } : {};
     const dataBoundary = kind === 'host' && isTrustedDataBoundary(item.origin?.dataBoundary)
       ? { dataBoundary: item.origin.dataBoundary } : {};
-    // Only Runtime's private wait continuation path may populate this field.
-    // Keep the original reply destination when the answer starts a new SDK run.
+    // Trusted Runtime continuations (durable waits and setup cards) use an internal
+    // trigger with a frozen reply destination when starting a new SDK run.
     const continuation = item.continuationTurn;
     return {
       kind: continuation ? 'host.work-trigger' : 'host.user-message',

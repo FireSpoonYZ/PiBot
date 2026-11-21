@@ -112,7 +112,7 @@ export {
 
 const MAX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const CONTROL_ACTIONS = new Set(['status', 'start', 'answer', 'advance', 'cancel', 'resume']);
-const PROJECT_CONFIRMATION_FIELDS = new Set([
+const STEP_CONFIRMATION_FIELDS = new Set([
   'action', 'botId', 'fresh', 'runId', 'expectedRevision', 'card', 'cardCopy', 'step', 'signal',
 ]);
 const SYSTEM_SENSITIVE_LOCK_AUTHORITY = Object.freeze({
@@ -749,6 +749,11 @@ export function createGoogleSetupService(options = {}) {
     }
 
     const botId = assertLocalBot(rawInput.botId, { allowArchived: action === 'status' });
+    // Apply the same normalization before Center and browser-lock checks as when recording the answer.
+    const answerValues = action === 'answer' && isCard(rawInput.card) && Array.isArray(rawInput.values)
+      ? rawInput.values.map((value) => assertNonEmptyString(value, `answers.${rawInput.card}`, 320))
+      : null;
+    const [stepDecision, answeredStep] = rawInput.card === 'step' ? (answerValues ?? []) : [];
 
     return withBotLane(botId, async () => {
       const current = await store.get(botId);
@@ -759,13 +764,9 @@ export function createGoogleSetupService(options = {}) {
         action === 'start' ||
         action === 'advance' ||
         action === 'resume' ||
-        (action === 'answer' &&
-          rawInput.card === 'step' &&
-          Array.isArray(rawInput.values) &&
-          (rawInput.values[0] === 'continue-without' ||
-            rawInput.values[0] === 'keep-account' ||
-            (rawInput.values[0] === 'done' &&
-              (rawInput.values[1] === 'client' || rawInput.values[1] === 'connect'))));
+        stepDecision === 'continue-without' ||
+        stepDecision === 'keep-account' ||
+        (stepDecision === 'done' && (answeredStep === 'client' || answeredStep === 'connect'));
       const centerStatus = await readCenterStatus(botId, {
         fresh: freshCenter,
         signal: rawInput.signal,
@@ -962,11 +963,11 @@ export function createGoogleSetupService(options = {}) {
 
       if (action === 'answer') {
         const card = rawInput.card;
-        const values = rawInput.values;
+        const values = answerValues;
         if (!isCard(card)) {
           throw setupError('INVALID_ARGUMENT', `Unknown setup card: ${String(card)}`);
         }
-        if (!Array.isArray(values) || values.length === 0) {
+        if (!values?.length) {
           throw setupError('INVALID_ARGUMENT', 'answer requires a non-empty values array.');
         }
 
@@ -1114,12 +1115,16 @@ export function createGoogleSetupService(options = {}) {
             idempotent: true,
           };
         }
-        const confirmsEmbeddedProject = rawInput.step === 'project' && rawInput.runId === current.id &&
-          usesEmbeddedSetupBrowser(current.mode) &&
-          Object.keys(rawInput).every((key) => PROJECT_CONFIRMATION_FIELDS.has(key));
+        const requestedStep = rawInput.step;
+        const currentStep = currentGoogleSetupStep(current);
+        // Client and connect confirmations also recheck current Center credentials and readiness.
+        const confirmsStep = rawInput.runId === current.id && isStep(requestedStep) &&
+          requestedStep !== 'client' && requestedStep !== 'connect' &&
+          Object.keys(rawInput).every((key) => STEP_CONFIRMATION_FIELDS.has(key));
         const expectedRevision = rawInput.expectedRevision;
-        if (confirmsEmbeddedProject && (expectedRevision === undefined || expectedRevision <= current.revision) &&
-            current.steps.project?.status === 'done' && isValidGoogleProjectId(current.projectId)) {
+        if (confirmsStep && (expectedRevision === undefined || expectedRevision <= current.revision) &&
+            current.steps[requestedStep]?.status === 'done' &&
+            (requestedStep !== 'project' || isValidGoogleProjectId(current.projectId))) {
           return {
             ...buildView(botId, current, { centerStatus, modeAvailability }),
             applied: false,
@@ -1127,8 +1132,8 @@ export function createGoogleSetupService(options = {}) {
           };
         }
         // A project-only confirmation can use the live step and browser state under this run's lane.
-        const canUseCurrentProjectStep = confirmsEmbeddedProject && expectedRevision < current.revision &&
-          currentGoogleSetupStep(current) === 'project';
+        const canUseCurrentProjectStep = confirmsStep && requestedStep === 'project' &&
+          usesEmbeddedSetupBrowser(current.mode) && expectedRevision < current.revision && currentStep === 'project';
         if (expectedRevision !== undefined && expectedRevision !== current.revision && !canUseCurrentProjectStep) {
           throw setupError(
             'SETUP_REVISION_CONFLICT',
@@ -1236,7 +1241,9 @@ export function createGoogleSetupService(options = {}) {
         next.updatedAt = ts;
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
-        return { ...view, applied: true };
+        const advancedStep = requestedStep && rawInput.runId === current.id && currentStep === requestedStep &&
+          view.step !== requestedStep && view.steps[requestedStep]?.status === 'done' ? requestedStep : null;
+        return { ...view, applied: true, ...(advancedStep ? { advancedStep } : {}) };
       }
 
       throw setupError('INVALID_ARGUMENT', `Unhandled setupControl action: ${String(action)}`);

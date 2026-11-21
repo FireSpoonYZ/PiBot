@@ -298,6 +298,60 @@ test('real Host schedule handoff keeps its Stop fence across restart and private
   }
 });
 
+test('Google setup waits for services, then resumes the Bot on sign-in confirmation and Continue', async t => {
+  const f = await hostFixture(t, { googleSetup: true });
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+  const requestId = (view) => 'google-setup-' +
+    createHash('sha256').update(JSON.stringify([view.id, view.revision])).digest('hex');
+
+  const start = await control({ action: 'start' });
+  const path = await control({
+    action: 'answer', card: 'path', values: ['do-it-for-me'], runId: start.id,
+    expectedRevision: start.revision, cardCopy: start.card.copy,
+  });
+  assert.equal(path.card.card, 'services');
+  assert.equal(path.resumeQueued, undefined);
+  const account = await control({
+    action: 'answer', card: 'services', values: ['gmail'], runId: start.id,
+    expectedRevision: path.revision, cardCopy: path.card.copy,
+  });
+  assert.equal(account.step, 'account');
+  assert.equal(account.resumeQueued, true);
+  await f.done(requestId(account));
+
+  const confirmation = {
+    action: 'advance', step: 'account', runId: start.id, expectedRevision: account.revision,
+  };
+  const project = await control(confirmation);
+  assert.equal(project.id, start.id);
+  assert.equal(project.steps.account.status, 'done');
+  assert.equal(project.step, 'project');
+  assert.equal(project.resumeQueued, true);
+  const duplicate = await control(confirmation);
+  assert.equal(duplicate.applied, false);
+  assert.equal(duplicate.resumeQueued, undefined);
+  const stale = await control({ ...confirmation, runId: 'previous-run' });
+  assert.equal(stale.stale, true);
+  assert.equal(stale.resumeQueued, undefined);
+  await f.done(requestId(project));
+  const prompt = f.state.calls[1].messages.find(message =>
+    message.role !== 'system' && JSON.stringify(message.content).includes('Card google-setup/step answered: done, account'));
+  assert.ok(prompt, 'the Bot receives the saved login confirmation');
+  const history = await f.history();
+  const entry = history.find(item => item.data?.requestId === requestId(project));
+  assert.equal(entry.kind, 'host.work-trigger');
+  assert.equal(entry.data.attribution.kind, 'host');
+  assert.deepEqual(entry.data.turn.replyTarget, { kind: 'primary' });
+
+  const resume = await control({
+    action: 'answer', card: 'step', values: ['resume'], runId: start.id, expectedRevision: project.revision,
+  });
+  assert.equal(resume.step, 'project');
+  assert.equal(resume.resumeQueued, true);
+  await f.done(requestId(resume));
+  assert.equal(f.state.calls.length, 3);
+});
+
 test('choosing the Google audience queues one automatic branding continuation through the real Host', async t => {
   const f = await hostFixture(t, { googleSetup: true });
   const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
@@ -318,10 +372,10 @@ test('choosing the Google audience queues one automatic branding continuation th
   const retry = await control(answer);
   assert.equal(retry.applied, false);
   const digest = createHash('sha256').update(JSON.stringify([run.id, chosen.revision])).digest('hex');
-  await f.done(`google-setup-kind-${digest}`);
+  await f.done(`google-setup-${digest}`);
   assert.equal(f.state.calls.length, 1);
   assert.ok(f.state.calls[0].messages.some(message =>
-    message.role !== 'system' && JSON.stringify(message.content).includes('按已保存的选择继续')));
+    message.role !== 'system' && JSON.stringify(message.content).includes('Card google-setup/kind answered: personal')));
 });
 
 test('real questionnaire releases its SDK run, survives restart and resumes its original route exactly once', async t => {

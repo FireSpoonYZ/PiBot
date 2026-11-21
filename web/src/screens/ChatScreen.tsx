@@ -1361,6 +1361,7 @@ export function ChatScreen({
         </div>
 
         <CurrentGoogleSetupCard
+          active={visible}
           scopeKey={toolScopeKey}
           presentation={currentGoogleSetup}
           googleContext={googleContext}

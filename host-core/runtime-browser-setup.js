@@ -23,6 +23,7 @@ import { createBotBrowserService } from './bot-browser/service.js';
 import { createDesktopBrowserProvider } from './bot-browser/desktop-provider.js';
 import { createAndroidBrowserProvider } from './bot-browser/android-provider.js';
 import { createGoogleSetupService } from './google-setup/service.js';
+import { isMode, isServiceChoice, isStep } from './google-setup/rules.js';
 import {
   browserControlError,
   googleSetupError,
@@ -57,6 +58,49 @@ const SYSTEM_BROWSER_LOCK_AUTHORITY = Object.freeze({
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function googleSetupContinuationAnswer(input, view, advancedStep) {
+  if (view.applied !== true || view.state !== 'running' || view.stale || view.idempotent ||
+      view.card?.card === 'path' || view.card?.card === 'services') return null;
+
+  if (input.action === 'advance') {
+    return isStep(advancedStep) && input.step === advancedStep && input.runId === view.id
+      ? { card: 'step', values: ['done', advancedStep] }
+      : null;
+  }
+  if (input.action !== 'answer') return null;
+
+  // Only include decision tokens. The Bot reads account and project data from show.
+  const { card } = input;
+  const values = input.values.map((value) => value.trim());
+  const [first, second] = values;
+  switch (card) {
+    case 'path':
+      return isMode(first) || first === 'configure-directly' || first === 'import'
+        ? { card, values: [first] }
+        : null;
+    case 'account':
+      return { card, values: [first === 'other' ? 'other' : 'selected'] };
+    case 'kind':
+      return view.kind === 'personal' || view.kind === 'work'
+        ? { card, values: [view.kind] }
+        : null;
+    case 'services':
+      return { card, values: (view.choices ?? []).filter(isServiceChoice) };
+    case 'step':
+      if (first === 'redo' || first === 'let-me' || first === 'done') {
+        return isStep(second) ? { card, values: [first, second] } : null;
+      }
+      if (first === 'continue-without') {
+        return { card, values: [first, ...values.slice(1).filter(isServiceChoice)] };
+      }
+      return ['keep-account', 'resume', 'start-over', 'take-over'].includes(first)
+        ? { card, values: [first] }
+        : null;
+    default:
+      return null;
+  }
 }
 
 function resolveTrustedCaller(callerContext) {
@@ -705,30 +749,26 @@ export async function openRuntimeBrowserSetup({
     const allowArchived = input.action === 'status' || input.action === 'cancel';
     const authority = await resolveOwnerAuthority(input.botId, input.scopeId, callerContext, { allowArchived });
     const serviceInput = projectGoogleSetupControlForService(input);
-    let result;
+    let saved;
     try {
-      result = await setupService.control(serviceInput, authority);
+      saved = await setupService.control(serviceInput, authority);
     } catch (err) {
       throw safeGoogleSetupError(err);
     }
-    if (
-      typeof enqueueGoogleSetupContinuation === 'function' &&
-      serviceInput.action === 'answer' && serviceInput.card === 'kind' &&
-      result?.applied === true && result.mode === 'do-it-for-me' && result.step === 'branding' &&
-      result.personStep !== 'branding' && !result.browserLock?.active &&
-      result.steps?.branding?.status !== 'needs-user' && !result.blocker
-    ) {
-      try {
-        const resumeQueued = await enqueueGoogleSetupContinuation({
-          botId: input.botId, runId: result.id, revision: result.revision,
-        });
-        return { ...result, resumeQueued: resumeQueued !== false };
-      } catch {
-        // The audience is already saved. A failed continuation does not undo the answer.
-        return { ...result, resumeQueued: false };
-      }
+    const { advancedStep, ...result } = saved;
+    if (typeof enqueueGoogleSetupContinuation !== 'function') return result;
+    const answer = googleSetupContinuationAnswer(serviceInput, result, advancedStep);
+    if (!answer) return result;
+
+    try {
+      const resumeQueued = await enqueueGoogleSetupContinuation({
+        botId: input.botId, runId: result.id, revision: result.revision, ...answer,
+      });
+      return { ...result, resumeQueued: resumeQueued === true };
+    } catch {
+      // The answer was saved before queueing the continuation.
+      return { ...result, resumeQueued: false };
     }
-    return result;
   }
 
   async function releaseBot(botId) {

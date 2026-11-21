@@ -509,7 +509,9 @@ test('runtime assembly observes Google project navigation privately and enforces
     assert.ok(detected.revision > project.revision);
     assert.ok(browserEvents.length > 0);
     assert.ok(browserEvents.every((event) => !Object.hasOwn(event, 'url')));
-    assert.equal((await setupControl(confirm)).step, 'apis');
+    const apis = await setupControl(confirm);
+    assert.equal(apis.step, 'apis');
+    assert.equal(apis.resumeQueued, true);
 
     const branding = await setupControl({ action: 'advance', step: 'apis' });
     assert.equal(branding.card.card, 'kind');
@@ -521,9 +523,10 @@ test('runtime assembly observes Google project navigation privately and enforces
     assert.equal(chosen.kind, 'personal');
     assert.equal(chosen.resumeQueued, true);
     assert.equal((await setupControl(answerKind)).applied, false);
-    assert.deepEqual(setupContinuations, [{
-      botId: botA.botId, runId: started.id, revision: chosen.revision,
-    }]);
+    assert.deepEqual(
+      setupContinuations.map(({ botId, runId, revision }) => ({ botId, runId, revision })),
+      [apis, chosen].map(({ id, revision }) => ({ botId: botA.botId, runId: id, revision })),
+    );
 
     // 3. Fail-closed safety gate: triggering sensitive `client` step while browser provider fails
     // MUST keep the safety lock engaged and block bot_browser tool with PAUSED_FOR_HUMAN

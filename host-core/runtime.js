@@ -77,6 +77,7 @@ import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
+import { googleSetupAnswerLine } from './google-setup/vendor/orca/google-setup-card-turn.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
@@ -1969,7 +1970,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  // trustedMeta 仅允许 Host 内部受信路径传入（dispatchContext、wait continuation、
+  // trustedMeta 仅允许 Host 内部受信路径传入（dispatchContext、内部续轮、
   // 受信 sourceType/dataBoundary），绝不向公开 submit 或外部 webhook payload 开放。
   function submitPrimary(botId, input, stopEpoch, trustedMeta = null) {
     const meta = isPlainObject(trustedMeta) ? trustedMeta : {};
@@ -3431,14 +3432,20 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     browserControl: browserSetup.browserControl,
     googleSetupControl(input, callerContext) {
       const stopEpoch = turns.stopEpoch(input?.botId);
-      return browserSetup.googleSetupControl(input, callerContext, async ({ botId, runId, revision }) => {
+      return browserSetup.googleSetupControl(input, callerContext, async ({ botId, runId, revision, card, values }) => {
         if (closing || isMaintenance()) return false;
         const fingerprint = createHash('sha256').update(JSON.stringify([runId, revision])).digest('hex');
         const receipt = await submitPrimary(botId, {
-          requestId: `google-setup-kind-${fingerprint}`,
-          text: '用户已在 Google 配置卡片选择受众。请调用 google_setup(action="show")。若向导仍在运行且当前为配置应用信息步骤，按已保存的选择继续。',
+          requestId: `google-setup-${fingerprint}`,
+          text: [
+            googleSetupAnswerLine(card, values),
+            `Call google_setup(action="show") first. Continue only if view.id is ${JSON.stringify(runId)} and view.state is "running".`,
+            'Follow the latest guidance for the current setup mode, owner handoffs, and sensitive steps.',
+          ].join('\n'),
           origin: { sender: { kind: 'host', name: 'Google 配置' } },
-        }, stopEpoch);
+        }, stopEpoch, {
+          continuationTurn: { kind: 'primary', scopeId: null, replyTarget: { kind: 'primary' } },
+        });
         return ['queued', 'placed', 'done'].includes(receipt?.status);
       });
     },
