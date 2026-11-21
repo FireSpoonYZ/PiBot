@@ -1,0 +1,12 @@
+---
+name: google-account-connection
+description: Connect or resume connecting a Google Workspace account for Gmail, Calendar, Drive, and enabled services. Use for 连接谷歌账号、连接 Google 账号、绑定谷歌、登录 Gmail、谷歌授权、重新连接, or GOOGLE_ACCOUNT_NOT_CONNECTED. Explicit Gemini/Vertex API-key requests use model-provider setup.
+---
+
+# Google account connection
+
+1. Call `google_setup` with `action="show"` first. Read the returned current state, Center readiness, blockers, owner card, and executable instructions. In Code Mode Only, inspect and invoke `google_setup` through codemode's registered `tools.*` / `describeTool` interface. Do not search provider authentication, automation, or capability installation tools for this request.
+2. If the requested account/services are ready, report that verified state and proceed with the user's authorized task. Do not restart setup or reconfigure the Center client.
+3. If a wizard is running, continue its existing card and current step. If no wizard is active and the requested connection is not ready, call `google_setup` with `action="start"`, then follow its returned card. If Center requires an administrator, explain the actual blocker instead of attempting to grant yourself access.
+4. Use the returned instructions for non-sensitive setup work. The user must choose their account, sign in, approve consent and terms, and enter private credentials through the owner card or system browser. Keep passwords, Client Secrets, OAuth tokens, and callback URLs out of chat and tool calls. Use `action="need_user"` for the handoff and end the turn when only user action remains.
+5. After the user returns, call `action="show"` again. Use `action="done"` when the current workflow calls for it. Report completion only after Center verifies that the selected services are ready.

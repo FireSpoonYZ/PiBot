@@ -37,11 +37,23 @@ import { createControlClient } from '../../host-core/control-client.js';
 import { createLocalControlAdapter } from '../../host-core/local-control-adapter.js';
 import { createHostControlReceiver } from '../../host-core/host-control.js';
 import { openRuntimeBrowserSetup } from '../../host-core/runtime-browser-setup.js';
+import { createBotManagementSkillSection } from '../../host-core/bot-management-skill.js';
 import { openHost } from '../../host-core/host.js';
 import { PrimaryIndex } from '../../host-core/runtime-docs.js';
 import { WorkContextState } from '../../host-core/work-context-docs.js';
 import { projectToolPresentation, normalizeToolPresentation } from '../../host-core/tool-presentation.js';
 
+test('builtin skill catalog includes Google account connection without inlining its workflow', () => {
+  const section = createBotManagementSkillSection();
+  const catalog = section.render();
+  assert.equal(section.key, 'bot-management-skill');
+  assert.match(catalog, /<name>bot-management<\/name>/);
+  assert.match(catalog, /<name>google-account-connection<\/name>/);
+  assert.match(catalog, /连接谷歌账号/);
+  assert.match(catalog, /GOOGLE_ACCOUNT_NOT_CONNECTED/);
+  assert.match(catalog, /google-account-connection[\\/]SKILL\.md/);
+  assert.ok(!catalog.includes('# Google account connection'));
+});
 /**
  * Minimal deterministic in-memory browser provider for headless runtime tests
  * (exercises the real createBotBrowserService state machine without spawning
@@ -379,6 +391,10 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
     const setupTool = setupExt.tools.find((t) => t.name === 'google_setup');
     const browserTool = browserExt.tools.find((t) => t.name === 'bot_browser');
     assert.ok(setupTool);
+    assert.match(setupTool.description, /连接谷歌账号/);
+    assert.match(setupTool.description, /GOOGLE_ACCOUNT_NOT_CONNECTED/);
+    assert.equal(setupTool.deferred, undefined);
+    assert.equal(setupTool.callers, undefined, 'Code Mode Only can call the registered Google setup tool');
     assert.ok(browserTool);
 
     const publishedDetails = [];

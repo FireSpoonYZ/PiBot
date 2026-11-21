@@ -753,9 +753,10 @@ export async function createDesktopBrowserProvider(opts = {}) {
       };
     }
     if (lastLaunchFailure) {
+      const retryable = lastLaunchFailure.reason === 'chromium_start_failed';
       return {
-        available: false,
-        canStreamInteract: false,
+        available: retryable,
+        canStreamInteract: retryable,
         reason: lastLaunchFailure.reason,
         detail: lastLaunchFailure.detail,
       };

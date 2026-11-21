@@ -4,10 +4,10 @@
 // 任何一步失败都留下可重试的 queued/failed 记录：绝不静默沿用旧 set 执行模型。
 // 恢复：restoreTurns() 在冷启动 resume 之前按持久 pin/admissionId 重挂被钉住的旧版本。
 import { createHash } from 'node:crypto';
-import { ConversationBusy, ConversationIdle, LiveDoc, InboxDoc } from '@earendil-works/pi-durable';
+import { ConversationBusy, ConversationIdle, LiveDoc, InboxDoc, AgentDoc, configure } from '@earendil-works/pi-durable';
 import { TurnQueue, TurnPin, toTurnAdmissionStatus, toQueuedReceipt } from './runtime-turns-docs.js';
 import { assertModelSupportsAttachments, normalizeAttachmentIds } from './attachments.js';
-import { PrimaryIndex, getPrimaryConversation, applyAgentProfile, RequestKeys } from './runtime-docs.js';
+import { PrimaryIndex, getPrimaryConversation, applyAgentProfile, codemodeModelTools, RequestKeys } from './runtime-docs.js';
 import { formatPrimarySubmission } from './runtime-history.js';
 import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
@@ -911,6 +911,27 @@ export function createTurnAdmission(deps) {
           await syncPublishedQueue(bot);
           return null;
         }
+        submission = await harness().submission(submissionId, context);
+      } else if (item.origin?.sender?.kind === 'user' && !item.continuationTurn && !skippedIdlePrep) {
+        // Discovery belongs to the current human request. Admit before clearing it
+        // in the same transaction, so a racing run or replay keeps its loaded tools.
+        const submissionId = await harness().commit(async (tx) => {
+          const prior = await tx.submissionByRequest(conversation.id, item.requestId);
+          if (prior) return prior.id;
+          const id = await conversation.submit(tx, { ...draft, whenBusy: 'reject' });
+          const state = await tx.doc(AgentDoc, conversation.id);
+          const modelTools = state.modelTools;
+          if (profile.codemodeOnly) {
+            await configure(tx, conversation.id, { modelTools: codemodeModelTools(profile) });
+          } else if (modelTools && !Array.isArray(modelTools) && modelTools.add?.length) {
+            await configure(tx, conversation.id, {
+              modelTools: modelTools.remove?.length
+                ? { remove: modelTools.remove.map((name) => ({ name })) }
+                : null,
+            });
+          }
+          return id;
+        }, context);
         submission = await harness().submission(submissionId, context);
       } else {
         submission = await conversation.submit(draft, context);
