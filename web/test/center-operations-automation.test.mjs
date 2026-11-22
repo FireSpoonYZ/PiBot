@@ -606,7 +606,7 @@ test('automation_task_update blocks OAuth and Bot from forging or bypassing user
   }
 });
 
-test('automation_webhook_* exposes safe read/update/delete only, never returns tokens or redirects target', async () => {
+test('automation_webhook_* supports read/update/rebind/delete while never issuing or exposing tokens', async () => {
   const env = createAutomationHarness();
   try {
     const secretToken = randomBytes(32).toString('base64url');
@@ -642,15 +642,7 @@ test('automation_webhook_* exposes safe read/update/delete only, never returns t
     assert.equal(JSON.stringify(events).includes('do-not-leak'), false);
     assert.equal(JSON.stringify(events).includes(secretToken), false);
 
-    // Redirecting target deviceId/botId or supplying token is strictly forbidden.
-    await assert.rejects(
-      () => env.handlers.automation_webhook_update({
-        id: seededRoute.id,
-        deviceId: 'dev-2',
-        botId: 'bot-remote',
-      }, OAUTH_CLIENT),
-      (err) => err?.code === 'FORBIDDEN',
-    );
+    // Supplying token fields remains strictly forbidden.
     await assert.rejects(
       () => env.handlers.automation_webhook_update({
         id: seededRoute.id,
@@ -659,7 +651,41 @@ test('automation_webhook_* exposes safe read/update/delete only, never returns t
       (err) => err?.code === 'FORBIDDEN',
     );
 
-    // Safe partial update modifies instruction & enabled while preserving target deviceId/botId.
+    // Scoped OAuth caller cannot rebind webhook to an unauthorized target Bot.
+    const scopedOAuth = {
+      kind: 'oauth',
+      clientId: 'oauth-scoped',
+      botTargets: [{ deviceId: 'dev-1', botId: 'bot-coord' }],
+    };
+    await assert.rejects(
+      () => env.handlers.automation_webhook_update({
+        id: seededRoute.id,
+        deviceId: 'dev-2',
+        botId: 'bot-remote',
+      }, scopedOAuth),
+      (err) => err?.code === 'FORBIDDEN',
+    );
+
+    // Rebinding target deviceId/botId succeeds for authorized callers and validates target existence.
+    await assert.rejects(
+      () => env.handlers.automation_webhook_update({
+        id: seededRoute.id,
+        deviceId: 'dev-2',
+        botId: 'bot-missing',
+      }, OAUTH_CLIENT),
+      (err) => err?.code === 'BOT_NOT_FOUND',
+    );
+    const rebound = await env.handlers.automation_webhook_update({
+      id: seededRoute.id,
+      deviceId: 'dev-2',
+      botId: 'bot-remote',
+    }, BOT_COORD);
+    assert.equal(rebound.deviceId, 'dev-2');
+    assert.equal(rebound.botId, 'bot-remote');
+    assert.equal(rebound.name, 'CI Hook');
+    assert.equal('token' in rebound, false);
+
+    // Safe partial update modifies instruction & enabled while preserving current target deviceId/botId.
     const updated = await env.handlers.automation_webhook_update({
       id: seededRoute.id,
       instruction: 'Inspect CI failure and summarize',
@@ -668,8 +694,8 @@ test('automation_webhook_* exposes safe read/update/delete only, never returns t
     assert.equal(updated.name, 'CI Hook');
     assert.equal(updated.instruction, 'Inspect CI failure and summarize');
     assert.equal(updated.enabled, false);
-    assert.equal(updated.deviceId, 'dev-1');
-    assert.equal(updated.botId, 'bot-coord');
+    assert.equal(updated.deviceId, 'dev-2');
+    assert.equal(updated.botId, 'bot-remote');
     assert.equal('token' in updated, false);
 
     // Disabling cancels pending undelivered events.

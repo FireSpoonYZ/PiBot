@@ -32,11 +32,9 @@ const NULLABLE_ADDRESS_LIST_SCHEMA = {
  *   Google account scopes/permissions (owner-only in Center UI).
  * - Never returns unauthorized email or calendar body content (rule metadata and delivery
  *   receipts only).
- * - Intentionally excludes creating brand-new Google trigger rules and forbids redirecting
- *   `account`, `deviceId`, `botId`, `source`, or `event` on existing rules: active Google
- *   trigger rules inject live Gmail/Calendar data into a high-privilege Bot without
- *   MCP safe-tool sandboxing, so new account/Bot bindings require explicit human owner
- *   admission in Center UI.
+ * - Bots and authorized OAuth MCP callers may create, update, rebind, pause, resume, and
+ *   remove trigger rules on already-authorized Google accounts (scoped OAuth callers remain
+ *   restricted to their authorized `botTargets`).
  */
 export const googleRuleOperations = Object.freeze([
   defineOperation({
@@ -93,8 +91,88 @@ export const googleRuleOperations = Object.freeze([
   }),
 
   defineOperation({
+    name: 'automation_google_rule_create',
+    description: 'Create a Google Workspace trigger rule (Gmail new_email or Calendar starting_soon) on an already-authorized Google account for a target Bot. For Bot callers, deviceId defaults to the caller device and botId defaults to the caller Bot on the same device; OAuth callers and cross-device calls must specify deviceId and botId. Account may be omitted when exactly one connected Google account exists. Never initiates Google OAuth sign-in, changes Google permissions, or accepts OAuth tokens.',
+    properties: {
+      deviceId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Target Host device ID. Optional for Bot callers (defaults to caller device); required for OAuth callers.',
+      },
+      botId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Target Bot ID. Optional for Bot callers targeting their own device (defaults to caller Bot); required for OAuth callers or cross-device calls.',
+      },
+      account: {
+        type: 'string',
+        minLength: 1,
+        maxLength: MAX_FILTER_LENGTH,
+        description: 'Optional already-authorized Google account email or ID. May be omitted when exactly one connected Google account exists.',
+      },
+      source: {
+        type: 'string',
+        enum: ['gmail', 'calendar'],
+        description: 'Trigger source: "gmail" (new_email) or "calendar" (starting_soon).',
+      },
+      event: {
+        type: 'string',
+        enum: ['new_email', 'starting_soon'],
+        description: 'Optional trigger event name; must match source ("new_email" for gmail, "starting_soon" for calendar).',
+      },
+      name: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 80,
+        description: 'Optional display name for the trigger rule (defaults to a source/account label).',
+      },
+      instruction: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 8000,
+        description: 'Instruction delivered to the target Bot when the rule triggers.',
+      },
+      enabled: {
+        type: 'boolean',
+        description: 'Whether the rule starts enabled (default true).',
+      },
+      from: {
+        ...NULLABLE_ADDRESS_LIST_SCHEMA,
+        description: 'Gmail rules only: sender addresses or domains (max 10).',
+      },
+      to: {
+        ...NULLABLE_ADDRESS_LIST_SCHEMA,
+        description: 'Gmail rules only: recipient addresses (max 10).',
+      },
+      subjectContains: {
+        ...NULLABLE_FILTER_TEXT_SCHEMA,
+        description: 'Gmail rules only: case-insensitive subject substring filter.',
+      },
+      label: {
+        ...NULLABLE_FILTER_TEXT_SCHEMA,
+        description: 'Gmail rules only: Gmail label name or ID filter.',
+      },
+      calendar: {
+        ...NULLABLE_FILTER_TEXT_SCHEMA,
+        description: 'Calendar rules only: calendar ID (defaults to primary).',
+      },
+      minutesBefore: {
+        type: 'integer',
+        minimum: 0,
+        maximum: MAX_MINUTES_BEFORE,
+        description: 'Calendar rules only: minutes before meeting start to trigger (0..1440, default 10).',
+      },
+    },
+    required: ['source', 'instruction'],
+    readOnly: false,
+    destructive: false,
+  }),
+
+  defineOperation({
     name: 'automation_google_rule_set_enabled',
-    description: 'Pause or resume an existing Google Workspace trigger rule while preserving its owner-admitted account, source, filters, instruction, and target Bot. Pausing cancels pending undelivered events; resuming re-verifies original explicit account and target Bot admission.',
+    description: 'Pause or resume an existing Google Workspace trigger rule while preserving its configured account, source, filters, instruction, and target Bot. Pausing cancels pending undelivered events; resuming verifies the target Bot and authorized Google account are still available.',
     properties: {
       id: {
         type: 'string',
@@ -103,7 +181,7 @@ export const googleRuleOperations = Object.freeze([
       },
       enabled: {
         type: 'boolean',
-        description: 'Target enabled state (false pauses and cancels pending deliveries; true resumes under existing explicit account/target admission).',
+        description: 'Target enabled state (false pauses and cancels pending deliveries; true resumes the rule).',
       },
     },
     required: ['id', 'enabled'],
@@ -113,12 +191,40 @@ export const googleRuleOperations = Object.freeze([
 
   defineOperation({
     name: 'automation_google_rule_update',
-    description: 'Update safe non-credential settings (name, instruction, enabled, and source-matched Gmail/Calendar filters) of an existing Google Workspace trigger rule. Preserves the owner-admitted account, target deviceId/botId, and trigger source; never creates new rules, changes Google permissions, or accepts OAuth tokens.',
+    description: 'Update an existing Google Workspace trigger rule (name, instruction, enabled, target deviceId/botId, authorized account, source/event, and source-matched Gmail/Calendar filters). Never initiates Google OAuth sign-in, changes Google permissions, or accepts OAuth tokens.',
     properties: {
       id: {
         type: 'string',
         pattern: GOOGLE_RULE_ID_PATTERN,
         description: 'Existing Google trigger rule ID.',
+      },
+      deviceId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Updated target Host device ID.',
+      },
+      botId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Updated target Bot ID.',
+      },
+      account: {
+        type: 'string',
+        minLength: 1,
+        maxLength: MAX_FILTER_LENGTH,
+        description: 'Updated already-authorized Google account email or ID.',
+      },
+      source: {
+        type: 'string',
+        enum: ['gmail', 'calendar'],
+        description: 'Updated trigger source ("gmail" or "calendar").',
+      },
+      event: {
+        type: 'string',
+        enum: ['new_email', 'starting_soon'],
+        description: 'Optional trigger event name; must match the effective source.',
       },
       name: {
         type: 'string',
@@ -130,7 +236,7 @@ export const googleRuleOperations = Object.freeze([
         type: 'string',
         minLength: 1,
         maxLength: 8000,
-        description: 'Updated instruction delivered to the existing target Bot when the rule triggers.',
+        description: 'Updated instruction delivered to the target Bot when the rule triggers.',
       },
       enabled: {
         type: 'boolean',

@@ -3,20 +3,19 @@
  * - Host scheduled tasks via fixed Host RPC (`bridge.call(deviceId, 'scheduleTask', ...)`).
  * - Center global tasks via real Bot actor (`store.executeTaskAction`) or non-interactive OAuth owner routes
  *   (`GET /api/tasks`, `POST /api/tasks/action`), with strict CAS and anti-approval-forgery guards.
- * - Center webhooks safe subset (`GET /api/webhooks`, `GET /api/webhooks/:id/events`,
- *   `PUT /api/webhooks/:id` for name/instruction/enabled only, `DELETE /api/webhooks/:id`).
- * - Authorized Google Workspace trigger rules safe subset (`GET /api/google/rules`,
- *   `GET /api/google/rules/:id/events`, `POST /api/google/rules/save` for existing rules only
- *   preserving original explicit account/target/source, `POST /api/google/rules/remove`).
+ * - Center webhooks non-secret operations (`GET /api/webhooks`, `GET /api/webhooks/:id/events`,
+ *   `PUT /api/webhooks/:id` for name/instruction/enabled/deviceId/botId, `DELETE /api/webhooks/:id`).
+ * - Authorized Google Workspace trigger rules (`GET /api/google/rules`,
+ *   `GET /api/google/rules/:id/events`, `POST /api/google/rules/save` for create/update/rebind/toggle,
+ *   `POST /api/google/rules/remove`).
  *
  * Intentionally excluded for security boundaries:
  * - Task human approvals/confirmations: `confirm_plan`, `answer_prompt`, `resolve_adoption_scope`, `dismiss_adoption`,
  *   clearing `pendingPrompt`, or advancing a task/step gated on a pending plan/question/needs_scope.
- * - Webhook secret issuance/rotation and trusted-target redirection: `POST /api/webhooks` (returns Bearer token),
- *   `POST /api/webhooks/:id/rotate-token` (returns Bearer token), and changing `deviceId`/`botId` on existing webhooks.
- * - Google OAuth/account management and new/redirected high-privilege Google trigger rules:
- *   `/api/google/status`, `/configure`, `/authorize`, `/flow`, `/cancel`, `/check`, `/remove`,
- *   `/api/oauth/google/callback`, creating brand-new Google rules, or rebinding `account`/`deviceId`/`botId`/`source`.
+ * - Webhook secret issuance/rotation: `POST /api/webhooks` (returns Bearer token) and
+ *   `POST /api/webhooks/:id/rotate-token` (returns Bearer token).
+ * - Google OAuth/account management: `/api/google/status`, `/configure`, `/authorize`, `/flow`,
+ *   `/cancel`, `/check`, `/remove`, `/api/oauth/google/callback`.
  * - Interactive Host OS permission prompt: schedule `requestExactAlarm`.
  * - External/Host delivery routes: `POST /api/webhooks/:id/events`, `/api/host/webhook-events/*`, `/api/host/tasks/*`.
  */
@@ -113,8 +112,8 @@ const TASK_ADOPTION_FIELDS = new Set(['phase', 'shortReceipt', 'changeText', 'sc
 
 const WEBHOOK_LIST_FIELDS = new Set();
 const WEBHOOK_ID_ONLY_FIELDS = new Set(['id']);
-const WEBHOOK_UPDATE_FIELDS = new Set(['id', 'name', 'instruction', 'enabled']);
-const WEBHOOK_FORBIDDEN_UPDATE_FIELDS = new Set(['deviceId', 'botId', 'token', 'tokenHash', 'token_hash']);
+const WEBHOOK_UPDATE_FIELDS = new Set(['id', 'deviceId', 'botId', 'name', 'instruction', 'enabled']);
+const WEBHOOK_FORBIDDEN_UPDATE_FIELDS = new Set(['token', 'tokenHash', 'token_hash']);
 
 function fail(code, message) {
   throw Object.assign(new Error(message), { code });
@@ -196,18 +195,47 @@ function assertWebhookId(value) {
   return value;
 }
 
+function normalizeBotTargets(rawTargets) {
+  if (rawTargets === undefined) return null;
+  if (!Array.isArray(rawTargets)) {
+    fail('FORBIDDEN', 'Invalid actor botTargets');
+  }
+  if (rawTargets.length === 0) return null;
+  const targets = [];
+  for (const entry of rawTargets) {
+    if (!isPlainObject(entry)) {
+      fail('FORBIDDEN', 'Invalid actor botTargets entry');
+    }
+    const deviceId = assertTrimmedId(entry.deviceId, 'actor.botTargets.deviceId', 128);
+    const botId = assertTrimmedId(entry.botId, 'actor.botTargets.botId', 128);
+    targets.push({ deviceId, botId });
+  }
+  return targets;
+}
+
+function assertActorTargetAllowed(actor, deviceId, botId) {
+  if (!actor.botTargets) return;
+  const allowed = actor.botTargets.some(
+    (target) => target.deviceId === deviceId && target.botId === botId,
+  );
+  if (!allowed) {
+    fail('FORBIDDEN', 'Target Bot is not authorized for this caller');
+  }
+}
+
 function validateActor(actor) {
   if (!isPlainObject(actor)) {
     fail('UNAUTHENTICATED', 'Authenticated actor is required');
   }
+  const botTargets = normalizeBotTargets(actor.botTargets);
   if (actor.kind === 'bot') {
     const deviceId = assertTrimmedId(actor.deviceId, 'actor.deviceId', 128);
     const botId = assertTrimmedId(actor.botId, 'actor.botId', 128);
-    return { kind: 'bot', deviceId, botId };
+    return { kind: 'bot', deviceId, botId, botTargets };
   }
   if (actor.kind === 'oauth') {
     const clientId = assertTrimmedId(actor.clientId, 'actor.clientId', 200);
-    return { kind: 'oauth', clientId };
+    return { kind: 'oauth', clientId, botTargets };
   }
   fail('FORBIDDEN', 'Unsupported actor kind');
 }
@@ -898,7 +926,7 @@ export function createHandlers(deps = {}) {
       return owner('POST', '/api/tasks/action', { params: {}, body: payload, query: {} });
     },
 
-    // ---- Center Webhooks (safe non-secret / non-target-redirect subset) ----
+    // ---- Center Webhooks (non-secret read/update/delete) ----
     async automation_webhook_list(args, rawActor) {
       validateActor(rawActor);
       const inputArgs = optionalPlainObject(args);
@@ -923,7 +951,7 @@ export function createHandlers(deps = {}) {
     },
 
     async automation_webhook_update(args, rawActor) {
-      validateActor(rawActor);
+      const actor = validateActor(rawActor);
       const inputArgs = requirePlainObject(args);
       for (const key of Object.keys(inputArgs)) {
         if (WEBHOOK_FORBIDDEN_UPDATE_FIELDS.has(key)) {
@@ -933,13 +961,17 @@ export function createHandlers(deps = {}) {
       rejectUnknownFields(inputArgs, WEBHOOK_UPDATE_FIELDS);
 
       const id = assertWebhookId(inputArgs.id);
+      const hasDeviceId = inputArgs.deviceId !== undefined;
+      const hasBotId = inputArgs.botId !== undefined;
       const hasName = inputArgs.name !== undefined;
       const hasInstruction = inputArgs.instruction !== undefined;
       const hasEnabled = inputArgs.enabled !== undefined;
-      if (!hasName && !hasInstruction && !hasEnabled) {
-        fail('INVALID_ARGUMENT', 'At least one of name, instruction, or enabled must be provided');
+      if (!hasDeviceId && !hasBotId && !hasName && !hasInstruction && !hasEnabled) {
+        fail('INVALID_ARGUMENT', 'At least one of deviceId, botId, name, instruction, or enabled must be provided');
       }
 
+      const nextDeviceId = hasDeviceId ? assertTrimmedId(inputArgs.deviceId, 'deviceId', 128) : undefined;
+      const nextBotId = hasBotId ? assertTrimmedId(inputArgs.botId, 'botId', 128) : undefined;
       const nextName = hasName ? assertNonEmptyText(inputArgs.name, 'name', 80).trim() : undefined;
       const nextInstruction = hasInstruction ? assertNonEmptyText(inputArgs.instruction, 'instruction', 8000) : undefined;
       if (hasEnabled && typeof inputArgs.enabled !== 'boolean') {
@@ -947,14 +979,22 @@ export function createHandlers(deps = {}) {
       }
 
       const existing = await getExistingWebhook(deps, id);
+      assertActorTargetAllowed(actor, existing.deviceId, existing.botId);
+      assertActorTargetAllowed(
+        actor,
+        nextDeviceId !== undefined ? nextDeviceId : existing.deviceId,
+        nextBotId !== undefined ? nextBotId : existing.botId,
+      );
+
       const owner = requireOwnerAdapter(deps);
-      // Never pass deviceId or botId: PUT /api/webhooks/:id preserves the existing trusted target.
       const updated = await owner('PUT', '/api/webhooks/:id', {
         params: { id },
         body: {
           name: nextName !== undefined ? nextName : existing.name,
           instruction: nextInstruction !== undefined ? nextInstruction : existing.instruction,
           enabled: hasEnabled ? inputArgs.enabled : Boolean(existing.enabled),
+          ...(nextDeviceId !== undefined ? { deviceId: nextDeviceId } : {}),
+          ...(nextBotId !== undefined ? { botId: nextBotId } : {}),
         },
         query: {},
       });
@@ -971,7 +1011,7 @@ export function createHandlers(deps = {}) {
       return { deleted: true, id };
     },
 
-    // ---- Authorized Google Workspace Trigger Rules (safe read/events/edit/remove) ----
+    // ---- Authorized Google Workspace Trigger Rules (list/events/create/toggle/update/remove) ----
     ...createGoogleRuleHandlers(deps),
   };
 }

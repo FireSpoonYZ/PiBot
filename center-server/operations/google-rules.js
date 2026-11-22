@@ -9,7 +9,7 @@
  * - `GET /api/google/rules/:id/events`
  * (with direct `deps.googleRules` / `deps.google.rules` fallback when `deps.owner` is absent).
  *
- * Security boundaries & high-privilege impact:
+ * Security boundaries:
  * - Never invokes or exposes Google OAuth sign-in, client configuration, callback, account check,
  *   account removal, or scope/permission mutation routes (`/api/google/status`, `/configure`,
  *   `/authorize`, `/flow`, `/cancel`, `/check`, `/remove`, `/api/oauth/google/callback`).
@@ -18,15 +18,11 @@
  * - Never returns unauthorized email/calendar body content: event listings return sanitized
  *   delivery receipt metadata only (never `payload`, `text`, `body`, `snippet`, `subject`,
  *   `google`, or `instruction`), and error/diagnostic strings are secret-scrubbed.
- * - Intentionally excludes creating brand-new Google trigger rules and forbids changing
- *   `deviceId`, `botId`, `account`, `source`, or `event` on existing rules. Active Google
- *   trigger rules inject live Gmail/Calendar events as `trustedSource: 'google-workspace-rule'`
- *   into a high-privilege Bot (without `MCP_SAFE_TOOL_POLICY` sandboxing). Creating new rules
- *   or rebinding a rule to a different account/Bot therefore remains human-owner-only in Center UI.
- * - Editing or re-enabling an existing rule always preserves its original explicit
- *   `(account, deviceId, botId, source)` binding (never falling back to implicit single-account
- *   selection) and passes them explicitly to `POST /api/google/rules/save` so the Google rules
- *   service re-enforces device registry, active non-archived Bot, and authorized account checks.
+ * - Bots and authorized OAuth MCP callers may create, update, rebind (`deviceId`, `botId`,
+ *   `account`, `source`, `event`), pause, resume, and remove trigger rules on already-authorized
+ *   Google accounts through `POST /api/google/rules/save`, which enforces device registry, active
+ *   non-archived Bot, and connected account checks. Scoped OAuth callers remain restricted to
+ *   their authorized `botTargets` for both existing and updated targets.
  */
 
 const GOOGLE_RULE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -80,14 +76,6 @@ const FORBIDDEN_AUTH_FIELD_SET = new Set([
   'api_key',
 ]);
 
-const FORBIDDEN_IMMUTABLE_RULE_FIELDS = new Set([
-  'deviceId',
-  'botId',
-  'account',
-  'source',
-  'event',
-]);
-
 const FORBIDDEN_BODY_KEYS = new Set([
   'payload',
   'payloadjson',
@@ -106,7 +94,28 @@ const FORBIDDEN_BODY_KEYS = new Set([
 const LIST_FIELDS = new Set(['deviceId', 'botId', 'account', 'enabled']);
 const EVENTS_FIELDS = new Set(['id', 'limit']);
 const SET_ENABLED_FIELDS = new Set(['id', 'enabled']);
+const CREATE_FIELDS = new Set([
+  'deviceId',
+  'botId',
+  'account',
+  'source',
+  'event',
+  'name',
+  'instruction',
+  'enabled',
+  'from',
+  'to',
+  'subjectContains',
+  'label',
+  'calendar',
+  'minutesBefore',
+]);
 const UPDATE_MUTABLE_KEYS = [
+  'deviceId',
+  'botId',
+  'account',
+  'source',
+  'event',
   'name',
   'instruction',
   'enabled',
@@ -160,16 +169,13 @@ function optionalPlainObject(value, label = 'args') {
   return requirePlainObject(value, label);
 }
 
-function assertCleanFields(obj, allowed, { forbidImmutable = false } = {}) {
+function assertCleanFields(obj, allowed) {
   for (const key of Object.keys(obj)) {
     if (PROTOTYPE_KEYS.has(key)) {
       fail('INVALID_ARGUMENT', `Disallowed field: ${key}`);
     }
     if (FORBIDDEN_AUTH_FIELD_SET.has(key.toLowerCase())) {
       fail('FORBIDDEN', `OAuth, credential, token, and permission field '${key}' is forbidden`);
-    }
-    if (forbidImmutable && FORBIDDEN_IMMUTABLE_RULE_FIELDS.has(key)) {
-      fail('FORBIDDEN', `Modifying Google rule ${key} is forbidden; create or rebind rules in Center UI`);
     }
     if (!allowed.has(key)) {
       fail('INVALID_ARGUMENT', `Unknown field: ${key}`);
@@ -502,14 +508,96 @@ function assertExistingRuleExplicitBinding(existing) {
   };
 }
 
+function assertSourceAndEvent(source, event) {
+  if (source !== 'gmail' && source !== 'calendar') {
+    fail('INVALID_ARGUMENT', 'source must be gmail or calendar');
+  }
+  const expectedEvent = source === 'gmail' ? 'new_email' : 'starting_soon';
+  if (event !== undefined && event !== expectedEvent) {
+    fail('INVALID_ARGUMENT', `event must be ${expectedEvent} for ${source}`);
+  }
+  return { source, event: expectedEvent };
+}
+
+function resolveCreateTarget(inputArgs, actor) {
+  let deviceId;
+  let botId;
+  if (actor.kind === 'bot') {
+    deviceId = inputArgs.deviceId !== undefined
+      ? assertTrimmedId(inputArgs.deviceId, 'deviceId', 128)
+      : actor.deviceId;
+    if (inputArgs.botId !== undefined) {
+      botId = assertTrimmedId(inputArgs.botId, 'botId', 128);
+    } else if (deviceId === actor.deviceId) {
+      botId = actor.botId;
+    } else {
+      fail('INVALID_ARGUMENT', 'botId is required when targeting a different deviceId');
+    }
+  } else {
+    deviceId = assertTrimmedId(inputArgs.deviceId, 'deviceId', 128);
+    botId = assertTrimmedId(inputArgs.botId, 'botId', 128);
+  }
+  assertActorRuleTargetAllowed(actor, { deviceId, botId });
+  return { deviceId, botId };
+}
+
+function extractSourceFilters(inputArgs, source) {
+  const hasGmailFields = inputArgs.from !== undefined
+    || inputArgs.to !== undefined
+    || inputArgs.subjectContains !== undefined
+    || inputArgs.label !== undefined;
+  const hasCalendarFields = inputArgs.calendar !== undefined
+    || inputArgs.minutesBefore !== undefined;
+
+  const filters = {};
+  if (source === 'gmail') {
+    if (hasCalendarFields) {
+      fail('INVALID_ARGUMENT', 'calendar and minutesBefore are not valid for gmail rules');
+    }
+    if (inputArgs.from !== undefined) {
+      filters.from = normalizeAddressListInput(inputArgs.from, 'from');
+    }
+    if (inputArgs.to !== undefined) {
+      filters.to = normalizeAddressListInput(inputArgs.to, 'to');
+    }
+    if (inputArgs.subjectContains !== undefined) {
+      filters.subjectContains = normalizeOptionalFilterText(inputArgs.subjectContains, 'subjectContains');
+    }
+    if (inputArgs.label !== undefined) {
+      filters.label = normalizeOptionalFilterText(inputArgs.label, 'label');
+    }
+  } else {
+    if (hasGmailFields) {
+      fail('INVALID_ARGUMENT', 'from, to, subjectContains, and label are not valid for calendar rules');
+    }
+    if (inputArgs.calendar !== undefined) {
+      filters.calendar = normalizeOptionalFilterText(inputArgs.calendar, 'calendar');
+    }
+    if (inputArgs.minutesBefore !== undefined) {
+      if (
+        !Number.isSafeInteger(inputArgs.minutesBefore)
+        || inputArgs.minutesBefore < 0
+        || inputArgs.minutesBefore > MAX_MINUTES_BEFORE
+      ) {
+        fail('INVALID_ARGUMENT', `minutesBefore must be an integer between 0 and ${MAX_MINUTES_BEFORE}`);
+      }
+      filters.minutesBefore = inputArgs.minutesBefore;
+    }
+  }
+  return filters;
+}
+
 function buildPreservedSaveBody(bound, patch = {}) {
+  const nextSource = patch.source !== undefined ? patch.source : bound.source;
+  const nextEvent = nextSource === 'gmail' ? 'new_email' : 'starting_soon';
+  const sameSource = nextSource === bound.source;
   const body = {
     id: bound.id,
-    deviceId: bound.deviceId,
-    botId: bound.botId,
-    account: bound.account,
-    source: bound.source,
-    event: bound.event,
+    deviceId: patch.deviceId !== undefined ? patch.deviceId : bound.deviceId,
+    botId: patch.botId !== undefined ? patch.botId : bound.botId,
+    account: patch.account !== undefined ? patch.account : bound.account,
+    source: nextSource,
+    event: nextEvent,
     enabled: patch.enabled !== undefined ? patch.enabled : bound.enabled,
     instruction: patch.instruction !== undefined ? patch.instruction : bound.instruction,
   };
@@ -519,34 +607,34 @@ function buildPreservedSaveBody(bound, patch = {}) {
     body.name = bound.name;
   }
 
-  if (bound.source === 'gmail') {
+  if (nextSource === 'gmail') {
     if (patch.from !== undefined) {
       body.from = patch.from;
-    } else if (bound.from !== undefined) {
+    } else if (sameSource && bound.from !== undefined) {
       body.from = bound.from;
     }
     if (patch.to !== undefined) {
       body.to = patch.to;
-    } else if (bound.to !== undefined) {
+    } else if (sameSource && bound.to !== undefined) {
       body.to = bound.to;
     }
     if (patch.subjectContains !== undefined) {
       body.subjectContains = patch.subjectContains;
-    } else if (bound.subjectContains !== undefined) {
+    } else if (sameSource && bound.subjectContains !== undefined) {
       body.subjectContains = bound.subjectContains;
     }
     if (patch.label !== undefined) {
       body.label = patch.label;
-    } else if (bound.label !== undefined) {
+    } else if (sameSource && bound.label !== undefined) {
       body.label = bound.label;
     }
   } else {
     body.calendar = patch.calendar !== undefined
       ? (patch.calendar === null ? 'primary' : patch.calendar)
-      : bound.calendar;
+      : (sameSource ? bound.calendar : 'primary');
     body.minutesBefore = patch.minutesBefore !== undefined
       ? patch.minutesBefore
-      : bound.minutesBefore;
+      : (sameSource ? bound.minutesBefore : 10);
   }
 
   return body;
@@ -612,10 +700,65 @@ export function createGoogleRuleHandlers(deps = {}) {
       };
     },
 
+    async automation_google_rule_create(args, rawActor) {
+      const actor = validateActor(rawActor);
+      const inputArgs = requirePlainObject(args);
+      assertCleanFields(inputArgs, CREATE_FIELDS);
+
+      const { source, event } = assertSourceAndEvent(inputArgs.source, inputArgs.event);
+      const { deviceId, botId } = resolveCreateTarget(inputArgs, actor);
+      const instruction = assertNonEmptyText(inputArgs.instruction, 'instruction', 8000);
+
+      let enabled = true;
+      if (inputArgs.enabled !== undefined) {
+        if (typeof inputArgs.enabled !== 'boolean') {
+          fail('INVALID_ARGUMENT', 'enabled must be a boolean');
+        }
+        enabled = inputArgs.enabled;
+      }
+
+      let name;
+      if (inputArgs.name !== undefined) {
+        name = assertNonEmptyText(inputArgs.name, 'name', 80).trim();
+      }
+
+      let account;
+      if (inputArgs.account !== undefined) {
+        account = assertNonEmptyText(inputArgs.account, 'account', MAX_FILTER_LENGTH).trim().toLowerCase();
+      }
+
+      const filters = extractSourceFilters(inputArgs, source);
+      const body = {
+        deviceId,
+        botId,
+        source,
+        event,
+        enabled,
+        instruction,
+        ...(name !== undefined ? { name } : {}),
+        ...(account !== undefined ? { account } : {}),
+      };
+
+      if (source === 'gmail') {
+        if (filters.from) body.from = filters.from;
+        if (filters.to) body.to = filters.to;
+        if (filters.subjectContains) body.subjectContains = filters.subjectContains;
+        if (filters.label) body.label = filters.label;
+      } else {
+        body.calendar = filters.calendar === undefined || filters.calendar === null ? 'primary' : filters.calendar;
+        body.minutesBefore = filters.minutesBefore !== undefined ? filters.minutesBefore : 10;
+      }
+
+      const res = await invokeGoogleRules(deps, 'save', body);
+      return {
+        rule: sanitizeGoogleRule(res?.rule ?? res),
+      };
+    },
+
     async automation_google_rule_set_enabled(args, rawActor) {
       const actor = validateActor(rawActor);
       const inputArgs = requirePlainObject(args);
-      assertCleanFields(inputArgs, SET_ENABLED_FIELDS, { forbidImmutable: true });
+      assertCleanFields(inputArgs, SET_ENABLED_FIELDS);
 
       const id = assertGoogleRuleId(inputArgs.id);
       if (typeof inputArgs.enabled !== 'boolean') {
@@ -636,7 +779,7 @@ export function createGoogleRuleHandlers(deps = {}) {
     async automation_google_rule_update(args, rawActor) {
       const actor = validateActor(rawActor);
       const inputArgs = requirePlainObject(args);
-      assertCleanFields(inputArgs, UPDATE_FIELDS, { forbidImmutable: true });
+      assertCleanFields(inputArgs, UPDATE_FIELDS);
 
       const id = assertGoogleRuleId(inputArgs.id);
       if (!UPDATE_MUTABLE_KEYS.some((key) => inputArgs[key] !== undefined)) {
@@ -648,6 +791,28 @@ export function createGoogleRuleHandlers(deps = {}) {
       assertActorRuleTargetAllowed(actor, bound);
 
       const patch = {};
+
+      if (inputArgs.deviceId !== undefined) {
+        patch.deviceId = assertTrimmedId(inputArgs.deviceId, 'deviceId', 128);
+      }
+      if (inputArgs.botId !== undefined) {
+        patch.botId = assertTrimmedId(inputArgs.botId, 'botId', 128);
+      }
+      assertActorRuleTargetAllowed(actor, {
+        deviceId: patch.deviceId ?? bound.deviceId,
+        botId: patch.botId ?? bound.botId,
+      });
+
+      if (inputArgs.account !== undefined) {
+        patch.account = assertNonEmptyText(inputArgs.account, 'account', MAX_FILTER_LENGTH).trim().toLowerCase();
+      }
+      const { source: nextSource } = assertSourceAndEvent(
+        inputArgs.source !== undefined ? inputArgs.source : bound.source,
+        inputArgs.event,
+      );
+      if (inputArgs.source !== undefined) {
+        patch.source = nextSource;
+      }
 
       if (inputArgs.name !== undefined) {
         patch.name = assertNonEmptyText(inputArgs.name, 'name', 80).trim();
@@ -662,47 +827,7 @@ export function createGoogleRuleHandlers(deps = {}) {
         patch.enabled = inputArgs.enabled;
       }
 
-      const hasGmailFields = inputArgs.from !== undefined
-        || inputArgs.to !== undefined
-        || inputArgs.subjectContains !== undefined
-        || inputArgs.label !== undefined;
-      const hasCalendarFields = inputArgs.calendar !== undefined
-        || inputArgs.minutesBefore !== undefined;
-
-      if (bound.source === 'gmail') {
-        if (hasCalendarFields) {
-          fail('INVALID_ARGUMENT', 'calendar and minutesBefore are not valid for gmail rules');
-        }
-        if (inputArgs.from !== undefined) {
-          patch.from = normalizeAddressListInput(inputArgs.from, 'from');
-        }
-        if (inputArgs.to !== undefined) {
-          patch.to = normalizeAddressListInput(inputArgs.to, 'to');
-        }
-        if (inputArgs.subjectContains !== undefined) {
-          patch.subjectContains = normalizeOptionalFilterText(inputArgs.subjectContains, 'subjectContains');
-        }
-        if (inputArgs.label !== undefined) {
-          patch.label = normalizeOptionalFilterText(inputArgs.label, 'label');
-        }
-      } else {
-        if (hasGmailFields) {
-          fail('INVALID_ARGUMENT', 'from, to, subjectContains, and label are not valid for calendar rules');
-        }
-        if (inputArgs.calendar !== undefined) {
-          patch.calendar = normalizeOptionalFilterText(inputArgs.calendar, 'calendar');
-        }
-        if (inputArgs.minutesBefore !== undefined) {
-          if (
-            !Number.isSafeInteger(inputArgs.minutesBefore)
-            || inputArgs.minutesBefore < 0
-            || inputArgs.minutesBefore > MAX_MINUTES_BEFORE
-          ) {
-            fail('INVALID_ARGUMENT', `minutesBefore must be an integer between 0 and ${MAX_MINUTES_BEFORE}`);
-          }
-          patch.minutesBefore = inputArgs.minutesBefore;
-        }
-      }
+      Object.assign(patch, extractSourceFilters(inputArgs, nextSource));
 
       const body = buildPreservedSaveBody(bound, patch);
       const res = await invokeGoogleRules(deps, 'save', body);
