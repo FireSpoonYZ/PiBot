@@ -85,12 +85,11 @@
   gap: 8px;
   overflow-wrap: anywhere;
 }
-.desktop-shell .desktop-transcript .bot-chat-bubble > :not(.desktop-turn-edit-btn) {
+.desktop-shell .desktop-transcript .bot-chat-bubble > * {
   min-width: 0;
   max-width: 100%;
 }
 .desktop-shell .desktop-transcript .bot-chat-bubble.user {
-  position: relative;
   align-self: flex-end;
   width: auto;
   min-width: 0;
@@ -108,42 +107,6 @@
 .desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-after {
   opacity: 0.45;
   transition: opacity 160ms ease;
-}
-.desktop-shell .desktop-transcript .desktop-turn-edit-btn {
-  position: absolute;
-  left: -34px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 26px;
-  height: 26px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 140ms ease, color 140ms ease, background-color 140ms ease;
-}
-.desktop-shell .desktop-transcript .desktop-turn-edit-btn::after {
-  content: '';
-  position: absolute;
-  inset: -4px -10px -4px -4px;
-}
-.desktop-shell .desktop-transcript .desktop-turn-edit-btn svg {
-  width: 13px;
-  height: 13px;
-}
-.desktop-shell .desktop-transcript .bot-chat-bubble.user:hover .desktop-turn-edit-btn,
-.desktop-shell .desktop-transcript .desktop-turn-edit-btn:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-.desktop-shell .desktop-transcript .desktop-turn-edit-btn:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
 }
 .desktop-shell .desktop-transcript .bot-chat-bubble.user.is-peer {
   --table-edge-bg: var(--surface);
@@ -280,7 +243,7 @@
   align-self: flex-end;
 }
 .desktop-shell .desktop-transcript .bot-chat-turn-clock { width: 14px; height: 14px; }
-.desktop-shell .desktop-transcript .bot-chat-turn-copy {
+.desktop-shell .desktop-transcript .bot-chat-turn-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -293,12 +256,12 @@
   color: inherit;
   line-height: 1;
 }
-.desktop-shell .desktop-transcript .bot-chat-turn-copy:hover:not(:disabled),
-.desktop-shell .desktop-transcript .bot-chat-turn-copy:focus-visible {
+.desktop-shell .desktop-transcript .bot-chat-turn-action:hover:not(:disabled),
+.desktop-shell .desktop-transcript .bot-chat-turn-action:focus-visible {
   color: var(--text);
   background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
 }
-.desktop-shell .desktop-transcript .bot-chat-turn-copy:focus-visible {
+.desktop-shell .desktop-transcript .bot-chat-turn-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -308,7 +271,7 @@
 .desktop-shell .desktop-transcript .bot-chat-turn-copy[data-copy-error] {
   color: var(--danger);
 }
-.desktop-shell .desktop-transcript .bot-chat-turn-copy-icon {
+.desktop-shell .desktop-transcript .bot-chat-turn-action-icon {
   width: 13px;
   height: 13px;
   flex-shrink: 0;

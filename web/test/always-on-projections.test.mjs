@@ -436,6 +436,32 @@ test('wire capability projection downgrades schedule/task_dispatch and omits dur
   );
 });
 
+test('Google setup revision is a bounded primary-watch field negotiated independently of earlier extensions', () => {
+  const target = { kind: 'primary', botId: 'bot' };
+  const frame = {
+    type: 'snapshot',
+    botId: 'bot',
+    conversationId: 'public',
+    sequence: 1,
+    state: { ...emptyLiveState(), googleSetupRevision: 6 },
+  };
+  const olderExtensions = { durableWaits: true, hostSources: true, browserScreencast: true };
+  const older = { liveExtensions: olderExtensions };
+  assert.throws(() => normalizeLiveSnapshot(structuredClone(frame), target, older), /googleSetupRevision/);
+  const downgraded = projectLiveSnapshotForPeer(frame, olderExtensions);
+  assert.equal(downgraded.state.history, frame.state.history);
+  assert.equal(projectLiveSnapshotForPeer(downgraded, olderExtensions), downgraded);
+  const normalized = normalizeLiveSnapshot(structuredClone(downgraded), target, older);
+  assert.equal('googleSetupRevision' in normalized.state, false);
+  assert.deepEqual(normalized.state.durableWaits, []);
+  assert.equal(frame.state.googleSetupRevision, 6);
+
+  const malformed = { ...frame, state: { ...frame.state, googleSetupRevision: '6' } };
+  assert.throws(() => normalizeLiveSnapshot(malformed, target), /googleSetupRevision/);
+  const work = { ...frame, scopeId: 'scope' };
+  assert.throws(() => normalizeLiveSnapshot(work, { kind: 'work', botId: 'bot', scopeId: 'scope' }), /googleSetupRevision/);
+});
+
 test('runtime-live integrates reset watermarks, pre-reset failure gates, pi.compaction exclusion, and notifyWaitsChanged', async () => {
   const preResetWait = {
     id: 9,

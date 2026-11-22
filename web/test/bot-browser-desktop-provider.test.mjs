@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { setImmediate as nextEventLoopTurn } from 'node:timers/promises';
 
 import {
   CdpClient,
@@ -303,6 +304,10 @@ function createMockBrowserHarness(options = {}) {
             });
             return;
           }
+          if (page.failDomProbe) {
+            fail('DOM temporarily unavailable');
+            return;
+          }
           reply({
             result: {
               value: {
@@ -366,7 +371,8 @@ function createMockBrowserHarness(options = {}) {
         }
         if (method === 'Page.captureScreenshot') {
           const data = page.screenshotDataByQuality[params.quality] ?? Buffer.from('mock-jpeg').toString('base64');
-          reply({ data });
+          if (options.onCaptureScreenshot) options.onCaptureScreenshot(() => reply({ data }));
+          else reply({ data });
           return;
         }
         if (method === 'Accessibility.getFullAXTree') {
@@ -666,7 +672,11 @@ test('URL policy, sensitive classification, and human-only guards enforce hard b
   assert.equal(normalizeNavigationUrl('chrome://settings'), null);
   assert.equal(normalizeNavigationUrl('https://user:pass@example.com/'), null);
 
-  assert.equal(classifySensitivePage({ url: 'https://accounts.google.com/signin' }).sensitive, true);
+  const login = classifySensitivePage({
+    url: 'https://accounts.google.com/v3/signin/identifier?service=cloudconsole',
+  });
+  assert.equal(login.sensitive, true);
+  assert.equal(login.authUseSystemBrowser, false);
   assert.equal(classifySensitivePage({ url: 'https://accounts.google.com/o/oauth2/v2/auth' }).authUseSystemBrowser, true);
   assert.equal(
     classifySensitivePage({
@@ -895,6 +905,22 @@ test('desktop provider act.wait enforces conditions, lifecycle, validation, sens
     });
     assert.equal(urlRes.ok, true);
     assert.equal(urlRes.url, 'https://example.com/done?step=2');
+
+    const userText = 'continued by user';
+    const waitingForUser = provider.perform({
+      action: 'act', actor: 'bot', pageId,
+      command: { kind: 'wait', text: userText, timeoutMs: 1000 },
+    });
+    const [afterWait, afterInput] = await Promise.all([
+      waitingForUser,
+      provider.perform({
+        action: 'input', actor: 'human', pageId,
+        event: { kind: 'text', text: userText },
+        beforeInput() { targetState.visibleText = userText; },
+      }),
+    ]);
+    assert.equal(afterInput.ok, true);
+    assert.equal(afterWait.ok, true);
 
     // Lifecycle load / domcontentloaded: domcontentloaded resolves on DOMContentLoaded while load still waits for loadEventFired.
     targetState.readyState = 'loading';
@@ -1306,7 +1332,6 @@ test('desktop provider supports same-page navigation, bounded frames, input reva
       profileDir: path.join(tmpDir, 'bot-alpha-profile'),
       maxTabs: 2,
       maxFrameBase64Bytes: 64_000,
-      minFrameIntervalMs: 50,
       now: () => fakeNow,
       discoverBrowser: async () => ({
         available: true,
@@ -1422,23 +1447,33 @@ test('desktop provider supports same-page navigation, bounded frames, input reva
     assert.equal(frame.mimeType, 'image/jpeg');
     assert.equal(frame.data.length, 1_024);
 
-    // Live CDP screencast frame is acked and served directly once past minFrameIntervalMs.
+    // The final paint is often the second CDP frame after a click, with no later repaint.
     fakeNow += 100;
-    const liveData = Buffer.from('live-screencast-frame').toString('base64');
+    const prevData = Buffer.from('paint-before-click').toString('base64');
     harness.emitEvent(
       'Page.screencastFrame',
-      { data: liveData, sessionId: 77, metadata: { deviceWidth: 1280, deviceHeight: 800 } },
+      { data: prevData, sessionId: 77, metadata: { deviceWidth: 1280, deviceHeight: 800 } },
+      targetState.sessionId
+    );
+    const prevFrame = await provider.perform({ action: 'frame', pageId, viewer: 'human', afterSeq: frame.seq });
+    assert.equal(prevFrame.data, prevData);
+    fakeNow += 13;
+    const liveData = Buffer.from('paint-after-click').toString('base64');
+    harness.emitEvent(
+      'Page.screencastFrame',
+      { data: liveData, sessionId: 78, metadata: { deviceWidth: 1280, deviceHeight: 800 } },
       targetState.sessionId
     );
     const liveFrame = await provider.perform({
       action: 'frame',
       pageId,
       viewer: 'human',
-      afterSeq: frame.seq,
+      afterSeq: prevFrame.seq,
     });
     assert.equal(liveFrame.data, liveData);
-    assert.ok(liveFrame.seq > frame.seq);
+    assert.ok(liveFrame.seq > prevFrame.seq);
     assert.ok(targetState.screencastAcks.includes(77));
+    assert.ok(targetState.screencastAcks.includes(78));
 
     // Secret dialog blocks ordinary frame streaming and input.
     targetState.domSignals.hasClientSecretModal = true;
@@ -1449,7 +1484,11 @@ test('desktop provider supports same-page navigation, bounded frames, input reva
       () => provider.perform({ action: 'input', pageId, event: { kind: 'key', key: 'Enter' } }),
       { code: 'BROWSER_SECRET_INPUT_BLOCKED' }
     );
+    targetState.failDomProbe = true;
+    assert.equal((await provider.perform({ action: 'status' })).sensitive, true);
+    targetState.failDomProbe = false;
     targetState.domSignals.hasClientSecretModal = false;
+    assert.equal((await provider.perform({ action: 'status' })).sensitive, false);
 
     // Max tab ceiling is enforced.
     await provider.perform({ action: 'open', url: 'https://example.com' });
@@ -1463,4 +1502,99 @@ test('desktop provider supports same-page navigation, bounded frames, input reva
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+async function openFrameTestBrowser(t, harness) {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'pibot-desktop-frame-'));
+  let provider;
+  t.after(async () => {
+    try {
+      await provider?.close();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+  provider = await createDesktopBrowserProvider({
+    botId: 'bot-frame',
+    profileDir: path.join(tmpDir, 'profile'),
+    discoverBrowser: async () => ({
+      available: true, executablePath: '/usr/bin/chromium', kind: 'chromium', transport: 'pipe',
+    }),
+    launchBrowser: async () => harness.getHandle(),
+  });
+  const opened = await provider.perform({ action: 'open', url: 'https://example.com' });
+  const target = [...harness.targets.values()].find((page) => page.url === opened.url);
+  assert.ok(target?.sessionId);
+  return { provider, opened, cdpSessionId: target.sessionId };
+}
+
+test('desktop provider dispatches human input during fallback capture and keeps the stream usable', async (t) => {
+  let replyToScreenshot;
+  const harness = createMockBrowserHarness({
+    onCaptureScreenshot(reply) { replyToScreenshot = reply; },
+  });
+  const { provider, opened, cdpSessionId } = await openFrameTestBrowser(t, harness);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const frameRequest = {
+    action: 'frame', pageId: opened.pageId, viewer: 'human', stream: true, afterSeq: 0, waitMs: 10,
+  };
+  const capture = provider.perform(frameRequest);
+  await nextEventLoopTurn();
+  t.mock.timers.tick(frameRequest.waitMs);
+  const waiting = Symbol('waiting');
+  assert.equal(await Promise.race([capture, nextEventLoopTurn(waiting)]), waiting);
+  assert.equal(typeof replyToScreenshot, 'function', 'the fallback screenshot is in flight');
+
+  const input = await Promise.race([
+    provider.perform({
+      action: 'input', pageId: opened.pageId, revision: opened.revision,
+      event: { kind: 'click', x: 0.5, y: 0.5 },
+    }),
+    nextEventLoopTurn(waiting),
+  ]);
+  assert.equal(input?.ok, true, 'the click completes with the screenshot reply still held');
+  assert.ok(harness.sentCommands.some((command) =>
+    command.sessionId === cdpSessionId && command.method === 'Input.dispatchMouseEvent' &&
+    command.params.type === 'mousePressed'
+  ));
+
+  replyToScreenshot();
+  assert.deepEqual(await capture, { frameUnchanged: true, pageId: opened.pageId });
+
+  const nextFrame = provider.perform(frameRequest);
+  assert.equal(await Promise.race([nextFrame, nextEventLoopTurn(waiting)]), waiting);
+  const data = Buffer.from('paint-after-manual-input').toString('base64');
+  harness.emitEvent('Page.screencastFrame', { data, sessionId: 81 }, cdpSessionId);
+  assert.equal((await Promise.race([nextFrame, nextEventLoopTurn(waiting)]))?.data, data);
+});
+
+test('desktop provider wakes a stream cursor on a repaint before the bounded wait expires', async (t) => {
+  const harness = createMockBrowserHarness();
+  const { provider, opened, cdpSessionId } = await openFrameTestBrowser(t, harness);
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_700_000_000_000 });
+
+  const frameRequest = {
+    action: 'frame', pageId: opened.pageId, viewer: 'human', stream: true, waitMs: 1000,
+  };
+  const waiting = Symbol('waiting');
+  const first = provider.perform({ ...frameRequest, afterSeq: 0 });
+  assert.equal(await Promise.race([first, nextEventLoopTurn(waiting)]), waiting);
+  const oldData = Buffer.from('previous-screencast-paint').toString('base64');
+  harness.emitEvent('Page.screencastFrame', { data: oldData, sessionId: 91 }, cdpSessionId);
+  const previous = await Promise.race([first, nextEventLoopTurn(waiting)]);
+  assert.equal(previous?.data, oldData);
+  assert.ok(previous.captureSeq > 0);
+
+  const nextFrame = provider.perform({ ...frameRequest, afterSeq: previous.captureSeq });
+  assert.equal(await Promise.race([nextFrame, nextEventLoopTurn(waiting)]), waiting);
+  t.mock.timers.tick(250);
+  assert.equal(await Promise.race([nextFrame, nextEventLoopTurn(waiting)]), waiting);
+
+  const newData = Buffer.from('new-screencast-paint').toString('base64');
+  harness.emitEvent('Page.screencastFrame', { data: newData, sessionId: 92 }, cdpSessionId);
+  const updated = await Promise.race([nextFrame, nextEventLoopTurn(waiting)]);
+  assert.equal(updated?.data, newData, 'the CDP repaint resolves the pending request without advancing the clock');
+  assert.ok(updated.captureSeq > previous.captureSeq);
+  assert.equal(harness.sentCommands.some((command) => command.method === 'Page.captureScreenshot'), false);
 });

@@ -362,6 +362,8 @@ trigger matching/checking logic) are vendored and adapted from **Orca**
 - Upstream Git blob IDs and local SHA-256 digests are recorded in
   [`center-server/google-workspace/vendor/orca/MANIFEST.json`](center-server/google-workspace/vendor/orca/MANIFEST.json).
 
+The Host also uses Orca's Google setup rules and Chromium helpers under the same MIT license. Revisions and source digests are recorded in the [Google setup manifest](host-core/google-setup/vendor/orca/MANIFEST.json) and [browser source notes](host-core/bot-browser/vendor/orca/README.md). The desktop WebView2 reconnect delay uses [browser-host-lease-reconnect-delay.ts](https://github.com/stablyai/orca/blob/1e8546eadfcd69ae3438c0e3c0a3693cf771067a/src/main/browser/client-hosts/leases/browser-host-lease-reconnect-delay.ts#L42-L61) from Orca under the same license.
+
 ```text
 MIT License
 

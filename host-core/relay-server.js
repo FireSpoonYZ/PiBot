@@ -9,6 +9,7 @@
 // The relay never persists messages and keeps no business state beyond peers.
 
 import { randomUUID } from 'node:crypto';
+import { createBrowserEgressRelay } from './bot-browser/egress-relay.js';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
@@ -50,6 +51,7 @@ import {
   projectLiveSnapshotForPeer
 } from './remote-live-protocol.js';
 import { controlMethodTimeoutMs, controlMethodVersion, normalizeControlCall } from './remote-control-protocol.js';
+import { addressBrowserStreamPacket, BROWSER_STREAM_HIGH_WATER_BYTES } from './bot-browser/stream-packet.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -189,6 +191,8 @@ export async function openRelayServer(options = {}) {
       perMessageDeflate: false
     });
     wss.on('headers', (headers, req) => {
+      if (req.headers['x-pibot-browser-egress'] === '1') headers.push('X-PiBot-Browser-Egress: 1');
+      if (req.headers['x-pibot-browser-window-lifecycle'] === '1') headers.push('X-PiBot-Browser-Window-Lifecycle: 1');
       const negotiated = upgradeLiveExtensions.get(req);
       const value = formatLiveExtensionsHeader(negotiated);
       if (value !== null) {
@@ -212,6 +216,10 @@ export async function openRelayServer(options = {}) {
   }
 
   const deviceMap = new Map(); // deviceId -> host conn (authenticated)
+  const browserEgress = createBrowserEgressRelay({
+    findHost: (deviceId) => deviceMap.get(deviceId), usable: peerUsable,
+    send: (conn, frame) => writeFrame(conn.ws, frame, noop),
+  });
   const allConns = new Set();  // every accepted WS, authenticated or not
   const upgradeSockets = new Set();
   const controlRoutes = openControlRoutes(); // bounded control-call correlation
@@ -230,6 +238,7 @@ export async function openRelayServer(options = {}) {
   }
 
   function connCleanup(conn) {
+    browserEgress.disconnect(conn);
     clearTimeout(conn.helloTimer);
     if (conn.deviceId !== null && deviceMap.get(conn.deviceId) === conn) {
       deviceMap.delete(conn.deviceId);
@@ -741,6 +750,9 @@ export async function openRelayServer(options = {}) {
       const code = !peer || !peerUsable(peer) ? 'OFFLINE' : 'CONTROL_UNAVAILABLE';
       return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, code);
     }
+    if (frame.target.kind === 'browser' && !peer.liveExtensions.browserScreencast) {
+      return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE');
+    }
     if (
       liveRoutes.size() >= LIVE_MAX_SUBSCRIPTIONS ||
       liveRoutes.countClient(conn) >= LIVE_MAX_CLIENT_SUBSCRIPTIONS ||
@@ -780,8 +792,8 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function routeLiveFrame(conn, frame) {
-    const record = liveRoutes.findByRoute(frame.routeId);
+  function receiveLiveRoute(conn, routeId) {
+    const record = liveRoutes.findByRoute(routeId);
     // Only the exact host conn a watch was opened against may feed it; stale,
     // late, duplicate or wrong-host frames are ignored.
     if (!record || record.host !== conn) return;
@@ -795,6 +807,43 @@ export async function openRelayServer(options = {}) {
       }
       return;
     }
+    return record;
+  }
+
+  function routeBrowserFrame(conn, packet) {
+    const record = receiveLiveRoute(conn, packet.streamId);
+    if (!record) return;
+    if (record.target.kind !== 'browser' || (record.seq !== null && packet.seq <= record.seq)) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    const ws = record.client.ws;
+    if (ws.readyState !== WS_OPEN || ws.bufferedAmount + packet.bytes.length > BROWSER_STREAM_HIGH_WATER_BYTES) {
+      return; // Missing credit ACK lets the Host pace or probe this viewer.
+    }
+    try {
+      ws.send(addressBrowserStreamPacket(packet, record.watchId), { binary: true }, (err) => {
+        if (err) ws.terminate();
+      });
+      record.seq = packet.seq;
+      record.opening = false;
+      delete record.openingDeadline;
+    } catch {
+      ws.terminate();
+    }
+  }
+
+  function routeLiveAck(conn, frame) {
+    const record = liveRoutes.findByClientWatch(conn, frame.watchId);
+    if (!record || record.target.kind !== 'browser' || record.seq === null ||
+        frame.seq > record.seq || frame.seq <= (record.ackedSeq ?? 0) || !peerUsable(record.host)) return;
+    if (writeFrame(record.host.ws, {
+      type: 'live-ack', routeId: record.routeId, seq: frame.seq,
+    }, noop)) record.ackedSeq = frame.seq;
+  }
+
+  function routeLiveFrame(conn, frame) {
+    const record = receiveLiveRoute(conn, frame.routeId);
+    if (!record) return;
     const applied = liveRoutes.applyFrame(record, frame.frame, { liveExtensions: conn.liveExtensions });
     if (!applied.ok) {
       return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
@@ -998,6 +1047,10 @@ export async function openRelayServer(options = {}) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
+    if (frame.type === 'browser-egress') {
+      if (conn.controlProtocol !== 2 || !conn.browserEgress) return closeWith(conn, RELAY_CLOSE.REVOKED);
+      return browserEgress.handle(conn, frame);
+    }
     // Roles separate traffic, not credential privilege: clients only
     // place/cancel control calls; hosts only send legacy frames and control
     // results. Role violations close 4403 (REVOKED) without routing.
@@ -1005,7 +1058,8 @@ export async function openRelayServer(options = {}) {
       if (frame.type === 'control-call' || frame.type === 'control-cancel') {
         // v1 control: any authenticated client
       } else if (
-        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') &&
+        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'live-ack' ||
+          frame.type === 'devices-list' || frame.type === 'device-rename') &&
         conn.controlProtocol === 2
       ) {
         // v2 live client frames
@@ -1017,9 +1071,10 @@ export async function openRelayServer(options = {}) {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
     } else if (frame.type === 'control-call' || frame.type === 'control-cancel' ||
-               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') {
+               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'live-ack' ||
+               frame.type === 'devices-list' || frame.type === 'device-rename') {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
-    } else if ((frame.type === 'live-frame' || frame.type === 'live-end') && conn.controlProtocol !== 2) {
+    } else if ((frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'browser-frame') && conn.controlProtocol !== 2) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
@@ -1068,12 +1123,16 @@ export async function openRelayServer(options = {}) {
         return routeLiveOpen(conn, frame);
       case 'live-cancel':
         return routeLiveCancel(conn, frame);
+      case 'live-ack':
+        return routeLiveAck(conn, frame);
       case 'devices-list':
         return routeDevicesList(conn, frame);
       case 'device-rename':
         return routeDeviceRename(conn, frame);
       case 'live-frame':
         return routeLiveFrame(conn, frame);
+      case 'browser-frame':
+        return routeBrowserFrame(conn, frame);
       case 'live-end':
         return routeLiveEnd(conn, frame);
       default:
@@ -1081,7 +1140,7 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function onConnection(ws, liveExtensions = NO_LIVE_EXTENSIONS) {
+  function onConnection(ws, liveExtensions = NO_LIVE_EXTENSIONS, browserEgress = false) {
     if (closed) {
       try { ws.terminate(); } catch { /* socket gone */ }
       return;
@@ -1094,6 +1153,7 @@ export async function openRelayServer(options = {}) {
       controlProtocol: 0,
       scopeProtocol: 0,
       liveExtensions,
+      browserEgress,
       helloTimer: null,
       alive: true,
       dead: false,
@@ -1147,7 +1207,7 @@ export async function openRelayServer(options = {}) {
     upgradeLiveExtensions.set(req, liveExtensions);
     try {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        onConnection(ws, liveExtensions);
+        onConnection(ws, liveExtensions, req.headers['x-pibot-browser-egress'] === '1');
       });
     } catch {
       socket.destroy();

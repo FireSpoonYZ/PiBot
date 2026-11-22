@@ -1,0 +1,105 @@
+{
+  "source": "https://github.com/stablyai/orca",
+  "version": "v1.4.265",
+  "commit": "e64e561738d8d465ab459e7e3f9e46d08b6396ea",
+  "license": "MIT",
+  "compiler": "esbuild 0.28.2 / ESM / node24",
+  "files": {
+    "google-scopes.js": {
+      "source": "src/shared/google/google-scopes.ts",
+      "upstreamSha256": "59671415b86418f4d285d625ba464dd37ffc09bd1b6453a79d56417967935d7c",
+      "sha256": "ced89129e3618c9b8978d1c3c75b6fc9645ad0ae650acca0509fdb578f65cfa8"
+    },
+    "google-console-setup.js": {
+      "source": "src/shared/google/google-console-setup.ts",
+      "upstreamSha256": "4d88178f890afac809a066cd1c785e9f3fdc35511036679b2379fe42de912258",
+      "sha256": "08a7118a71442602e3ff0e4d8a63da40f2de7d57e02b38b509eb65bdab67746d",
+      "statements": [
+        "GOOGLE_CONSOLE_ORIGIN",
+        "googleConsoleApiIds",
+        "consoleUrl",
+        "withGoogleAccount",
+        "googleEnableApisUrl",
+        "googleConsoleStepUrl",
+        "PROJECT_ID",
+        "readGoogleConsoleAddress",
+        "GOOGLE_CONSOLE_START",
+        "tick",
+        "advanceGoogleConsole"
+      ],
+      "note": "Executable Console URL and progress functions only. Orca branding defaults and Desktop key export naming are unused by Center Web OAuth."
+    },
+    "google-setup-run.js": {
+      "source": "src/shared/google/google-setup-run.ts",
+      "upstreamSha256": "74b6990ac414214f6f4125f27544e1bcbb477273ffc7f1cee4d35d3323a0754e",
+      "sha256": "12d7f6ca90d4c461dd650f3b81094e41ca834c4a7b1406e3c4b337457612cd5e",
+      "statements": [
+        "GOOGLE_SETUP_STEPS",
+        "GOOGLE_SETUP_MODES",
+        "GOOGLE_SETUP_RUN_MODES",
+        "GOOGLE_SETUP_STEP_STATUSES",
+        "GOOGLE_SETUP_CARDS",
+        "currentGoogleSetupStep",
+        "googleSetupAwaitsKey",
+        "isGoogleClientsPage",
+        "personDoesGoogleSetupStep"
+      ],
+      "note": "Upstream constants and pure functions. Pi Bot retains its existing run schema and store."
+    },
+    "google-setup-card.js": {
+      "source": "src/shared/google/google-setup-card.ts",
+      "upstreamSha256": "3b468af4756c36e975801ad293ce778faa4362432315baed4c8397c6a67d875c",
+      "sha256": "554f7e9a4a7dad5b1a6c473c56c2cf0e6d3d6d6865f16cdda20eebe0535ac1d1",
+      "statements": [
+        "GOOGLE_SETUP_CARD_PRESENTATION",
+        "googleSetupCardKey",
+        "isNewestGoogleSetupCard"
+      ],
+      "note": "Card keys and copy selection. The owner control envelope and persisted run ID checks stay in Pi Bot."
+    },
+    "google-setup-rules.js": {
+      "source": "src/main/google/google-setup-rules.ts",
+      "upstreamSha256": "f8a9673cec72b712b02cdfdb81b2c414413511b1b5ee284aa82dde3cce5f281e",
+      "sha256": "5e16af6fe66f296a722473ca7dc37f91addcca8b6330d78ad3410592793072bb",
+      "statements": [
+        "GOOGLE_SETUP_STEPS_SET",
+        "GOOGLE_SERVICE_SET",
+        "GoogleSetupError",
+        "PERSON_FINISHES",
+        "BOT_CANNOT_TAKE_CLICKS",
+        "PERSON_STEPS",
+        "isPersonOwnedStep",
+        "botClicks",
+        "recordAnswer",
+        "OWNER_ONLY_STEP_ANSWERS",
+        "OWNER_RECOVERS",
+        "GOOGLE_SETUP_MODE_OF",
+        "IMPORTED_STEPS",
+        "isStep",
+        "isService"
+      ],
+      "note": "Pure upstream owner/step rules and answer transitions. Pi Bot validates permissions, readiness and browser locks in its adapter."
+    },
+    "google-setup-chat-cards.js": {
+      "source": "src/main/google/google-setup-chat-cards.ts",
+      "upstreamSha256": "059145073938efcef7621a17c3be7f48459ce134f4c6f53caad031ac9b522e81",
+      "sha256": "dfbbffb468da00c939f9c598e5619fb63ebc7f6d8e534e3d1377ee0c0989b6a7",
+      "statements": [
+        "personsTurn",
+        "answered",
+        "googleSetupCardsDue",
+        "googleSetupWaitingCard"
+      ],
+      "note": "Card selection only. No Orca transcript or persistent store imports."
+    },
+    "google-setup-card-turn.js": {
+      "source": "src/main/runtime/rpc/methods/bots-google-setup.ts",
+      "upstreamSha256": "19f709ab607c8a930c7eea1c5872b130dbea09d625cc55a322677c59dd523818",
+      "sha256": "15e211a6ef8ad994754932b9aabed4004731bd7fb9da8c015e8ccfa749f4b369",
+      "statements": [
+        "googleSetupAnswerLine"
+      ],
+      "note": "Upstream card-answer text formatter. Pi Bot delivers it through its authenticated Host turn queue."
+    }
+  }
+}

@@ -190,12 +190,15 @@ export function ToolCallCard({
   const presentationActive = isGoogleSetupHistory
     ? false
     : resolveToolPresentationActive(tool, presentation, active, disabled);
+  const questionnaireInterrupted = presentation?.kind === 'questionnaire' && presentation.status === 'pending' &&
+    (tool.status === 'error' || tool.status === 'interrupted' || tool.status === 'cancelled');
   const presentationCard = presentation ? (
     <ToolPresentationCard
       key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
       presentation={presentation}
       active={presentationActive}
       disabled={disabled}
+      questionnaireInterrupted={questionnaireInterrupted}
       variant={variant === 'desktop' ? 'desktop' : undefined}
       requesterName={requesterName}
       googleContext={isGoogleSetupHistory ? undefined : googleContext}

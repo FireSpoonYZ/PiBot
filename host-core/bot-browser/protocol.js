@@ -100,6 +100,10 @@ export const BROWSER_ERROR_CODES = Object.freeze([
 
 const KNOWN_ERROR_CODE_SET = new Set(BROWSER_ERROR_CODES);
 
+export const CLIENT_BROWSER_WINDOW_CLOSED_REASON = 'client_browser_window_closed';
+export const CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE =
+  'The desktop browser window was closed. Reopen the Pi Bot desktop window to use the browser again.';
+
 const SAFE_DEFAULT_MESSAGES = Object.freeze({
   INVALID_ARGUMENT: 'Invalid browser request.',
   BOT_NOT_FOUND: 'Bot not found on this host.',
@@ -136,15 +140,15 @@ const SAFE_DEFAULT_MESSAGES = Object.freeze({
 
 const CONTROL_ACTION_FIELDS = Object.freeze({
   status: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease'],
-  open: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
+  open: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision', 'placement'],
   navigate: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
   back: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   forward: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   reload: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'ignoreCache'],
   select: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   closeTab: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
-  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes'],
-  takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
+  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream', 'waitMs'],
+  takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'shared', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
   input: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event'],
   handback: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason'],
   release: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'reason'],
@@ -211,7 +215,11 @@ export function safeBrowserError(error, fallbackCode = 'BROWSER_BACKEND_FAILED')
   const code = typeof error?.code === 'string' && KNOWN_ERROR_CODE_SET.has(error.code)
     ? error.code
     : fallbackCode;
-  const err = browserError(code, SAFE_DEFAULT_MESSAGES[code]);
+  const safeMessage =
+    code === 'BROWSER_UNAVAILABLE' && error?.details?.reason === CLIENT_BROWSER_WINDOW_CLOSED_REASON
+      ? CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE
+      : SAFE_DEFAULT_MESSAGES[code];
+  const err = browserError(code, safeMessage);
   if (error?.outcome === 'not-sent' || error?.outcome === 'unconfirmed') {
     err.outcome = error.outcome;
   }
@@ -561,9 +569,19 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   if (input.url !== undefined) {
     normalized.url = assertBoundedString(input.url, 'url', { min: 1, max: MAX_URL_BYTES, maxBytes: MAX_URL_BYTES });
   }
+  if (input.placement !== undefined) {
+    if (action !== 'open' || input.placement !== 'server') {
+      throw browserError('INVALID_ARGUMENT', 'placement only supports "server" on open');
+    }
+    normalized.placement = 'server';
+  }
   if (input.force !== undefined) {
     if (typeof input.force !== 'boolean') throw browserError('INVALID_ARGUMENT', 'force must be boolean');
     normalized.force = input.force;
+  }
+  if (input.shared !== undefined) {
+    if (typeof input.shared !== 'boolean') throw browserError('INVALID_ARGUMENT', 'shared must be boolean');
+    normalized.shared = input.shared;
   }
   if (input.preempt !== undefined) {
     if (typeof input.preempt !== 'boolean') throw browserError('INVALID_ARGUMENT', 'preempt must be boolean');
@@ -598,6 +616,19 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   }
   if (action === 'frame') {
     normalized.frameLimits = normalizeFrameLimits(input, maxFrameBase64Bytes);
+    if (input.stream !== undefined) {
+      if (input.stream !== true || !normalized.pageId || !normalized.sessionId) {
+        throw browserError('INVALID_ARGUMENT', 'stream frames require pageId and sessionId');
+      }
+      normalized.stream = true;
+    }
+    if (input.waitMs !== undefined) {
+      if (!normalized.stream || normalized.sinceSeq === undefined ||
+          !Number.isSafeInteger(input.waitMs) || input.waitMs < 1 || input.waitMs > 1500) {
+        throw browserError('INVALID_ARGUMENT', 'waitMs requires a stream cursor and must be between 1 and 1500');
+      }
+      normalized.waitMs = input.waitMs;
+    }
   }
   if (action === 'input') {
     if (!normalized.pageId) throw browserError('INVALID_ARGUMENT', 'input requires pageId');

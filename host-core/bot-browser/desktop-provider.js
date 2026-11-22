@@ -6,7 +6,7 @@
 //   - Private per-Bot data dir (never connects to personal profiles)
 //   - Private CDP pipe (POSIX) or 127.0.0.1 loopback WebSocket (Windows)
 //   - Owned tab/navigation registry with documentGeneration & revision tracking
-//   - Continuous bounded screencast frames (rate & 720 KiB base64 budget, never persisted)
+//   - A latest-only JPEG screencast cache (720 KiB base64 budget, never persisted)
 //   - Real same-page mouse/keyboard/wheel human input with pre-dispatch revalidation
 //   - Restricted Bot snapshot/act (no eval/cookies/CDP passthrough) + sensitive/ToS/OAuth/secret guards
 //
@@ -15,15 +15,19 @@
 //   - src/main/orcad/browser-providers/chromium/external-chromium-browser-process.ts
 //   - src/main/orcad/browser-providers/chromium/external-chromium-tab-registry.ts
 //   - src/main/orcad/browser-providers/chromium/external-chromium-tab-projection.ts
-// MIT License — Copyright (c) 2026 Lovecast Inc.
+// The trailing screencast frame pacer follows Orca v1.4.267 (commit baf9c2c328fa95c0ba9c25fda4836b479162d232):
+//   - src/main/browser/cdp/screencast/browser-screencast-frame-pacer.ts
+// MIT License — Copyright (c) 2026 Lovecast Inc. See ./vendor/orca/LICENSE.
 
 import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertId } from '../message-protocol.js';
 import { hasWaitCondition, normalizeProviderWait } from './protocol.js';
 import { launchDesktopChromium } from './desktop-cdp.js';
+import { assertPrivateWindowsProfileDir } from './desktop-windows-endpoint.js';
 import {
   discoverDesktopBrowser,
   isPersonalBrowserProfilePath,
@@ -373,6 +377,14 @@ export async function createDesktopBrowserProvider(opts = {}) {
   const pendingTargetTasks = new Set();
   const activeWaits = new Set();
 
+  function assertProviderOpen() {
+    if (closed) {
+      throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
+        outcome: 'not-sent',
+      });
+    }
+  }
+
   function enqueue(operation) {
     const result = queue.then(operation, operation);
     queue = result.then(
@@ -410,7 +422,54 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
   }
 
+  function acknowledgeScreencastFrame(page, handle, ackSessionId) {
+    if (handle !== browserHandle || handle.client.closed || typeof ackSessionId !== 'number') return;
+    void handle.client.send(
+      'Page.screencastFrameAck',
+      { sessionId: ackSessionId },
+      { sessionId: page.sessionId, timeoutMs: 3_000 }
+    ).catch(() => undefined);
+  }
+
+  function clearPendingScreencastFrame(page) {
+    clearTimeout(page.screencastFrameTimer);
+    page.screencastFrameTimer = null;
+    const pending = page.pendingScreencastFrame;
+    page.pendingScreencastFrame = null;
+    if (pending) acknowledgeScreencastFrame(page, pending.handle, pending.ackSessionId);
+  }
+
+  function invalidatePageFrames(page) {
+    page.frameGeneration += 1;
+    page.latestFrame = null;
+    clearPendingScreencastFrame(page);
+  }
+
+  function publishPageFrame(page, frame) {
+    page.latestFrame = frame;
+    for (const receive of page.pendingFrameWaiters) receive(frame);
+  }
+
+  function promoteScreencastFrame(page) {
+    page.screencastFrameTimer = null;
+    const pending = page.pendingScreencastFrame;
+    page.pendingScreencastFrame = null;
+    if (!pending) return;
+    const { frame, handle, frameGeneration, ackSessionId } = pending;
+    if (page.screencastActive && !page.secretExposureRisk &&
+      handle === browserHandle && !handle.client.closed && frameGeneration === page.frameGeneration &&
+      frame.documentGeneration === page.documentGeneration && frame.seq > (page.latestFrame?.seq ?? 0)) {
+      page.lastScreencastFrameAt = now();
+      page.screencastHasFrames = true;
+      publishPageFrame(page, frame);
+    }
+    acknowledgeScreencastFrame(page, handle, ackSessionId);
+  }
+
   function clearPageScreencastTimers(page) {
+    invalidatePageFrames(page);
+    page.screencastStart = null;
+    page.screencastHasFrames = false;
     if (page.screencastIdleTimer) {
       clearTimeout(page.screencastIdleTimer);
       page.screencastIdleTimer = null;
@@ -428,7 +487,6 @@ export async function createDesktopBrowserProvider(opts = {}) {
   function clearRuntimeState() {
     for (const page of pagesById.values()) {
       clearPageScreencastTimers(page);
-      page.latestFrame = null;
       page.screencastActive = false;
     }
     pagesById.clear();
@@ -777,54 +835,65 @@ export async function createDesktopBrowserProvider(opts = {}) {
     page.secretExposureRisk = Boolean(classification.secretExposureRisk);
     page.authUseSystemBrowser = Boolean(classification.authUseSystemBrowser);
     if (page.secretExposureRisk) {
-      page.latestFrame = null;
       void stopPageScreencast(page);
     } else if (!prevSensitive && page.sensitive) {
       // Drop cached pre-transition frame when entering a sensitive page.
-      page.latestFrame = null;
+      invalidatePageFrames(page);
     }
     if (page.sensitive) {
       notifyWaitWakeups(page);
     }
   }
 
-  async function refreshPageState(page, { signal, timeoutMs } = {}) {
-    if (!browserHandle || browserHandle.client.closed) {
+  async function refreshPageState(page, { signal, timeoutMs, assertFrameTarget } = {}) {
+    const handle = browserHandle;
+    if (!handle || handle.client.closed) {
       throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
     }
 
     const frameTreeTimeout = timeoutMs === undefined ? 5_000 : Math.max(50, Math.min(5_000, timeoutMs));
     const probeTimeout = timeoutMs === undefined ? 4_000 : Math.max(50, Math.min(4_000, timeoutMs));
 
-    let domSignals = null;
+    const assertFrameReadCurrent = (generation) => {
+      if (!assertFrameTarget) return;
+      assertFrameTarget();
+      if (page.frameGeneration !== generation) {
+        throw browserError('BROWSER_STALE_REVISION', 'Browser page changed during the frame safety check.');
+      }
+    };
+    let readGeneration = page.frameGeneration;
+    let frameTree;
     try {
-      const frameTree = await browserHandle.client.send(
+      frameTree = await handle.client.send(
         'Page.getFrameTree',
         {},
         { sessionId: page.sessionId, timeoutMs: frameTreeTimeout, signal }
       );
-      const mainFrame = frameTree?.frameTree?.frame;
-      if (mainFrame) {
-        if (mainFrame.id) page.frameId = mainFrame.id;
-        if (mainFrame.loaderId && page.loaderId && mainFrame.loaderId !== page.loaderId) {
-          page.loaderId = mainFrame.loaderId;
-          page.documentGeneration += 1;
-          page.refs.clear();
-          page.latestFrame = null;
-          bumpRevision();
-        } else if (mainFrame.loaderId && !page.loaderId) {
-          page.loaderId = mainFrame.loaderId;
-        }
-        if (typeof mainFrame.url === 'string' && mainFrame.url) {
-          page.url = mainFrame.url;
-        }
-      }
     } catch {
       // Keep last known URL if frameTree is momentarily busy.
     }
+    assertFrameReadCurrent(readGeneration);
+    const mainFrame = frameTree?.frameTree?.frame;
+    const changedDocument = mainFrame?.loaderId && page.loaderId && mainFrame.loaderId !== page.loaderId;
+    const changedUrl = typeof mainFrame?.url === 'string' && mainFrame.url && page.url && mainFrame.url !== page.url;
+    if (mainFrame) {
+      if (mainFrame.id) page.frameId = mainFrame.id;
+      if (changedDocument) {
+        page.documentGeneration += 1;
+        page.refs.clear();
+      }
+      if (changedDocument || changedUrl) {
+        invalidatePageFrames(page);
+        bumpRevision();
+      }
+      if (mainFrame.loaderId) page.loaderId = mainFrame.loaderId;
+      if (typeof mainFrame.url === 'string' && mainFrame.url) page.url = mainFrame.url;
+    }
 
+    readGeneration = page.frameGeneration;
+    let evalRes;
     try {
-      const evalRes = await browserHandle.client.send(
+      evalRes = await handle.client.send(
         'Runtime.evaluate',
         {
           expression: SENSITIVE_DOM_PROBE_EXPRESSION,
@@ -834,23 +903,20 @@ export async function createDesktopBrowserProvider(opts = {}) {
         },
         { sessionId: page.sessionId, timeoutMs: probeTimeout, signal }
       );
-      if (isPlainObject(evalRes?.result?.value)) {
-        domSignals = evalRes.result.value;
-        if (typeof domSignals.title === 'string') {
-          page.title = domSignals.title;
-        }
-        if (typeof domSignals.url === 'string' && domSignals.url) {
-          if (page.url && domSignals.url !== page.url) {
-            page.url = domSignals.url;
-            page.latestFrame = null;
-            bumpRevision();
-          } else {
-            page.url = domSignals.url;
-          }
-        }
-      }
     } catch {
       // URL-based classification still applies if document is mid-navigation.
+    }
+    assertFrameReadCurrent(readGeneration);
+    const domSignals = isPlainObject(evalRes?.result?.value) ? evalRes.result.value : null;
+    if (domSignals) {
+      if (typeof domSignals.title === 'string') page.title = domSignals.title;
+      if (typeof domSignals.url === 'string' && domSignals.url) {
+        if (page.url && domSignals.url !== page.url) {
+          invalidatePageFrames(page);
+          bumpRevision();
+        }
+        page.url = domSignals.url;
+      }
     }
 
     if (page.isPopup && !isAllowedPopupUrl(page.url)) {
@@ -863,8 +929,11 @@ export async function createDesktopBrowserProvider(opts = {}) {
       title: page.title,
       domSignals,
     });
-    applySensitiveState(page, classification);
-    return { domSignals, classification };
+    // A missing DOM probe is not proof that a previously detected dialog is gone.
+    if (domSignals || classification.sensitive || changedDocument) {
+      applySensitiveState(page, classification);
+    }
+    return { domSignals };
   }
 
   async function stopPageScreencast(page) {
@@ -872,7 +941,6 @@ export async function createDesktopBrowserProvider(opts = {}) {
     clearPageScreencastTimers(page);
     if (!page.screencastActive) return;
     page.screencastActive = false;
-    page.latestFrame = null;
     if (browserHandle && !browserHandle.client.closed) {
       try {
         await browserHandle.client.send(
@@ -978,7 +1046,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
           }
           if (typeof info.url === 'string' && info.url && info.url !== page.url) {
             page.url = info.url;
-            page.latestFrame = null;
+            invalidatePageFrames(page);
             changed = true;
           }
           if (changed) {
@@ -1014,7 +1082,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
         page.documentGeneration += 1;
         page.domContentLoaded = false;
         page.refs.clear();
-        page.latestFrame = null;
+        invalidatePageFrames(page);
         bumpRevision();
         applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
         notifyWaitWakeups(page);
@@ -1027,6 +1095,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
         if (typeof params.url === 'string') {
           page.url = params.url;
         }
+        invalidatePageFrames(page);
         bumpRevision();
         applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
         notifyWaitWakeups(page);
@@ -1071,49 +1140,38 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
     if (method === 'Page.screencastFrame') {
       const ackSessionId = params.sessionId;
-      if (browserHandle && !browserHandle.client.closed && typeof ackSessionId === 'number') {
-        browserHandle.client
-          .send(
-            'Page.screencastFrameAck',
-            { sessionId: ackSessionId },
-            { sessionId: page.sessionId, timeoutMs: 3_000 }
-          )
-          .catch(() => undefined);
-      }
-      if (page.secretExposureRisk) {
-        page.latestFrame = null;
-        return;
-      }
       const data = typeof params.data === 'string' ? params.data : '';
-      if (!data) return;
-      const timestamp = now();
-      if (page.lastAcceptedFrameAt > 0 && timestamp - page.lastAcceptedFrameAt < minFrameIntervalMs) {
+      if (!page.screencastActive || page.secretExposureRisk || !data) {
+        acknowledgeScreencastFrame(page, handle, ackSessionId);
         return;
       }
       if (data.length > maxFrameBase64Bytes) {
         page.frameOversizedHint = true;
+        acknowledgeScreencastFrame(page, handle, ackSessionId);
         return;
       }
       page.frameOversizedHint = false;
-      page.lastAcceptedFrameAt = timestamp;
-      frameSeq += 1;
+      const capturedAt = now();
       const frame = {
-        seq: frameSeq,
+        seq: ++frameSeq,
         mimeType: 'image/jpeg',
         data,
         width: viewport.width,
         height: viewport.height,
         revision,
         documentGeneration: page.documentGeneration,
+        frameGeneration: page.frameGeneration,
         pageId: page.pageId,
-        capturedAt: timestamp,
+        capturedAt,
       };
-      page.latestFrame = frame;
-      if (page.pendingFrameWaiters.size > 0) {
-        for (const resolveWaiter of page.pendingFrameWaiters) {
-          resolveWaiter(frame);
-        }
-        page.pendingFrameWaiters.clear();
+      // Keep one trailing paint and withhold its ACK until it is published.
+      const replaced = page.pendingScreencastFrame;
+      page.pendingScreencastFrame = { frame, handle, ackSessionId, frameGeneration: page.frameGeneration };
+      if (replaced) acknowledgeScreencastFrame(page, replaced.handle, replaced.ackSessionId);
+      if (!page.screencastFrameTimer) {
+        const elapsed = capturedAt - page.lastScreencastFrameAt;
+        if (elapsed < 0 || elapsed >= minFrameIntervalMs) promoteScreencastFrame(page);
+        else page.screencastFrameTimer = setTimeout(() => promoteScreencastFrame(page), minFrameIntervalMs - elapsed);
       }
     }
   }
@@ -1138,7 +1196,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       });
     }
 
-    const profilePath = await prepareBotProfileDir({
+    const baseProfilePath = await prepareBotProfileDir({
       botId,
       profileDir: profileDirOpt,
       dataDir: dataDirOpt,
@@ -1149,20 +1207,43 @@ export async function createDesktopBrowserProvider(opts = {}) {
       snapRoots: opts.snapRoots,
       passwdHomePath: opts.passwdHomePath,
     });
-    resolvedProfilePath = profilePath;
-
+    const recoveryProfilePath = platform === 'win32' && discovery.transport === 'loopback'
+      ? win32.join(baseProfilePath, '.pibot-recovery')
+      : null;
+    let profilePath = baseProfilePath;
+    const startProfile = (profilePath) => launchBrowser({
+      executablePath: discovery.executablePath,
+      profilePath,
+      transport: discovery.transport,
+      viewport,
+      platform,
+      env,
+      commandTimeoutMs,
+      signal,
+    });
     let handle;
     try {
-      handle = await launchBrowser({
-        executablePath: discovery.executablePath,
-        profilePath,
-        transport: discovery.transport,
-        viewport,
-        platform,
-        env,
-        commandTimeoutMs,
-        signal,
-      });
+      if (recoveryProfilePath) {
+        try {
+          await assertPrivateWindowsProfileDir(recoveryProfilePath);
+          profilePath = recoveryProfilePath;
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+      }
+      try {
+        handle = await startProfile(profilePath);
+      } catch (error) {
+        if (!recoveryProfilePath || profilePath !== baseProfilePath || error?.data?.profileInUse !== true) throw error;
+        signal?.throwIfAborted();
+        // An orphaned Windows Chromium may still own the original profile after
+        // a Host upgrade. Keep that profile intact and persist a new profile for this Bot.
+        await assertPrivateWindowsProfileDir(baseProfilePath);
+        await mkdir(recoveryProfilePath, { mode: 0o700, recursive: true });
+        await assertPrivateWindowsProfileDir(recoveryProfilePath);
+        profilePath = recoveryProfilePath;
+        handle = await startProfile(profilePath);
+      }
     } catch (err) {
       lastLaunchFailure = {
         reason: err?.code === 'BROWSER_PROFILE_UNWRITABLE' ? 'profile_dir_unwritable' : 'chromium_start_failed',
@@ -1171,6 +1252,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       throw err;
     }
 
+    resolvedProfilePath = profilePath;
     lastLaunchFailure = null;
     browserHandle = handle;
     sessionId = randomUUID();
@@ -1280,11 +1362,17 @@ export async function createDesktopBrowserProvider(opts = {}) {
       secretExposureRisk: false,
       authUseSystemBrowser: false,
       refs: new Map(),
+      frameTargetBlocked: false,
       screencastActive: false,
+      screencastStart: null,
+      screencastHasFrames: false,
       screencastQuality: DESKTOP_BROWSER_DEFAULT_FRAME_QUALITY,
       screencastIdleTimer: null,
+      screencastFrameTimer: null,
+      pendingScreencastFrame: null,
+      lastScreencastFrameAt: -Infinity,
+      frameGeneration: 0,
       latestFrame: null,
-      lastAcceptedFrameAt: 0,
       frameOversizedHint: false,
       pendingFrameWaiters: new Set(),
       waitWakeups: new Set(),
@@ -1439,7 +1527,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       page.loaderId = navResult.loaderId;
       page.documentGeneration += 1;
       page.refs.clear();
-      page.latestFrame = null;
+      invalidatePageFrames(page);
     }
     page.url = url;
     bumpRevision();
@@ -1450,68 +1538,81 @@ export async function createDesktopBrowserProvider(opts = {}) {
     await refreshPageState(page, { signal });
   }
 
-  async function startOrRenewScreencast(page, { maxWidth, maxHeight, quality, signal }) {
+  async function startOrRenewScreencast(page, { maxWidth, maxHeight, quality, signal }, assertFrameTarget) {
     resetScreencastIdleTimer(page);
     const targetQuality = clampInt(quality, 20, 90, page.frameOversizedHint ? 40 : DESKTOP_BROWSER_DEFAULT_FRAME_QUALITY);
-    if (page.screencastActive && page.screencastQuality === targetQuality) {
-      return;
-    }
-    if (page.screencastActive) {
+    if (page.screencastActive && page.screencastQuality !== targetQuality) {
       await stopPageScreencast(page);
+      assertFrameTarget();
       resetScreencastIdleTimer(page);
     }
+    if (page.screencastActive) return page.screencastStart;
     page.screencastQuality = targetQuality;
     page.screencastActive = true;
-    try {
-      await browserHandle.client.send(
-        'Page.startScreencast',
-        {
-          format: 'jpeg',
-          quality: targetQuality,
-          maxWidth: clampInt(maxWidth, 320, viewport.width, viewport.width),
-          maxHeight: clampInt(maxHeight, 240, viewport.height, viewport.height),
-          everyNthFrame: 1,
-        },
-        { sessionId: page.sessionId, timeoutMs: 5_000, signal }
-      );
-    } catch {
-      page.screencastActive = false;
-    }
+    const start = browserHandle.client.send(
+      'Page.startScreencast',
+      {
+        format: 'jpeg',
+        quality: targetQuality,
+        maxWidth: clampInt(maxWidth, 320, viewport.width, viewport.width),
+        maxHeight: clampInt(maxHeight, 240, viewport.height, viewport.height),
+        everyNthFrame: 1,
+      },
+      { sessionId: page.sessionId, timeoutMs: 5_000, signal }
+    ).catch(() => {
+      if (page.screencastStart === start) {
+        page.screencastActive = false;
+        clearPageScreencastTimers(page);
+      }
+    }).finally(() => {
+      if (page.screencastStart === start) page.screencastStart = null;
+    });
+    page.screencastStart = start;
+    await start;
   }
 
-  async function captureBoundedScreenshot(page, { requestedQuality, signal }) {
+  async function captureBoundedScreenshot(page, { requestedQuality, signal }, assertFrameTarget) {
     const qualities = requestedQuality
       ? [clampInt(requestedQuality, 20, 90, DESKTOP_BROWSER_DEFAULT_FRAME_QUALITY), ...ADAPTIVE_JPEG_QUALITIES]
       : [...ADAPTIVE_JPEG_QUALITIES];
     const tried = new Set();
+    const frameGeneration = page.frameGeneration;
 
     for (const q of qualities) {
       if (tried.has(q)) continue;
       tried.add(q);
+      // Order the fallback at dispatch. A newer CDP paint can arrive before its reply.
+      const seq = ++frameSeq;
       const res = await browserHandle.client.send(
         'Page.captureScreenshot',
         { format: 'jpeg', quality: q, fromSurface: true },
         { sessionId: page.sessionId, timeoutMs: 8_000, signal }
       );
+      assertFrameTarget();
+      if (frameGeneration !== page.frameGeneration) {
+        throw browserError('BROWSER_STALE_REVISION', 'Browser page changed while capturing a frame.');
+      }
+      if (page.latestFrame?.seq > seq) return page.latestFrame;
       const data = typeof res?.data === 'string' ? res.data : '';
       if (!data) {
         throw browserError('BROWSER_CAPTURE_FAILED', 'Browser returned an empty frame.');
       }
       if (data.length <= maxFrameBase64Bytes) {
-        frameSeq += 1;
         const frame = {
-          seq: frameSeq,
+          seq,
           mimeType: 'image/jpeg',
           data,
           width: viewport.width,
           height: viewport.height,
           revision,
           documentGeneration: page.documentGeneration,
+          frameGeneration,
           pageId: page.pageId,
           capturedAt: now(),
         };
-        page.latestFrame = frame;
-        page.lastAcceptedFrameAt = frame.capturedAt;
+        if (page.pendingScreencastFrame?.frame.seq < seq) clearPendingScreencastFrame(page);
+        if (!page.pendingScreencastFrame) page.lastScreencastFrameAt = frame.capturedAt;
+        publishPageFrame(page, frame);
         return frame;
       }
     }
@@ -1671,16 +1772,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       typeof input.pageId === 'string' && input.pageId.trim() ? input.pageId.trim() : null;
     if (requestedPageId && pagesById.has(requestedPageId) && input.newTab !== true) {
       const existing = pagesById.get(requestedPageId);
-      if (activePageId && activePageId !== existing.pageId) {
-        await stopPageScreencast(pagesById.get(activePageId));
-      }
-      await browserHandle.client.send(
-        'Target.activateTarget',
-        { targetId: existing.targetId },
-        { timeoutMs: 5_000, signal }
-      );
-      activePageId = existing.pageId;
-      bumpRevision();
+      await activateOwnedPage(existing, { signal });
       if (input.url !== undefined) {
         await navigatePage(existing, url, { actor: input.actor, signal });
       } else {
@@ -1760,14 +1852,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       explicitOpenReserved = false;
       throw err;
     }
-    if (activePageId && activePageId !== page.pageId) {
-      await stopPageScreencast(pagesById.get(activePageId));
-    }
-    await browserHandle.client
-      .send('Target.activateTarget', { targetId: page.targetId }, { timeoutMs: 5_000, signal })
-      .catch(() => undefined);
-    activePageId = page.pageId;
-    bumpRevision();
+    await activateOwnedPage(page, { signal, ignoreActivationFailure: true });
 
     if (url !== 'about:blank') {
       await navigatePage(page, url, { actor: input.actor, signal });
@@ -1778,19 +1863,32 @@ export async function createDesktopBrowserProvider(opts = {}) {
     return buildStatusView({ available: true, canStreamInteract: true });
   }
 
+  async function activateOwnedPage(page, { signal, ignoreActivationFailure = false } = {}) {
+    const priorPage = getActivePage();
+    const leaving = priorPage && priorPage !== page ? priorPage : null;
+    if (leaving) leaving.frameTargetBlocked = true;
+    try {
+      if (leaving) await stopPageScreencast(leaving);
+      try {
+        await browserHandle.client.send(
+          'Target.activateTarget',
+          { targetId: page.targetId },
+          { timeoutMs: 5_000, signal }
+        );
+      } catch (error) {
+        if (!ignoreActivationFailure) throw error;
+      }
+      activePageId = page.pageId;
+      bumpRevision();
+    } finally {
+      if (leaving) leaving.frameTargetBlocked = false;
+    }
+  }
+
   async function performSelect(input) {
     const signal = input.signal;
     const page = resolveOwnedPage(input.pageId);
-    if (activePageId && activePageId !== page.pageId) {
-      await stopPageScreencast(pagesById.get(activePageId));
-    }
-    await browserHandle.client.send(
-      'Target.activateTarget',
-      { targetId: page.targetId },
-      { timeoutMs: 5_000, signal }
-    );
-    activePageId = page.pageId;
-    bumpRevision();
+    await activateOwnedPage(page, { signal });
     await refreshPageState(page, { signal });
     return buildStatusView({ available: true, canStreamInteract: true });
   }
@@ -1842,7 +1940,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       );
       page.documentGeneration += 1;
       page.refs.clear();
-      page.latestFrame = null;
+      invalidatePageFrames(page);
       bumpRevision();
       await waitForPageSettle(page, { timeoutMs: navigationTimeoutMs, signal });
     } else {
@@ -1865,7 +1963,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
         );
         page.documentGeneration += 1;
         page.refs.clear();
-        page.latestFrame = null;
+        invalidatePageFrames(page);
         bumpRevision();
         await waitForPageSettle(page, { timeoutMs: navigationTimeoutMs, signal });
       }
@@ -1881,6 +1979,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
   async function performCloseTab(input) {
     const signal = input.signal;
     const page = resolveOwnedPage(input.pageId);
+    page.frameTargetBlocked = true;
     await stopPageScreencast(page);
     await browserHandle.client
       .send('Target.closeTarget', { targetId: page.targetId }, { timeoutMs: 5_000, signal })
@@ -1906,14 +2005,9 @@ export async function createDesktopBrowserProvider(opts = {}) {
     };
   }
 
-  async function performFrame(input) {
-    const signal = input.signal;
-    const page = resolveOwnedPage(input.pageId);
-    await refreshPageState(page, { signal });
-    revalidateTargetState(page, input);
-
+  function assertFrameAccess(page, input) {
     if (page.secretExposureRisk && input.allowSecretFrame !== true) {
-      await stopPageScreencast(page);
+      void stopPageScreencast(page);
       throw browserError(
         'BROWSER_SECRET_FRAME_BLOCKED',
         'Client secret dialog detected; secret screens cannot be streamed as ordinary frames.',
@@ -1938,48 +2032,79 @@ export async function createDesktopBrowserProvider(opts = {}) {
         }
       );
     }
+  }
 
-    await startOrRenewScreencast(page, {
-      maxWidth: input.maxWidth,
-      maxHeight: input.maxHeight,
-      quality: input.quality,
-      signal,
+  function waitForScreencastFrame(page, { afterSeq, waitMs, signal }) {
+    return new Promise((resolve) => {
+      const finish = (frame) => {
+        if (frame && frame.seq <= afterSeq) return;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        page.pendingFrameWaiters.delete(finish);
+        resolve(frame);
+      };
+      const onAbort = () => finish(null);
+      const timer = setTimeout(onAbort, waitMs);
+      timer.unref?.();
+      signal?.addEventListener('abort', onAbort, { once: true });
+      page.pendingFrameWaiters.add(finish);
     });
+  }
 
-    let frame = page.latestFrame;
-    const isFresh =
-      frame &&
-      frame.documentGeneration === page.documentGeneration &&
-      (!input.forceCapture) &&
-      (input.afterSeq === undefined || frame.seq > input.afterSeq);
-
-    if (!isFresh) {
-      // Wait briefly for a live screencast frame before falling back to a bounded capture.
-      const waited = await new Promise((resolve) => {
-        let done = false;
-        const finish = (value) => {
-          if (done) return;
-          done = true;
-          clearTimeout(timer);
-          page.pendingFrameWaiters.delete(finish);
-          resolve(value);
-        };
-        const timer = setTimeout(() => finish(null), FIRST_SCREENCAST_WAIT_MS);
-        timer.unref?.();
-        page.pendingFrameWaiters.add(finish);
-      });
-      if (waited && waited.documentGeneration === page.documentGeneration) {
-        frame = waited;
-      } else {
-        frame = await captureBoundedScreenshot(page, {
-          requestedQuality: input.quality,
-          signal,
-        });
+  async function performFrame(input) {
+    const signal = input.signal;
+    const page = resolveOwnedPage(input.pageId, { requireActive: input.stream === true });
+    const handle = browserHandle;
+    const assertFrameTarget = () => {
+      signal?.throwIfAborted();
+      if (closed || handle !== browserHandle || !handle || handle.client.closed || page.frameTargetBlocked ||
+          pagesById.get(page.pageId) !== page || (input.stream && activePageId !== page.pageId)) {
+        throw browserError('BROWSER_PAGE_MISMATCH', 'Browser frame target changed during capture.');
       }
+      revalidateTargetState(page, input);
+    };
+
+    let frame;
+    try {
+      assertFrameTarget();
+      if (!input.waitMs || !page.screencastActive) await refreshPageState(page, { signal, assertFrameTarget });
+      assertFrameAccess(page, input);
+      await startOrRenewScreencast(page, input, assertFrameTarget);
+      assertFrameTarget();
+      assertFrameAccess(page, input);
+
+      const afterSeq = Math.max(input.afterSeq ?? 0, input.forceCapture ? page.latestFrame?.seq ?? 0 : 0);
+      const waitMs = clampInt(input.waitMs, 1, 1500, FIRST_SCREENCAST_WAIT_MS);
+      frame = page.latestFrame;
+      if (page.screencastActive && (!frame || frame.seq <= afterSeq)) {
+        await waitForScreencastFrame(page, { afterSeq, waitMs, signal });
+        assertFrameTarget();
+        assertFrameAccess(page, input);
+        frame = page.latestFrame;
+      }
+      // A quiet live page can resend its validated cache for the relay's keyframe refresh.
+      if (!frame || (frame.seq <= afterSeq && (!input.waitMs || input.forceCapture))) {
+        frame = await captureBoundedScreenshot(page, { requestedQuality: input.quality, signal }, assertFrameTarget);
+      }
+
+      await refreshPageState(page, { signal, assertFrameTarget });
+      assertFrameTarget();
+      assertFrameAccess(page, input);
+      if (frame.frameGeneration !== page.frameGeneration || frame.documentGeneration !== page.documentGeneration) {
+        throw browserError('BROWSER_STALE_REVISION', 'Browser page changed while capturing a frame.');
+      }
+    } catch (error) {
+      // Input may invalidate an in-flight screenshot. Retry through the next observation
+      // without replaying its pixels or closing the authenticated stream.
+      if (!input.stream || error?.code !== 'BROWSER_STALE_REVISION') throw error;
+      assertFrameTarget();
+      assertFrameAccess(page, input);
+      return { frameUnchanged: true, pageId: page.pageId };
     }
 
     return {
       seq: frame.seq,
+      ...(input.stream && page.screencastHasFrames ? { captureSeq: frame.seq } : {}),
       mimeType: frame.mimeType,
       data: frame.data,
       width: frame.width,
@@ -2101,46 +2226,78 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
   }
 
-  async function performWait(page, waitSpec, signal) {
+  function buildActResult(page, kind, detail) {
+    return {
+      ok: true,
+      kind,
+      pageId: page.pageId,
+      revision,
+      documentGeneration: page.documentGeneration,
+      url: page.url,
+      title: page.title,
+      sensitive: Boolean(page.sensitive),
+      sensitiveCategory: page.sensitiveCategory,
+      sensitiveReason: page.sensitiveReason,
+      authUseSystemBrowser: Boolean(page.authUseSystemBrowser),
+      ...detail,
+    };
+  }
+
+  async function performWait(input) {
+    const { signal } = input;
+    const waitSpec = normalizeDesktopWaitCommand(input);
+    const page = await enqueue(async () => {
+      assertProviderOpen();
+      const target = resolveOwnedPage(input.pageId);
+      if (!waitSpec.hasCondition) await refreshPageState(target, { signal });
+      revalidateTargetState(target, { ...input, documentGeneration: undefined });
+      assertPageNotSensitiveForBot(target);
+      return target;
+    });
+
     if (signal?.aborted) {
       throw browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' });
     }
+    const registerWakeup = (wake) => {
+      page.waitWakeups.add(wake);
+      return () => page.waitWakeups.delete(wake);
+    };
 
     if (!waitSpec.hasCondition) {
       const waitMs = waitSpec.timeoutMs;
       const deadline = Date.now() + waitMs;
-      while (true) {
+      const assertTimedWaitTarget = () => {
+        if (signal?.aborted) {
+          throw browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' });
+        }
+        assertProviderOpen();
+        if (!browserHandle || browserHandle.client.closed) {
+          throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
+        }
+        if (pagesById.get(page.pageId) !== page) {
+          throw browserError('BROWSER_TAB_NOT_FOUND', `Browser page '${page.pageId}' was not found for this Bot.`);
+        }
         assertPageNotSensitiveForBot(page);
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) break;
+      };
+      for (;;) {
+        const result = await enqueue(async () => {
+          assertTimedWaitTarget();
+          if (Date.now() < deadline) return null;
+          await refreshPageState(page, { signal });
+          assertTimedWaitTarget();
+          return buildActResult(page, 'wait', { waitedMs: waitMs });
+        });
+        if (result) return result;
         await sleepAbortable(
-          remaining,
+          deadline - Date.now(),
           signal,
           (cancel) => {
             activeWaits.add(cancel);
             return () => activeWaits.delete(cancel);
           },
-          (wake) => {
-            page.waitWakeups.add(wake);
-            return () => page.waitWakeups.delete(wake);
-          }
+          registerWakeup
         );
-        if (closed) {
-          throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-            outcome: 'not-sent',
-          });
-        }
-        if (!browserHandle || browserHandle.client.closed) {
-          throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
-        }
-        if (!pagesById.has(page.pageId)) {
-          throw browserError('BROWSER_TAB_NOT_FOUND', `Browser page '${page.pageId}' was not found for this Bot.`);
-        }
-        assertPageNotSensitiveForBot(page);
       }
-      await refreshPageState(page, { signal });
-      assertPageNotSensitiveForBot(page);
-      return { waitedMs: waitMs };
     }
 
     const startedAt = performance.now();
@@ -2152,6 +2309,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
     const assertWaiting = () => {
       if (signal?.aborted || closeController.signal.aborted) throw browserError('CANCELLED', 'Wait cancelled.');
+      assertProviderOpen();
       if (deadlineSignal.aborted || performance.now() - startedAt >= waitSpec.timeoutMs) {
         throw browserError('BROWSER_TIMEOUT', 'Browser wait conditions were not met before timeout.');
       }
@@ -2161,36 +2319,36 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
     try {
       for (;;) {
-        assertWaiting();
-        const { domSignals } = await refreshPageState(page, { signal: waitSignal });
-        assertWaiting();
-        const generation = page.documentGeneration;
-        let probe = null;
-        if (domSignals) {
-          // All predicates refer to one document, never cached metadata from an earlier navigation.
-          try {
-            probe = await probeWaitDomCondition(page, waitSpec, waitSignal, waitSpec.timeoutMs);
-          } catch {
-            // A navigation can destroy the execution context; sample the new document on the next pass.
+        // Sample a single document between mutations, then release the queue between samples.
+        const result = await enqueue(async () => {
+          assertWaiting();
+          const { domSignals } = await refreshPageState(page, { signal: waitSignal });
+          assertWaiting();
+          const generation = page.documentGeneration;
+          let probe = null;
+          if (domSignals) {
+            try {
+              probe = await probeWaitDomCondition(page, waitSpec, waitSignal, waitSpec.timeoutMs);
+            } catch {
+              // Navigation can destroy the execution context. Retry on the next pass.
+            }
           }
-        }
-        assertWaiting();
-        if (probe?.selectorInvalid) throw browserError('INVALID_ARGUMENT', 'Invalid CSS selector in act.wait.');
-        if (probe && generation === page.documentGeneration) {
+          assertWaiting();
+          if (!probe || generation !== page.documentGeneration) return null;
+          if (probe.selectorInvalid) throw browserError('INVALID_ARGUMENT', 'Invalid CSS selector in act.wait.');
           const loaded = !waitSpec.load || (waitSpec.load === 'load'
             ? !page.isNavigating && probe.readyState === 'complete'
             : (probe.readyState === 'interactive' || probe.readyState === 'complete')
               && (!page.isNavigating || page.domContentLoaded));
           if (loaded && (!waitSpec.selector || probe.selectorMatched) && (!waitSpec.text || probe.textMatched)
               && (!waitSpec.url || probe.urlMatched)) {
-            return { waitedMs: Math.round(performance.now() - startedAt) };
+            return buildActResult(page, 'wait', { waitedMs: Math.round(performance.now() - startedAt) });
           }
-        }
+          return null;
+        });
+        if (result) return result;
         try {
-          await sleepAbortable(WAIT_POLL_INTERVAL_MS, waitSignal, null, wake => {
-            page.waitWakeups.add(wake);
-            return () => page.waitWakeups.delete(wake);
-          });
+          await sleepAbortable(WAIT_POLL_INTERVAL_MS, waitSignal, null, registerWakeup);
         } catch {
           assertWaiting();
         }
@@ -2200,10 +2358,8 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
   }
 
-  async function performAct(input) {
+  async function performAct(input, cmd, kind) {
     const signal = input.signal;
-    const cmd = isPlainObject(input.command) ? input.command : input;
-    const kind = String(cmd.kind ?? cmd.op ?? '').trim();
 
     if (FORBIDDEN_ACT_KINDS.has(kind) || FORBIDDEN_ACT_KINDS.has(kind.toLowerCase())) {
       throw browserError(
@@ -2218,11 +2374,9 @@ export async function createDesktopBrowserProvider(opts = {}) {
       });
     }
 
-    const waitSpec = kind === 'wait' ? normalizeDesktopWaitCommand(input) : null;
-
     const page = resolveOwnedPage(input.pageId);
-    if (!waitSpec?.hasCondition) await refreshPageState(page, { signal });
-    revalidateTargetState(page, kind === 'wait' ? { ...input, documentGeneration: undefined } : input);
+    await refreshPageState(page, { signal });
+    revalidateTargetState(page, input);
     assertPageNotSensitiveForBot(page);
 
     const resolveRef = async () => {
@@ -2272,6 +2426,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
     };
 
     let detail = {};
+    invalidatePageFrames(page);
 
     if (kind === 'click' || kind === 'dblclick' || kind === 'hover') {
       const { entry } = await resolveRef();
@@ -2407,28 +2562,10 @@ export async function createDesktopBrowserProvider(opts = {}) {
         { sessionId: page.sessionId, timeoutMs: commandTimeoutMs, signal }
       );
       detail = { scrolled: direction, amount };
-    } else if (kind === 'wait') {
-      detail = await performWait(page, waitSpec, signal);
     }
 
-    if (kind !== 'wait') {
-      page.latestFrame = null;
-      await refreshPageState(page, { signal });
-    }
-    return {
-      ok: true,
-      kind,
-      pageId: page.pageId,
-      revision,
-      documentGeneration: page.documentGeneration,
-      url: page.url,
-      title: page.title,
-      sensitive: Boolean(page.sensitive),
-      sensitiveCategory: page.sensitiveCategory,
-      sensitiveReason: page.sensitiveReason,
-      authUseSystemBrowser: Boolean(page.authUseSystemBrowser),
-      ...detail,
-    };
+    await refreshPageState(page, { signal });
+    return buildActResult(page, kind, detail);
   }
 
   async function performInput(input) {
@@ -2463,6 +2600,9 @@ export async function createDesktopBrowserProvider(opts = {}) {
       );
     }
 
+    input.beforeInput?.();
+    // The repaint can arrive before CDP acknowledges the input.
+    invalidatePageFrames(page);
     if (normalized.kind === 'click' || normalized.kind === 'dblclick' || normalized.kind === 'move') {
       const px = Math.max(0, Math.min(viewport.width - 1, Math.round(normalized.x * viewport.width)));
       const py = Math.max(0, Math.min(viewport.height - 1, Math.round(normalized.y * viewport.height)));
@@ -2527,7 +2667,6 @@ export async function createDesktopBrowserProvider(opts = {}) {
       );
     }
 
-    page.latestFrame = null;
     await refreshPageState(page, { signal });
     return {
       ok: true,
@@ -2564,11 +2703,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
     },
 
     async perform(input) {
-      if (closed) {
-        throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-          outcome: 'not-sent',
-        });
-      }
+      assertProviderOpen();
       if (!isPlainObject(input)) {
         throw browserError('INVALID_ARGUMENT', 'perform(input) requires a plain object.', {
           outcome: 'not-sent',
@@ -2586,13 +2721,14 @@ export async function createDesktopBrowserProvider(opts = {}) {
           ? enqueue(() => performStatus())
           : performStatus();
       }
+      // Frame wait and screenshot CDP commands never reserve the mutation/input queue.
+      if (action === 'frame') return performFrame(input);
+      const cmd = action === 'act' ? (isPlainObject(input.command) ? input.command : input) : null;
+      const kind = cmd && String(cmd.kind ?? cmd.op ?? '').trim();
+      if (kind === 'wait') return performWait(input);
 
       return enqueue(async () => {
-        if (closed) {
-          throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
-            outcome: 'not-sent',
-          });
-        }
+        assertProviderOpen();
         switch (action) {
           case 'open':
             return performOpen(input);
@@ -2606,14 +2742,12 @@ export async function createDesktopBrowserProvider(opts = {}) {
             return performHistoryOrReload(input);
           case 'closeTab':
             return performCloseTab(input);
-          case 'frame':
-            return performFrame(input);
           case 'stopStream':
             return performStopStream(input);
           case 'snapshot':
             return performSnapshot(input);
           case 'act':
-            return performAct(input);
+            return performAct(input, cmd, kind);
           case 'input':
             return performInput(input);
           default:

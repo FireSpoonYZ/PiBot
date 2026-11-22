@@ -6,12 +6,21 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { openHost } from '../../host-core/host.js';
-import { countMessageTokens } from '../../host-core/request-context.js';
+import {
+  computeOverflowRecoveryBudget,
+  computePreflightTargetTokens,
+  countMessageTokens,
+  setRequestBudget,
+  withRequestBudget,
+} from '../../host-core/request-context.js';
 import { openRuntime } from '../../host-core/runtime.js';
+import { openAICompletionsApi } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.lazy.js';
+import { openAIResponsesApi } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/api/openai-responses.lazy.js';
 import { registerApiProvider } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/compat.js';
 import { createAssistantMessageEventStream } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js';
 import { getCurrentTools } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
 import { estimateMessageTokens } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/estimate.js';
+import { isContextOverflow } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/overflow.js';
 
 const BC_PACKAGE_ROOT = fileURLToPath(new URL('../../plugins/billion-context', import.meta.url));
 const BC_INSTALLATION_ID = 'inst-billion-context';
@@ -37,6 +46,100 @@ const ZERO_USAGE = {
   totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+async function sendProjectedRequest({
+  api = 'openai-responses', compat, tokenCount = 494_900, billionContext = true, options,
+} = {}) {
+  const responses = api === 'openai-responses';
+  const provider = withRequestBudget(responses ? openAIResponsesApi() : openAICompletionsApi());
+  const model = {
+    id: MODEL_ID, api, provider: 'openai', baseUrl: 'https://openai.example.test/v1',
+    reasoning: false, input: ['text'], contextWindow: 500_000, maxTokens: 1_024,
+    cost: ZERO_USAGE.cost, compat,
+  };
+  const messages = [
+    { role: 'assistant', content: [{ type: 'text', text: 'Retained reply' }], stopReason: 'stop', timestamp: 1,
+      api, provider: model.provider, model: model.id, usage: { ...ZERO_USAGE, totalTokens: 499_000 } },
+    { role: 'user', content: 'Current question', timestamp: 2 },
+  ];
+  setRequestBudget(messages, tokenCount, model.contextWindow, undefined, { billionContext });
+
+  let body;
+  const result = await provider.streamSimple(model, { messages: [...messages] }, {
+    apiKey: 'sk-fixture',
+    ...options,
+    async fetch(_url, request) {
+      body = JSON.parse(request.body);
+      const event = responses
+        ? { type: 'response.completed', response: { status: 'completed', output: [] } }
+        : { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] };
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  }).result();
+  return { body, result };
+}
+
+test('Billion Context reserves output and a near-window margin for OpenAI preflight and recovery', () => {
+  assert.equal(computePreflightTargetTokens(500_000, 1_024, 'openai-responses'), 494_880);
+  assert.equal(computePreflightTargetTokens(500_000, 16, 'openai-completions'), 495_888);
+  assert.equal(computePreflightTargetTokens(500_000, 200_000, 'openai-responses'), 370_904);
+  assert.equal(computePreflightTargetTokens(500_000, 1_024, 'anthropic-messages'), 500_000);
+  assert.equal(computePreflightTargetTokens(4_096, 1_024, 'openai-responses'), 3_072);
+  const { targetTokens, effectiveContextWindow } = computeOverflowRecoveryBudget({
+    configuredContextWindow: 500_000, modelMaxTokens: 1_024, api: 'openai-responses',
+    sentEstimatedTokens: 480_000, errorMessage: 'maximum context length is 64000 tokens',
+  });
+  assert.equal(effectiveContextWindow, 64_000);
+  assert.equal(targetTokens, 58_880);
+});
+
+test('Billion Context restores SDK-clamped OpenAI wire limits from the projected input', async (t) => {
+  for (const [api, field, minimum] of [
+    ['openai-responses', 'max_output_tokens', 16],
+    ['openai-completions', 'max_completion_tokens', 1],
+    ['openai-completions', 'max_tokens', 1],
+  ]) {
+    await t.test(field, async () => {
+      const { body, result } = await sendProjectedRequest({
+        api,
+        compat: api === 'openai-completions' ? { maxTokensField: field } : undefined,
+        options: { onPayload: (payload) => {
+          assert.equal(payload[field], minimum, 'the stale assistant usage should trigger the SDK clamp');
+          return payload;
+        } },
+      });
+      assert.equal(result.stopReason, 'stop', result.errorMessage);
+      assert.equal(body[field], 1_004);
+    });
+  }
+});
+
+test('Billion Context reports a recognizable overflow before sending an OpenAI floor-only request', async () => {
+  const { body, result } = await sendProjectedRequest({ tokenCount: 496_002 });
+  assert.equal(body, undefined);
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /context_length_exceeded/);
+  assert.equal(isContextOverflow(result), true);
+});
+
+test('Billion Context preserves explicit and omitted OpenAI Responses limits', async (t) => {
+  for (const [name, settings, expected] of [
+    ['ordinary request', { billionContext: false }, 16],
+    ['explicit request cap', { options: { maxTokens: 16 } }, 16],
+    ['explicit cap above the floor', { options: { maxTokens: 32 } }, 32],
+    ['configured model cap', { tokenCount: 400_000, options: { maxTokens: 2_048 } }, 1_024],
+    ['sampling override', { options: { samplingParams: { max_output_tokens: 16 } } }, 16],
+    ['replacement hook', { options: { onPayload: (payload) => ({ ...payload, max_output_tokens: 16 }) } }, 16],
+    ['unsupported field', { compat: { supportsMaxOutputTokens: false } }, undefined],
+  ]) {
+    await t.test(name, async () => {
+      const { body, result } = await sendProjectedRequest(settings);
+      assert.equal(result.stopReason, 'stop', result.errorMessage);
+      assert.equal(body.max_output_tokens, expected);
+      if (expected === undefined) assert.equal(Object.hasOwn(body, 'max_output_tokens'), false);
+    });
+  }
+});
 
 async function waitUntil(predicate, { timeoutMs = 30_000, intervalMs = 20, label = 'condition' } = {}) {
   const deadline = performance.now() + timeoutMs;

@@ -13,6 +13,13 @@ import {
   MAX_CONTROL_JSON_BYTES,
 } from './remote-control-protocol.js';
 
+export function relayControlCaller(fromDeviceId) {
+  const id = typeof fromDeviceId === 'string' ? fromDeviceId.trim() : '';
+  return id
+    ? { transport: 'relay', clientId: `relay:${id}`, fromDeviceId: id }
+    : { transport: 'relay', clientId: 'relay:unknown' };
+}
+
 function isResultShape(value) {
   return value !== null && typeof value === 'object';
 }
@@ -91,14 +98,7 @@ export function createHostControlReceiver({ deviceId, execute, send }) {
     active.set(rec.routeId, rec);
     let promise;
     try {
-      const caller =
-        typeof frame.fromDeviceId === 'string' && frame.fromDeviceId.trim() !== ''
-          ? {
-              transport: 'relay',
-              clientId: `relay:${frame.fromDeviceId.trim()}`,
-              fromDeviceId: frame.fromDeviceId.trim(),
-            }
-          : { transport: 'relay', clientId: 'relay:unknown' };
+      const caller = relayControlCaller(frame.fromDeviceId);
       promise = execute(deviceId, frame.method, frame.params, { signal: rec.controller.signal, caller });
     } catch (err) {
       finishErr(rec, err);

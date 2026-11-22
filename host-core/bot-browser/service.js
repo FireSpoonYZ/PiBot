@@ -3,6 +3,7 @@
 // lease with real bot queue drain & in-flight confirmation, fail-closed disconnect hold,
 // Privacy Shield sensitive-step isolation, and dual-lane control() vs toolsForBot() dispatch.
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { assertId } from '../message-protocol.js';
 import {
   BROWSER_DEFAULT_IDLE_CLOSE_MS,
@@ -11,6 +12,8 @@ import {
   BROWSER_MAX_ACTIVE_SESSIONS,
   BROWSER_MAX_FRAME_BASE64_BYTES,
   BROWSER_MAX_TABS_PER_BOT,
+  CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
+  CLIENT_BROWSER_WINDOW_CLOSED_REASON,
   botBrowserProfileDirectory,
   browserError,
   isPlainObject,
@@ -26,6 +29,7 @@ import {
 import {
   checkBotActionSensitivity,
   classifyPageSensitivity,
+  isGoogleCloudConsoleUrl,
   mergeProviderHints,
   sanitizeSnapshotForBot,
   sanitizeTabsForCaller,
@@ -34,6 +38,8 @@ import {
 } from './policy.js';
 import { createBotBrowserState } from './state.js';
 import { createBotBrowserTools } from './tools.js';
+import { normalizeNativeBrowserControl } from './native-control.js';
+import { createClientBrowserRenderer } from './client-renderer.js';
 
 function combineSignals(a, b) {
   if (a && b) return AbortSignal.any([a, b]);
@@ -218,11 +224,50 @@ export function createBotBrowserService(options = {}) {
       takeoverTimeoutMs,
       maxTabsPerBot,
       isPageWithheld: checkWithheld,
-      onEvent,
+      onPageUrl: options.onPageUrl,
+      onEvent(event) {
+        const grant = entry?.presentation;
+        if (grant && (state.leaseGeneration !== grant.generation || event.pageId !== grant.pageId ||
+            event.phase !== 'human' || state.sensitivity.blockNormalFrame)) {
+          void dismissPresentation(entry).catch(() => {});
+        }
+        onEvent?.(event);
+      },
     });
-    entry = { state, provider: null, providerPromise: null };
+    entry = {
+      state, provider: null, providerPromise: null, providerEpoch: 0, streamCaptures: new Map(),
+      renderer: null, closedClientRenderer: null, closedRendererIds: new Set(),
+      presentation: null, dismissing: null, presentationChanges: 0, opening: 0, closing: false,
+    };
     entries.set(botId, entry);
     return entry;
+  }
+
+  function recordClosedRendererId(entry, rendererId) {
+    if (!rendererId) return;
+    entry.closedRendererIds.add(rendererId);
+    if (entry.closedRendererIds.size > 64) {
+      const oldest = entry.closedRendererIds.values().next().value;
+      if (oldest !== undefined) entry.closedRendererIds.delete(oldest);
+    }
+  }
+
+  function desktopWindowClosedError() {
+    return browserError('BROWSER_UNAVAILABLE', CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE, {
+      reason: CLIENT_BROWSER_WINDOW_CLOSED_REASON,
+    });
+  }
+
+  function staleProviderError(entry) {
+    if (closed || entry.state.closed) return browserError('BROWSER_CLOSED');
+    if (entry.closedClientRenderer) return desktopWindowClosedError();
+    return browserError('BROWSER_CLOSED');
+  }
+
+  function assertProviderCurrent(entry, provider) {
+    if (closed || entry.state.closed || entry.provider !== provider) {
+      throw staleProviderError(entry);
+    }
   }
 
   async function loadDefaultProviderFactory() {
@@ -241,14 +286,25 @@ export function createBotBrowserService(options = {}) {
   }
 
   async function ensureProvider(entry, { allowUnavailable = false } = {}) {
-    if (closed) throw browserError('BROWSER_CLOSED');
+    if (closed || entry.closing) throw browserError('BROWSER_CLOSED');
+    if (entry.closedClientRenderer && !entry.provider) {
+      entry.state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+      if (allowUnavailable) return null;
+      throw desktopWindowClosedError();
+    }
     if (entry.provider) return entry.provider;
     if (entry.providerPromise) {
       const existing = await entry.providerPromise;
-      if (existing || allowUnavailable) return existing;
+      if (existing && entry.provider === existing) return existing;
+      if (entry.closedClientRenderer) {
+        if (allowUnavailable) return null;
+        throw desktopWindowClosedError();
+      }
+      if (allowUnavailable) return null;
       throw browserError('BROWSER_UNAVAILABLE', entry.state.reason || 'Bot browser provider is unavailable.');
     }
 
+    const startEpoch = entry.providerEpoch;
     entry.providerPromise = (async () => {
       try {
         const factory = customProviderFactory ?? (await loadDefaultProviderFactory());
@@ -259,13 +315,17 @@ export function createBotBrowserService(options = {}) {
           deviceId: host.deviceId,
           ...(nativeBridge ? { nativeBridge } : {}),
         }));
-        if (closed) {
+        if (closed || entry.closing || entry.providerEpoch !== startEpoch || entry.renderer || entry.closedClientRenderer) {
           await provider.close().catch(() => {});
           return null;
         }
         entry.provider = provider;
         return provider;
       } catch (err) {
+        if (entry.providerEpoch !== startEpoch || entry.renderer || entry.closedClientRenderer) {
+          if (allowUnavailable) return null;
+          throw staleProviderError(entry);
+        }
         const reason = err?.message || 'browser_provider_unavailable';
         entry.state.setUnavailable(reason);
         if (allowUnavailable) return null;
@@ -281,12 +341,21 @@ export function createBotBrowserService(options = {}) {
 
   async function closeEntryProvider(entry) {
     const provider = entry.provider;
-    entry.provider = null;
     if (!provider) return;
+    entry.closing = true;
     try {
-      await provider.perform({ action: 'release', botId: entry.state.botId }).catch(() => {});
+      // Renderer replies remain routable while an attached client closes its tabs.
+      if (!entry.renderer || (!closed && entries.get(entry.state.botId) === entry)) {
+        await dismissPresentation(entry);
+        await provider.perform({ action: 'release', botId: entry.state.botId }).catch(() => {});
+      }
     } finally {
-      await provider.close();
+      entry.provider = null;
+      entry.renderer = null;
+      entry.presentation = null;
+      entry.providerEpoch += 1;
+      entry.streamCaptures.clear();
+      try { await provider.close(); } finally { entry.closing = false; }
     }
   }
 
@@ -334,9 +403,11 @@ export function createBotBrowserService(options = {}) {
         ...(pageId ? { pageId } : {}),
         ...(signal ? { signal } : {}),
       });
+      if (entry.provider !== provider) return null;
       entry.state.syncProviderResult(res);
       return res;
     } catch (err) {
+      if (entry.provider !== provider) return null;
       if (allowUnavailable) {
         entry.state.setUnavailable(err?.message || 'browser_provider_unavailable');
         return null;
@@ -352,21 +423,19 @@ export function createBotBrowserService(options = {}) {
       ? state.currentLeaseTokenFor(authority, presentedLease)
       : undefined;
 
-    const canSeeSensitiveTabs =
-      authority.canViewSensitive &&
-      (!state.sensitivity.blockBystanderFrame || state.phase !== 'human' || isLeaseHolder);
-
     const tabs = sanitizeTabsForCaller(state.tabs, {
-      isBot: false,
-      canViewSensitive: canSeeSensitiveTabs,
+      canViewSensitive: authority.canViewSensitive && (isLeaseHolder || state.phase === 'held'),
       isPageWithheld: checkWithheld,
       botId: state.botId,
+      restrictedPageId: state.sensitivity.blockBystanderFrame ? state.pageId : null,
     });
 
     const sensitiveReason = state.sensitivity.sensitive
       ? (state.sensitivity.guidance || state.providerSensitiveReason || state.sensitivity.reasons[0] || undefined)
       : undefined;
     const attentionRequested = state.phase === 'held';
+    const entry = entries.get(state.botId);
+    const localRenderer = entry?.renderer?.clientId === authority.clientId;
     const attentionMessage = attentionRequested
       ? (state.sensitivity.guidance || state.providerSensitiveReason || state.reason || undefined)
       : undefined;
@@ -375,6 +444,11 @@ export function createBotBrowserService(options = {}) {
       available: state.available,
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
+      ...(authority.canControl && authority.role !== 'system' ? { supportsSharedInput: true } : {}),
+      ...(state.sharedInput ? { sharedInput: true } : {}),
+      ...(entry?.renderer || entry?.closedClientRenderer ? { renderPlacement: 'client' } : {}),
+      ...(localRenderer ? { rendererId: entry.renderer.rendererId, nativePresentation: true } : {}),
+      ...(entry?.provider?.nativePresentation && authority.transport === 'local' ? { nativePresentation: true } : {}),
       canIsolateSensitivePages: state.capabilities.privateSecretIsolation,
       phase: state.phase,
       ...(state.sessionId ? { sessionId: state.sessionId } : {}),
@@ -401,16 +475,17 @@ export function createBotBrowserService(options = {}) {
     state.expireLeaseIfNeeded();
     const tabs = sanitizeTabsForCaller(state.tabs, {
       isBot: true,
-      canViewSensitive: false,
       isPageWithheld: checkWithheld,
       botId: state.botId,
+      restrictedPageId: state.sensitivity.blockBotObserve ? state.pageId : null,
     });
     return {
       available: state.available,
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
       phase: state.phase,
-      pausedForHuman: state.phase !== 'bot',
+      pausedForHuman: !state.canBotOperate,
+      ...(state.sharedInput ? { sharedInput: true } : {}),
       ...(state.sessionId ? { sessionId: state.sessionId } : {}),
       ...(state.pageId ? { pageId: state.pageId } : {}),
       revision: state.revision,
@@ -462,10 +537,195 @@ export function createBotBrowserService(options = {}) {
    * Trusted owner/viewer control RPC entry point (browserControl).
    * Volatile only: never logs frame bytes, input text, secrets, or lease tokens.
    */
+  async function dismissPresentation(entry) {
+    if (entry.dismissing) return entry.dismissing;
+    const grant = entry.presentation;
+    if (!grant) return;
+    entry.presentation = null;
+    entry.dismissing = (async () => {
+      try {
+        if (grant.renderer) await grant.renderer.hide(grant.pageId);
+        else await grant.provider.perform({ action: 'nativeRevoke', grantId: grant.id });
+      } catch {
+        // The presenter enforces its own deadline even if the link is lost.
+        const remaining = grant.expiresAt + 1_000 - Date.now();
+        if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+      }
+    })().finally(() => { entry.dismissing = null; });
+    return entry.dismissing;
+  }
+
+  async function changePresentationOwner(entry, change) {
+    entry.presentationChanges += 1;
+    try {
+      await dismissPresentation(entry);
+      return await change();
+    } finally {
+      entry.presentationChanges -= 1;
+    }
+  }
+
+  // Completing the Google policy card can return its own safe tab but never another client's active lease.
+  async function completeSetupPolicyHandoff({ botId, pageId, sessionId }, authority) {
+    assertNotClosedOrMaintenance();
+    const auth = normalizeControlAuthority(authority);
+    if (!auth.canControl || auth.role === 'system') throw browserError('BROWSER_FORBIDDEN');
+    const entry = entries.get(botId);
+    const state = entry?.state;
+    if (!entry?.provider || state.pageId !== pageId || state.sessionId !== sessionId) return;
+    if (!await refreshProviderStatus(entry)) return;
+
+    const canHandBack = () => {
+      state.expireLeaseIfNeeded();
+      if (entry.closing || state.closed || !state.available || state.sensitivity.sensitive ||
+          state.pageId !== pageId || state.sessionId !== sessionId) return false;
+      const url = state.activeTab()?.url;
+      if (!isGoogleCloudConsoleUrl(url) || !/^\/auth\/(?:overview|branding|audience)\/?$/.test(new URL(url).pathname)) return false;
+      return state.phase === 'held'
+        ? state.reason === 'policy-consent' || state.reason === 'disconnected_hold'
+        : !state.sharedInput && state.isActiveLeaseHolder(auth);
+    };
+
+    if (!canHandBack()) return;
+    const revision = state.revision;
+    const giveBack = () => {
+      if (canHandBack() && state.revision === revision) {
+        state.handback({ authority: auth, confirmedSetupPolicy: true });
+      }
+    };
+    if (entry.presentation || entry.dismissing) await changePresentationOwner(entry, giveBack);
+    else giveBack();
+  }
+
+  async function controlNative(entry, req, auth) {
+    const { state } = entry;
+    if (!auth.canControl || auth.transport === 'system') throw browserError('BROWSER_FORBIDDEN');
+    const renderer = entry.renderer;
+    if (req.action === 'rendererAttach') {
+      if (entry.closing || entry.closedRendererIds.has(req.rendererId)) return { accepted: false };
+      if (renderer?.clientId === auth.clientId && renderer.rendererId === req.rendererId) {
+        return { accepted: true, rendererId: renderer.rendererId, windowCloseProtocol: 1 };
+      }
+      if (state.phase === 'taking' || state.hasInFlightBotOp || state.queuedBotOpCount || entry.opening ||
+          entry.providerPromise || entry.presentationChanges || entry.dismissing || renderer?.online()) {
+        return { accepted: false };
+      }
+      if (renderer && renderer.clientId !== auth.clientId) return { accepted: false };
+
+      const occupied = state.hasActiveSession || renderer?.hasTabs();
+      const replaceExpired = Boolean(renderer && renderer.clientId === auth.clientId && entry.provider === renderer);
+      if (occupied && !replaceExpired) return { accepted: false };
+
+      const previous = entry.provider;
+      const replacement = createClientBrowserRenderer({
+        rendererId: req.rendererId, clientId: auth.clientId, maxTabs: maxTabsPerBot, maxFrameBytes: maxFrameBase64Bytes,
+      });
+      // Revoke the old presentation while fencing its renderer and tab IDs in this turn.
+      if (replaceExpired) {
+        recordClosedRendererId(entry, renderer.rendererId);
+        if (entry.presentation?.renderer === renderer) entry.presentation = null;
+        else if (entry.presentation) void dismissPresentation(entry).catch(() => {});
+      }
+      entry.renderer = replacement;
+      entry.provider = replacement;
+      entry.closedClientRenderer = null;
+      entry.providerEpoch += 1;
+      entry.streamCaptures.clear();
+      if (previous) void previous.close().catch(() => {});
+      if (replaceExpired) state.resetAfterRelease();
+      state.syncProviderResult(replacement.status());
+      return { accepted: true, rendererId: req.rendererId, windowCloseProtocol: 1 };
+    }
+    if (req.action === 'nativeGrant' || req.action === 'nativeDismiss') {
+      if (req.action === 'nativeGrant' && (entry.closing || entry.presentationChanges || entry.dismissing)) {
+        throw browserError('BROWSER_TAKEOVER_PENDING');
+      }
+      state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: req.action === 'nativeGrant' });
+      if (state.pageId !== req.pageId) throw browserError('BROWSER_STALE_PAGE');
+      if (req.action === 'nativeDismiss') {
+        await dismissPresentation(entry);
+        return { ok: true };
+      }
+      const provider = entry.provider;
+      if ((!renderer || renderer.clientId !== auth.clientId) && !(provider?.nativePresentation && auth.transport === 'local')) {
+        return { supported: false };
+      }
+      if (state.sensitivity.blockNormalFrame) throw browserError('BROWSER_SECRET_STEP_BLOCKED');
+      const generation = state.leaseGeneration;
+      const expiresAt = Date.now() + 4_000;
+      const previous = entry.presentation;
+      const id = previous?.generation === generation && previous.pageId === req.pageId ? previous.id : randomUUID();
+      const grant = { id, pageId: req.pageId, generation, expiresAt, renderer, provider };
+      entry.presentation = grant;
+      if (!renderer) {
+        try {
+          const result = await provider.perform({ action: 'nativeGrant', pageId: req.pageId, grantId: id, expiresAt });
+          if (result?.supported === false) {
+            if (entry.presentation === grant) entry.presentation = null;
+            return result;
+          }
+        } catch (error) {
+          if (entry.presentation === grant) entry.presentation = null;
+          throw error;
+        }
+      }
+      if (entry.presentation !== grant || state.leaseGeneration !== generation || state.pageId !== req.pageId) {
+        if (!renderer) await provider.perform({ action: 'nativeRevoke', grantId: id }).catch(() => {});
+        throw browserError('BROWSER_LEASE_EXPIRED');
+      }
+      return { supported: true, grantId: id, expiresAt, ...(renderer ? { rendererId: renderer.rendererId } : {}) };
+    }
+    if (!renderer || renderer.rendererId !== req.rendererId || renderer.clientId !== auth.clientId) {
+      throw browserError('BROWSER_FORBIDDEN');
+    }
+    switch (req.action) {
+      case 'rendererNext': return renderer.next();
+      case 'rendererReply': return renderer.reply(req);
+      case 'rendererEgressAuthorize':
+        return { allowed: renderer.online() && auth.transport === 'relay', allowedPorts: renderer.ports() };
+      case 'rendererDetach':
+        if (renderer.hasTabs() || entry.opening || state.hasInFlightBotOp) return { ok: false };
+        await dismissPresentation(entry);
+        if (entry.renderer !== renderer || entry.closing) return { ok: false };
+        // The client closes its own tabs and proxy. Cancel outstanding Host
+        // commands immediately and invalidate the old session and any lease.
+        entry.provider = null;
+        entry.renderer = null;
+        entry.providerEpoch += 1;
+        entry.streamCaptures.clear();
+        const closing = renderer.close();
+        state.resetAfterRelease();
+        await closing;
+        return { ok: true };
+      case 'rendererClose': {
+        // Synchronously fence the closing renderer, cached lease/tabs, presentation, and in-flight commands.
+        entry.renderer = null;
+        if (entry.provider === renderer) entry.provider = null;
+        entry.closedClientRenderer = { clientId: auth.clientId, rendererId: renderer.rendererId };
+        recordClosedRendererId(entry, renderer.rendererId);
+        entry.providerEpoch += 1;
+        entry.streamCaptures.clear();
+        if (entry.presentation?.renderer === renderer) entry.presentation = null;
+        else if (entry.presentation) void dismissPresentation(entry).catch(() => {});
+        const closingRenderer = renderer.close(
+          'BROWSER_UNAVAILABLE',
+          CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
+          { reason: CLIENT_BROWSER_WINDOW_CLOSED_REASON },
+        );
+        state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+        state.resetAfterRelease();
+        await closingRenderer;
+        return { ok: true };
+      }
+      default: throw browserError('INVALID_ARGUMENT');
+    }
+  }
+
   async function control(input, authority) {
     assertNotClosedOrMaintenance();
     const auth = normalizeControlAuthority(authority);
-    const req = normalizeControlInput(input, maxFrameBase64Bytes);
+    const native = normalizeNativeBrowserControl(input, maxFrameBase64Bytes);
+    const req = native ?? normalizeControlInput(input, maxFrameBase64Bytes);
     assertLocalBot(req.botId);
 
     if (req.scopeId !== undefined && resolveWorkContext) {
@@ -475,6 +735,7 @@ export function createBotBrowserService(options = {}) {
     const entry = getOrCreateEntry(req.botId);
     const { state } = entry;
     state.expireLeaseIfNeeded();
+    if (native) return controlNative(entry, req, auth);
 
     switch (req.action) {
       case 'status': {
@@ -490,14 +751,40 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_FORBIDDEN', 'Only the owner or admin can take over the bot browser.');
         }
         if (auth.role === 'system') {
-          await state.holdForSystemLock({
+          await changePresentationOwner(entry, () => state.holdForSystemLock({
             reason: req.reason || 'sensitive_step_lock',
             onTakeoverHook: onTakeover,
-          });
+          }));
           await refreshProviderStatus(entry, { allowUnavailable: true });
           return buildControlViewDto(state, auth, { includeLeaseToken: false });
         }
-        const result = await state.beginTakeover({
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
+        if (req.shared) {
+          const preempt = req.force === true || req.preempt === true;
+          const replacesOwnLease = !req.lease && state.sharedInput && state.isActiveLeaseHolder(auth);
+          const share = async () => {
+            const latest = await refreshProviderStatus(entry, { allowUnavailable: true });
+            if (!latest) throw entry.closedClientRenderer ? desktopWindowClosedError() : browserError('BROWSER_STREAM_UNAVAILABLE');
+            if (req.pageId && req.pageId !== state.pageId) throw browserError('BROWSER_STALE_PAGE');
+            if (req.sessionId && req.sessionId !== state.sessionId) throw browserError('BROWSER_STALE_PAGE');
+            return state.beginSharedInput({
+              authority: auth,
+              leaseToken: req.lease,
+              preempt,
+              holderLabelOverride: req.holderLabel,
+            });
+          };
+          const token = preempt || replacesOwnLease ? await changePresentationOwner(entry, share) : await share();
+          if (entry.closedClientRenderer && !entry.provider) {
+            state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+            state.resetAfterRelease();
+            throw desktopWindowClosedError();
+          }
+          return buildControlViewDto(state, auth, { includeLeaseToken: true, presentedLease: token });
+        }
+        const take = () => state.beginTakeover({
           authority: auth,
           leaseToken: req.lease ?? null,
           force: req.force === true,
@@ -505,6 +792,12 @@ export function createBotBrowserService(options = {}) {
           holderLabelOverride: req.holderLabel ?? null,
           onTakeoverHook: onTakeover,
         });
+        const result = req.force || req.preempt ? await changePresentationOwner(entry, take) : await take();
+        if (entry.closedClientRenderer && !entry.provider) {
+          state.setUnavailable(CLIENT_BROWSER_WINDOW_CLOSED_REASON);
+          state.resetAfterRelease();
+          throw desktopWindowClosedError();
+        }
         // Sync current page/tabs WITHOUT reloading or creating a new tab.
         await refreshProviderStatus(entry, { allowUnavailable: true });
         return buildControlViewDto(state, auth, {
@@ -523,15 +816,14 @@ export function createBotBrowserService(options = {}) {
             revision: state.revision,
           });
         }
-        // Always inspect the live landing page BEFORE permitting handback.
+        // Refresh the page's access policy independently of who holds control.
         if (entry.provider) {
           await refreshProviderStatus(entry, { allowUnavailable: true, pageId: req.pageId });
         }
-        const summary = state.handback({
-          authority: auth,
-          leaseToken: req.lease ?? null,
-          currentSensitivity: state.sensitivity,
-        });
+        if (entry.presentation) state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
+        const giveBack = () => state.handback({ authority: auth, leaseToken: req.lease });
+        const summary = entry.presentation || entry.dismissing
+          ? await changePresentationOwner(entry, giveBack) : giveBack();
         if (onHandback) {
           try {
             await onHandback({
@@ -573,6 +865,7 @@ export function createBotBrowserService(options = {}) {
         }
         const provider = await ensureProvider(entry, { allowUnavailable: true });
         if (!provider) {
+          if (entry.closedClientRenderer) throw desktopWindowClosedError();
           throw browserError('BROWSER_STREAM_UNAVAILABLE', state.reason || 'Bot browser is unavailable on this host.');
         }
         if (!state.available || !state.pageId) {
@@ -590,6 +883,9 @@ export function createBotBrowserService(options = {}) {
         if (req.pageId) {
           state.assertOwnsPage(req.pageId);
         }
+        if ((req.sessionId && req.sessionId !== state.sessionId) || (req.stream && req.pageId !== state.pageId)) {
+          throw browserError('BROWSER_STALE_PAGE');
+        }
         const targetPageId = req.pageId ?? state.pageId;
         if (!targetPageId) {
           throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active page open in this bot browser.');
@@ -601,18 +897,20 @@ export function createBotBrowserService(options = {}) {
           url: targetTab()?.url ?? '', title: targetTab()?.title ?? '', botId: req.botId,
           pageId: targetPageId, isPageWithheld: checkWithheld,
         });
+        const sensitiveFrameRequiresLease = req.stream || auth.transport === 'relay';
         const mayViewRestricted = () => {
           const holder = state.isActiveLeaseHolder(auth, presentedLease); // also expires stale leases
           if (!auth.canViewSensitive) return false;
+          if (sensitiveFrameRequiresLease) return hasPresentedLease && holder;
           if (state.phase === 'human' || hasPresentedLease) return holder;
-          return state.phase !== 'taking' && state.reason !== 'disconnected_hold';
+          return state.phase === 'held' && state.reason !== 'disconnected_hold';
         };
         const assertMayDeliver = (sensitivity, allowed) => {
           if (sensitivity.blockNormalFrame) {
             throw browserError('BROWSER_SECRET_STEP_BLOCKED', sensitivity.guidance,
               { phase: state.phase, reason: 'secret_risk', fallbackToSystemBrowser: true });
           }
-          if (sensitivity.blockBystanderFrame && !allowed) {
+          if ((sensitivity.blockBystanderFrame || (sensitiveFrameRequiresLease && sensitivity.sensitive)) && !allowed) {
             throw browserError('BROWSER_SENSITIVE_BLOCKED',
               'Sensitive page frames are withheld from bystanders and non-holder viewers.',
               { phase: state.phase, reason: sensitivity.reasons[0] ?? 'sensitive_page' });
@@ -624,19 +922,38 @@ export function createBotBrowserService(options = {}) {
         const sensitivityBefore = targetSensitivity();
         assertMayDeliver(sensitivityBefore, allowedBefore);
 
+        const capture = () => provider.perform({
+          action: 'frame',
+          actor: 'human',
+          viewer: 'human',
+          botId: req.botId,
+          pageId: targetPageId,
+          ...req.frameLimits,
+          limits: req.frameLimits,
+          ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
+          ...(req.stream ? { stream: true, waitMs: req.waitMs } : {}),
+        });
         let rawFrame;
         try {
-          rawFrame = await provider.perform({
-            action: 'frame',
-            actor: 'human',
-            viewer: 'human',
-            botId: req.botId,
-            pageId: targetPageId,
-            ...req.frameLimits,
-            limits: req.frameLimits,
-            ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
-          });
+          if (req.stream) {
+            // Share a capture in flight. Each viewer's lease and page are checked
+            // independently on both sides of the await.
+            const key = JSON.stringify([
+              sessionAtStart, targetPageId, state.documentGeneration, leaseAtStart, req.frameLimits, req.sinceSeq, req.waitMs,
+            ]);
+            let pending = entry.streamCaptures.get(key);
+            if (!pending) {
+              pending = Promise.resolve(capture()).finally(() => entry.streamCaptures.delete(key));
+              entry.streamCaptures.set(key, pending);
+            }
+            rawFrame = await pending;
+          } else {
+            rawFrame = await capture();
+          }
         } catch (err) {
+          if (entry.provider !== provider) {
+            throw entry.closedClientRenderer ? desktopWindowClosedError() : browserError('BROWSER_STREAM_UNAVAILABLE');
+          }
           throw mapProviderError(err, state);
         }
 
@@ -644,7 +961,8 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_CLOSED');
         }
 
-        const validated = validateFramePayload(rawFrame, req.frameLimits.maxBytes);
+        const frameUnchanged = req.stream && rawFrame?.frameUnchanged === true;
+        const validated = frameUnchanged ? { pageId: rawFrame.pageId } : validateFramePayload(rawFrame, req.frameLimits.maxBytes);
         const framePageId = validated.pageId ?? targetPageId;
         const frameHints = mergeProviderHints(rawFrame, validated.hints);
 
@@ -666,7 +984,7 @@ export function createBotBrowserService(options = {}) {
         });
 
         // Sync metadata/sensitivity only while the same provider session and document are current.
-        if (sessionStillCurrent && !staleDocument && currentTab && framePageId === state.pageId) {
+        if (!frameUnchanged && sessionStillCurrent && !staleDocument && currentTab && framePageId === state.pageId) {
           state.syncProviderResult({
             pageId: framePageId,
             ...(validated.url !== undefined ? { url: validated.url } : {}),
@@ -687,11 +1005,16 @@ export function createBotBrowserService(options = {}) {
         assertMayDeliver(sensitivityAtDelivery, allowedAfter);
         assertMayDeliver(sensitivityBefore, allowedAfter);
         if (!sessionStillCurrent) throw browserError('BROWSER_STREAM_UNAVAILABLE');
-        if (!currentTab || staleDocument) throw browserError('BROWSER_STALE_PAGE');
+        if (!currentTab || staleDocument || (req.stream && state.pageId !== framePageId)) {
+          throw browserError('BROWSER_STALE_PAGE');
+        }
+        if (frameUnchanged) return { frameUnchanged: true, pageId: framePageId };
 
         const stamped = state.recordFrame({ pageId: framePageId });
         return {
           seq: stamped.seq,
+          ...(req.stream && Number.isSafeInteger(rawFrame.captureSeq) && rawFrame.captureSeq > 0
+            ? { captureSeq: rawFrame.captureSeq } : {}),
           mimeType: validated.mimeType,
           data: validated.data,
           width: validated.width,
@@ -735,11 +1058,18 @@ export function createBotBrowserService(options = {}) {
               expectedRevision: state.revision,
               ...(Number.isSafeInteger(state.documentGeneration) ? { documentGeneration: state.documentGeneration } : {}),
               expectedDocumentGeneration: state.documentGeneration,
+              beforeInput: () => {
+                assertProviderCurrent(entry, provider);
+                state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
+                state.assertInputFreshness({ pageId: req.pageId, revision: req.revision, frameSeq: req.frameSeq });
+              },
               event: formatProviderInputEvent(req.event),
             });
           } catch (providerErr) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(providerErr, state);
           }
+          assertProviderCurrent(entry, provider);
           if (isPlainObject(res)) {
             state.syncProviderResult(res);
           }
@@ -755,35 +1085,52 @@ export function createBotBrowserService(options = {}) {
 
       case 'open': {
         assertControlMutationAllowed(state, auth, { ...req, revision: undefined });
-        const safeUrl = req.url !== undefined
-          ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
-          : undefined;
-        if (!state.hasActiveSession) {
-          await reclaimIdleBotSessionsIfNeeded(req.botId);
+        if (req.placement === 'server' && entry.renderer) {
+          throw browserError('BROWSER_ACTION_BLOCKED', 'Cannot switch to host browser while a client renderer is active.');
         }
-        if (state.tabs.length >= maxTabsPerBot) {
-          throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
-        }
-        const provider = await ensureProvider(entry, { allowUnavailable: false });
-        let res;
+        entry.opening += 1;
         try {
-          res = await provider.perform({
-            action: 'open',
-            actor: 'human',
-            botId: req.botId,
-            ...(safeUrl !== undefined ? { url: safeUrl } : {}),
-          });
-        } catch (err) {
-          throw mapProviderError(err, state);
+          const safeUrl = req.url !== undefined
+            ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
+            : undefined;
+          if (entry.closedClientRenderer && !entry.provider && req.placement !== 'server') {
+            throw desktopWindowClosedError();
+          }
+          if (!state.hasActiveSession) await reclaimIdleBotSessionsIfNeeded(req.botId);
+          if (state.tabs.length >= maxTabsPerBot) {
+            throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
+          }
+          if (req.placement === 'server' && entry.closedClientRenderer && !entry.renderer) {
+            entry.closedClientRenderer = null;
+          }
+          const provider = await ensureProvider(entry, { allowUnavailable: false });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'open',
+              actor: 'human',
+              botId: req.botId,
+              ...(safeUrl !== undefined ? { url: safeUrl } : {}),
+            });
+          } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
+            throw mapProviderError(err, state);
+          }
+          assertProviderCurrent(entry, provider);
+          state.ensureSessionId();
+          state.syncProviderResult({ available: true, ...res });
+          return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
+        } finally {
+          entry.opening -= 1;
         }
-        state.ensureSessionId();
-        state.syncProviderResult({ available: true, ...res });
-        return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
       }
 
       case 'navigate': {
         assertControlMutationAllowed(state, auth, req);
         const safeUrl = validateNavigationUrl(req.url, { actor: 'human', allowBlank: false });
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
         if (req.pageId) state.assertOwnsPage(req.pageId);
         const provider = await ensureProvider(entry, { allowUnavailable: false });
         let res;
@@ -796,8 +1143,10 @@ export function createBotBrowserService(options = {}) {
             url: safeUrl,
           });
         } catch (err) {
+          if (entry.provider !== provider) throw staleProviderError(entry);
           throw mapProviderError(err, state);
         }
+        assertProviderCurrent(entry, provider);
         state.ensureSessionId();
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
@@ -809,6 +1158,9 @@ export function createBotBrowserService(options = {}) {
       case 'select':
       case 'closeTab': {
         assertControlMutationAllowed(state, auth, req);
+        if (entry.closedClientRenderer && !entry.provider) {
+          throw desktopWindowClosedError();
+        }
         if (req.pageId) state.assertOwnsPage(req.pageId);
         const targetPageId = req.pageId ?? state.pageId;
         if (!targetPageId) {
@@ -825,8 +1177,10 @@ export function createBotBrowserService(options = {}) {
             ...(req.action === 'reload' && req.ignoreCache !== undefined ? { ignoreCache: req.ignoreCache } : {}),
           });
         } catch (err) {
+          if (entry.provider !== provider) throw staleProviderError(entry);
           throw mapProviderError(err, state);
         }
+        assertProviderCurrent(entry, provider);
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
       }
@@ -880,11 +1234,14 @@ export function createBotBrowserService(options = {}) {
     }
 
     const reqPageId = rawArgs.pageId !== undefined ? normalizePageId(rawArgs.pageId) : undefined;
+    if (state.phase === 'bot' && state.sensitivity.sensitive) {
+      await refreshProviderStatus(entry, { allowUnavailable: true, signal: callOpts.signal });
+    }
 
     return state.enqueueBotOp(action, async (opSignal) => {
       const signal = combineSignals(opSignal, callOpts.signal);
       const assertStillBot = () => {
-        if (opSignal.aborted || state.phase !== 'bot') {
+        if (opSignal.aborted || !state.canBotOperate) {
           throw browserError('BROWSER_PAUSED_FOR_HUMAN', undefined, {
             phase: state.phase,
             reason: state.reason,
@@ -911,6 +1268,9 @@ export function createBotBrowserService(options = {}) {
               throw err;
             }
           }
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (!state.hasActiveSession) {
             await reclaimIdleBotSessionsIfNeeded(botId);
           }
@@ -918,6 +1278,7 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for this bot.`);
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -928,8 +1289,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult({ available: true, ...res });
@@ -964,21 +1327,28 @@ export function createBotBrowserService(options = {}) {
             }
             throw err;
           }
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
+          const targetPageId = reqPageId ?? state.pageId;
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
               action: 'navigate',
               actor: 'bot',
               botId,
-              pageId: reqPageId ?? state.pageId,
+              pageId: targetPageId,
               url: safeUrl,
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult(res);
@@ -1005,6 +1375,9 @@ export function createBotBrowserService(options = {}) {
         case 'reload':
         case 'select':
         case 'closeTab': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if ((action === 'select' || action === 'closeTab') && !reqPageId) {
             throw browserError('INVALID_ARGUMENT', `${action} requires pageId`);
           }
@@ -1014,6 +1387,7 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active browser tab; call open first.');
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -1025,8 +1399,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
           if (action !== 'closeTab' && (state.sensitivity.blockBotObserve || state.sensitivity.blockBotAct)) {
@@ -1044,10 +1420,14 @@ export function createBotBrowserService(options = {}) {
               }
             );
           }
+          assertStillBot();
           return buildBotStatusDto(state);
         }
 
         case 'snapshot': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1070,6 +1450,7 @@ export function createBotBrowserService(options = {}) {
           }
           const snapshotOpts = normalizeBotSnapshotOptions(rawArgs.snapshot ?? {});
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let res;
           try {
             res = await provider.perform({
@@ -1081,8 +1462,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
           const sanitized = sanitizeSnapshotForBot(res, state.sensitivity);
@@ -1097,6 +1480,7 @@ export function createBotBrowserService(options = {}) {
               fallbackToSystemBrowser: sanitized.fallbackToSystemBrowser,
             });
           }
+          assertStillBot();
           state.setSnapshotRefs(sanitized.refMap);
           return {
             pageId: state.pageId,
@@ -1112,6 +1496,9 @@ export function createBotBrowserService(options = {}) {
         }
 
         case 'act': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1148,6 +1535,7 @@ export function createBotBrowserService(options = {}) {
           }
 
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           const providerAct = formatProviderAct(normalizedAct);
           let res;
           try {
@@ -1163,8 +1551,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           state.syncProviderResult(res);
 
@@ -1195,6 +1585,9 @@ export function createBotBrowserService(options = {}) {
         }
 
         case 'screenshot': {
+          if (entry.closedClientRenderer && !entry.provider) {
+            throw desktopWindowClosedError();
+          }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const targetPageId = reqPageId ?? state.pageId;
           if (!targetPageId) {
@@ -1216,6 +1609,7 @@ export function createBotBrowserService(options = {}) {
             );
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
+          assertStillBot();
           let rawFrame;
           try {
             rawFrame = await provider.perform({
@@ -1229,8 +1623,10 @@ export function createBotBrowserService(options = {}) {
               signal,
             });
           } catch (err) {
+            if (entry.provider !== provider) throw staleProviderError(entry);
             throw mapProviderError(err, state, { holdBotOnSensitive: true });
           }
+          assertProviderCurrent(entry, provider);
           assertStillBot();
           const validated = validateFramePayload(rawFrame, rawArgs.limits?.maxBytes ?? maxFrameBase64Bytes);
           const framePageId = validated.pageId ?? targetPageId;
@@ -1272,6 +1668,7 @@ export function createBotBrowserService(options = {}) {
             );
           }
 
+          assertStillBot();
           return {
             pageId: framePageId,
             revision: state.revision,
@@ -1353,5 +1750,6 @@ export function createBotBrowserService(options = {}) {
     cleanupBot,
     releaseBot: cleanupBot,
     setWithheldPagePredicate,
+    completeSetupPolicyHandoff,
   };
 }

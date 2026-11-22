@@ -970,6 +970,7 @@ const STATE_KEYS = [
   'activity',
   'learning',
   'durableWaits',
+  'googleSetupRevision',
 ];
 
 /**

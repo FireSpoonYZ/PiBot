@@ -911,7 +911,7 @@ export function createAndroidBridge(options = {}) {
     if (!rec || rec.done) return;
     const terminal = event.error !== undefined
       || (isPlainObject(event.frame) && event.frame.type === 'end');
-    fire(sendObserverFrame(id, event).then((ok) => {
+    return sendObserverFrame(id, event).then((ok) => {
       if (!ok) {
         finishObserver(id, messageError('BACKPRESSURE', 'client frame was not written'));
         releaseClientObservation(id, rec);
@@ -927,7 +927,7 @@ export function createAndroidBridge(options = {}) {
         ? messageError('RESPONSE_TOO_LARGE', 'client frame exceeds 40MiB')
         : messageError('INTERNAL', 'client frame was not written'));
       releaseClientObservation(id, rec);
-    }));
+    });
   }
 
   // Remove only this record: a later observation may legitimately reuse the id.

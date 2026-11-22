@@ -1,4 +1,6 @@
 {
+  "productName": "Pi Bot",
+  "mainBinaryName": "pibot",
   "bundle": {
     "windows": {
       "wix": {

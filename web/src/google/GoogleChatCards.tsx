@@ -303,7 +303,6 @@ export function GoogleBrowserTakeoverCard({
   const [error, setError] = useState('');
 
   const canStream = presentation.canStreamInteract !== false && !googleContext?.isLocalAndroid;
-  const isGoogleLoginUrl = Boolean(presentation.url && /accounts\.google\.com/i.test(presentation.url));
 
   const handleOpenAndTakeover = async () => {
     if (disabled || busy) return;
@@ -365,13 +364,6 @@ export function GoogleBrowserTakeoverCard({
           <Globe size={13} aria-hidden="true" />
           <span>{presentation.url}</span>
         </div>
-      ) : null}
-
-      {isGoogleLoginUrl ? (
-        <p className="gws-sensitive-note">
-          <ShieldAlert size={14} aria-hidden="true" />
-          <span>{t('提示：Google API 授权须在系统浏览器完成，此处网页登录不会同步为 Bot 的 Google API 权限。', 'Note: Google API authorization happens in your system browser. Signing in here does not grant Google API access.')}</span>
-        </p>
       ) : null}
 
       {error ? (
@@ -675,6 +667,8 @@ export function GoogleReadinessCard({
           autoStart
           callGoogleSetup={googleContext.callGoogleSetup}
           onOpenBrowser={googleContext.onOpenBrowser}
+          onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
+          provisionGoogleClient={googleContext.provisionGoogleClient}
           onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
           onStatusUpdated={snap => setLiveStatus(snap)}
           onClose={() => setPanel('none')}

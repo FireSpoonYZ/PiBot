@@ -33,6 +33,7 @@ import {
   setRequestBudget,
   isLocalBudgetOverflowError,
   createBaseProjectionReplacer,
+  resolveRequestOutputCap,
   computePreflightTargetTokens,
   computeOverflowRecoveryBudget,
   createTurnProvenanceStore,
@@ -77,6 +78,7 @@ import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
+import { googleSetupAnswerLine } from './google-setup/vendor/orca/google-setup-card-turn.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
@@ -794,8 +796,9 @@ export async function openRuntime(options) {
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
           // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
+          const maxTokens = resolveRequestOutputCap(model.maxTokens, checkpoint.streamOptions?.maxTokens);
           const preflightTarget = !isAntigravity
-            ? computePreflightTargetTokens(model.contextWindow, model.maxTokens, model.api)
+            ? computePreflightTargetTokens(model.contextWindow, maxTokens, model.api)
             : undefined;
           const requestView = await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
           const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
@@ -816,7 +819,7 @@ export async function openRuntime(options) {
             const bcProvider = plugins.getBillionContextBinding(requestView);
             if (bcProvider) {
               requestRecoveryState.set(api.taskId, {
-                cutoff: checkpoint.cutoff, preflightTarget, turnKey, baselineMessages, baselineTokens,
+                cutoff: checkpoint.cutoff, preflightTarget, maxTokens, turnKey, baselineMessages, baselineTokens,
                 baseMessages: requestView.messages, bcProvider,
               }, context.abortSignal);
             } else {
@@ -944,7 +947,7 @@ export async function openRuntime(options) {
           }
         }
         const nextRequest = compacted?.messages ? { ...request, messages: compacted.messages } : request;
-        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status);
+        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status, { billionContext: eligible });
         // Managed oversize requests go through the final guard so Durable can still run its native fallback.
         await decisions.checkBudget(nextRequest, api, context, eligible);
         if (nextRequest !== request) return nextRequest;
@@ -966,7 +969,7 @@ export async function openRuntime(options) {
 
       const sentEstimatedTokens = budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, messages);
       const { targetTokens, effectiveContextWindow } = computeOverflowRecoveryBudget({
-        configuredContextWindow: model.contextWindow, modelMaxTokens: model.maxTokens,
+        configuredContextWindow: model.contextWindow, modelMaxTokens: recovery.maxTokens, api: model.api,
         sentEstimatedTokens, errorMessage: error.errorMessage,
       });
       try {
@@ -977,7 +980,7 @@ export async function openRuntime(options) {
         await decisions.checkBudget(nextRequest, api, context, true);
         context.abortSignal?.throwIfAborted();
         if (!online || closing) return;
-        setRequestBudget(result.messages, result.total, effectiveContextWindow);
+        setRequestBudget(result.messages, result.total, effectiveContextWindow, undefined, { billionContext: true });
         return nextRequest;
       } catch (err) {
         requestRecoveryState.delete(api.taskId);
@@ -1027,6 +1030,13 @@ export async function openRuntime(options) {
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
   registry.install(mcpDispatchExtension);
+  const live = createRuntimeLive({
+    host,
+    getHarness: () => harness,
+    getWaits: () => waitsBridge,
+    // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
+    resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
+  });
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     // Cua inventory：对固定 Driver 二进制跑一次只读 CLI metadata（list-tools +
@@ -1067,7 +1077,15 @@ export async function openRuntime(options) {
       },
       isBotTurnRunning: (botId) => (typeof isBotTurnRunningReader === 'function' ? isBotTurnRunningReader(botId) : null),
       onBrowserEvent: options?.onBrowserEvent,
-      onSetupEvent: options?.onSetupEvent,
+      onSetupEvent: (event) => {
+        try {
+          if (event?.type === 'run-changed' || event?.type === 'cards-due') {
+            live.setGoogleSetupRevision(event.botId, event.run?.revision);
+          }
+        } finally {
+          options?.onSetupEvent?.(event);
+        }
+      },
       abortBotTurn: async (botId) => {
         if (!harness) return;
         const bot = host.getBot(botId);
@@ -1108,6 +1126,7 @@ export async function openRuntime(options) {
       env: envFor,
     }, CTX);
   } catch (err) {
+    try { await live.close(); } catch { /* close 失败不掩盖原错误 */ }
     if (harness) {
       try { await harness.close(CTX); } catch { /* close 失败不掩盖原错误 */ }
     } else if (storage) {
@@ -1126,13 +1145,6 @@ export async function openRuntime(options) {
     host.close();
     throw err;
   }
-  const live = createRuntimeLive({
-    host,
-    getHarness: () => harness,
-    getWaits: () => waitsBridge,
-    // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
-    resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
-  });
   workContexts = createWorkContextRuntime({
     host,
     harness,
@@ -1969,7 +1981,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  // trustedMeta 仅允许 Host 内部受信路径传入（dispatchContext、wait continuation、
+  // trustedMeta 仅允许 Host 内部受信路径传入（dispatchContext、内部续轮、
   // 受信 sourceType/dataBoundary），绝不向公开 submit 或外部 webhook payload 开放。
   function submitPrimary(botId, input, stopEpoch, trustedMeta = null) {
     const meta = isPlainObject(trustedMeta) ? trustedMeta : {};
@@ -2217,6 +2229,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     await schedules.deleteBot(bot);
     await browserSetup.releaseBot(botId);
     host.deleteBot({ botId });
+    live.clearGoogleSetupRevision(botId);
     await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
     return true;
@@ -2693,6 +2706,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await schedules.deleteBot(bot);
       await browserSetup.releaseBot(botId);
       const res = host.deleteBot({ botId });
+      live.clearGoogleSetupRevision(botId);
       await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
       if (onBotsSync) await onBotsSync();
@@ -3429,7 +3443,25 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 统一图形环境（Android/Windows/Linux 同签名）：status/frame 只读，takeover 复用 conversation.abort。
     vaultControl: vault.control,
     browserControl: browserSetup.browserControl,
-    googleSetupControl: browserSetup.googleSetupControl,
+    googleSetupControl(input, callerContext) {
+      const stopEpoch = turns.stopEpoch(input?.botId);
+      return browserSetup.googleSetupControl(input, callerContext, async ({ botId, runId, revision, card, values }) => {
+        if (closing || isMaintenance()) return false;
+        const fingerprint = createHash('sha256').update(JSON.stringify([runId, revision])).digest('hex');
+        const receipt = await submitPrimary(botId, {
+          requestId: `google-setup-${fingerprint}`,
+          text: [
+            googleSetupAnswerLine(card, values),
+            `Call google_setup(action="show") first. Continue only if view.id is ${JSON.stringify(runId)} and view.state is "running".`,
+            'Follow the latest guidance for the current setup mode, owner handoffs, and sensitive steps.',
+          ].join('\n'),
+          origin: { sender: { kind: 'host', name: 'Google 配置' } },
+        }, stopEpoch, {
+          continuationTurn: { kind: 'primary', scopeId: null, replyTarget: { kind: 'primary' } },
+        });
+        return ['queued', 'placed', 'done'].includes(receipt?.status);
+      });
+    },
     getShowerStatus: showerRuntime.getShowerStatus,
     createShowerSession: showerRuntime.createShowerSession,
     getShowerFrame: showerRuntime.getShowerFrame,

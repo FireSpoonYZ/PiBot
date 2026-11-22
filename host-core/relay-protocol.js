@@ -11,8 +11,17 @@ import { messageError, assertId, normalizeEnvelope, normalizeAck } from './messa
 import { readControlClientFrame, readControlHostFrame, readControlServerFrame } from './remote-control-protocol.js';
 import { readLiveClientFrame, readLiveHostFrame, readLiveServerFrame } from './remote-live-protocol.js';
 import { readScopeClientFrame, readScopeServerFrame } from './scope-wire.js';
+import { readBrowserStreamPacket } from './bot-browser/stream-packet.js';
+import { readBrowserEgress } from './bot-browser/egress-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
+
+function readRelayBrowserFrame(data, options) {
+  if (options?.liveExtensions?.browserScreencast !== true) throw invalid('relay frames must be text frames');
+  const packet = readBrowserStreamPacket(data);
+  if (!packet) throw invalid('invalid browser stream packet');
+  return packet;
+}
 
 export const MAX_RELAY_FRAME_BYTES = 41943040; // 40 MiB, actual UTF-8 bytes
 export const RELAY_HIGH_WATER_BYTES = 83886080; // 80 MiB bufferedAmount + frame budget
@@ -334,8 +343,9 @@ function readUnavailable(frame) {
  * Role legality of control frames is enforced by the relay server, not here.
  */
 export function readClientFrame(data, isBinary = false, options) {
-  if (isBinary) throw invalid('relay frames must be text frames');
+  if (isBinary) return readRelayBrowserFrame(data, options);
   const frame = parseFrame(data);
+  if (frame.type === 'browser-egress') return readBrowserEgress(frame);
   const scopeFrame = readScopeClientFrame(frame);
   if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {
@@ -354,9 +364,10 @@ export function readClientFrame(data, isBinary = false, options) {
       return readControlHostFrame(frame);
     case 'live-open':
     case 'live-cancel':
+    case 'live-ack':
     case 'devices-list':
     case 'device-rename':
-      return readLiveClientFrame(frame);
+      return readLiveClientFrame(frame, options);
     case 'live-frame':
     case 'live-end':
       return readLiveHostFrame(frame, options);
@@ -371,8 +382,9 @@ export function readClientFrame(data, isBinary = false, options) {
  * "Ready first" ordering is enforced by the link lifecycle, not here.
  */
 export function readServerFrame(data, isBinary = false, options) {
-  if (isBinary) throw invalid('relay frames must be text frames');
+  if (isBinary) return readRelayBrowserFrame(data, options);
   const frame = parseFrame(data);
+  if (frame.type === 'browser-egress') return readBrowserEgress(frame);
   const scopeFrame = readScopeServerFrame(frame);
   if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {
@@ -392,6 +404,7 @@ export function readServerFrame(data, isBinary = false, options) {
       return readControlServerFrame(frame);
     case 'live-request':
     case 'live-cancel':
+    case 'live-ack':
     case 'live-frame':
     case 'live-end':
     case 'devices-result':

@@ -12,6 +12,10 @@ function isPlainObject(value) {
 	return proto === Object.prototype || proto === null;
 }
 
+export function isHindsightRecallMessage(message) {
+	return message?.role === 'user' && Object.hasOwn(message, 'hindsightRecall') && message.hindsightRecall === true;
+}
+
 export function validateAntigravityTurnContext(messages, turnContext) {
 	if (!Array.isArray(messages)) {
 		throw invalidArgument('Invalid messages');
@@ -65,6 +69,9 @@ export function validateAntigravityTurnContext(messages, turnContext) {
 		const role = messages[inputIndex]?.role;
 		if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') {
 			throw invalidArgument('Invalid turnContext.inputIndex role');
+		}
+		if (isHindsightRecallMessage(messages[inputIndex])) {
+			throw invalidArgument('turnContext.inputIndex cannot reference automatic Hindsight recall');
 		}
 	}
 	let expectedInputIndex = null;

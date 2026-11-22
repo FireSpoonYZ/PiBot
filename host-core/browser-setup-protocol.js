@@ -6,6 +6,7 @@
 // control adapters, and the real Host services stay strictly in sync.
 
 import { assertId, messageError } from './message-protocol.js';
+import { normalizeNativeBrowserControl } from './bot-browser/native-control.js';
 import {
   BROWSER_CONTROL_ACTIONS,
   BROWSER_ERROR_CODES as RAW_BROWSER_ERROR_CODES,
@@ -53,15 +54,15 @@ const MAX_SERVICES_COUNT = 16;
 
 const WIRE_BROWSER_FIELDS = Object.freeze({
   status: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease']),
-  open: new Set(['action', 'botId', 'scopeId', 'pageId', 'revision', 'url', 'lease']),
+  open: new Set(['action', 'botId', 'scopeId', 'pageId', 'revision', 'url', 'lease', 'placement']),
   navigate: new Set(['action', 'botId', 'scopeId', 'pageId', 'url', 'lease', 'revision']),
   back: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   forward: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'ignoreCache']),
   select: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   closeTab: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
-  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes']),
-  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt', 'resume', 'holderLabel']),
+  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream', 'waitMs']),
+  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'shared', 'force', 'preempt', 'resume', 'holderLabel']),
   input: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'frameSeq', 'event']),
   handback: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   release: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt']),
@@ -148,6 +149,7 @@ const SETUP_SAFE_MESSAGES = Object.freeze({
   SETUP_MODE_UNAVAILABLE: 'Requested Google setup mode is unavailable on this host.',
   SETUP_REVISION_CONFLICT: 'Google setup state changed; refresh and try again.',
   SETUP_STALE_CARD: 'This Google setup card is outdated; use the latest card.',
+  SETUP_PROJECT_ID_REQUIRED: 'The Google Cloud project ID is required to continue setup.',
   SETUP_SENSITIVE_LOCKED: 'This Google setup step is locked for direct owner completion.',
   SETUP_CENTER_UNAVAILABLE: 'Center Google status is currently unreachable.',
   SETUP_NOT_READY: 'Google setup is not ready to finish; verify Center account and service readiness.',
@@ -230,6 +232,8 @@ export function normalizeBrowserControl(input, maxFrameBase64Bytes = BROWSER_MAX
   if (!isPlainObject(input)) {
     throw invalid('browserControl params must be a plain object');
   }
+  const native = normalizeNativeBrowserControl(input, maxFrameBase64Bytes);
+  if (native) return native;
   const action = input.action;
   if (typeof action !== 'string' || !Object.hasOwn(WIRE_BROWSER_FIELDS, action)) {
     throw invalid('browserControl action is unsupported');

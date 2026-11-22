@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Clock, Copy, X } from 'lucide-react';
+import { Check, Clock, Copy, Pencil, X } from 'lucide-react';
 import { formatTurnDuration } from './chatTurnModel';
 import './components/ui/components.css';
 import { useText } from './ui';
@@ -37,6 +37,7 @@ export interface ChatTurnMetaProps {
   timestamp?: number;
   durationMs?: number;
   copyText?: string;
+  onEdit?: () => void;
   /** 轮次角色；assistant 始终预留固定最小高度，避免首个 token 到达时行高从 0 跳变。 */
   role?: 'user' | 'assistant';
   /** 显式控制是否预留最小高度；默认在 role === 'assistant' 时为 true。 */
@@ -49,6 +50,7 @@ export function ChatTurnMeta({
   timestamp,
   durationMs,
   copyText,
+  onEdit,
   role,
   reserveHeight,
   showCopyLabel = false,
@@ -77,7 +79,7 @@ export function ChatTurnMeta({
   const shouldReserve = reserveHeight ?? (role === 'assistant');
   const reservedMinHeight = isCoarse ? 32 : 24;
 
-  if (!hasDate && durationMs === undefined && !textToCopy) {
+  if (!hasDate && durationMs === undefined && !textToCopy && !onEdit) {
     if (!shouldReserve) return null;
     return (
       <div
@@ -89,6 +91,7 @@ export function ChatTurnMeta({
   }
 
   const idleCopyText = t('复制', 'Copy');
+  const editLabel = t('编辑消息', 'Edit message');
   const copiedText = t('已复制', 'Copied');
   const errorShortText = t('失败', 'Failed');
   const copyLabel =
@@ -114,11 +117,11 @@ export function ChatTurnMeta({
   };
 
   const copyIcon = copyState === 'copied' ? (
-    <Check className="bot-chat-turn-copy-icon" aria-hidden />
+    <Check className="bot-chat-turn-action-icon" aria-hidden />
   ) : copyState === 'error' ? (
-    <X className="bot-chat-turn-copy-icon" aria-hidden />
+    <X className="bot-chat-turn-action-icon" aria-hidden />
   ) : (
-    <Copy className="bot-chat-turn-copy-icon" aria-hidden />
+    <Copy className="bot-chat-turn-action-icon" aria-hidden />
   );
 
   return (
@@ -133,10 +136,21 @@ export function ChatTurnMeta({
           {formatTurnDuration(durationMs, t)}
         </span>
       )}
+      {onEdit ? (
+        <button
+          type="button"
+          className={isCoarse ? 'ui-icon-btn is-ghost is-sm bot-chat-turn-action' : 'bot-chat-turn-action'}
+          aria-label={editLabel}
+          title={isCoarse ? undefined : editLabel}
+          onClick={onEdit}
+        >
+          <Pencil className="bot-chat-turn-action-icon" aria-hidden />
+        </button>
+      ) : null}
       {textToCopy ? (
         <button
           type="button"
-          className={isCoarse ? 'ui-icon-btn is-ghost is-sm bot-chat-turn-copy' : 'bot-chat-turn-copy'}
+          className={isCoarse ? 'ui-icon-btn is-ghost is-sm bot-chat-turn-action bot-chat-turn-copy' : 'bot-chat-turn-action bot-chat-turn-copy'}
           aria-label={copyLabel}
           title={isCoarse ? undefined : copyLabel}
           data-copied={copyState === 'copied' || undefined}

@@ -17,6 +17,7 @@ import type {
   PendingListOptions,
   PendingListPage,
   LiveTarget,
+  BrowserLiveFrame,
   ModelCatalog,
   TaskActionInput,
 } from './index.js';
@@ -154,7 +155,7 @@ export interface DesktopUiStore {
   close(): void;
 }
 
-export type DesktopLiveFrame = BotLiveFrame | WorkLiveFrame | RemoteLiveSnapshot | RemoteLiveEnd;
+export type DesktopLiveFrame = BotLiveFrame | WorkLiveFrame | RemoteLiveSnapshot | RemoteLiveEnd | BrowserLiveFrame;
 
 export type DesktopObservationEvent =
   | {

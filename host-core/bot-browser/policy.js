@@ -53,11 +53,13 @@ const PAYMENT_HOSTS = new Set([
 ]);
 
 const AUTH_PATH_RE = /\/(o\/oauth2|oauth2?\/authorize|oauth\/consent|signin|serviceLogin|v3\/signin|challenge\/|mfa|2fa|two-factor|totp|webauthn|passkey|sso|saml|api\/oauth\/google\/callback)(\/|$|\?)/i;
+const GOOGLE_OAUTH_PATH_RE = /^\/(?:o\/oauth2|signin\/oauth|v\d+\/signin\/oauth|consent)(\/|$)/i;
+const GOOGLE_SIGN_IN_REJECTED_PATH_RE = /^\/(?:v\d+\/)?signin\/rejected\/?$/i;
 const PAYMENT_PATH_RE = /\/(checkout|billing\/pay|payment-method|payments|credit-card|card-details)(\/|$|\?)/i;
 const SECRET_CONSOLE_PATH_RE = /^\/(auth\/clients|apis\/credentials|iam-admin\/serviceaccounts|security\/secret-manager)(\/|$)/i;
 
 const POLICY_CONSENT_RE = /(user\s+data\s+policy|google\s+api\s+services.*policy|terms\s+of\s+service|terms\s+and\s+conditions|privacy\s+policy|i\s+agree|accept\s+terms|agree\s+to\s+the|用户数据政策|服务条款|隐私政策|我同意|同意条款|接受条款)/i;
-const SECRET_CREATE_OR_REVEAL_RE = /(create\s+oauth|create\s+client|create\s+credentials|\bcreate\b|download\s+json|client\s+secret|show\s+secret|reveal\s+secret|copy\s+secret|generate\s+key|create\s+key|创建客户端|创建凭据|创建密钥|下载\s*json|显示密钥|复制密钥|密钥)/i;
+const SECRET_CREATE_OR_REVEAL_RE = /(create\s+oauth|create\s+client|create\s+credentials|download\s+json|client\s+secret|show\s+secret|reveal\s+secret|copy\s+secret|generate\s+key|create\s+key|创建客户端|创建凭据|创建密钥|下载\s*json|显示密钥|复制密钥|密钥)/i;
 const SENSITIVE_FIELD_RE = /(password|passcode|passphrase|one[\s-]?time|otp|2fa|mfa|verification\s+code|auth\s+code|client[\s_]?secret|api[\s_]?key|private[\s_]?key|credit\s+card|card\s+number|cvv|cvc|security\s+code|密码|口令|验证码|安全码|密钥)/i;
 const OAUTH_CONSENT_ACTION_RE = /(sign\s+in\s+with\s+google|continue\s+with\s+google|grant\s+access|allow\s+access|authorize\s+app|approve\s+access|oauth\s+consent|登录\s*google|授权访问|允许访问)/i;
 
@@ -142,6 +144,19 @@ export function isAuthOrOAuthUrl(url) {
   return AUTH_PATH_RE.test(parsed.pathname + parsed.search);
 }
 
+export function isGoogleApiOAuthUrl(url) {
+  const parsed = parseUrlSafe(url);
+  return parsed !== null && (
+    parsed.hostname === 'oauth2.googleapis.com' ||
+    (parsed.hostname === 'accounts.google.com' && GOOGLE_OAUTH_PATH_RE.test(parsed.pathname))
+  );
+}
+
+function isGoogleSignInRejected(parsed) {
+  return parsed?.origin === 'https://accounts.google.com' &&
+    !parsed.username && !parsed.password && GOOGLE_SIGN_IN_REJECTED_PATH_RE.test(parsed.pathname);
+}
+
 export function isPaymentUrl(url) {
   const parsed = parseUrlSafe(url);
   if (!parsed) return false;
@@ -193,10 +208,14 @@ export function validateNavigationUrl(rawUrl, { actor = 'bot', allowBlank = fals
 
   if (actor === 'bot') {
     if (isAuthOrOAuthUrl(parsed.href)) {
+      const googleSignInRejected = isGoogleSignInRejected(parsed);
       throw browserError(
         'BROWSER_SENSITIVE_BLOCKED',
-        'Bot cannot navigate to Google sign-in, OAuth, or MFA pages; complete authorization in the user system browser.',
-        { reason: 'oauth_auth_page', fallbackToSystemBrowser: true }
+        'Sign-in, MFA, and OAuth consent require human control.',
+        {
+          reason: googleSignInRejected ? 'google_sign_in_rejected' : 'oauth_auth_page',
+          fallbackToSystemBrowser: googleSignInRejected || isGoogleApiOAuthUrl(parsed.href),
+        }
       );
     }
     if (isGoogleClientsPage(parsed.href)) {
@@ -219,16 +238,6 @@ export function validateNavigationUrl(rawUrl, { actor = 'bot', allowBlank = fals
 }
 
 /**
- * Classifies current page sensitivity and Privacy Shield restrictions.
- * Enforces:
- * - OAuth / MFA / sign-in: blocks bot observe/act, blocks handback, blocks bystanders, recommends system browser
- * - Cloud Console Client Secret pages / dialogs: blocks bot observe/act, blocks handback, blocks bystanders,
- *   AND blocks normal frame streaming (`blockNormalFrame: true`)
- * - Policy/Terms consent: blocks bot act, blocks handback, allows owner takeover on the same page
- * - Password / OTP / Payment: blocks bot observe/act, blocks handback, blocks bystanders
- * - Web Google login vs Center Google API MCP notice (`webLoginNotApiGrant`)
- */
-/**
  * Synthesizes canonical sensitivity hints from desktop-provider (`sensitiveCategory`,
  * `authUseSystemBrowser`) and android-provider (`requiresSystemBrowser`, `sensitiveReason`)
  * fields alongside any explicit `hints` object.
@@ -242,10 +251,12 @@ export function mergeProviderHints(result, baseHints = null) {
   const cat = typeof result.sensitiveCategory === 'string'
     ? result.sensitiveCategory.trim().toLowerCase()
     : '';
-  if (cat === 'client_secret' || cat === 'secret_dialog' || cat === 'secret_key' || cat === 'secret') {
+  if (cat === 'client_secret' || cat === 'secret_modal' || cat === 'secret_dialog' || cat === 'secret_key' || cat === 'secret') {
     out.secretDialogVisible = true;
   } else if (cat === 'oauth_consent' || cat === 'oauth_login' || cat === 'oauth' || cat === 'mfa' || cat === 'auth') {
     out.isOAuthConsent = true;
+  } else if (cat === 'google_auth' || cat === 'auth_mfa') {
+    out.isLoginPage = true;
   } else if (cat === 'password_input' || cat === 'password' || cat === 'otp') {
     out.hasPasswordInput = true;
   } else if (cat === 'payment' || cat === 'checkout' || cat === 'billing') {
@@ -253,8 +264,8 @@ export function mergeProviderHints(result, baseHints = null) {
   } else if (cat === 'policy_consent' || cat === 'terms' || cat === 'tos') {
     out.hasPolicyCheckbox = true;
   }
-  if (result.authUseSystemBrowser === true || result.requiresSystemBrowser === true) {
-    out.isOAuthConsent = true;
+  if (typeof result.authUseSystemBrowser === 'boolean' || typeof result.requiresSystemBrowser === 'boolean') {
+    out.requiresSystemBrowser = result.authUseSystemBrowser === true || result.requiresSystemBrowser === true;
   }
   if (result.sensitive === true) {
     out.sensitive = true;
@@ -262,6 +273,7 @@ export function mergeProviderHints(result, baseHints = null) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/** Classifies Bot access and whether page frames require an active owner or must be withheld. */
 export function classifyPageSensitivity({
   url = '',
   title = '',
@@ -276,8 +288,14 @@ export function classifyPageSensitivity({
   const host = parsed ? parsed.hostname.toLowerCase() : '';
   const reasons = [];
 
+  const googleApiOAuth = isGoogleApiOAuthUrl(url);
+  const googleSignInRejected = isGoogleSignInRejected(parsed);
+  if (googleSignInRejected) reasons.push('google_sign_in_rejected');
+  const requiresSystemBrowser = safeHints.requiresSystemBrowser === true;
   const oauthOrAuth =
     isAuthOrOAuthUrl(url) ||
+    googleApiOAuth ||
+    requiresSystemBrowser ||
     safeHints.isOAuthConsent === true ||
     safeHints.isMfaChallenge === true ||
     safeHints.isLoginPage === true;
@@ -335,7 +353,7 @@ export function classifyPageSensitivity({
     safeHints.sensitive === true;
 
   // Policy consent on Cloud Console allows the owner to view and take over the same form,
-  // while blocking bot clicks and handback. All other sensitive classes block bot observation too.
+  // while blocking bot clicks. All other sensitive classes block bot observation too.
   const blockBotObserve =
     oauthOrAuth ||
     secretRisk ||
@@ -346,18 +364,21 @@ export function classifyPageSensitivity({
     safeHints.sensitive === true;
 
   const blockBotAct = sensitive;
-  const blockHandback = sensitive;
   const blockBystanderFrame = blockBotObserve;
   const blockNormalFrame = secretRisk;
-  const fallbackToSystemBrowser = oauthOrAuth || secretRisk;
+  const fallbackToSystemBrowser = googleSignInRejected || googleApiOAuth || requiresSystemBrowser || secretRisk;
 
   let guidance = null;
   if (secretRisk) {
     guidance = 'Client Secret creation/display is isolated from bot observation and normal frames. Complete this step in your system browser and enter credentials via the private Center configuration card.';
+  } else if (googleSignInRejected) {
+    guidance = 'Google denied sign-in in this browser. Sign in to Google Cloud Console in a supported system browser, then return to setup.';
+  } else if (googleApiOAuth) {
+    guidance = 'Complete Google API authorization in your system browser.';
+  } else if (requiresSystemBrowser) {
+    guidance = 'Continue this step in your system browser.';
   } else if (oauthOrAuth) {
-    guidance = webLoginNotApiGrant
-      ? 'Google API authorization must be completed in your system browser. Signing into Google in the Bot browser does not grant Google API access.'
-      : 'Sign-in, MFA, and OAuth consent must be completed by the human owner.';
+    guidance = 'Take over this page to sign in, verify your identity, or review consent. The Bot stays paused.';
   } else if (policyConsent) {
     guidance = 'Please take over this page to review and accept the policy/terms checkbox yourself, then hand back to the bot.';
   } else if (passwordOrOtp) {
@@ -381,7 +402,6 @@ export function classifyPageSensitivity({
     reasons: Object.freeze(reasons),
     blockBotObserve,
     blockBotAct,
-    blockHandback,
     blockBystanderFrame,
     blockNormalFrame,
     fallbackToSystemBrowser,
@@ -488,10 +508,13 @@ export function checkBotActionSensitivity({
   }
 
   // 3. Before clicking Create / Download JSON / Reveal Secret on Google Cloud Console.
+  const isProjectCreateButton = typeof targetRefMeta?.name === 'string' &&
+    /^create$/i.test(targetRefMeta.name.trim()) &&
+    parseUrlSafe(pageUrl)?.pathname === '/projectcreate';
   if (
     isGoogleCloudConsoleUrl(pageUrl) &&
     (act.kind === 'click' || act.kind === 'dblclick' || act.kind === 'press') &&
-    SECRET_CREATE_OR_REVEAL_RE.test(refText)
+    (SECRET_CREATE_OR_REVEAL_RE.test(refText) || (!isProjectCreateButton && /\bcreate\b/i.test(refText)))
   ) {
     return {
       allowed: false,
@@ -513,8 +536,8 @@ export function checkBotActionSensitivity({
       code: 'BROWSER_SENSITIVE_BLOCKED',
       reason: 'oauth_consent_forbidden',
       holdSession: true,
-      fallbackToSystemBrowser: true,
-      guidance: 'Google sign-in and OAuth consent must be completed by the human owner in their system browser.',
+      fallbackToSystemBrowser: isGoogleApiOAuthUrl(pageUrl),
+      guidance: 'The owner must take over to sign in or approve access.',
     };
   }
 
@@ -530,6 +553,7 @@ export function sanitizeUrlForModel(rawUrl) {
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) return '[redacted-url]';
 
   const clean = new URL(parsed.origin + parsed.pathname);
+  if (isGoogleSignInRejected(parsed)) return clean.href;
   for (const [key, value] of parsed.searchParams.entries()) {
     if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) {
       clean.searchParams.set(key, '[redacted]');
@@ -643,11 +667,14 @@ export function sanitizeSnapshotForBot(rawSnapshot, sensitivity) {
 }
 
 /** Redacts sensitive tab titles/URLs for bots and non-privileged bystander viewers. */
-export function sanitizeTabsForCaller(tabs, { isBot = false, canViewSensitive = false, isPageWithheld = null, botId = null } = {}) {
+export function sanitizeTabsForCaller(tabs, {
+  isBot = false, canViewSensitive = false, isPageWithheld = null, botId = null, restrictedPageId = null,
+} = {}) {
   return tabs.map((tab) => {
     const sens = classifyPageSensitivity({
       url: tab.url,
       title: tab.title,
+      providerSensitive: tab.id === restrictedPageId,
       botId,
       pageId: tab.id,
       isPageWithheld,
@@ -669,7 +696,7 @@ export function sanitizeTabsForCaller(tabs, { isBot = false, canViewSensitive = 
     return {
       id: tab.id,
       title: tab.title,
-      url: isBot ? sanitizeUrlForModel(tab.url) : tab.url,
+      url: isBot || sens.reasons.includes('google_sign_in_rejected') ? sanitizeUrlForModel(tab.url) : tab.url,
     };
   });
 }

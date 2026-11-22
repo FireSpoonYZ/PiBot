@@ -17,6 +17,8 @@ import { createReplicaSync } from './replica-sync.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { createHostControlReceiver } from './host-control.js';
 import { createHostLiveReceiver } from './host-live.js';
+import { createBrowserEgressHost } from './bot-browser/egress-host.js';
+import { BROWSER_STREAM_HIGH_WATER_BYTES } from './bot-browser/stream-packet.js';
 import {
   ALL_LIVE_EXTENSIONS,
   NO_LIVE_EXTENSIONS,
@@ -207,6 +209,7 @@ export async function openDeviceLink(options) {
     replicaSync.setOnline(false);
     receiver.reset();
     liveReceiver.reset();
+    browserEgress.reset();
     setPhase('blocked');
   }
 
@@ -261,6 +264,16 @@ export async function openDeviceLink(options) {
     return sendFrame(frame);
   }
 
+  function sendBrowserFrame(bytes) {
+    const ws = currentWs;
+    if (!ready || !ws || ws.readyState !== WebSocket.OPEN ||
+        ws.bufferedAmount + bytes.length > BROWSER_STREAM_HIGH_WATER_BYTES) return false;
+    ws.send(bytes, { binary: true }, (err) => {
+      if (err && ws === currentWs && !closed) ws.terminate();
+    });
+    return true;
+  }
+
   function sendHello() {
     const ws = currentWs;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -308,11 +321,17 @@ export async function openDeviceLink(options) {
     execute: control,
     send: (frame) => (ready ? sendFrame(frame) : false),
   });
+  const browserEgress = createBrowserEgressHost({
+    execute: control, deviceId: log.deviceId, controlUrl: options.control?.url,
+    send: (frame) => (ready ? sendFrame(frame) : false),
+  });
   // Module 14：live 接收器与控制接收器完全分离；observe 通过适配器 execute.live
   // 完成本机身份核对与 SSE，send 只走已认证 ready 后的当前 socket。
   const liveReceiver = createHostLiveReceiver({
     deviceId: log.deviceId,
     observe: control ? (target, { signal } = {}) => control.live(log.deviceId, target, { signal }) : null,
+    prepareBrowserFrames: control?.prepareBrowserFrames,
+    sendBrowserFrame,
     send: (frame) => (ready ? sendFrame(frame) : false),
   });
 
@@ -324,6 +343,7 @@ export async function openDeviceLink(options) {
     // 新连接前作废旧代控制/观察调用，旧代回调不会发到新 socket。
     receiver.reset();
     liveReceiver.reset();
+    browserEgress.reset();
     scopeDelivery.setOnline(false);
     replicaSync.setOnline(false);
     setPhase('connecting');
@@ -333,7 +353,7 @@ export async function openDeviceLink(options) {
     try {
       ws = new WebSocket(url.href, {
         ...(ca !== undefined ? { ca } : {}),
-        ...(liveExtHeader ? { headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader } } : {}),
+        headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader, 'X-PiBot-Browser-Egress': '1' },
         maxPayload: MAX_RELAY_FRAME_BYTES,
         perMessageDeflate: false,
         followRedirects: false,
@@ -426,14 +446,18 @@ export async function openDeviceLink(options) {
         } catch { /* 控制接收器内部异常不影响传输；其自身状态负责诊断 */ }
         return;
       }
-      if (frame.type === 'live-request' || frame.type === 'live-cancel') {
+      if (frame.type === 'browser-egress') {
+        browserEgress.handle(frame);
+        return;
+      }
+      if (frame.type === 'live-request' || frame.type === 'live-cancel' || frame.type === 'live-ack') {
         try {
           liveReceiver.handle(frame);
         } catch { /* live 接收器内部异常不影响传输；其自身状态负责诊断 */ }
         return;
       }
       // Module 14：客户端方向 live 帧不允许出现在 Host 侧，视为协议违规。
-      if (frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'devices-result') {
+      if (frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'devices-result' || frame.type === 'browser-frame') {
         block('BAD_FRAME');
         ws.terminate();
         return;
@@ -473,6 +497,7 @@ export async function openDeviceLink(options) {
       replicaSync.setOnline(false);
       receiver.reset();
       liveReceiver.reset();
+      browserEgress.reset();
       const blockedCode = BLOCKED_CLOSE_CODES.has(code)
         ? code === RELAY_CLOSE.UNAUTHORIZED ? 'UNAUTHORIZED'
           : code === RELAY_CLOSE.REVOKED ? 'REVOKED'
@@ -503,6 +528,7 @@ export async function openDeviceLink(options) {
       try { receiver.close(); } catch (err) { errors.push(err); }
       // Module 14：live 接收器必须 await 其观察退出后再关 log/释放 owner。
       try { await liveReceiver.close(); } catch (err) { errors.push(err); }
+      browserEgress.close();
       const ws = currentWs;
       currentWs = null;
       if (ws) {

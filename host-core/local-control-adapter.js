@@ -3,7 +3,8 @@
 // only to the local control server via createControlClient over a bounded
 // fetch; never opens Runtime, files, or other local state. All errors carry a
 // fixed .code and .outcome (not-sent / unconfirmed / responded).
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createControlClient, ControlApiError } from './control-client.js';
 import { assertId } from './message-protocol.js';
 import {
@@ -17,6 +18,9 @@ import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
+const LOCAL_BROWSER_FRAME_INTERVAL_MS = 60;
+const BROWSER_FRAME_REFRESH_MS = 2000;
+const BROWSER_FRAME_EVENT_WAIT_MS = 1000;
 
 // Local domain codes the control server may return; forwarded unchanged with
 // outcome responded. Everything else (transport/protocol) is mapped below.
@@ -173,7 +177,7 @@ function boundedFetch(state, options = {}) {
         const { done, value } = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > MAX_CONTROL_JSON_BYTES) {
+        if (size > (options.maxBytes ?? MAX_CONTROL_JSON_BYTES)) {
           state.tooLarge = true;
           await reader.cancel();
           throw new Error('host control response exceeds size limit');
@@ -376,6 +380,20 @@ function dispatchError(err, state, signal) {
   return controlError('INTERNAL', 'unconfirmed');
 }
 
+async function requireControlIdentity(control, expectedDeviceId, state, signal) {
+  let info;
+  try {
+    info = await control.getHostInfo({ signal });
+  } catch (err) {
+    throw preflightError(err, state, signal);
+  }
+  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
+  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
+    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
+  }
+  return info;
+}
+
 async function executeCall(config, expectedDeviceId, method, params, { signal, caller } = {}) {
   requireValidId(expectedDeviceId);
   // 先按协议表规范化（含方法参数形状/未知键/JSON 字节限制）再映射。
@@ -401,16 +419,7 @@ async function executeCall(config, expectedDeviceId, method, params, { signal, c
     controlTransport: caller?.transport ?? 'local',
   });
 
-  let info;
-  try {
-    info = await control.getHostInfo({ signal });
-  } catch (err) {
-    throw preflightError(err, state, signal);
-  }
-  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
-  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
-    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
-  }
+  const info = await requireControlIdentity(control, expectedDeviceId, state, signal);
   if (method === 'getHostInfo') return info;
 
   try {
@@ -422,13 +431,49 @@ async function executeCall(config, expectedDeviceId, method, params, { signal, c
   }
 }
 
+async function prepareBrowserFrames(config, expectedDeviceId, target, { signal, caller } = {}) {
+  const { botId, pageId, sessionId, lease } = target;
+  const input = {
+    action: 'frame', botId, pageId, sessionId, stream: true,
+    ...(lease ? { lease } : {}),
+    format: 'jpeg',
+  };
+  const state = { tooLarge: false };
+  const control = createControlClient({
+    url: config.url,
+    token: config.token,
+    fetch: boundedFetch(state, { maxBytes: 1024 * 1024 }),
+    clientId: caller?.clientId ?? config.defaultClientId,
+    controlTransport: caller?.transport ?? 'local',
+  });
+  await requireControlIdentity(control, expectedDeviceId, state, signal);
+  let captureSeq;
+  return async ({ wait = true } = {}) => {
+    try {
+      const timeout = AbortSignal.timeout(10_000);
+      const frameSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const request = wait && captureSeq !== undefined
+        ? { ...input, sinceSeq: captureSeq, waitMs: BROWSER_FRAME_EVENT_WAIT_MS }
+        : input;
+      const frame = await control.browserControl(request, { signal: frameSignal });
+      if (frame?.pageId === pageId && frame.frameUnchanged !== true) {
+        // Only providers which actually publish repaint events opt in to waiting.
+        captureSeq = Number.isSafeInteger(frame.captureSeq) && frame.captureSeq > 0 ? frame.captureSeq : undefined;
+      }
+      return frame;
+    } catch (err) {
+      throw dispatchError(err, state, signal);
+    }
+  };
+}
+
 /**
  * 本机 SSE 观察：先 bounded getHostInfo 身份 preflight，再按 target kind 选择
  * control.live / control.workLive。流请求经 boundedFetch(sseOk) 仅在 200 +
  * text/event-stream 时透传原始 Response，其余响应（含 JSON 错误）仍有界读取；
- * 始终 redirect:error。返回 AsyncIterable，帧为 snapshot/update/end。
+ * 始终 redirect:error。浏览器观察复用鉴权回环，桌面在重绘时交付下一帧。
  */
-async function* live(config, expectedDeviceId, target, { signal } = {}) {
+async function* live(config, expectedDeviceId, target, { signal, caller } = {}) {
   requireValidId(expectedDeviceId);
   let normTarget;
   try {
@@ -436,22 +481,41 @@ async function* live(config, expectedDeviceId, target, { signal } = {}) {
   } catch {
     throw controlError('INVALID_ARGUMENT', 'not-sent');
   }
+  if (normTarget.kind === 'browser') {
+    const capture = await prepareBrowserFrames(config, expectedDeviceId, normTarget, { signal, caller });
+    let lastDigest;
+    let lastRevision;
+    let lastSentAt = 0;
+    for (;;) {
+      const frame = await capture();
+      if (signal?.aborted) throw controlError('CANCELLED', 'unconfirmed');
+      if (frame?.pageId !== normTarget.pageId) throw controlError('BROWSER_STALE_PAGE', 'responded');
+      if (frame.frameUnchanged === true) {
+        await delay(LOCAL_BROWSER_FRAME_INTERVAL_MS, undefined, { signal });
+        continue;
+      }
+      if (typeof frame.data !== 'string') throw controlError('BAD_RESPONSE', 'responded');
+      const digest = createHash('sha256').update(frame.data).digest('base64');
+      const { captureSeq, ...streamFrame } = frame;
+      if (digest !== lastDigest || frame.revision !== lastRevision || Date.now() - lastSentAt >= BROWSER_FRAME_REFRESH_MS) {
+        lastDigest = digest;
+        lastRevision = frame.revision;
+        lastSentAt = Date.now();
+        yield { type: 'browser-frame', frame: streamFrame };
+        const remaining = lastSentAt + LOCAL_BROWSER_FRAME_INTERVAL_MS - Date.now();
+        if (remaining > 0) await delay(remaining, undefined, { signal });
+      } else if (captureSeq === undefined) {
+        await delay(LOCAL_BROWSER_FRAME_INTERVAL_MS, undefined, { signal });
+      }
+    }
+  }
   const state = { tooLarge: false };
   const control = createControlClient({
     url: config.url,
     token: config.token,
     fetch: boundedFetch(state, { sseOk: true }),
   });
-  let info;
-  try {
-    info = await control.getHostInfo({ signal });
-  } catch (err) {
-    throw preflightError(err, state, signal);
-  }
-  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
-  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
-    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
-  }
+  await requireControlIdentity(control, expectedDeviceId, state, signal);
   const iter =
     normTarget.kind === 'work'
       ? control.workLive(normTarget.botId, normTarget.scopeId, { signal })
@@ -607,6 +671,8 @@ export function createLocalControlAdapter(options) {
   };
   execute.live = (expectedDeviceId, target, liveOptions = {}) =>
     live(config, expectedDeviceId, target, liveOptions);
+  execute.prepareBrowserFrames = (expectedDeviceId, target, streamOptions) =>
+    prepareBrowserFrames(config, expectedDeviceId, target, streamOptions);
   execute.getHostInfo = (callOptions = {}) => fetchHostInfo(config, callOptions);
   execute.getSettings = (expectedDeviceId, callOptions = {}) =>
     getSettings(config, expectedDeviceId, callOptions);

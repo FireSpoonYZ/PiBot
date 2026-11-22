@@ -45,6 +45,8 @@ export interface AcpDriverOptions {
 	/** Isolated Gemini profile directory forwarded via `--gemini-dir`. */
 	geminiDir?: string;
 	extraEnv?: Record<string, string>;
+	/** Enable the private PreInvocation listener for actual ACP sessions. */
+	enableTurnRecall?: boolean;
 	/** Bridge registration for session/new AND session/load. */
 	mcpServers?: () => AcpMcpServer[];
 	/** Gate B stopgap: how ACP turns synthesize usage while the server sends
@@ -279,6 +281,7 @@ export class AcpDriver implements TurnDriver {
 	async #executeTurn(turn: ActiveTurn): Promise<void> {
 		const request = turn.request;
 		const conn = await this.#ensureConnection(request);
+		if (turn.closed) return;
 
 		// Session: load (resume) or create. Load failures fall back to a fresh
 		// session — a missing conversation must not fail the turn (9.4).
@@ -353,7 +356,13 @@ export class AcpDriver implements TurnDriver {
 		try {
 			// Nothing to cancel before the prompt RPC exists; see promptStarted.
 			turn.promptStarted = true;
-			const result = await conn.prompt(turn.sessionId, request.prompt, request.images, request.contextBlock);
+			const result = await conn.prompt(
+				turn.sessionId,
+				request.prompt,
+				request.images,
+				request.contextBlock,
+				request.turnRecall,
+			);
 			if (turn.closed) return;
 			turn.sawResult = true;
 			// Exact PromptResponse.usage supersedes every partial estimate, but
@@ -533,7 +542,16 @@ export class AcpDriver implements TurnDriver {
 	}
 
 	#ensureConnection(request: DriverTurnRequest): Promise<AcpConnection> {
-		if (this.#conn?.alive) return Promise.resolve(this.#conn);
+		const previous = this.#conn;
+		if (previous?.alive) {
+			if (!request.turnRecall || !previous.turnRecallUnavailable) return Promise.resolve(previous);
+			// AGY inherits its hook capability at spawn. Reconnect to recover
+			// the listener before dispatching a new recall-bearing prompt.
+			this.#conn = undefined;
+			this.#log("recycle-recall-listener");
+			previous.abortAll("turn recall listener unavailable");
+			previous.kill();
+		}
 		this.#generation += 1;
 		this.#state = "starting";
 		this.#stats.spawns += 1;
@@ -542,6 +560,7 @@ export class AcpDriver implements TurnDriver {
 			binArgs: typeof this.#opts.binArgs === "function" ? this.#opts.binArgs() : this.#opts.binArgs,
 			geminiDir: this.#opts.geminiDir,
 			extraEnv: this.#opts.extraEnv,
+			enableTurnRecall: this.#opts.enableTurnRecall,
 			cwd: request.cwd,
 			mcpServers: this.#opts.mcpServers,
 			log: (msg, data) => this.#log(msg, data),
@@ -568,6 +587,7 @@ export class AcpDriver implements TurnDriver {
 		this.#pendingExits.add(exitWait);
 		return started
 			.then(() => {
+				if (this.#conn !== conn || !conn.alive) throw new Error("ACP connection closed during startup");
 				this.#serverVersion = conn.serverVersion();
 				const info = conn.agentInfo as { name?: unknown; title?: unknown } | undefined;
 				this.#agentInfo = {
@@ -580,8 +600,10 @@ export class AcpDriver implements TurnDriver {
 			.catch((err) => {
 				// A server that spawned but failed the handshake (init timeout,
 				// auth hang) must not leak: it is detached, so it outlives pi.
-				this.#state = "dead";
-				this.#conn = undefined;
+				if (this.#conn === conn) {
+					this.#state = "dead";
+					this.#conn = undefined;
+				}
 				conn.kill();
 				this.#log("start-failed", { message: describe(err) });
 				throw err;

@@ -175,6 +175,180 @@ test('three-mode availability matrix degrades honestly on headless and Android l
   }
 });
 
+test('confirming services opens one embedded account tab and owner resume restores a closed tab', async () => {
+  const openedUrls = [];
+  let tabs = [];
+  let failOpen = false;
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl({ action, url }) {
+        if (action === 'status') return { available: true, canStreamInteract: true, tabs };
+        assert.equal(action, 'open');
+        openedUrls.push(url);
+        if (failOpen) throw new Error('simulated startup failure');
+        const pageId = `page-${openedUrls.length}`;
+        tabs = [...tabs, { id: pageId }];
+        return { pageId };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({ action: 'start' });
+    const mode = await control({ action: 'answer', card: 'path', values: ['guide-here'], runId: started.id });
+    assert.equal(mode.card.card, 'services');
+    assert.deepEqual(openedUrls, []);
+
+    const account = await control({ action: 'answer', card: 'services', values: ['gmail'], runId: mode.id });
+    assert.equal(account.step, 'account');
+    assert.equal(account.browserPageId, 'page-1');
+    assert.equal(env.events.find(event => event.type === 'owner-answer' && event.card === 'services').view.browserPageId, 'page-1');
+    assert.equal((await control({ action: 'status' })).browserPageId, 'page-1');
+    assert.equal((await control({ action: 'resume', runId: account.id })).browserPageId, 'page-1');
+    assert.deepEqual(openedUrls, [googleConsoleStepUrl('account')]);
+
+    tabs = [];
+    const stale = await control({ action: 'resume', runId: 'older-run' });
+    assert.equal(stale.staleReason, 'STALE_RUN');
+    assert.equal(openedUrls.length, 1);
+
+    failOpen = true;
+    const failed = await control({ action: 'resume', runId: account.id });
+    assert.equal(failed.state, 'running');
+    assert.equal(failed.browserPageId, undefined);
+    failOpen = false;
+    const recovered = await control({ action: 'resume', runId: account.id, expectedRevision: failed.revision });
+    assert.equal(recovered.browserPageId, 'page-3');
+    await control({ botId: 'bot-b', action: 'start', mode: 'guide-browser', choices: ['gmail'] });
+    assert.deepEqual(openedUrls, Array(3).fill(googleConsoleStepUrl('account')));
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('embedded project confirmation reads the Cloud welcome page and tolerates a concurrent progress update', async () => {
+  const projectId = 'project-12345678-1234-5678-abc';
+  let setupUrl = `https://console.cloud.google.com/projectcreate?project=${projectId}`;
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl({ action }) {
+        assert.equal(action, 'status');
+        return {
+          available: true,
+          canStreamInteract: true,
+          pageId: 'other-tab',
+          tabs: [
+            { id: 'setup-tab', url: setupUrl },
+            { id: 'other-tab', url: 'https://console.cloud.google.com/home/dashboard?project=other-project' },
+          ],
+        };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({
+      action: 'start', mode: 'guide-here', choices: ['gmail'], browserPageId: 'setup-tab',
+    });
+    const project = await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const confirm = {
+      action: 'advance', step: 'project', runId: started.id, expectedRevision: project.revision,
+    };
+
+    await assert.rejects(() => control(confirm), { code: 'SETUP_PROJECT_ID_REQUIRED' });
+    assert.equal((await control({ action: 'status' })).step, 'project');
+
+    const updated = await env.callBot({ action: 'step', step: 'project', status: 'active' });
+    assert.equal(updated.isError, false);
+    assert.ok(updated.body.view.revision > project.revision);
+    setupUrl = `https://console.cloud.google.com/welcome?project=${projectId}`;
+    await assert.rejects(() => control({ ...confirm, kind: 'work' }), { code: 'SETUP_REVISION_CONFLICT' });
+
+    const next = await control(confirm);
+    assert.equal(next.step, 'apis');
+    assert.equal(next.projectId, projectId);
+    assert.equal(new URL(next.guidance.consoleUrl).searchParams.get('project'), projectId);
+    assert.equal((await control(confirm)).revision, next.revision);
+    assert.equal((await control({ ...confirm, runId: 'older-run' })).staleReason, 'STALE_RUN');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('the external project step needs a supplied ID only when the run has none', async () => {
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl() {
+        return {
+          available: true,
+          canStreamInteract: true,
+          pageId: 'embedded-tab',
+          tabs: [{ id: 'embedded-tab', url: 'https://console.cloud.google.com/home/dashboard?project=embedded-project' }],
+        };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({ action: 'start', mode: 'guide-browser', choices: ['gmail'] });
+    const project = await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const confirm = {
+      action: 'advance', step: 'project', runId: started.id, expectedRevision: project.revision,
+    };
+    await assert.rejects(() => control(confirm), { code: 'SETUP_PROJECT_ID_REQUIRED' });
+
+    const next = await control({ ...confirm, projectId: 'pibot-center' });
+    assert.equal(next.step, 'apis');
+    assert.equal(next.projectId, 'pibot-center');
+
+    const restarted = await control({ action: 'start', restart: true, mode: 'guide-browser', choices: ['gmail'] });
+    await control({ action: 'advance', step: 'account', account: 'owner@gmail.com' });
+    const saved = await env.callBot({ action: 'set', projectId: 'known-project' });
+    assert.equal(saved.isError, false);
+    const reused = await control({ ...confirm, runId: restarted.id, expectedRevision: saved.body.view.revision });
+    assert.equal(reused.step, 'apis');
+    assert.equal(reused.projectId, 'known-project');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('branding asks for the audience on the same setup card after the Bot stops', async () => {
+  const env = makeEnv({ isBotTurnRunning: () => false });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const run = await control({ action: 'start', mode: 'do-it-for-me', choices: ['gmail'] });
+    await control({ action: 'advance', step: 'account', account: 'owner@example.com' });
+    await control({ action: 'advance', step: 'project', projectId: 'existing-cloud-project' });
+    const branding = await control({ action: 'advance', step: 'apis' });
+    assert.equal(branding.step, 'branding');
+    assert.equal(branding.card.card, 'kind');
+    assert.deepEqual(new Set(branding.card.options.map(({ id }) => id)), new Set(['personal', 'work']));
+
+    env.advanceClock(GOOGLE_SETUP_PAUSED_AFTER_MS + 100);
+    const waiting = await control({ action: 'status' });
+    assert.equal(waiting.id, run.id);
+    assert.equal(waiting.card.card, 'kind');
+    assert.equal(waiting.blocker, null);
+    assert.equal(waiting.guidance.phase, 'awaiting-kind');
+
+    const answer = { action: 'answer', card: 'kind', values: ['work'], runId: run.id,
+      expectedRevision: waiting.revision, cardCopy: waiting.card.copy };
+    const selected = await control(answer);
+    assert.equal(selected.kind, 'work');
+    assert.equal(selected.id, run.id);
+    assert.equal(selected.projectId, 'existing-cloud-project');
+    assert.equal(selected.steps.apis.status, 'done');
+    assert.equal(selected.step, 'branding');
+    assert.equal(selected.steps.links.status, 'skipped');
+    assert.equal(selected.steps.publish.status, 'skipped');
+    assert.equal(selected.guidance.phase, 'active-step');
+    assert.equal((await control(answer)).applied, false);
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('Center Web OAuth links never use Orca domains and preserve People base scopes', () => {
   const valid = deriveCenterBrandingLinks('https://center.acme.example/subpath');
   assert.deepEqual(valid, {
@@ -311,11 +485,18 @@ test('sensitive steps lock bot browser before consent/secret and refuse unverifi
     await env.callBot({ action: 'step', step: 'links', status: 'done' });
     await env.callBot({ action: 'step', step: 'publish', status: 'done' });
 
-    // Activating client proactively locks browser before Client Secret dialog.
+    env.setCenterStatus({
+      reachable: true, isAdmin: true,
+      client: { configured: false, supportsAutoConfigure: true, redirectUri: 'https://center.example.com/api/oauth/google/callback' },
+      accounts: [],
+    });
+    // Desktop auto-creation still locks the Bot browser before any Client Secret dialog.
     const clientActive = await env.callBot({ action: 'step', step: 'client', status: 'active' });
     assert.equal(clientActive.isError, false);
     assert.equal(clientActive.body.view.browserLock.active, true);
     assert.equal(clientActive.body.view.browserLock.reason, 'oauth-client-secret');
+    assert.match(clientActive.body.view.guidance.nextAction, /creates the Web OAuth client and imports it into Center automatically/);
+    assert.equal((await env.service.getAgentBrowserPolicy('bot-a')).allowed, false);
 
     // Sensitive URL classifier blocks accounts.google.com and /auth/clients.
     assert.equal(
@@ -588,6 +769,73 @@ test('non-admin user is blocked when Center is unconfigured', async () => {
     const botStart = await env.callBot({ action: 'start' });
     assert.equal(botStart.isError, false);
     assert.equal(botStart.body.routed, 'admin-required');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test('handed-off connect unblocks and instructs done once Center verifies target readiness', async () => {
+  const client = { configured: true };
+  const env = makeEnv({ centerStatus: { client, accounts: [] } });
+  try {
+    await env.service.control(
+      { botId: 'bot-a', action: 'start', mode: 'guide-browser', choices: ['gmail', 'files'] },
+      OWNER,
+    );
+    await env.callBot({ action: 'set', account: 'alice@acme.dev' });
+    const handed = await env.callBot({
+      action: 'need_user',
+      step: 'connect',
+      note: 'Sign in to Google in your system browser.',
+    });
+    assert.equal(handed.isError, false);
+    assert.equal(handed.body.view.blocker.kind, 'needs-user');
+    assert.equal(handed.body.view.blocker.step, 'connect');
+
+    const beforeReady = await env.callBot({ action: 'done' });
+    assert.equal(beforeReady.isError, true);
+    assert.equal(beforeReady.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'bob@acme.dev', status: 'connected', connectedAt: 50_000, services: readyServices() }],
+    });
+    const wrongDone = await env.callBot({ action: 'done' });
+    assert.equal(wrongDone.isError, true);
+    assert.equal(wrongDone.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'alice@acme.dev', status: 'connected', connectedAt: 55_000, services: [{ service: 'gmail', state: 'ready' }] }],
+    });
+    const partialDone = await env.callBot({ action: 'done' });
+    assert.equal(partialDone.isError, true);
+    assert.equal(partialDone.body.code, 'SETUP_NOT_READY');
+
+    env.setCenterStatus({
+      client,
+      accounts: [{ email: 'alice@acme.dev', status: 'connected', connectedAt: 60_000, services: readyServices() }],
+    });
+    const beforeShow = await env.service.getRun('bot-a');
+    const showReady = await env.callBot({ action: 'show' });
+    assert.equal(showReady.isError, false);
+    assert.equal(showReady.body.view.blocker, null);
+    assert.equal(showReady.body.view.guidance.phase, 'active-step');
+    assert.equal(showReady.body.view.guidance.ownerButtons, undefined);
+    assert.match(showReady.body.view.guidance.nextAction, /google_setup\(action="done"\)/);
+    assert.equal((await env.service.getRun('bot-a')).revision, beforeShow.revision);
+    assert.equal((await env.service.getRun('bot-a')).steps.connect.status, 'needs-user');
+
+    const directStep = await env.callBot({ action: 'step', step: 'connect', status: 'done' });
+    assert.equal(directStep.isError, true);
+    assert.equal(directStep.body.code, 'SETUP_FORBIDDEN');
+
+    const doneRes = await env.callBot({ action: 'done' });
+    assert.equal(doneRes.isError, false);
+    assert.equal(doneRes.body.view.state, 'done');
+    assert.equal(doneRes.body.view.steps.connect.status, 'done');
+    assert.equal(doneRes.body.view.card.card, 'connected');
+    assert.equal(doneRes.body.view.revision, beforeShow.revision + 1);
   } finally {
     await env.cleanup();
   }

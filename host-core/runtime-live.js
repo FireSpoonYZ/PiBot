@@ -376,6 +376,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
   const workByBot = new Map();
   const webhookStopPendingByBot = new Set();
   const learningByBot = new Map();
+  const googleSetupRevisionByBot = new Map();
   const activityCtx = { controlByBot, workByBot, admissionByBot, webhookStopPendingByBot, learningByBot };
 
   function track(task) {
@@ -390,6 +391,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
 
   function createWatch(bot, signal, work, board = false) {
     const botId = bot.botId;
+    const googleSetupRevision = work || board ? undefined : googleSetupRevisionByBot.get(botId);
     const state = {
       kind: 'pending', // 'pending' | 'attaching' | 'attached' | 'ended'
       native: null,
@@ -404,7 +406,10 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
         work ? emptyLiveState()
           : withBotActivity(
             withTurnAdmission(
-              emptyLiveState(),
+              {
+                ...emptyLiveState(),
+                ...(googleSetupRevision !== undefined ? { googleSetupRevision } : {}),
+              },
               admissionByBot.get(botId) ?? null,
               [],
               { hasPreceding: hasPrecedingForInbox(botId, null, activityCtx) },
@@ -731,11 +736,16 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
 
     function projectPrimaryWatchState(baseState) {
       const admission = admissionByBot.get(botId) ?? null;
+      const googleSetupRevision = board ? undefined : googleSetupRevisionByBot.get(botId);
       const precedingForInbox = hasPrecedingForInbox(botId, state.runActivity, activityCtx);
       const effectiveInboxItems = precedingForInbox ? state.inboxItemsAll : state.inboxItemsAfterHead;
       return withBotActivity(
         withTurnAdmission(
-          { ...baseState, queuedCount: state.inboxQueued },
+          {
+            ...baseState,
+            queuedCount: state.inboxQueued,
+            ...(googleSetupRevision !== undefined ? { googleSetupRevision } : {}),
+          },
           admission,
           effectiveInboxItems,
           { hasPreceding: precedingForInbox || state.inboxQueued > 0 },
@@ -947,6 +957,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
       _readBoard: readBoard,
       _applyAdmission: applyAdmission,
       _applyActivity: applyActivity,
+      _applyGoogleSetupRevision: (targetBotId) => {
+        if (!board) applyActivity(targetBotId);
+      },
       _refreshWaits: (targetBotId) => {
         if (targetBotId === botId && state.latestView !== null && state.endReason === null) onView(state.latestView);
       },
@@ -1213,6 +1226,22 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
     for (const watch of watches) watch._refreshWaits(botId);
   }
 
+  /** A committed setup revision invalidates owner cards through their existing primary watch. */
+  function setGoogleSetupRevision(botId, revision) {
+    if (closedFlag) return;
+    assertNonBlank(botId, 'botId');
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      throw errWithCode('Google setup revision must be a safe nonnegative integer', 'INVALID_ARGUMENT');
+    }
+    if (!host.getBot(botId) || revision <= (googleSetupRevisionByBot.get(botId) ?? -1)) return;
+    googleSetupRevisionByBot.set(botId, revision);
+    for (const watch of watches) watch._applyGoogleSetupRevision(botId);
+  }
+
+  function clearGoogleSetupRevision(botId) {
+    googleSetupRevisionByBot.delete(botId);
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -1230,7 +1259,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
     workByBot.clear();
     webhookStopPendingByBot.clear();
     learningByBot.clear();
+    googleSetupRevisionByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, clearStoppedControl, setWebhookStopPending, setBotLearning, notifyWaitsChanged, close };
+  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, clearStoppedControl, setWebhookStopPending, setBotLearning, notifyWaitsChanged, setGoogleSetupRevision, clearGoogleSetupRevision, close };
 }

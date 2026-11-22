@@ -350,6 +350,8 @@ export interface GoogleSignInFlowProps {
   identity: DesktopIdentity;
   /** Pre-selected choices (for initial connect or adding/expanding services — Center uses union). */
   initialChoices?: GoogleServiceChoice[];
+  /** Services already chosen in the setup wizard; show them without a second picker. */
+  setupChoices?: GoogleServiceChoice[];
   /** Target account email when reconnecting or expanding permissions on an existing account. */
   targetAccount?: string;
   /** Existing choices on targetAccount so scope expansion always requests the union. */
@@ -373,6 +375,7 @@ export function GoogleSignInFlow({
   api,
   identity,
   initialChoices,
+  setupChoices,
   targetAccount,
   existingChoices,
   mode = 'connect',
@@ -381,9 +384,14 @@ export function GoogleSignInFlow({
 }: GoogleSignInFlowProps) {
   const t = useText();
   const mountedRef = useRef(true);
-  const pollTimerRef = useRef<number | null>(null);
+  const pollingRef = useRef<{ check: () => void; stop: () => void } | null>(null);
+  const onCompletedRef = useRef(onCompleted);
 
-  const [selected, setSelected] = useState<GoogleServiceChoice[]>(() => {
+  useLayoutEffect(() => {
+    onCompletedRef.current = onCompleted;
+  }, [onCompleted]);
+
+  const [selectedDraft, setSelected] = useState<GoogleServiceChoice[]>(() => {
     const base = new Set<GoogleServiceChoice>(existingChoices ?? []);
     for (const c of initialChoices ?? []) base.add(c);
     if (base.size === 0) {
@@ -392,6 +400,9 @@ export function GoogleSignInFlow({
     }
     return GOOGLE_SERVICE_CHOICES.filter(c => base.has(c));
   });
+  const confirmedChoices = GOOGLE_SERVICE_CHOICES.filter(choice => mode === 'connect' && setupChoices?.includes(choice));
+  const hasConfirmedChoices = confirmedChoices.length > 0;
+  const selected = hasConfirmedChoices ? confirmedChoices : selectedDraft;
 
   const [starting, setStarting] = useState(false);
   const [flow, setFlow] = useState<GoogleAuthFlowStart | null>(null);
@@ -400,18 +411,11 @@ export function GoogleSignInFlow({
   const [error, setError] = useState('');
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const clearPoll = () => {
-    if (pollTimerRef.current !== null) {
-      window.clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  };
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      clearPoll();
+      pollingRef.current?.stop();
     };
   }, []);
 
@@ -426,26 +430,46 @@ export function GoogleSignInFlow({
   useEffect(() => {
     if (phase !== 'pending' || !flow) return;
     let stopped = false;
+    let inFlight = false;
+    let timer: number | null = null;
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const stop = () => {
+      stopped = true;
+      clearTimer();
+      if (pollingRef.current?.stop === stop) pollingRef.current = null;
+    };
 
     const tick = async () => {
+      if (stopped || !mountedRef.current || inFlight) return;
+      clearTimer();
+      inFlight = true;
       try {
         const res = await pollGoogleAuthFlow(api, identity, flow.flowId);
         if (stopped || !mountedRef.current) return;
         if (res.phase === 'pending') {
-          pollTimerRef.current = window.setTimeout(() => void tick(), 1800);
+          timer = window.setTimeout(() => void tick(), 1800);
           return;
         }
         if (res.phase === 'connected') {
           const snapshot = await fetchGoogleStatus(api, identity).catch(() => null);
           if (stopped || !mountedRef.current) return;
+          stop();
           const verifiedAccount =
             res.account ??
             snapshot?.accounts.find(a => (targetAccount ? a.email === targetAccount : true));
           setConnectedAccount(verifiedAccount ?? null);
           setPhase('connected');
-          onCompleted(verifiedAccount, snapshot);
+          onCompletedRef.current(verifiedAccount, snapshot);
           return;
         }
+        stop();
         if (res.phase === 'cancelled') {
           setPhase('cancelled');
           setFlow(null);
@@ -459,21 +483,32 @@ export function GoogleSignInFlow({
         const info = classifyGoogleError(cause);
         if (info.tempError || info.offline) {
           // Transient polling drop: keep polling without marking revoked/failed immediately.
-          pollTimerRef.current = window.setTimeout(() => void tick(), 3000);
+          timer = window.setTimeout(() => void tick(), 3000);
           return;
         }
+        stop();
         setPhase('failed');
         setError(info.message);
         setFlow(null);
+      } finally {
+        inFlight = false;
       }
     };
 
-    pollTimerRef.current = window.setTimeout(() => void tick(), 1500);
-    return () => {
-      stopped = true;
-      clearPoll();
+    pollingRef.current = { check: () => void tick(), stop };
+    const onReturn = () => {
+      if (document.visibilityState === 'visible') void tick();
     };
-  }, [api, identity, flow, phase, targetAccount, onCompleted, t]);
+    window.addEventListener('focus', onReturn);
+    document.addEventListener('visibilitychange', onReturn);
+
+    timer = window.setTimeout(() => void tick(), 1500);
+    return () => {
+      stop();
+      window.removeEventListener('focus', onReturn);
+      document.removeEventListener('visibilitychange', onReturn);
+    };
+  }, [api, identity, flow, phase, targetAccount, t]);
 
   const toggleChoice = (choice: GoogleServiceChoice) => {
     setSelected(prev => {
@@ -523,7 +558,7 @@ export function GoogleSignInFlow({
   };
 
   const handleCancelFlow = async () => {
-    clearPoll();
+    pollingRef.current?.stop();
     const currentFlow = flow;
     setFlow(null);
     setPhase('cancelled');
@@ -551,6 +586,14 @@ export function GoogleSignInFlow({
           >
             <ExternalLink size={14} aria-hidden="true" />
             <span>{t('重新打开浏览器', 'Re-open browser')}</span>
+          </button>
+          <button
+            type="button"
+            className="gws-btn is-ghost is-sm"
+            onClick={() => pollingRef.current?.check()}
+          >
+            <RefreshCw size={14} aria-hidden="true" />
+            <span>{t('重新检查', 'Check again')}</span>
           </button>
           <button type="button" className="gws-btn is-ghost is-sm" onClick={() => void handleCancelFlow()}>
             {t('取消', 'Cancel')}
@@ -621,7 +664,9 @@ export function GoogleSignInFlow({
       ? t(`重新连接 ${targetAccount ?? 'Google 账号'}`, `Reconnect ${targetAccount ?? 'Google account'}`)
       : mode === 'expand'
         ? t('管理服务 / 添加服务', 'Add or grant Google services')
-        : t('选择要连接的服务', 'Choose services to connect');
+        : hasConfirmedChoices
+          ? t('连接 Google 账号', 'Connect Google account')
+          : t('选择要连接的服务', 'Choose services to connect');
 
   const ctaLabel =
     mode === 'reconnect'
@@ -637,32 +682,39 @@ export function GoogleSignInFlow({
         <span>{title}</span>
       </div>
 
-      <div className="gws-choice-grid" role="group" aria-label={t('Google 服务组', 'Google service groups')}>
-        {GOOGLE_SERVICE_CHOICES.map(choice => {
-          const checked = selected.includes(choice);
-          const lockedExisting = mode === 'expand' && Boolean(existingChoices?.includes(choice));
-          return (
-            <label
-              key={choice}
-              className={`gws-choice-card${checked ? ' is-selected' : ''}${lockedExisting ? ' is-locked' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={starting || lockedExisting}
-                onChange={() => toggleChoice(choice)}
-              />
-              <span className="gws-choice-body">
-                <span className="gws-choice-title">
-                  {googleChoiceLabel(choice, t)}
-                  {lockedExisting ? <span className="gws-pill is-muted">{t('已包含', 'Included')}</span> : null}
+      {hasConfirmedChoices ? (
+        <p className="gws-muted">
+          {t('本次申请授权：', 'Requested services: ')}
+          {confirmedChoices.map(choice => googleChoiceLabel(choice, t)).join(t('、', ', '))}
+        </p>
+      ) : (
+        <div className="gws-choice-grid" role="group" aria-label={t('Google 服务组', 'Google service groups')}>
+          {GOOGLE_SERVICE_CHOICES.map(choice => {
+            const checked = selected.includes(choice);
+            const lockedExisting = mode === 'expand' && Boolean(existingChoices?.includes(choice));
+            return (
+              <label
+                key={choice}
+                className={`gws-choice-card${checked ? ' is-selected' : ''}${lockedExisting ? ' is-locked' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={starting || lockedExisting}
+                  onChange={() => toggleChoice(choice)}
+                />
+                <span className="gws-choice-body">
+                  <span className="gws-choice-title">
+                    {googleChoiceLabel(choice, t)}
+                    {lockedExisting ? <span className="gws-pill is-muted">{t('已包含', 'Included')}</span> : null}
+                  </span>
+                  <span className="gws-choice-desc">{googleChoiceDescription(choice, t)}</span>
                 </span>
-                <span className="gws-choice-desc">{googleChoiceDescription(choice, t)}</span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
+              </label>
+            );
+          })}
+        </div>
+      )}
 
       <p className="gws-base-scope-note">
         {t('基础附带（不可单独取消）：账号识别与联系人联查（People API，用于按姓名查找联系人，将独立探测就绪度）。', 'Base included (always requested): Account identity & People API contacts lookup (probed independently).')}

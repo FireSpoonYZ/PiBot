@@ -12,6 +12,7 @@ import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
 import { openPendingClient } from './pending-client.js';
 import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
+import { browserEgressIdentityDigest, createBrowserEgressClient } from './bot-browser/egress-client.js';
 import { collectBotDirectory } from './bot-directory.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { openRemoteControl } from './remote-control-client.js';
@@ -282,6 +283,11 @@ export function openDesktopClient(options) {
   let lastObservedAt = null;
   let errorCode = null;
   let activeSession = null; // { generation, kind, adapter?, remote?, localDeviceId?, connectController? }
+  let localBrowserRoute = null;
+  const browserProxies = new Map();
+  const browserRenderers = new Map();
+  let browserEgressPool = null;
+  let browserWindowClosed = false;
   let centerClient = null;
   let centerGeneration = 0;
   let centerState = 'disconnected';
@@ -439,7 +445,7 @@ export function openDesktopClient(options) {
     centerError = { code: failure.code, message: failure.message };
     centerState = failure.permanent ? 'disconnected' : 'connecting';
     endConnectionObservations({ ...centerError, outcome: 'unconfirmed' });
-    dropTransportForCenter();
+    dropTransportForCenter({ preserveBrowser: !failure.permanent });
     abortCenterRequests();
     const previous = centerClient;
     centerClient = null;
@@ -1022,7 +1028,8 @@ export function openDesktopClient(options) {
     return { approved: true };
   }
 
-  function dropTransportForCenter() {
+  function dropTransportForCenter({ preserveBrowser = false } = {}) {
+    if (!preserveBrowser) clearBrowserRoutes();
     cancelCenterProbe();
     centerRelayConnection = null;
     generation += 1;
@@ -1230,6 +1237,7 @@ export function openDesktopClient(options) {
       }
       const conn = normalizeConnectionInput(rawConnection);
       const profileKey = derivePendingProfileKey(conn);
+      if (!centerManaged) clearBrowserRoutes();
       cancelCenterProbe();
 
       // Update phase after validation but before the first await so concurrent
@@ -1306,7 +1314,13 @@ export function openDesktopClient(options) {
           return buildStatusSnapshot();
         }
 
-        // Relay connection
+        // WebView2 keeps the loopback proxy URL for the life of its guest.
+        const browserKey = browserEgressIdentityDigest(['relay', new URL(conn.url).href, conn.deviceId, conn.token, conn.ca ?? '']);
+        if (browserEgressPool?.key !== browserKey) {
+          if (browserEgressPool) clearBrowserRoutes();
+          browserEgressPool = { key: browserKey, client: createBrowserEgressClient({ identity: browserKey }) };
+        }
+        session.browserKey = browserKey;
         const timeout = withCallTimeout(connectController.signal, DESKTOP_CALL_TIMEOUT_MS);
         const sessionCenterGeneration = centerGeneration;
         let remote;
@@ -1316,6 +1330,7 @@ export function openDesktopClient(options) {
             url: conn.url,
             token: conn.token,
             ...(conn.ca !== undefined ? { ca: conn.ca } : {}),
+            browserEgress: browserEgressPool.client,
             signal: timeout.signal,
             onClose: (err) => {
               if (activeSession !== session || myGen !== generation || closed) return;
@@ -1615,6 +1630,184 @@ export function openDesktopClient(options) {
       activeSession?.kind === 'local' && typeof activeSession.adapter === 'function';
   }
 
+  function browserAdapter(targetDeviceId) {
+    if (activeSession?.kind === 'local' && activeSession.localDeviceId === targetDeviceId) return activeSession.adapter;
+    if (!localBrowserRoute || !centerCredentials || localBrowserRoute.deviceId !== targetDeviceId ||
+        centerCredentials.deviceId !== targetDeviceId ||
+        centerCredentials.url !== localBrowserRoute.centerUrl) return null;
+    return localBrowserRoute.adapter;
+  }
+
+  async function opBrowserLocalRoute(params) {
+    rejectUnknownFields(params, new Set(['deviceId', 'centerUrl', 'url', 'token']), 'browser local route');
+    if (!params.deviceId) {
+      localBrowserRoute = null;
+      return { deviceId: null };
+    }
+    assertId(params.deviceId, 'deviceId');
+    const parsed = new URL(params.url);
+    if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw invalid('browser route is not local');
+    const adapter = createLocalControlAdapter({ url: params.url, token: params.token });
+    const info = await adapter.getHostInfo({ signal: AbortSignal.timeout(2_000) });
+    if (info.deviceId !== params.deviceId) throw invalid('local browser Host identity changed');
+    const key = browserEgressIdentityDigest(['local-browser-route', params.deviceId, params.centerUrl, parsed.href, params.token]);
+    localBrowserRoute = { deviceId: params.deviceId, centerUrl: params.centerUrl.replace(/\/+$/, ''), adapter, key };
+    return { deviceId: browserAdapter(params.deviceId) ? params.deviceId : null };
+  }
+
+  function browserBinding(targetDeviceId, record) {
+    if (record?.kind !== 'relay') {
+      const adapter = browserAdapter(targetDeviceId);
+      const key = activeSession?.adapter === adapter ? activeSession : localBrowserRoute?.key;
+      if (adapter && (!record || record.key === key)) return { kind: 'direct', key, adapter };
+      if (record) return null;
+    }
+    const session = activeSession;
+    if (phase === 'connected' && session?.kind === 'relay' && session.remote &&
+        (!record || record.key === session.browserKey)) {
+      return { kind: 'relay', key: session.browserKey, session };
+    }
+    return null;
+  }
+
+  function closeBrowserProxy(rendererId) {
+    browserProxies.get(rendererId)?.close();
+    browserProxies.delete(rendererId);
+  }
+
+  function clearBrowserRoutes() {
+    browserRenderers.clear();
+    browserProxies.clear();
+    browserEgressPool?.client.reset();
+    browserEgressPool = null;
+  }
+
+  function callBrowserOnBinding(binding, targetDeviceId, params, signal) {
+    if (binding.kind === 'direct') {
+      return binding.adapter(targetDeviceId, 'browserControl', params, {
+        signal, caller: { transport: 'local', clientId: `local:${clientId}` },
+      });
+    }
+    return binding.session.remote.call(targetDeviceId, 'browserControl', params, { signal });
+  }
+
+  function closeRenderer(binding, record) {
+    if (!record.windowCloseSupported || !binding ||
+        (binding.kind === 'relay' && !binding.session.remote.browserWindowLifecycle)) return;
+    return callBrowserOnBinding(binding, record.targetDeviceId,
+      { action: 'rendererClose', botId: record.botId, rendererId: record.rendererId },
+      AbortSignal.timeout(700));
+  }
+
+  async function opBrowserWindowClose(params) {
+    rejectUnknownFields(params, new Set(), 'browser_window_close params');
+    if (browserWindowClosed) return { ok: true };
+    browserWindowClosed = true;
+    const closing = [...browserRenderers.values()].map(async record =>
+      closeRenderer(browserBinding(record.targetDeviceId, record), record));
+    clearBrowserRoutes();
+    for (const rec of inflightRequests.values()) {
+      if (rec.browserIo) rec.controller.abort();
+    }
+    await Promise.allSettled(closing);
+    return { ok: true };
+  }
+
+  async function opBrowserEgressOpen(params, signal) {
+    rejectUnknownFields(params, new Set(['targetDeviceId', 'botId', 'rendererId']), 'browser egress');
+    const { targetDeviceId, botId, rendererId } = params;
+    const renderer = browserRenderers.get(rendererId);
+    if (!renderer || renderer.targetDeviceId !== targetDeviceId || renderer.botId !== botId) {
+      throw brokerError('BROWSER_FORBIDDEN', 'not-sent', 'browser renderer is not attached');
+    }
+    const binding = browserBinding(targetDeviceId, renderer);
+    if (binding?.kind === 'direct') return { proxyUrl: null };
+    if (!binding || browserProxies.size >= 8 || browserProxies.has(rendererId)) {
+      throw brokerError('CONTROL_UNAVAILABLE', 'not-sent', 'browser network route is unavailable');
+    }
+    const proxy = await binding.session.remote.openBrowserEgress(params);
+    if (browserWindowClosed || binding.session !== activeSession || signal.aborted ||
+        browserRenderers.get(rendererId) !== renderer || browserProxies.has(rendererId)) {
+      proxy.close();
+      throw brokerError('CANCELLED', 'not-sent');
+    }
+    browserProxies.set(rendererId, proxy);
+    return { proxyUrl: proxy.proxyUrl };
+  }
+
+  function opBrowserEgressClose(params) {
+    rejectUnknownFields(params, new Set(['rendererId']), 'browser egress close');
+    closeBrowserProxy(params.rendererId);
+    return { ok: true };
+  }
+
+  async function opBrowserControl(targetDeviceId, params, signal) {
+    const { action, botId, rendererId } = params;
+    const renderer = rendererId ? browserRenderers.get(rendererId) : undefined;
+    if ((renderer && (renderer.targetDeviceId !== targetDeviceId || renderer.botId !== botId)) ||
+        (rendererId && !renderer && action !== 'rendererAttach') ||
+        (action === 'rendererClose' && !renderer?.windowCloseSupported)) {
+      throw brokerError('BROWSER_FORBIDDEN', 'not-sent', 'browser renderer is not attached');
+    }
+    if (action === 'rendererAttach' && !renderer && browserRenderers.size >= 16) {
+      throw brokerError('RPC_BUSY', 'not-sent', 'too many attached browser renderers');
+    }
+    // Use the same authenticated route for the page and its renderer even if local
+    // route discovery completes after this window has already attached by relay.
+    const pageRenderer = renderer ?? [...browserRenderers.values()].find(record =>
+      record.targetDeviceId === targetDeviceId && record.botId === botId);
+    const binding = browserBinding(targetDeviceId, pageRenderer);
+    if (!binding) {
+      const code = renderer && browserBinding(targetDeviceId) ? 'BROWSER_FORBIDDEN' : 'NOT_CONNECTED';
+      if (code === 'BROWSER_FORBIDDEN') {
+        browserRenderers.delete(rendererId);
+        closeBrowserProxy(rendererId);
+      }
+      throw brokerError(code, 'not-sent');
+    }
+    const timeout = withCallTimeout(signal, controlBrokerTimeoutMs('browserControl'));
+    try {
+      if (binding.kind === 'relay') {
+        await requireTargetReady(targetDeviceId, timeout.signal);
+        requireCenter();
+      }
+      if (browserWindowClosed || timeout.signal.aborted ||
+          browserBinding(targetDeviceId, binding)?.key !== binding.key ||
+          (binding.kind === 'relay' && binding.session !== activeSession)) {
+        throw brokerError('CANCELLED', 'not-sent');
+      }
+      const result = await callBrowserOnBinding(binding, targetDeviceId, params, timeout.signal);
+      if (action === 'rendererAttach' && result.accepted) {
+        const record = {
+          kind: binding.kind, key: binding.key, targetDeviceId, botId, rendererId,
+          windowCloseSupported: result.windowCloseProtocol === 1,
+        };
+        if (browserWindowClosed) {
+          await closeRenderer(browserBinding(targetDeviceId, record), record);
+        } else if (!timeout.signal.aborted && browserBinding(targetDeviceId, record) &&
+            (binding.kind === 'direct' || binding.session === activeSession)) {
+          browserRenderers.set(rendererId, record);
+        }
+      } else if ((action === 'rendererDetach' || action === 'rendererClose') &&
+          result.ok && browserRenderers.get(rendererId) === renderer) {
+        browserRenderers.delete(rendererId);
+        closeBrowserProxy(rendererId);
+      }
+      if (binding.kind === 'relay') markObserved(binding.session.generation);
+      return result;
+    } catch (err) {
+      if (err?.code === 'BROWSER_FORBIDDEN' && action === 'rendererNext' &&
+          browserRenderers.get(rendererId) === renderer) {
+        browserRenderers.delete(rendererId);
+        closeBrowserProxy(rendererId);
+      }
+      if (timeout.wasTimedOut() && !signal.aborted) throw brokerError('TIMEOUT', 'unconfirmed', 'browser control timed out');
+      throw err;
+    } finally {
+      timeout.cleanup();
+    }
+  }
+
   async function opCall(params, reqSignal) {
     rejectUnknownFields(params, new Set(['targetDeviceId', 'method', 'params']), 'call params');
     try {
@@ -1628,6 +1821,9 @@ export function openDesktopClient(options) {
     } catch (err) {
       const code = err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT';
       throw brokerError(code, 'not-sent', err.message);
+    }
+    if (normalized.method === 'browserControl') {
+      return opBrowserControl(params.targetDeviceId, normalized.params, reqSignal);
     }
     if (!isLocalVaultCall('call', params)) {
       await requireTargetReady(params.targetDeviceId, reqSignal);
@@ -1889,10 +2085,13 @@ export function openDesktopClient(options) {
       throw brokerError('RPC_BUSY', 'not-sent', 'maximum concurrent observations reached');
     }
 
-    if (!connection) await requireTargetReady(params.targetDeviceId);
-    requireCenter();
-    const session = requireConnectedSession();
-    const sessionGen = session.generation;
+    const directBrowser = normTarget?.kind === 'browser' ? browserAdapter(params.targetDeviceId) : null;
+    if (!directBrowser) {
+      if (!connection) await requireTargetReady(params.targetDeviceId);
+      requireCenter();
+    }
+    const session = directBrowser ? activeSession : requireConnectedSession();
+    const sessionGen = session?.generation ?? generation;
     const controller = new AbortController();
     const observationId = params.observationId;
 
@@ -1919,8 +2118,11 @@ export function openDesktopClient(options) {
 
     let iterable;
     try {
-      if (session.kind === 'local') {
-        iterable = session.adapter.live(params.targetDeviceId, normTarget, { signal: controller.signal });
+      if (directBrowser || session?.kind === 'local') {
+        iterable = (directBrowser ?? session.adapter).live(params.targetDeviceId, normTarget, {
+          signal: controller.signal,
+          ...(normTarget.kind === 'browser' ? { caller: { transport: 'local', clientId: `local:${clientId}` } } : {}),
+        });
       } else {
         iterable = session.remote.live(params.targetDeviceId, normTarget, { signal: controller.signal });
       }
@@ -1962,7 +2164,7 @@ export function openDesktopClient(options) {
             error = normalizeDesktopError(err, 'unconfirmed');
           }
           // Relay transport failures are handled by onClose; a target may fail independently.
-          if (sessionGen === generation && session.kind === 'local' && (error.code === 'DISCONNECTED' || error.code === 'REPLACED' || error.code === 'REVOKED' || error.code === 'BAD_FRAME')) {
+          if (sessionGen === generation && session?.kind === 'local' && (error.code === 'DISCONNECTED' || error.code === 'REPLACED' || error.code === 'REVOKED' || error.code === 'BAD_FRAME')) {
             phase = 'failed';
             errorCode = error.code;
           }
@@ -2025,6 +2227,10 @@ export function openDesktopClient(options) {
     ['global_tasks', opGlobalTasks],
     ['rename_device', opRenameDevice],
     ['call', opCall],
+    ['browser_local_route', opBrowserLocalRoute],
+    ['browser_window_close', opBrowserWindowClose],
+    ['browser_egress_open', opBrowserEgressOpen],
+    ['browser_egress_close', opBrowserEgressClose],
     ['settings_get', opSettingsGet],
     ['settings_set', opSettingsSet],
     ['service_status', opServiceStatus],
@@ -2051,7 +2257,14 @@ export function openDesktopClient(options) {
     if (!isPlainObject(params)) {
       throw invalid(`${op} params must be a plain object`);
     }
-    if (!CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op) && !isLocalVaultCall(op, params)) requireCenter();
+    if (op === 'browser_window_close') return opBrowserWindowClose(params);
+    const browserIo = op === 'browser_local_route' || op === 'browser_egress_open' ||
+      (op === 'call' && params.method === 'browserControl') || (op === 'observe' && params.target?.kind === 'browser');
+    if (browserWindowClosed && browserIo) throw brokerError('NOT_CONNECTED', 'not-sent', 'desktop browser window is closed');
+    const localBrowser = (op === 'call' && params.method === 'browserControl' ||
+      op === 'observe' && params.target?.kind === 'browser') && browserAdapter(params.targetDeviceId);
+    if (!CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op) && !isLocalVaultCall(op, params) &&
+        !localBrowser && op !== 'browser_local_route' && op !== 'browser_egress_close') requireCenter();
     if (op === 'settings_set') throw brokerError('NOT_CONNECTED', 'not-sent', 'settings are managed by the center');
     // unobserve only aborts a local subscription synchronously (no network, no wait): it must
     // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
@@ -2071,7 +2284,7 @@ export function openDesktopClient(options) {
     const handler = OP_HANDLERS.get(op);
     const internalId = nextInternalRequestId++;
     const controller = new AbortController();
-    const rec = { controller, promise: null, op };
+    const rec = { controller, promise: null, op, browserIo };
     inflightRequests.set(internalId, rec);
 
     rec.promise = (async () => {
@@ -2089,6 +2302,7 @@ export function openDesktopClient(options) {
     if (!closePromise) {
       closePromise = (async () => {
         closed = true;
+        clearBrowserRoutes();
         cancelCenterProbe();
         cancelCenterRetry();
         centerRelayConnection = null;

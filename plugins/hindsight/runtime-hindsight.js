@@ -556,7 +556,7 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
         return undefined;
       }
       saveRecallOutcome(recall, 'injected');
-      return { messages: [...request.messages, message] };
+      return { messages: [...request.messages, { ...message, hindsightRecall: true }] };
     });
   }
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import {
 import { openAntigravity } from '../../center-server/antigravity/index.js';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
 import { RESUME_PROMPT } from '../../center-server/antigravity/round-trips.ts';
+import { makeSessionKey, SessionStore } from '../../center-server/antigravity/sessions.ts';
 import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
 import { registerAntigravityRoutes } from '../../center-server/antigravity-routes.js';
 import { createAntigravityProvider } from '../../host-core/antigravity-provider.js';
@@ -25,6 +27,7 @@ import {
 } from '../../host-core/request-context.js';
 import { openRuntime } from '../../host-core/runtime.js';
 import { createContextCodec } from '../../plugins/billion-context/context-codec.js';
+import { renderHindsightRecall } from '../../plugins/hindsight/hindsight-format.js';
 
 // Valid 1x1 transparent PNG (canonical base64).
 const PNG_1X1 =
@@ -35,6 +38,8 @@ const COMPACTION_MARKER = 'compacted into the following summary';
 const PENDING_STATUSES = new Set(['queued', 'placed', 'running', 'pending', 'admitted']);
 const USER_ORIGIN = { sender: { kind: 'user' }, replyTo: null };
 const BASE_MODEL_SEL = { modelRef: MODEL_REF, thinkingLevel: 'off', codemode: false, codemodeOnly: false };
+const hindsightRoot = fileURLToPath(new URL('../../plugins/hindsight/', import.meta.url));
+const hindsightManifest = JSON.parse(fs.readFileSync(path.join(hindsightRoot, 'capability.json'), 'utf8'));
 
 const USAGE = {
   input: 12,
@@ -208,6 +213,7 @@ function createControlledAcpDriverHarness(t) {
         prompt: request.prompt,
         images: request.images ? request.images.map((img) => ({ ...img })) : undefined,
         contextBlock: request.contextBlock ? { ...request.contextBlock } : undefined,
+        turnRecall: request.turnRecall,
       },
       mcpTools,
       mcp: s.mcp,
@@ -333,35 +339,9 @@ export function createPlugin({ host }) {
 `,
   );
 
-  const recallDir = path.join(rootDir, 'plugins', 'test-hindsight-recall');
-  fs.mkdirSync(recallDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(recallDir, 'entry.mjs'),
-    `export function createPlugin() {
-  const bots = new Set();
-  return {
-    async forBot({ effectiveConfig: cfg }) {
-      const bot = {
-        requestContributions: {
-          async beforeRequest(request) {
-            if (!cfg?.recallText) return undefined;
-            return { messages: [...request.messages, { role: 'user', content: cfg.recallText, timestamp: 0 }] };
-          },
-        },
-        async prepare() {}, async activate() {}, async quiesce() {}, async close() { bots.delete(bot); },
-      };
-      bots.add(bot);
-      return bot;
-    },
-    async close() { await Promise.all([...bots].map((b) => b.close())); },
-  };
-}
-`,
-  );
-
   const installed = new Map([
     ['test-bc-context', { version: '1.0.0', packageRoot: bcDir, dataDir: path.join(bcDir, 'data'), manifest: { id: 'test.bc-context', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } } }],
-    ['test-hindsight-recall', { version: '1.0.0', packageRoot: recallDir, dataDir: path.join(recallDir, 'data'), manifest: { id: 'test.hindsight-recall', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } } }],
+    ['test-hindsight-recall', { version: hindsightManifest.version, packageRoot: hindsightRoot, dataDir: path.join(rootDir, 'hindsight-data'), manifest: hindsightManifest }],
   ]);
   const questionnaireRoot = fileURLToPath(new URL('../../plugins/ask-user-question/', import.meta.url));
   const questionnaireManifest = JSON.parse(fs.readFileSync(path.join(questionnaireRoot, 'capability.json'), 'utf8'));
@@ -451,6 +431,25 @@ async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads }) {
 // 1. Real Host Runtime + pi-durable GenerationTask -> openAntigravity.stream (3 turns)
 test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (toolsAdded/toolsRemoved), BC deep-clone + recall, text+image & pure-image, and parked continuation', async (t) => {
   const driverHarness = createControlledAcpDriverHarness(t);
+  const recallText = 'Verified tool probes.';
+  const recallQueries = [];
+  const recallServer = http.createServer(async (req, res) => {
+    let result = { items: [] };
+    if (req.method === 'POST' && req.url.endsWith('/memories/recall')) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      recallQueries.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).query);
+      result = { results: [{ id: 'qa-probe', text: recallText, type: 'observation' }], source_facts: {} };
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(result));
+  });
+  await new Promise((resolve) => recallServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => {
+    recallServer.close(resolve);
+    recallServer.closeAllConnections();
+  }));
+  const recallBaseUrl = `http://127.0.0.1:${recallServer.address().port}`;
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-e2e-'));
   const botCwd = path.join(rootDir, 'workspace');
   fs.mkdirSync(botCwd, { recursive: true });
@@ -501,7 +500,7 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     await runtime.setBotSoul(bot.botId, { expectedRevision: soul.revision, text: `${soul.text}\nTurn 2 rule: use ping_probe_tool.` });
     const caps = (enableProbeTool, rev) => [
       makeCapability('test-bc-context', { mode: 'bc', enableProbeTool, injectBcSummary: true, injectBcNudge: true }, rev),
-      makeCapability('test-hindsight-recall', { recallText: '<hindsight_memories>Verified tool probes.</hindsight_memories>' }, 1),
+      { ...makeCapability('test-hindsight-recall', { baseUrl: recallBaseUrl, mode: 'read-only' }), targetVersion: hindsightManifest.version },
     ];
     await env.applySnapshot(env.makeSnapshot(3, [{ botId: bot.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: caps(true, 1) }]));
     await runtime.submit(bot.botId, { requestId: 'e2e-t2', text: '第二轮请看图并使用新工具', attachments: [img.id], origin: USER_ORIGIN });
@@ -523,13 +522,20 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     const run2 = driverHarness.runs[1];
     assert.equal(run2.request.conversationId, 'conv-e2e');
     assert.ok(run2.request.prompt.indexOf('BC nudge: keep tool output concise.') < run2.request.prompt.indexOf('第二轮请看图并使用新工具'));
-    assert.ok(run2.request.prompt.includes('Verified tool probes.'));
+    const projectedRecall = captured[1].messages.find((m) => m.hindsightRecall === true);
+    assert.ok(projectedRecall && messageText(projectedRecall).includes(recallText));
+    assert.equal(run2.request.turnRecall, messageText(projectedRecall));
+    assert.ok(!run2.request.prompt.includes(recallText));
+    assert.ok(!(run2.request.contextBlock?.text ?? '').includes(recallText));
+    assert.ok(recallQueries.some((query) => query.includes('第二轮请看图并使用新工具')));
     assert.deepEqual(run2.request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
     assert.ok(!(run2.request.contextBlock?.text ?? '').includes('第二轮请看图并使用新工具'));
     assert.ok(run2.mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
     assert.equal(captured[2].messages[captured[2].turnContext.inputIndex]?.role, 'toolResult');
     assert.ok(observedToolResult && run2.driverState.reentryCalls >= 1);
-    assert.ok(JSON.stringify((await runtime.history(bot.botId, { limit: 50 })).items).includes('工具结果确认：probe:acp-check'));
+    const durableHistory = JSON.stringify((await runtime.history(bot.botId, { limit: 50 })).items);
+    assert.ok(durableHistory.includes('工具结果确认：probe:acp-check'));
+    assert.ok(!durableHistory.includes(recallText));
 
     // Turn 3: remove ping_probe_tool + pure-image user
     stage = 3;
@@ -542,6 +548,7 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     assert.equal(hasImage(captured[3].messages[tc3.inputIndex]), true);
     assert.ok(captured[3].messages.slice(tc3.inputIndex + 1).some((m) => m.role === 'system' && (m.toolsRemoved ?? []).some((x) => x.name === 'ping_probe_tool')));
     assert.deepEqual(driverHarness.runs[2].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
+    assert.equal(driverHarness.runs[2].request.turnRecall, undefined);
     assert.ok(!driverHarness.runs[2].mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
   } catch (err) {
     hadError = true;
@@ -941,6 +948,92 @@ test('Preserves parked tool continuation without resending prompt, bound assista
   }
 });
 
+test('Migrates a pre-hook native binding once, restoring ordinary history without replaying automatic recall', async (t) => {
+  const driver = createControlledAcpDriverHarness(t);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-recall-'));
+  const deviceId = 'dev-recall';
+  const sessionId = 'session-recall';
+  const sessionsPath = path.join(rootDir, 'center', 'antigravity', 'sessions.json');
+  fs.mkdirSync(path.dirname(sessionsPath), { recursive: true });
+  fs.writeFileSync(sessionsPath, JSON.stringify({
+    [makeSessionKey(deviceId, sessionId)]: { conversationId: 'legacy-conversation', lastStepIdx: -1, lastMessageCount: 4 },
+  }));
+
+  let antigravity = openIsolatedAntigravity(rootDir);
+  let hadError = false;
+  const history = [
+    BASE_SYSTEM,
+    { role: 'user', content: 'Ordinary earlier request', timestamp: 10 },
+    { role: 'user', content: 'Old automatic recall', hindsightRecall: true, timestamp: 0 },
+    asstText('Ordinary earlier answer', 11),
+  ];
+  const send = (messages, inputIndex, auxiliaryIndices) => drainEventStream(antigravity.stream({
+    deviceId, sessionId, modelId: MODEL_ID, messages, turnContext: { inputIndex, auxiliaryIndices },
+  }));
+  try {
+    const firstRecall = renderHindsightRecall([{
+      bankId: 'legacy-bank', target: { kind: 'primary' }, result: { results: [{ id: 'r1', text: 'Recall from an older Host' }] },
+    }]);
+    const first = await send([...history, { role: 'user', content: 'First message after upgrading', timestamp: 12 }, firstRecall], 4, [2, 5]);
+    assert.equal(first.terminal?.reason, 'stop');
+    const migrated = driver.runs[0];
+    assert.equal(migrated.request.conversationId, null);
+    assert.equal(migrated.request.turnRecall, firstRecall.content);
+    assert.ok(migrated.request.prompt.includes('Base assistant instructions.'));
+    assert.ok(migrated.request.contextBlock?.text.includes('Ordinary earlier request'));
+    assert.ok(migrated.request.contextBlock?.text.includes('Ordinary earlier answer'));
+    for (const block of [migrated.request.prompt, migrated.request.contextBlock?.text ?? '']) {
+      assert.ok(!block.includes('Old automatic recall'));
+      assert.ok(!block.includes('Recall from an older Host'));
+    }
+
+    await antigravity.close();
+    antigravity = openIsolatedAntigravity(rootDir);
+    const genuineLookalike = { ...firstRecall, content: firstRecall.content.replace('Recall from an older Host', 'Real user text') };
+    const afterRestart = await send([...history, genuineLookalike], 4, [2]);
+    assert.equal(afterRestart.terminal?.reason, 'stop');
+    const resumed = driver.runs[1];
+    assert.equal(resumed.request.conversationId, migrated.assignedConversationId);
+    assert.equal(resumed.request.turnRecall, undefined);
+    assert.ok(resumed.request.prompt.includes(genuineLookalike.content));
+  } catch (err) {
+    hadError = true;
+    throw err;
+  } finally {
+    await closeAndRemove({ antigravity, rootDir, hadError });
+  }
+});
+
+test('Persists a second hook-enabled binding that arrives while another binding is being written', async (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-bindings-'));
+  const sessionsPath = path.join(rootDir, 'sessions.json');
+  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
+  const store = new SessionStore(sessionsPath);
+  const { promise: writing, resolve: signalWrite } = Promise.withResolvers();
+  const { promise: release, resolve: releaseWrite } = Promise.withResolvers();
+  const writeFile = fs.promises.writeFile;
+  t.mock.method(fs.promises, 'writeFile', async (file, ...args) => {
+    if (String(file).startsWith(sessionsPath + '.')) {
+      signalWrite();
+      await release;
+    }
+    return writeFile(file, ...args);
+  });
+  const firstKey = makeSessionKey('device', 'first');
+  const secondKey = makeSessionKey('device', 'second');
+  store.set(firstKey, { conversationId: 'first-native', lastStepIdx: -1, turnRecallHook: true });
+  try {
+    await writing;
+    store.set(secondKey, { conversationId: 'second-native', lastStepIdx: -1, turnRecallHook: true });
+  } finally {
+    releaseWrite();
+    await store.flush();
+  }
+  const reopened = new SessionStore(sessionsPath);
+  assert.equal(reopened.get(firstKey)?.turnRecallHook, true);
+  assert.equal(reopened.get(secondKey)?.turnRecallHook, true);
+});
+
 // 5. No-Input / Unbound Non-User & Invalid turnContext Fail-Closed (registerAntigravityRoutes + openAntigravity.stream)
 test('No-input/unbound cases never start driver.run, and invalid turnContext fails closed in both registerAntigravityRoutes and openAntigravity.stream', async (t) => {
   const driverHarness = createControlledAcpDriverHarness(t);
@@ -984,6 +1077,7 @@ test('No-input/unbound cases never start driver.run, and invalid turnContext fai
       ['non-integer inputIndex', twoMsgs, { inputIndex: 1.5, auxiliaryIndices: [] }],
       ['OOB inputIndex', twoMsgs, { inputIndex: 5, auxiliaryIndices: [] }],
       ['inputIndex -> system', twoMsgs, { inputIndex: 0, auxiliaryIndices: [] }],
+      ['inputIndex -> automatic recall', [BASE_SYSTEM, { role: 'user', content: 'Automatic recall', hindsightRecall: true, timestamp: 0 }], { inputIndex: 1, auxiliaryIndices: [] }],
       ['inputIndex in auxiliaryIndices', twoMsgs, { inputIndex: 1, auxiliaryIndices: [1] }],
       ['contradictory null inputIndex', twoMsgs, { inputIndex: null, auxiliaryIndices: [] }],
       ['non-last inputIndex', fourMsgs, { inputIndex: 1, auxiliaryIndices: [3] }],

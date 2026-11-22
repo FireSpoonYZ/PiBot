@@ -44,6 +44,8 @@ const BRIDGE_SERVER_RE = /^(?:pibot|pi)-bridge(?:-\d+)?$/i;
 const BRIDGE_PERMISSION_RE = /^(?:mcp_)?(?:pibot|pi)-bridge(?:-\d+)?(?:_|$)/i;
 const AUTH_CACHE_TTL_MS = 60_000;
 const KNOWN_MESSAGE_ROLES = new Set(["user", "system", "assistant", "toolResult"]);
+const MIGRATED_CONTEXT_PREAMBLE =
+	"[This is the previous conversation from PiBot's session history. Use it for continuity and keep completed work intact.]";
 
 function safeMessageRole(msg) {
 	if (!msg) return "none";
@@ -120,6 +122,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			bin: profile.bin,
 			binArgs: ["acp", "--agent", AGENT_NAME, "--process-per-session"],
 			geminiDir: profile.geminiHome,
+			enableTurnRecall: true,
 			mcpServers: () => [mcpBridge.serverConfig(slot.mcpToken)],
 			permissionPolicy: (req) => (isBridgePermissionRequest(req) ? "auto" : "deny"),
 		});
@@ -289,8 +292,17 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			slot.currentTools = mcpTools;
 			slot.allowedToolNames = new Set(mcpTools.map((t) => t.name));
 
-			const existing = store.get(slot.key);
+			let existing = store.get(slot.key);
 			const messageCount = cleanMessages.length;
+			let hasTurnRecallHook = existing?.turnRecallHook === true;
+			const rememberConversation = (conversationId) => {
+				store.set(slot.key, {
+					conversationId,
+					lastStepIdx: -1,
+					lastMessageCount: messageCount,
+					...(hasTurnRecallHook ? { turnRecallHook: true } : {}),
+				});
+			};
 
 			const inputIndex = resolvedTurn.inputIndex;
 			const inputRole = inputIndex !== null ? cleanMessages[inputIndex]?.role : undefined;
@@ -411,11 +423,30 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					return;
 				}
 
+				// An older native conversation keeps its inline recall and original hook
+				// list on session/load. Replace the binding on the next fresh user turn
+				// once any results owed to the old conversation have been delivered.
+				let migrating = false;
+				if (existing && !existing.turnRecallHook && inputRole === "user" && late.length === 0 &&
+					slot.roundTrips.pendingIds.length === 0) {
+					const deadIds = new Set(slot.roundTrips.deadIds);
+					const awaitingLateResult = deadIds.size > 0 && cleanMessages.some((message) =>
+						message.role === "assistant" && message.content.some((part) =>
+							part.type === "toolCall" && deadIds.has(part.id)));
+					if (!awaitingLateResult) {
+						migrating = true;
+						existing = null;
+					}
+				}
+				const conversationId = redeliveryConversation ?? existing?.conversationId ?? null;
+				hasTurnRecallHook = conversationId === null ||
+					(conversationId === existing?.conversationId && existing.turnRecallHook === true);
 				const watermark = existing?.lastMessageCount ?? 0;
 				const digest =
 					late.length === 0 && !resume
 						? buildContextDigest(cleanMessages, watermark, {
 								ownProvider: ANTIGRAVITY_PROVIDER_ID,
+								includeOwnHistory: migrating,
 								endIndex: inputIndex,
 								auxiliaryIndices: resolvedTurn.historicalAuxiliaryIndices,
 							})
@@ -448,13 +479,14 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						effort,
 						mode: "default",
 						skipPermissions: false,
-						conversationId: redeliveryConversation ?? existing?.conversationId ?? null,
+						conversationId,
 						prompt: fullPrompt,
 						images: runImages.length > 0 ? runImages : undefined,
+						turnRecall: hasTurnRecallHook && inputRole === "user" ? resolvedTurn.turnRecall : undefined,
 						contextBlock: digest
 							? {
 									uri: `urn:pibot-bridge:context-digest/${messageCount}`,
-									text: `${DIGEST_PREAMBLE}\n\n${digest}`,
+									text: `${migrating ? MIGRATED_CONTEXT_PREAMBLE : DIGEST_PREAMBLE}\n\n${digest}`,
 								}
 							: undefined,
 						signal: slot.turnAbort.signal,
@@ -501,13 +533,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			if (drainState === "parked") {
 				if (!existing) {
 					const parkedConv = slot.driver.snapshot().conversationId;
-					if (parkedConv) {
-						store.set(slot.key, {
-							conversationId: parkedConv,
-							lastStepIdx: -1,
-							lastMessageCount: messageCount,
-						});
-					}
+					if (parkedConv) rememberConversation(parkedConv);
 				}
 				return;
 			}
@@ -556,11 +582,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				if (existing?.conversationId && outcome.conversationId !== existing.conversationId) {
 					store.delete(slot.key);
 				} else if (outcome.status === "OK" && !outcome.aborted) {
-					store.set(slot.key, {
-						conversationId: outcome.conversationId,
-						lastStepIdx: -1,
-						lastMessageCount: messageCount,
-					});
+					rememberConversation(outcome.conversationId);
 				}
 			}
 

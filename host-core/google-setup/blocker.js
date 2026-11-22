@@ -22,6 +22,7 @@ import {
 } from './console.js';
 import {
   currentGoogleSetupStep,
+  googleSetupNeedsKind,
   GOOGLE_SETUP_STEPS,
   personDoesGoogleSetupStep,
 } from './rules.js';
@@ -269,6 +270,13 @@ export function googleSetupBlocker({
       };
     }
     if (handed === 'connect') {
+      if (
+        current === 'connect' &&
+        googleSetupKeyBlocker(run, google) === null &&
+        googleSetupAccountReadyRefusal(run, google) === null
+      ) {
+        return null;
+      }
       return {
         kind: 'needs-user',
         step: handed,
@@ -296,6 +304,7 @@ export function googleSetupBlocker({
     current !== 'connect' &&
     current !== 'client' &&
     !personDoesGoogleSetupStep(run, current) &&
+    !googleSetupNeedsKind(run) &&
     now - run.updatedAt >= GOOGLE_SETUP_PAUSED_AFTER_MS
   ) {
     return {
@@ -305,6 +314,32 @@ export function googleSetupBlocker({
     };
   }
 
+  return null;
+}
+
+function googleSetupAccountReadyRefusal(run, google) {
+  const account = googleSetupAccount(run, google.accounts);
+  if (!account) {
+    return 'No Google account is connected in Center for this setup yet. The owner must complete Google sign-in in their system browser.';
+  }
+  const accBlocker = accountBlocker(run, google);
+  if (accBlocker) {
+    return `${googleSetupBlockerLine(accBlocker)} The owner card shows: ${googleSetupActionsLine(accBlocker)}.`;
+  }
+  const chosen = run.services ?? [];
+  if (chosen.length === 0) {
+    return 'No Google services have been selected for this setup yet.';
+  }
+  // Double-check every chosen service reports explicit 'ready' in Center status.
+  const serviceMap = new Map(
+    (account.services ?? []).map((entry) => [entry.service, entry.state]),
+  );
+  const notReady = chosen.filter((choice) =>
+    GOOGLE_CHOICE_SERVICES[choice].some((service) => serviceMap.get(service) !== 'ready'),
+  );
+  if (notReady.length > 0) {
+    return `${googleSetupChoicesWords(notReady)} is not ready yet according to Center verification. Check again once permissions and APIs are confirmed.`;
+  }
   return null;
 }
 
@@ -334,29 +369,7 @@ export function googleSetupDoneRefusal(run, google) {
   if (left && left !== 'connect') {
     return `The ${left} step is not finished yet.`;
   }
-  const account = googleSetupAccount(run, google.accounts);
-  if (!account) {
-    return 'No Google account is connected in Center for this setup yet. The owner must complete Google sign-in in their system browser.';
-  }
-  const accBlocker = accountBlocker(run, google);
-  if (accBlocker) {
-    return `${googleSetupBlockerLine(accBlocker)} The owner card shows: ${googleSetupActionsLine(accBlocker)}.`;
-  }
-  const chosen = run.services ?? [];
-  if (chosen.length === 0) {
-    return 'No Google services have been selected for this setup yet.';
-  }
-  // Double-check every chosen service reports explicit 'ready' in Center status.
-  const serviceMap = new Map(
-    (account.services ?? []).map((entry) => [entry.service, entry.state]),
-  );
-  const notReady = chosen.filter((choice) =>
-    GOOGLE_CHOICE_SERVICES[choice].some((service) => serviceMap.get(service) !== 'ready'),
-  );
-  if (notReady.length > 0) {
-    return `${googleSetupChoicesWords(notReady)} is not ready yet according to Center verification. Check again once permissions and APIs are confirmed.`;
-  }
-  return null;
+  return googleSetupAccountReadyRefusal(run, google);
 }
 
 export function googleSetupChoicesWords(choices) {

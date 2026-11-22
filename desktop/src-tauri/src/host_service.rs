@@ -904,6 +904,38 @@ fn read_host_center_ca(home: &Path) -> Result<String, BridgeError> {
   Ok(pem.trim().to_string())
 }
 
+/// The control bearer stays in the native app and its private broker pipe.
+#[tauri::command]
+pub async fn desktop_browser_local_route(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+) -> Result<Value, BridgeError> {
+  ensure_main_webview(&webview)?;
+  let route = run_blocking(|| {
+    let Some(status) = run_launcher(&["status".to_string()], None, Duration::from_secs(4)).ok() else {
+      return Ok(None);
+    };
+    if !is_running(&status) || status.get("ready").and_then(Value::as_bool) != Some(true) {
+      return Ok(None);
+    }
+    let Some(home) = reported_host_home(&status) else { return Ok(None); };
+    let Some(token) = read_control_token(&home) else { return Ok(None); };
+    let url = status.get("controlUrl").and_then(Value::as_str);
+    let center = status.get("centerUrl").and_then(Value::as_str);
+    let id = status.get("deviceId").and_then(Value::as_str);
+    let (Some(url), Some(center), Some(id)) = (url, center, id) else { return Ok(None); };
+    let parsed = tauri::Url::parse(url).ok();
+    if !parsed.is_some_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1") &&
+      url.username().is_empty() && url.password().is_none()) {
+      return Ok(None);
+    }
+    Ok(Some(json!({ "deviceId": id, "centerUrl": center, "url": url, "token": token })))
+  })
+  .await?;
+  bridge.register_browser_route(&app, route.unwrap_or_else(|| json!({}))).await
+}
+
 /// Hands the paired Host's identity to the desktop client, so a client that lost its login
 /// (reinstall, cleared data) reconnects without asking for anything. No network and no
 /// Host lifecycle: it only records credentials the Host already holds.

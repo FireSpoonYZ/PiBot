@@ -259,6 +259,7 @@ export interface ToolPresentationCardProps {
   /** 仅当前活跃工具的 pending 交互可提交；历史卡片一律只读。 */
   active: boolean;
   disabled?: boolean;
+  questionnaireInterrupted?: boolean;
   variant?: 'desktop';
   requesterName?: string;
   googleContext?: GoogleChatCardContext;
@@ -273,6 +274,7 @@ export function ToolPresentationCard({
   presentation,
   active,
   disabled = false,
+  questionnaireInterrupted = false,
   variant,
   requesterName,
   googleContext,
@@ -309,6 +311,7 @@ export function ToolPresentationCard({
       presentation={presentation}
       active={active && presentation.status === 'pending' && Boolean(onSubmit)}
       disabled={disabled}
+      interrupted={questionnaireInterrupted && presentation.status === 'pending'}
       collapseOptionalFields={variant === 'desktop'}
       onSubmit={onSubmit}
       t={t}
@@ -390,6 +393,7 @@ function QuestionnaireCard({
   presentation,
   active,
   disabled,
+  interrupted,
   collapseOptionalFields,
   onSubmit,
   t,
@@ -397,11 +401,12 @@ function QuestionnaireCard({
   presentation: QuestionnairePresentation;
   active: boolean;
   disabled: boolean;
+  interrupted: boolean;
   collapseOptionalFields: boolean;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   t: (zh: string, en: string) => string;
 }) {
-  const editable = active && !disabled;
+  const editable = active && !disabled && !interrupted;
   const [localStatus, setLocalStatus] = useState<'settled' | null>(null);
   const [selectedMap, setSelectedMap] = useState<Record<number, number[]>>({});
   const [customTextMap, setCustomTextMap] = useState<Record<number, string>>({});
@@ -491,16 +496,12 @@ function QuestionnaireCard({
 
   const settledLocally = localStatus === 'settled' && presentation.status === 'pending';
 
-  const statusLabel =
-    presentation.status === 'answered'
-      ? t('已回答', 'Answered')
-      : presentation.status === 'cancelled'
-        ? t('已取消', 'Cancelled')
-        : settledLocally
-          ? t('已结算（以先到回答为准）', 'Settled (first answer won)')
-          : editable
-            ? t('待回答', 'Pending')
-            : t('待回答（只读）', 'Pending (read-only)');
+  const displayStatus = interrupted ? 'cancelled' : presentation.status;
+  const statusLabel = interrupted ? t('已中断', 'Interrupted')
+    : presentation.status === 'answered' ? t('已回答', 'Answered')
+    : presentation.status === 'cancelled' ? t('已取消', 'Cancelled')
+    : settledLocally ? t('已结算（以先到回答为准）', 'Settled (first answer won)')
+    : editable ? t('待回答', 'Pending') : t('待回答（只读）', 'Pending (read-only)');
   const globalNoteInput = <input
     type="text"
     className="tp-input tp-global-note"
@@ -514,14 +515,14 @@ function QuestionnaireCard({
 
   return (
     <div
-      className={`tp-card tp-questionnaire is-${presentation.status}`}
+      className={`tp-card tp-questionnaire is-${displayStatus}`}
       role="group"
       aria-label={t('问卷', 'Questionnaire')}
       data-active-questionnaire={editable && !busy && !settledLocally ? presentation.requestId : undefined}
     >
       <div className="tp-card-head">
         <span className="tp-card-title">{t('问卷', 'Questions')}</span>
-        <span className={`tp-status-pill is-${presentation.status}`}>{statusLabel}</span>
+        <span className={`tp-status-pill is-${displayStatus}`}>{statusLabel}</span>
       </div>
 
       {presentation.status === 'pending' ? (
@@ -591,21 +592,21 @@ function QuestionnaireCard({
                     <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
                   ) : null,
                 )}
-                {collapseOptionalFields ? <details className="tp-optional-fields">
+                {!interrupted && (collapseOptionalFields ? <details className="tp-optional-fields">
                   <summary>{t('自定义回答和备注', 'Custom answer and notes')}
                     {customTextMap[index]?.trim() || notesMap[index]?.trim() ? t(' · 已填写', ' · Added') : ''}
                   </summary>
                   {optionalFields}
-                </details> : optionalFields}
+                </details> : optionalFields)}
               </fieldset>
             );
           })}
-          {collapseOptionalFields ? <details className="tp-optional-fields">
+          {!interrupted && (collapseOptionalFields ? <details className="tp-optional-fields">
             <summary>{globalNote.trim() ? t('整体备注 · 已填写', 'Overall note · Added') : t('添加整体备注', 'Add overall note')}</summary>
             {globalNoteInput}
-          </details> : globalNoteInput}
-          {error ? <div className="tp-error" role="alert">{error}</div> : null}
-          {settledLocally ? (
+          </details> : globalNoteInput)}
+          {!interrupted && error ? <div className="tp-error" role="alert">{error}</div> : null}
+          {!interrupted && (settledLocally ? (
             <div className="tp-result-line">{t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}</div>
           ) : (
             <div className="tp-actions">
@@ -626,7 +627,7 @@ function QuestionnaireCard({
                 {t('取消问卷', 'Cancel')}
               </button>
             </div>
-          )}
+          ))}
         </div>
       ) : (
         <div className="tp-result">

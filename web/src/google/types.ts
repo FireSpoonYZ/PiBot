@@ -2,6 +2,7 @@
 // Aligned with center-server/google-workspace/*, host-core/google-setup/service.js,
 // and host-core/browser-setup-protocol.js.
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import type { BrowserDestination } from '../bot-browser/protocol';
 
 export type GoogleServiceChoice = 'gmail' | 'calendar' | 'files';
 
@@ -31,6 +32,7 @@ export interface GoogleAccountView {
 
 export interface GoogleClientStatus {
   configured: boolean;
+  supportsAutoConfigure?: boolean;
   clientId?: string;
   projectId?: string;
   redirectUri?: string;
@@ -205,6 +207,7 @@ export interface GoogleSetupControlState {
   browserPrompt?: string;
   redirectUri?: string;
   applied?: boolean;
+  resumeQueued?: boolean;
   stale?: boolean;
   staleReason?: string;
   error?: string;
@@ -307,6 +310,8 @@ export interface GoogleChatCardContext {
   callGoogleSetup?: GoogleSetupControlCall;
   callBrowser?: BotBrowserControlCall;
   onOpenBrowser?: () => void;
+  onOpenBrowserDestination?: (destination: BrowserDestination) => void;
+  provisionGoogleClient?: (runId: string, centerApi: DesktopPanelApi, centerIdentity: DesktopIdentity) => Promise<GoogleSetupControlState>;
   onOpenCapabilities?: () => void;
   onOpenCenterAdmin?: () => void;
   onSelectGoogleAccount?: (selection: {

@@ -77,6 +77,9 @@
         <service
             android:name=".BotHostUiBridgeService"
             android:exported="false" />
+        <service
+            android:name=".BotBrowserSurfaceService"
+            android:exported="false" />
         <!-- Bot 屏幕：默认进程、同 UID 私有 Binder；只观看/接管已有 Shower 虚拟屏，不创建屏幕或启动 Host。 -->
         <service
             android:name=".BotScreenService"

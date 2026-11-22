@@ -88,6 +88,30 @@ test('android-bridge-protocol accepts valid bot_browser frames and rejects unkno
   }
 });
 
+test('native Android presentation uses the same validated bridge as other browser actions', async () => {
+  const calls = [];
+  const provider = createAndroidBrowserProvider({
+    botId: 'bot-1',
+    deviceId: 'dev-1',
+    async nativeBridge(request) {
+      calls.push(request);
+      const { arguments: args } = normalizeNativeRequest(request);
+      return { supported: true, grantId: args.grantId };
+    },
+  });
+  const grantId = 'browser-grant-20261121';
+  assert.deepEqual(await provider.perform({ action: 'nativeGrant', pageId: 'page-1', grantId, expiresAt: Date.now() + 4000 }), {
+    supported: true,
+    grantId,
+  });
+  await provider.perform({ action: 'nativeRevoke', grantId });
+  assert.deepEqual(calls.map(call => call.arguments.action), ['nativeGrant', 'nativeRevoke']);
+  assert.throws(() => normalizeNativeRequest({
+    ...calls[0], taskId: 'agent:11111111-2222-3333-4444-555555555555',
+  }), /human taskId/);
+  await provider.close();
+});
+
 test('createAndroidBrowserProvider honestly reports unavailable when nativeBridge is absent', async () => {
   const provider = await createAndroidBrowserProvider({ botId: 'bot-1', deviceId: 'dev-1' });
   const status = await provider.perform({ action: 'status', botId: 'bot-1' });

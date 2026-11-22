@@ -66,8 +66,11 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import type { BrowserDestination } from './bot-browser/protocol';
+import { createAndroidNativePresenter } from './bot-browser/androidNativePresenter';
+import { createBrowserFrameSubscriber } from './bot-browser/relayStream';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
-import { selectCurrentGoogleSetup } from './google/currentGoogleSetup';
+import { continueGoogleSetupAfterSignInRejection, selectCurrentGoogleSetup } from './google/currentGoogleSetup';
 import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
@@ -1116,6 +1119,14 @@ export function HostPage({
     if (primaryBot && activeBotKey === primaryBot.key) return primaryBot;
     return allBotItems.find(b => b.key === activeBotKey) ?? null;
   }, [activeBotKey, primaryBot, allBotItems]);
+  const nativeBrowserBotId = activeBot?.hostKind === 'local' ? activeBot.botId : null;
+  const nativeBrowserOwner = useMemo(() => ({ botId: nativeBrowserBotId }), [nativeBrowserBotId]);
+  const nativeBrowserOwnerRef = useRef<typeof nativeBrowserOwner | null>(null);
+  nativeBrowserOwnerRef.current = screen === 'bot-browser' ? nativeBrowserOwner : null;
+  const androidNativePresenter = useMemo(() => nativeBrowserBotId
+    ? createAndroidNativePresenter(nativeBrowserBotId, mobileLocalRequest, () => nativeBrowserOwnerRef.current === nativeBrowserOwner)
+    : undefined, [nativeBrowserBotId, nativeBrowserOwner]);
+  useEffect(() => () => { void androidNativePresenter?.clear(); }, [androidNativePresenter]);
 
   // C4: 查找导航栈中最顶层的 chat 条目，并以其 botKey 解析保活 ChatScreen 的目标 Bot，
   // 防止 chat(A) -> bot-profile(A) -> ... -> bot-profile(B) 时误切换隐藏态 ChatScreen 的 Bot 或重挂 RemotePendingComposer。
@@ -5831,10 +5842,28 @@ ${newer}` : draftSnapshot;
     },
     [activeBot, botPanelConnected, showerIdentity],
   );
-  const callBrowser = useCallback<BotBrowserControlCall>(
-    input => callHostVolatile('browserControl', input),
-    [callHostVolatile],
+  // The on-device Host keeps browser control on its local bridge.
+  const browserApi = remoteClientRef.current?.api;
+  const browserDeviceId = activeBot?.deviceId;
+  const browserRelayProfile = activeBot?.hostKind === 'remote' ? showerIdentity : null;
+  const browserViaRelay = Boolean(remoteConnected && browserRelayProfile?.kind === 'relay' && showerRemoteReady);
+  const browserProfileId = browserRelayProfile?.profileId;
+  const browserGeneration = browserRelayProfile?.generation;
+  const browserRelayIdentity = useMemo<DesktopIdentity | null>(() => {
+    if (!browserViaRelay || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return null;
+    return { kind: 'relay', profileId: browserProfileId, generation: browserGeneration, targetDeviceId: browserDeviceId };
+  }, [browserViaRelay, browserProfileId, browserGeneration, browserDeviceId]);
+  const subscribeBrowserFrames = useMemo(
+    () => createBrowserFrameSubscriber(browserApi, browserRelayIdentity, showerBotId ?? undefined),
+    [browserApi, browserRelayIdentity, showerBotId],
   );
+  const callBrowser = useCallback<BotBrowserControlCall>(async input => {
+    if (browserRelayIdentity && browserApi && showerBotId && botPanelConnected) {
+      const params = { ...input, botId: showerBotId } as RemoteControlMethodMap['browserControl']['params'];
+      return await browserApi.call(browserRelayIdentity, 'browserControl', params) as unknown as Record<string, unknown>;
+    }
+    return callHostVolatile('browserControl', input);
+  }, [browserApi, browserRelayIdentity, showerBotId, botPanelConnected, callHostVolatile]);
   const callGoogleSetup = useCallback<GoogleSetupControlCall>(
     async input => (await callHostVolatile('googleSetupControl', input)) as unknown as GoogleSetupControlState,
     [callHostVolatile],
@@ -5904,6 +5933,16 @@ ${newer}` : draftSnapshot;
     saveCurrentChatAnchor();
     nav.push({ screen: 'bot-browser', botKey: activeBot.key });
   }, [activeBot, nav, saveCurrentChatAnchor]);
+  const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
+  const browserDestinationScope = `${showerPreviewKey}:${browserRelayIdentity?.generation ?? '-'}`;
+  const openBrowserDestination = useCallback((value: BrowserDestination) => {
+    if (!activeBot) return;
+    setBrowserDestination({ scope: browserDestinationScope, value });
+    openBotBrowser();
+  }, [activeBot, browserDestinationScope, openBotBrowser]);
+  useEffect(() => {
+    setBrowserDestination(current => screen === 'bot-browser' && current?.scope === browserDestinationScope ? current : null);
+  }, [screen, browserDestinationScope]);
   const mobileGoogleContext = useMemo<GoogleChatCardContext | undefined>(() => {
     if (!activeBot) return undefined;
     const brokerApi = remoteClientRef.current?.api ?? null;
@@ -5921,6 +5960,7 @@ ${newer}` : draftSnapshot;
       callGoogleSetup,
       callBrowser,
       onOpenBrowser: openBotBrowser,
+      onOpenBrowserDestination: openBrowserDestination,
       onOpenCapabilities: () => {
         if (remoteConnected && remoteIdentity && (activeBot.hostKind !== 'local' || localHost?.deviceId)) {
           openModelPickerSheet('capabilities');
@@ -5939,6 +5979,7 @@ ${newer}` : draftSnapshot;
     callGoogleSetup,
     callBrowser,
     openBotBrowser,
+    openBrowserDestination,
     remoteConnected,
     localHost?.deviceId,
     openInAppCenterAdmin,
@@ -6802,6 +6843,7 @@ ${newer}` : draftSnapshot;
             autoStart
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={openBotBrowser}
+            onOpenBrowserDestination={openBrowserDestination}
             onOpenCenterAdmin={() => openInAppCenterAdmin('google')}
             onClose={() => { popScreen(); }}
           />
@@ -6811,19 +6853,27 @@ ${newer}` : draftSnapshot;
       {screen === 'bot-browser' && activeBot && (
         <div className="gws-mobile-browser-screen">
           <BotBrowserPanel
-            key={`${showerPreviewKey}:browser:${activeBot.botId}`}
+            key={JSON.stringify([showerPreviewKey, browserRelayIdentity, 'browser'])}
             botId={activeBot.botId}
             deviceId={activeBot.deviceId}
             botName={activeBot.role}
-            hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
             mode="fullscreen"
             connected={botPanelConnected}
             request={callBrowser}
-            onSwitchToExternalGuide={url => {
+            destination={browserDestination?.scope === browserDestinationScope ? browserDestination.value : undefined}
+            onDestinationConsumed={() => setBrowserDestination(null)}
+            subscribeFrames={subscribeBrowserFrames}
+            nativePresenter={androidNativePresenter}
+            onSwitchToExternalGuide={async (url, reason, rejection) => {
+              if (reason === 'google-sign-in-rejected') {
+                if (await continueGoogleSetupAfterSignInRejection(callGoogleSetup, openExternalUrl, rejection)) {
+                  if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
+                }
+                return;
+              }
               void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
-              if (url) void openExternalUrl(url).catch(() => {});
+              if (url) await openExternalUrl(url);
             }}
-            onOpenSystemGoogleAuth={() => openInAppCenterAdmin('google')}
             onClose={() => {
               if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
             }}

@@ -18,6 +18,10 @@
 // The above copyright notice and this permission notice shall be included in all
 // copies or substantial portions of the Software.
 
+import { isGoogleApiOAuthUrl } from './policy.js';
+
+export { isGoogleApiOAuthUrl };
+
 export const DESKTOP_BROWSER_DEFAULT_VIEWPORT = Object.freeze({ width: 1280, height: 800 });
 export const DESKTOP_BROWSER_MIN_VIEWPORT = Object.freeze({ width: 320, height: 240 });
 export const DESKTOP_BROWSER_MAX_VIEWPORT = Object.freeze({ width: 2560, height: 1600 });
@@ -26,8 +30,8 @@ export const DESKTOP_BROWSER_MAX_VIEWPORT = Object.freeze({ width: 2560, height:
 // control frame stays well under the 1 MiB transport frame ceiling.
 export const DESKTOP_BROWSER_MAX_FRAME_BASE64_BYTES = 737_280;
 export const DESKTOP_BROWSER_DEFAULT_FRAME_QUALITY = 65;
-export const DESKTOP_BROWSER_MIN_FRAME_INTERVAL_MS = 100;
-export const DESKTOP_BROWSER_FLOOR_FRAME_INTERVAL_MS = 50;
+export const DESKTOP_BROWSER_MIN_FRAME_INTERVAL_MS = 33;
+export const DESKTOP_BROWSER_FLOOR_FRAME_INTERVAL_MS = 16;
 export const DESKTOP_BROWSER_SCREENCAST_IDLE_STOP_MS = 15_000;
 
 export const DESKTOP_BROWSER_MAX_TABS_PER_BOT = 8;
@@ -177,24 +181,7 @@ const CLOUD_CONSOLE_HOSTS = new Set([
 
 const MFA_PATH_OR_TITLE_RE = /(?:two-?factor|\b2fa\b|\bmfa\b|\btotp\b|authenticator|security[- ]key|passkey|challenge\/(?:pwd|totp|ipp|sk|az|dp))/i;
 const LOGIN_URL_OR_TITLE_RE = /(?:\/(?:sign-?in|log-?in|auth|oauth|session|sso)\b|\bsign\s*in\b|\blog\s*in\b|登录|验证身份)/i;
-const OAUTH_CONSENT_PATH_RE = /^\/(?:o\/oauth2|signin\/oauth|v\d+\/signin\/oauth|consent)/i;
 const PAYMENT_PATH_RE = /\/(?:checkout|billing\/pay|payment|card-details)/i;
-
-export function isGoogleApiOAuthUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl) return false;
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-  const host = parsed.hostname.toLowerCase();
-  if (host === 'oauth2.googleapis.com') return true;
-  if (host === 'accounts.google.com' && OAUTH_CONSENT_PATH_RE.test(parsed.pathname)) {
-    return true;
-  }
-  return false;
-}
 
 export function isCloudConsoleOAuthClientPath(rawUrl) {
   if (typeof rawUrl !== 'string' || !rawUrl) return false;
@@ -247,16 +234,16 @@ export function classifySensitivePage({ url = '', title = '', domSignals = null 
   }
 
   // 2. OAuth Consent screens (Google API auth must use system browser).
-  if (isGoogleApiOAuthUrl(url) || signals.hasOAuthConsentPrompt === true) {
-    const isGoogle = GOOGLE_AUTH_HOSTS.has(host) || host.endsWith('.google.com');
+  const googleApiOAuth = isGoogleApiOAuthUrl(url);
+  if (googleApiOAuth || signals.hasOAuthConsentPrompt === true) {
     return {
       sensitive: true,
       category: 'oauth_consent',
-      reason: isGoogle
-        ? 'Google OAuth consent must be completed in the system browser, not the Bot browser.'
+      reason: googleApiOAuth
+        ? 'Complete Google API authorization in your system browser.'
         : 'OAuth authorization consent screen detected; human review required.',
       secretExposureRisk: false,
-      authUseSystemBrowser: isGoogle,
+      authUseSystemBrowser: googleApiOAuth,
     };
   }
 
@@ -265,9 +252,9 @@ export function classifySensitivePage({ url = '', title = '', domSignals = null 
     return {
       sensitive: true,
       category: 'google_auth',
-      reason: 'Google sign-in/account page detected; blocking Bot observation. Use system browser for Google API authorization.',
+      reason: 'Take over this page to sign in. The Bot stays paused.',
       secretExposureRisk: false,
-      authUseSystemBrowser: true,
+      authUseSystemBrowser: false,
     };
   }
   if (
@@ -384,7 +371,7 @@ export function checkBotHumanOnlyTarget({
     return {
       blocked: true,
       category: 'oauth_consent',
-      reason: 'Bot cannot approve OAuth consent; human must complete authorization in the system browser.',
+      reason: 'Only the owner can approve OAuth consent.',
     };
   }
 

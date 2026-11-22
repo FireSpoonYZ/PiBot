@@ -12,7 +12,8 @@ import { clipMemoryText, redactMemoryText } from './hindsight-format.js';
 
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
 const WORK_TRIGGER_KIND = 'host.work-trigger';
-const PRIMARY_INPUT_KIND = 'pi.user';
+const LEGACY_PRIMARY_INPUT_KIND = 'pi.user';
+const HOST_PRIMARY_INPUT_KIND = 'host.user-message';
 const RESET_ENTRY_KIND = 'pi.reset';
 const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
 const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
@@ -69,6 +70,14 @@ function textFromMessage(message, role) {
     }
   }
   return parts.join('');
+}
+
+function primaryInputText(entry) {
+  const message = entry.model?.[0];
+  if (message?.role !== 'user') return '';
+  if (entry.kind === LEGACY_PRIMARY_INPUT_KIND) return textFromMessage(message, 'user');
+  if (entry.kind !== HOST_PRIMARY_INPUT_KIND || entry.data?.attribution?.kind === 'host') return '';
+  return typeof entry.data?.userText === 'string' ? entry.data.userText : textFromMessage(message, 'user');
 }
 
 function isoFromMs(timestamp) {
@@ -210,7 +219,7 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
     }
   }
 
-  /** 主私聊：RequestKeys 注册 + 实际 pi.user 输入文本摘要一致 + native 归属/贡献。 */
+  /** 主私聊：RequestKeys 注册 + 正文与有序附件摘要一致 + native 归属/贡献。 */
   async function primaryCapture(api, callContext, submissions, cutoff, view, visible) {
     const h = harness();
     const keys = await h.snapshot(RequestKeys, api.conversationId, callContext);
@@ -230,10 +239,16 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
       const idx = entryIndex.get(submission.entry);
       if (idx === undefined) continue;
       const entry = view.entries[idx];
-      if (entry.conversationId !== api.conversationId || entry.kind !== PRIMARY_INPUT_KIND) continue;
+      if (entry.conversationId !== api.conversationId) continue;
       if (!contributes(view, idx, visible)) continue;
-      const text = textFromMessage(entry.model?.[0], 'user');
-      if (text.length === 0 || sha256Hex(text) !== expected) continue; // 精确 Runtime 正文摘要
+      const text = primaryInputText(entry);
+      if (text.length === 0) continue;
+      const storedAttachments = entry.kind === HOST_PRIMARY_INPUT_KIND ? entry.data?.attachments : undefined;
+      if (storedAttachments !== undefined && !Array.isArray(storedAttachments)) continue;
+      const attachments = storedAttachments?.map((attachment) => attachment?.id) ?? [];
+      if (attachments.some((id) => typeof id !== 'string' || id.length === 0)) continue;
+      const digest = sha256Hex(attachments.length === 0 ? text : JSON.stringify({ text, attachments }));
+      if (digest !== expected) continue;
       verified.push({ entryId: entry.id, text });
       runs.push({
         submissionId: submission.id,
@@ -396,8 +411,8 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
           throw sourceError('HINDSIGHT_STORE_FAILED', 'primary run entry is missing');
         }
         const items = [];
-        const inputText = textFromMessage(inputEntry.model?.[0], 'user');
-        if (inputText.length > 0 && inputEntry.kind === PRIMARY_INPUT_KIND) {
+        const inputText = primaryInputText(inputEntry);
+        if (inputText.length > 0) {
           items.push({
             text: inputText,
             timestamp: requiredIso(isoFromMs(inputEntry.model?.[0]?.timestamp), 'primary input'),

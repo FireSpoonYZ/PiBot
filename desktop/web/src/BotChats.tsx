@@ -90,7 +90,11 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import type { BrowserDestination } from '../../../web/src/bot-browser/protocol';
+import { desktopNativeBrowser, type DesktopNativeBrowser } from './nativeBrowser';
+import { createBrowserFrameSubscriber } from '../../../web/src/bot-browser/relayStream';
 import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
+import { continueGoogleSetupAfterSignInRejection } from '../../../web/src/google/currentGoogleSetup';
 import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
 import {
   createBrowserControlRequest,
@@ -131,7 +135,7 @@ import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { HistoryEpochChangedError, readHistoryPage } from './history';
 import { Scopes } from './Scopes';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import type { RoomApiResolver, ScopeReadApi } from './scope-api';
 import {
   ConversationContextMenu,
@@ -2013,6 +2017,15 @@ function PrimaryChatPane({
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
+  const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
+  const browserDestinationScope = `${sess}:${bot.deviceId}:${bot.botId}`;
+  const openBrowserDestination = useCallback((value: BrowserDestination) => {
+    setBrowserDestination({ scope: browserDestinationScope, value });
+    setInspectorTab('browser');
+  }, [browserDestinationScope]);
+  useEffect(() => {
+    setBrowserDestination(current => inspectorTab === 'browser' && current?.scope === browserDestinationScope ? current : null);
+  }, [inspectorTab, browserDestinationScope]);
   const [chatSearch, setChatSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -2109,13 +2122,65 @@ function PrimaryChatPane({
   }, [api, identity]);
 
   // Bot 内置浏览器与 Google 建项向导控制：volatile RPC 绑定当前目标设备与 Bot，不经持久 outbox。
-  const callBrowser = useMemo(
+  const fallbackCallBrowser = useMemo(
     () => createBrowserControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
   );
+  const browserProfileId = identity?.profileId;
+  const browserDeviceId = identity?.targetDeviceId;
+  const browserGeneration = identity?.generation;
+  const browserConnectionKind = identity?.kind;
+  const browserPlacementKey = browserDeviceId && browserProfileId
+    ? `desktop-browser-placement:${JSON.stringify([browserProfileId, browserDeviceId])}`
+    : '';
+  const [browserPreference, setBrowserPreference] = useState<{ key: string; placement: 'client' | 'server' }>();
+  let browserPlacement: 'client' | 'server' = 'client';
+  if (browserPreference?.key === browserPlacementKey) {
+    browserPlacement = browserPreference.placement;
+  } else if (browserPlacementKey) {
+    try { if (localStorage.getItem(browserPlacementKey) === 'server') browserPlacement = 'server'; } catch { /* storage may be unavailable */ }
+  }
+  const setBrowserPlacement = (placement: 'client' | 'server') => {
+    setBrowserPreference({ key: browserPlacementKey, placement });
+    try { if (browserPlacementKey) localStorage.setItem(browserPlacementKey, placement); } catch { /* retain in memory */ }
+  };
+  const nativeBrowser = useMemo(
+    () => identity && isTauri() && !isArchived && /Windows|Linux/.test(navigator.userAgent)
+      ? desktopNativeBrowser(api, identity, bot.botId) : undefined,
+    [api, identity, bot.botId, isArchived],
+  );
+  const [localBrowser, setLocalBrowser] = useState<DesktopNativeBrowser>();
+  useEffect(() => {
+    if (!nativeBrowser) return;
+    let active = true;
+    void nativeBrowser.isLocalHost().then(local => {
+      if (active) setLocalBrowser(local ? nativeBrowser : undefined);
+    });
+    return () => { active = false; };
+  }, [nativeBrowser, online]);
+  useEffect(() => {
+    if (nativeBrowser && online && pageActive) void nativeBrowser.prepare(browserPlacement).catch(() => {});
+  }, [nativeBrowser, online, pageActive, browserPlacement]);
+  const callBrowser = useCallback(
+    (input: Record<string, unknown>) => nativeBrowser
+      ? nativeBrowser.request(input, browserPlacement)
+      : fallbackCallBrowser(input),
+    [nativeBrowser, browserPlacement, fallbackCallBrowser],
+  );
+  const subscribeBrowserFrames = useMemo(() => {
+    if (!browserConnectionKind || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return;
+    return createBrowserFrameSubscriber(api, {
+      kind: browserConnectionKind, profileId: browserProfileId,
+      targetDeviceId: browserDeviceId, generation: browserGeneration,
+    }, bot.botId);
+  }, [api, bot.botId, browserProfileId, browserDeviceId, browserGeneration, browserConnectionKind]);
   const callGoogleSetup = useMemo(
     () => createGoogleSetupControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
+  );
+  const provisionGoogleClient = useMemo(
+    () => /Windows/.test(navigator.userAgent) ? nativeBrowser?.provisionGoogleClient.bind(nativeBrowser) : undefined,
+    [nativeBrowser],
   );
   const selectGoogleAccount = useCallback(
     async (selection: {
@@ -2171,6 +2236,8 @@ function PrimaryChatPane({
       callGoogleSetup,
       callBrowser,
       onOpenBrowser: () => setInspectorTab('browser'),
+      onOpenBrowserDestination: openBrowserDestination,
+      provisionGoogleClient,
       onOpenCapabilities: () => setInspectorTab('capabilities'),
       onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
       onSelectGoogleAccount: selectGoogleAccount,
@@ -2186,6 +2253,8 @@ function PrimaryChatPane({
       online,
       callGoogleSetup,
       callBrowser,
+      openBrowserDestination,
+      provisionGoogleClient,
       onOpenCenterAdmin,
       selectGoogleAccount,
     ],
@@ -3667,7 +3736,7 @@ function PrimaryChatPane({
    * - 其余落在抽屉外（遮罩/聊天区）的 Esc 才关闭紧凑浮层；普通宽屏并排不拦截。
    */
   useEffect(() => {
-    if (!inspectorTab || !compactOverlay) return;
+    if (!inspectorTab || inspectorTab === 'browser' || !compactOverlay) return;
     function onEsc(e: KeyboardEvent) {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
@@ -3880,15 +3949,14 @@ function PrimaryChatPane({
         .find(pres => pres?.kind === 'google-browser-takeover') ?? null)
     : null;
   const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
+  const browserOpen = inspectorTab === 'browser';
   const inspectorTitle = inspectorPage?.label ??
     (isProfilePage
       ? '智能体资料'
       : inspectorTab === 'raw'
         ? '诊断与原始记录'
         : inspectorTab === 'google-setup' ? t('Google 配置向导', 'Google setup wizard')
-        : inspectorTab === 'browser'
-          ? 'Bot 内置浏览器'
-          : '虚拟桌面');
+        : '虚拟桌面');
   const deleteConfirmation = confirmDelete && !isPrimary ? (
     <div className="confirm-delete-banner" role="alert" ref={deleteConfirmationRef} tabIndex={isManagementPage ? -1 : undefined}>
       <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
@@ -4398,7 +4466,7 @@ function PrimaryChatPane({
       </Dialog.Root>
 
       <Dialog.Root
-        open={inspectorTab !== null}
+        open={inspectorTab !== null && !browserOpen}
         modal={compactOverlay}
         onOpenChange={(open) => {
           if (!open) setInspectorTab(null);
@@ -4617,31 +4685,61 @@ function PrimaryChatPane({
                   isLocalAndroid={devicePlatform?.toLowerCase() === 'android'}
                   autoStart callGoogleSetup={callGoogleSetup}
                   onOpenBrowser={() => setInspectorTab('browser')}
+                  onOpenBrowserDestination={openBrowserDestination}
+                  provisionGoogleClient={provisionGoogleClient}
                   onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
                   onClose={() => setInspectorTab(null)}
                 />
               )}
-              {inspectorTab === 'browser' ? (
-                <div className="gws-desktop-browser-pane">
-                  <BotBrowserPanel
-                    key={`browser:${sess}:${bot.botId}`}
-                    botId={bot.botId}
-                    deviceId={bot.deviceId}
-                    botName={bot.role}
-                    hostLabel={deviceName}
-                    mode="sidebar"
-                    connected={online && pageActive}
-                    request={callBrowser}
-                    onSwitchToExternalGuide={(url) => {
-                      void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
-                      if (url) void openExternalUrl(url).catch(() => {});
-                    }}
-                    onOpenSystemGoogleAuth={() => setInspectorTab('capabilities')}
-                    onClose={() => setInspectorTab(null)}
-                  />
-                </div>
-              ) : null}
             </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={browserOpen} onOpenChange={(open) => { if (!open) setInspectorTab(null); }}>
+        <Dialog.Portal>
+          <Dialog.Content
+            className="bot-browser-dialog"
+            aria-describedby={undefined}
+            onEscapeKeyDown={(event) => {
+              const target = event.target;
+              if (target instanceof Element && target.closest('.bb-stage--interactive, .bb-remote-input, .bb-more[open]')) {
+                event.preventDefault();
+              }
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+            }}
+          >
+            <Dialog.Title className="sr-only">{t(`${bot.role} 的浏览器`, `${bot.role} browser`)}</Dialog.Title>
+            <BotBrowserPanel
+              key={`browser:${sess}:${bot.botId}`}
+              botId={bot.botId}
+              deviceId={bot.deviceId}
+              botName={bot.role}
+              mode="sidebar"
+              connected={online && pageActive}
+              request={callBrowser}
+              destination={browserDestination?.scope === browserDestinationScope ? browserDestination.value : undefined}
+              onDestinationConsumed={() => setBrowserDestination(null)}
+              subscribeFrames={subscribeBrowserFrames}
+              nativePresenter={nativeBrowser}
+              browserPlacement={nativeBrowser && localBrowser !== nativeBrowser && browserConnectionKind === 'relay' ? {
+                value: browserPlacement, canChange: true, set: setBrowserPlacement,
+              } : undefined}
+              onSwitchToExternalGuide={async (url, reason, rejection) => {
+                if (reason === 'google-sign-in-rejected') {
+                  if (await continueGoogleSetupAfterSignInRejection(callGoogleSetup, openExternalUrl, rejection)) {
+                    setInspectorTab(current => current === 'browser' ? null : current);
+                  }
+                  return;
+                }
+                void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+                if (url) await openExternalUrl(url);
+              }}
+              onClose={() => setInspectorTab(null)}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

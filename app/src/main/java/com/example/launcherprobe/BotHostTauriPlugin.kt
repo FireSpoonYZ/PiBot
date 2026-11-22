@@ -98,6 +98,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private val scanInFlight = AtomicBoolean()
     /** Bot 屏幕原生覆盖层（懒创建）；只观看/接管已有屏幕，与 Host 事件流无关。 */
     private var screenOverlay: BotScreenOverlay? = null
+    private var browserNativeOverlay: BotBrowserNativeOverlay? = null
     /** 系统选图/拍照：同进程序列化在 BotImagePicker 内（单会话）。 */
     private var imagePicker: BotImagePicker? = null
 
@@ -234,6 +235,26 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             }
             "pickImages" -> pickImages(invoke, params)
             "screenOpen" -> screenOpen(invoke, params)
+            "browserNativeOpen", "browserNativeLayout", "browserNativeStatus", "browserNativeClose" -> {
+                try {
+                    if (method == "browserNativeOpen") {
+                        if (!uiReady()) {
+                            replyInvalid(invoke, "NOT_READY", "界面未就绪")
+                        } else {
+                            val overlay = browserNativeOverlay ?: BotBrowserNativeOverlay(hostActivity) { mainWebView }
+                                .also { browserNativeOverlay = it }
+                            replyOk(invoke, overlay.open(params))
+                        }
+                    } else {
+                        val overlay = browserNativeOverlay
+                        if (overlay != null && overlay.isSession(params.optInt("sessionId", -1))) {
+                            if (method == "browserNativeLayout") overlay.layout(params)
+                            if (method == "browserNativeClose") overlay.close()
+                            replyOk(invoke, overlay.status())
+                        } else replyOk(invoke, objectOf("phase" to "idle"))
+                    }
+                } catch (t: Throwable) { replyFailure(invoke, t) }
+            }
             "screenLayout" -> screenLayout(invoke, params)
             "screenStatus" -> {
                 val overlay = screenOverlay
@@ -1025,6 +1046,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
         // 离开前台即解绑 Bot 屏幕画面并结束接管；回到前台后按观看状态重连（需重新接管）。
         screenOverlay?.pause()
+        browserNativeOverlay?.close()
     }
 
     private fun probeClientConnection() {
@@ -1064,6 +1086,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         imagePicker?.destroy()
         imagePicker = null
         screenOverlay?.destroy()
+        browserNativeOverlay?.destroy()
+        browserNativeOverlay = null
         screenOverlay = null
         pairWorker.shutdownNow()
         mainWebView = null

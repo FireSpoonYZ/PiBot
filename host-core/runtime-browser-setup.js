@@ -23,6 +23,7 @@ import { createBotBrowserService } from './bot-browser/service.js';
 import { createDesktopBrowserProvider } from './bot-browser/desktop-provider.js';
 import { createAndroidBrowserProvider } from './bot-browser/android-provider.js';
 import { createGoogleSetupService } from './google-setup/service.js';
+import { isMode, isServiceChoice, isStep } from './google-setup/rules.js';
 import {
   browserControlError,
   googleSetupError,
@@ -46,17 +47,55 @@ const FORBIDDEN_AGENT_TOOL_NAMES = new Set([
 ]);
 
 const SYSTEM_BROWSER_LOCK_AUTHORITY = Object.freeze({
-  authenticated: true,
-  role: 'owner',
-  actor: 'owner',
-  trustedOwner: true,
-  clientId: 'system:google-setup',
-  holderLabel: 'Google setup sensitive step',
-  transport: 'internal',
+  actor: 'system',
+  trustedSystem: true,
 });
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function googleSetupContinuationAnswer(input, view, advancedStep) {
+  if (view.applied !== true || view.state !== 'running' || view.stale || view.idempotent ||
+      view.card?.card === 'path' || view.card?.card === 'services') return null;
+
+  if (input.action === 'advance') {
+    return isStep(advancedStep) && input.step === advancedStep && input.runId === view.id
+      ? { card: 'step', values: ['done', advancedStep] }
+      : null;
+  }
+  if (input.action !== 'answer') return null;
+
+  // Only include decision tokens. The Bot reads account and project data from show.
+  const { card } = input;
+  const values = input.values.map((value) => value.trim());
+  const [first, second] = values;
+  switch (card) {
+    case 'path':
+      return isMode(first) || first === 'configure-directly' || first === 'import'
+        ? { card, values: [first] }
+        : null;
+    case 'account':
+      return { card, values: [first === 'other' ? 'other' : 'selected'] };
+    case 'kind':
+      return view.kind === 'personal' || view.kind === 'work'
+        ? { card, values: [view.kind] }
+        : null;
+    case 'services':
+      return { card, values: (view.choices ?? []).filter(isServiceChoice) };
+    case 'step':
+      if (first === 'redo' || first === 'let-me' || first === 'done') {
+        return isStep(second) ? { card, values: [first, second] } : null;
+      }
+      if (first === 'continue-without') {
+        return { card, values: [first, ...values.slice(1).filter(isServiceChoice)] };
+      }
+      return ['keep-account', 'resume', 'start-over', 'take-over'].includes(first)
+        ? { card, values: [first] }
+        : null;
+    default:
+      return null;
+  }
 }
 
 function resolveTrustedCaller(callerContext) {
@@ -179,7 +218,7 @@ function maybeExtractBrowserTakeoverPresentation(botId, rawResult) {
   const needsTakeover =
     parsed.status === 'PAUSED_FOR_HUMAN' ||
     parsed.action === 'requestTakeover' ||
-    parsed.phase === 'human' ||
+    (parsed.phase === 'human' && parsed.pausedForHuman === true && parsed.sharedInput !== true) ||
     parsed.phase === 'taking' ||
     parsed.phase === 'held';
   if (!needsTakeover) return null;
@@ -274,6 +313,19 @@ export async function openRuntimeBrowserSetup({
 
   let setupService = null;
 
+  function observeBrowserPage(event) {
+    if (
+      !closed &&
+      typeof setupService?.syncBrowserUrl === 'function' &&
+      typeof event?.botId === 'string' &&
+      typeof event.url === 'string' &&
+      event.url.trim() !== ''
+    ) {
+      // Browser status can be called from inside setup control and must never await this lane.
+      void setupService.syncBrowserUrl(event.botId, event.url, event.pageId, event.openPageIds).catch(() => {});
+    }
+  }
+
   const browserService = await browserFactory({
     host,
     profileRoot: join(host.dataRoot, 'bot-browser', 'profiles'),
@@ -290,20 +342,20 @@ export async function openRuntimeBrowserSetup({
         await abortBotTurn(botId);
       }
     },
+    onPageUrl: observeBrowserPage,
     onEvent: (event) => {
       if (typeof onBrowserEvent === 'function') {
-        try { onBrowserEvent(event); } catch { /* observer error must not break state */ }
+        try {
+          if (typeof event?.url === 'string') {
+            const { url: _privateUrl, ...publicEvent } = event;
+            onBrowserEvent(publicEvent);
+          } else {
+            onBrowserEvent(event);
+          }
+        } catch { /* observer error must not break state */ }
       }
-      if (
-        !closed &&
-        setupService &&
-        typeof setupService.syncBrowserUrl === 'function' &&
-        typeof event?.botId === 'string' &&
-        typeof event?.url === 'string' &&
-        event.url.trim() !== ''
-      ) {
-        void setupService.syncBrowserUrl(event.botId, event.url).catch(() => {});
-      }
+      // Older injected browser factories may still deliver navigation as a browser event.
+      observeBrowserPage(event);
     },
   });
 
@@ -336,8 +388,7 @@ export async function openRuntimeBrowserSetup({
           action: 'takeover',
           botId: rawInput.botId,
           ...(typeof rawInput.pageId === 'string' && rawInput.pageId ? { pageId: rawInput.pageId } : {}),
-          force: true,
-          holderLabel: 'Google setup sensitive step',
+          reason: rawInput.reason,
         },
         SYSTEM_BROWSER_LOCK_AUTHORITY,
       );
@@ -346,15 +397,16 @@ export async function openRuntimeBrowserSetup({
     return browserService.control(normalized, SYSTEM_BROWSER_LOCK_AUTHORITY);
   }
 
-  async function browserLockForSetup({ botId, pageId, step, reason }) {
-    // Engage fail-closed logical lock BEFORE touching the provider so even a
-    // failed/unavailable browser never leaves the sensitive step unprotected.
-    sensitiveLocksByBot.set(botId, {
-      pageId: pageId ?? null,
-      step: step ?? null,
-      reason: reason ?? 'sensitive-step',
-    });
-    let requiresSystemBrowser = reason === 'oauth-client-secret' || reason === 'google-auth';
+  async function browserLockForSetup({ botId, pageId, step, reason, mode }) {
+    if (mode === 'guide-browser' || reason === 'oauth-client-secret' || reason === 'google-auth') {
+      // The setup gate blocks Bot tools; the private flow never runs in this browser session.
+      return { locked: true, requiresSystemBrowser: true };
+    }
+
+    // Withhold embedded handoffs before probing the provider, including on failure.
+    const lock = { pageId, step, reason };
+    sensitiveLocksByBot.set(botId, lock);
+    let requiresSystemBrowser = false;
     try {
       const status = await browserService.control(
         { action: 'status', botId },
@@ -363,16 +415,11 @@ export async function openRuntimeBrowserSetup({
       if (!status?.available || !status?.canStreamInteract) {
         requiresSystemBrowser = true;
       } else if (status.sessionId || (Array.isArray(status.tabs) && status.tabs.length > 0)) {
-        await browserService.control(
-          {
-            action: 'takeover',
-            botId,
-            ...(typeof pageId === 'string' && pageId ? { pageId } : {}),
-            force: true,
-            holderLabel: 'Google setup sensitive step',
-          },
-          SYSTEM_BROWSER_LOCK_AUTHORITY,
-        );
+        const held = await internalBrowserControlForSetup({ action: 'takeover', botId, pageId, reason });
+        if (reason === 'policy-consent' && status.sessionId && status.pageId === pageId &&
+            held?.sessionId === status.sessionId && held.pageId === pageId) {
+          lock.sessionId = status.sessionId;
+        }
       }
     } catch {
       // Fail-closed: preserve sensitiveLocksByBot entry on any takeover/probe failure.
@@ -381,11 +428,14 @@ export async function openRuntimeBrowserSetup({
     return { locked: true, requiresSystemBrowser };
   }
 
-  async function browserUnlockForSetup({ botId, step, reason }) {
+  async function browserUnlockForSetup({ botId, step, reason, confirmingOwner }) {
     const existing = sensitiveLocksByBot.get(botId);
-    if (!existing) return;
-    if (reason === 'cancelled' || reason === 'setup-done' || !step || existing.step === step) {
-      sensitiveLocksByBot.delete(botId);
+    if (!existing || (step && existing.step !== step && reason !== 'cancelled' && reason !== 'setup-done')) return;
+    sensitiveLocksByBot.delete(botId);
+    if (confirmingOwner && step === 'branding' && existing.reason === 'policy-consent' && existing.sessionId) {
+      await browserService.completeSetupPolicyHandoff?.({
+        botId, pageId: existing.pageId, sessionId: existing.sessionId,
+      }, confirmingOwner);
     }
   }
 
@@ -684,7 +734,7 @@ export async function openRuntimeBrowserSetup({
     }
   }
 
-  async function googleSetupControl(rawInput, callerContext = undefined) {
+  async function googleSetupControl(rawInput, callerContext = undefined, enqueueGoogleSetupContinuation = undefined) {
     if (closed || suspended) {
       throw googleSetupError('SETUP_CLOSED');
     }
@@ -692,10 +742,25 @@ export async function openRuntimeBrowserSetup({
     const allowArchived = input.action === 'status' || input.action === 'cancel';
     const authority = await resolveOwnerAuthority(input.botId, input.scopeId, callerContext, { allowArchived });
     const serviceInput = projectGoogleSetupControlForService(input);
+    let saved;
     try {
-      return await setupService.control(serviceInput, authority);
+      saved = await setupService.control(serviceInput, authority);
     } catch (err) {
       throw safeGoogleSetupError(err);
+    }
+    const { advancedStep, ...result } = saved;
+    if (typeof enqueueGoogleSetupContinuation !== 'function') return result;
+    const answer = googleSetupContinuationAnswer(serviceInput, result, advancedStep);
+    if (!answer) return result;
+
+    try {
+      const resumeQueued = await enqueueGoogleSetupContinuation({
+        botId: input.botId, runId: result.id, revision: result.revision, ...answer,
+      });
+      return { ...result, resumeQueued: resumeQueued === true };
+    } catch {
+      // The answer was saved before queueing the continuation.
+      return { ...result, resumeQueued: false };
     }
   }
 

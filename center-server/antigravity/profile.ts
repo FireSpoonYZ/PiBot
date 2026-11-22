@@ -4,13 +4,16 @@
 // `~/.gemini/config/mcp_config.json`. Each openAntigravity instance points
 // `agy acp --agent pibot-center --gemini-dir <geminiHome>` at its own isolated root.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ANTIGRAVITY_BRIDGE_SERVER } from "./constants.ts";
+import { ACP_RECALL_HOOK_NAME, ACP_RESOURCE_DISCOVERY_TOOL, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
 
 export const AGENT_NAME = "pibot-center";
 export const AGENT_SYSTEM_FILE = "agent.md";
 export const BRIDGE_ALLOW_RULE = `mcp(${ANTIGRAVITY_BRIDGE_SERVER}/*)`;
+const AGENT_RECALL_HOOKS_FILE = "recall-hooks.json";
 
 export interface ResolvedProfile {
 	rootDir: string;
@@ -69,6 +72,8 @@ export function dedicatedAgentMarkdown(): string {
 		"skills: []",
 		"rules: []",
 		"agents: []",
+		"hooks:",
+		`  - "./${AGENT_RECALL_HOOKS_FILE}"`,
 		"---",
 		"",
 		"You are running inside PiBot Center's isolated Antigravity ACP bridge.",
@@ -79,8 +84,16 @@ export function dedicatedAgentMarkdown(): string {
 	].join("\n");
 }
 
+function fileMatches(filePath: string, content: string): boolean {
+	try {
+		return fs.readFileSync(filePath, "utf8") === content;
+	} catch {
+		return false;
+	}
+}
+
 function writeFileAtomic(filePath: string, content: string): void {
-	const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		fs.writeFileSync(tmp, content, { mode: 0o600 });
 		fs.renameSync(tmp, filePath);
@@ -90,7 +103,8 @@ function writeFileAtomic(filePath: string, content: string): void {
 		} catch {
 			/* ignore */
 		}
-		throw err;
+		// Another process may have installed identical content after our read.
+		if (!fileMatches(filePath, content)) throw err;
 	}
 }
 
@@ -152,16 +166,27 @@ export function ensureIsolatedProfile(profile: ResolvedProfile): void {
 	fs.mkdirSync(profile.rootDir, { recursive: true, mode: 0o700 });
 	fs.mkdirSync(profile.workspaceDir, { recursive: true, mode: 0o700 });
 	fs.mkdirSync(profile.geminiHome, { recursive: true, mode: 0o700 });
-	fs.mkdirSync(path.dirname(profile.agentPath), { recursive: true, mode: 0o700 });
+	const agentDir = path.dirname(profile.agentPath);
+	fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+
+	// AGY retains the hook specification on session/load. Install it before
+	// session/new, including turns with an empty recall binding.
+	const recallHooksPath = path.join(agentDir, AGENT_RECALL_HOOKS_FILE);
+	const recallHooks = JSON.stringify({
+		[ACP_RECALL_HOOK_NAME]: {
+			PreInvocation: [{ type: "command", command: acpRecallHookCommand(), timeout: 3 }],
+			PreToolUse: [{
+				matcher: `^${ACP_RESOURCE_DISCOVERY_TOOL}$`,
+				hooks: [{ type: "command", command: acpRecallHookCommand(true), timeout: 3 }],
+			}],
+		},
+	}, null, 2) + "\n";
+	if (!fileMatches(recallHooksPath, recallHooks)) {
+		writeFileAtomic(recallHooksPath, recallHooks);
+	}
 
 	const content = dedicatedAgentMarkdown();
-	let existing: string | null = null;
-	try {
-		existing = fs.readFileSync(profile.agentPath, "utf8");
-	} catch {
-		existing = null;
-	}
-	if (existing !== content) {
+	if (!fileMatches(profile.agentPath, content)) {
 		writeFileAtomic(profile.agentPath, content);
 	}
 

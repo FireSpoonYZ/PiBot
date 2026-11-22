@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.hindsight",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "plugin",
   "displayName": "Hindsight",
   "hostApi": "^1.0.0",

@@ -5,6 +5,7 @@
 // 无压缩/maxPayload），但只持有 client 角色 —— 不打开任何本地文件/MessageLog/
 // Runtime/owner 锁；不自动重连、不重试、不记录凭证。
 import { randomUUID } from 'node:crypto';
+import { browserEgressIdentityDigest, createBrowserEgressClient } from './bot-browser/egress-client.js';
 import WebSocket from 'ws';
 import {
   parseRelayUrl,
@@ -84,6 +85,7 @@ export async function openRemoteControl(options) {
   let ca;
   let signal;
   let onCloseCallback;
+  let externalBrowserEgress = null;
   try {
     if (!options || typeof options !== 'object') throw invalid('options must be an object');
     deviceId = options.deviceId;
@@ -99,6 +101,18 @@ export async function openRemoteControl(options) {
     if (onCloseCallback !== undefined && typeof onCloseCallback !== 'function') throw invalid('onClose must be a function');
     signal = options.signal;
     if (signal !== undefined && !isAbortSignal(signal)) throw invalid('signal must be an AbortSignal');
+    if (options.browserEgress !== undefined && options.browserEgress !== null) {
+      if (
+        typeof options.browserEgress !== 'object' ||
+        typeof options.browserEgress.attachTransport !== 'function' ||
+        typeof options.browserEgress.detachTransport !== 'function' ||
+        typeof options.browserEgress.handle !== 'function' ||
+        typeof options.browserEgress.openBrowserEgress !== 'function'
+      ) {
+        throw invalid('browserEgress must be a browser egress client');
+      }
+      externalBrowserEgress = options.browserEgress;
+    }
   } catch {
     throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
   }
@@ -106,10 +120,15 @@ export async function openRemoteControl(options) {
     throw new RemoteControlError('CANCELLED', 'not-sent');
   }
 
+  const relayEgressIdentity = browserEgressIdentityDigest(['relay', url.href, deviceId, token, ca ?? '']);
+
   const client = {
     deviceId: null,
     ws: null,
     liveExtensions: NO_LIVE_EXTENSIONS,
+    browserEgress: false,
+    browserWindowLifecycle: false,
+    egressTransport: null,
     ready: false,
     opened: false,
     closed: false,
@@ -218,6 +237,13 @@ export async function openRemoteControl(options) {
       norm = normalizeControlCall(method, params);
     } catch (err) {
       throw new RemoteControlError(err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT', 'not-sent');
+    }
+    if (
+      norm.method === 'browserControl' &&
+      client.browserWindowLifecycle !== true &&
+      (norm.params.action === 'rendererClose' || (norm.params.action === 'open' && norm.params.placement !== undefined))
+    ) {
+      throw new RemoteControlError('BROWSER_UNSUPPORTED', 'not-sent');
     }
     let callSignal;
     if (options !== undefined && options !== null) {
@@ -442,7 +468,16 @@ export async function openRemoteControl(options) {
     if (client.opened) return;
     client.opened = true;
     removeStartAbort();
-    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, renameDevice, live: liveManager.live });
+    client.openResolve({
+      deviceId: client.deviceId,
+      browserWindowLifecycle: client.browserWindowLifecycle === true,
+      call,
+      close,
+      listDevices,
+      renameDevice,
+      live: liveManager.live,
+      openBrowserEgress,
+    });
   }
 
   function rejectPending(error) {
@@ -469,6 +504,7 @@ export async function openRemoteControl(options) {
     const error = new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent');
     failOpenOrPending(error);
     liveManager.terminateAll(error);
+    teardownBrowserEgress();
   }
 
   function armWatchdog(ws) {
@@ -500,6 +536,24 @@ export async function openRemoteControl(options) {
         protocolViolation();
         return;
       }
+      if (externalBrowserEgress) {
+        const transport = {
+          send: sendFrame,
+          available: () => client.ready && !client.closed && !client.violated && client.browserEgress === true,
+          identity: relayEgressIdentity,
+        };
+        try {
+          externalBrowserEgress.attachTransport(transport);
+        } catch (err) {
+          client.violated = true;
+          clearTimers();
+          if (client.ws) client.ws.terminate();
+          const code = err?.code === 'CONTROL_IDENTITY_MISMATCH' ? 'CONTROL_IDENTITY_MISMATCH' : 'NOT_CONNECTED';
+          failOpen(new RemoteControlError(code, 'not-sent'));
+          return;
+        }
+        client.egressTransport = transport;
+      }
       client.ready = true;
       client.deviceId = frame.deviceId;
       if (client.readyTimer) {
@@ -507,6 +561,14 @@ export async function openRemoteControl(options) {
         client.readyTimer = null;
       }
       finishOpen();
+      return;
+    }
+    if (frame.type === 'browser-egress') {
+      if (externalBrowserEgress) {
+        if (client.egressTransport) externalBrowserEgress.handle(frame, client.egressTransport);
+      } else {
+        ownBrowserEgress.handle(frame);
+      }
       return;
     }
     if (frame.type === 'control-result') {
@@ -539,7 +601,7 @@ export async function openRemoteControl(options) {
       handleDevicesResult(frame);
       return;
     }
-    if (frame.type === 'live-frame' || frame.type === 'live-end') {
+    if (frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'browser-frame') {
       liveManager.handleFrame(frame);
       return;
     }
@@ -576,6 +638,7 @@ export async function openRemoteControl(options) {
     }
     failOpenOrPending(error);
     liveManager.terminateAll(error);
+    teardownBrowserEgress();
     if (client.ready && onCloseCallback) {
       try { onCloseCallback(error); } catch { /* consumer exceptions do not affect transport cleanup */ }
     }
@@ -587,7 +650,11 @@ export async function openRemoteControl(options) {
     try {
       ws = new WebSocket(url.href, {
         ...(ca !== undefined ? { ca } : {}),
-        ...(liveExtHeader ? { headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader } } : {}),
+        headers: {
+          [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader,
+          'X-PiBot-Browser-Egress': '1',
+          'X-PiBot-Browser-Window-Lifecycle': '1',
+        },
         maxPayload: MAX_RELAY_FRAME_BYTES,
         perMessageDeflate: false,
         followRedirects: false,
@@ -599,9 +666,13 @@ export async function openRemoteControl(options) {
     }
     client.ws = ws;
     client.liveExtensions = NO_LIVE_EXTENSIONS;
+    client.browserEgress = false;
+    client.browserWindowLifecycle = false;
 
     ws.on('upgrade', (res) => {
       if (ws !== client.ws || client.closed) return;
+      client.browserEgress = res?.headers?.['x-pibot-browser-egress'] === '1';
+      client.browserWindowLifecycle = res?.headers?.['x-pibot-browser-window-lifecycle'] === '1';
       client.liveExtensions = intersectLiveExtensions(
         ALL_LIVE_EXTENSIONS,
         parseLiveExtensionsHeader(res?.headers?.[LIVE_EXTENSIONS_HEADER]),
@@ -659,12 +730,14 @@ export async function openRemoteControl(options) {
       try { ws.terminate(); } catch { /* terminate 失败忽略 */ }
     }
     if (!client.opened) {
+      teardownBrowserEgress();
       failOpen(new RemoteControlError('CANCELLED', 'not-sent'));
       return;
     }
     const error = new RemoteControlError('DISCONNECTED', 'unconfirmed');
     rejectPending(error);
     liveManager.terminateAll(error);
+    teardownBrowserEgress();
   }
 
   const liveManager = installRemoteLive(client, {
@@ -672,6 +745,36 @@ export async function openRemoteControl(options) {
     send: sendFrame,
     violate: protocolViolation,
   });
+  const ownBrowserEgress = externalBrowserEgress
+    ? null
+    : createBrowserEgressClient({
+      send: sendFrame,
+      available: () => client.ready && !client.closed && !client.violated && client.browserEgress === true,
+      identity: relayEgressIdentity,
+    });
+  const browserEgress = externalBrowserEgress ?? ownBrowserEgress;
+
+  function teardownBrowserEgress() {
+    if (externalBrowserEgress) {
+      if (client.egressTransport) {
+        const transport = client.egressTransport;
+        client.egressTransport = null;
+        externalBrowserEgress.detachTransport(transport);
+      }
+      return;
+    }
+    ownBrowserEgress.reset();
+  }
+
+  function openBrowserEgress(params) {
+    if (client.closed || client.violated || !client.ready || client.browserEgress !== true) {
+      return Promise.reject(new Error('Browser egress unavailable'));
+    }
+    if (externalBrowserEgress && !client.egressTransport) {
+      return Promise.reject(new Error('Browser egress unavailable'));
+    }
+    return browserEgress.openBrowserEgress(params);
+  }
 
   if (signal) {
     const onStartAbort = () => {

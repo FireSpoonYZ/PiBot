@@ -2,6 +2,8 @@ const APP_COMMANDS: &[&str] = &[
   "desktop_request",
   "desktop_open_center",
   "desktop_observe",
+  "desktop_browser_guest",
+  "desktop_browser_local_route",
   "desktop_unobserve",
   "desktop_pick_file",
   "desktop_pick_images",

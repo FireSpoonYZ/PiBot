@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
+import { createClientBrowserRenderer } from '../../host-core/bot-browser/client-renderer.js';
+import { normalizeBrowserControl } from '../../host-core/browser-setup-protocol.js';
 import {
   BROWSER_ERROR_CODES,
+  CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE,
   botBrowserProfileDirectory,
   normalizeBotActInput,
+  safeBrowserError,
 } from '../../host-core/bot-browser/protocol.js';
 import {
+  checkBotActionSensitivity,
   classifyPageSensitivity,
   containsSecretLeak,
   sanitizeUrlForModel,
@@ -19,6 +24,43 @@ const VALID_PNG_BASE64 = Buffer.from([
   0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
   0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
 ]).toString('base64');
+
+test('client-rendered pages preserve normalized form input and bounded wait conditions', async (t) => {
+  const renderer = createClientBrowserRenderer({
+    rendererId: 'fixture-renderer-1', clientId: 'fixture-client', maxTabs: 2, maxFrameBytes: 737280,
+  });
+  t.after(() => renderer.close());
+  const page = { url: 'https://example.org/', title: 'Fixture', documentGeneration: 1 };
+  async function reply(operation, result) {
+    const { command } = await renderer.next();
+    assert.equal(command.operation, operation);
+    renderer.reply({ operationId: command.operationId, result });
+    return command;
+  }
+  const opening = renderer.perform({ action: 'open', actor: 'human', url: page.url });
+  await reply('create', page);
+  const { pageId } = await opening;
+
+  const fill = renderer.perform({
+    action: 'act', actor: 'bot', pageId, act: normalizeBotActInput({ kind: 'fill', ref: 'e1', value: 'typed value' }),
+  });
+  await reply('status', page);
+  const fillRequest = await reply('act', { ok: true });
+  assert.equal(fillRequest.text, 'typed value');
+  assert.equal(fillRequest.elementRef, 1);
+  assert.equal(fillRequest.expectedUrl, page.url);
+  await reply('status', page);
+  assert.equal((await fill).ok, true);
+
+  const wait = renderer.perform({
+    action: 'act', actor: 'bot', pageId, act: normalizeBotActInput({ kind: 'wait', selector: '#done' }),
+  });
+  await reply('status', page);
+  const waitRequest = await reply('waitCheck', { ok: true });
+  assert.equal(waitRequest.wait.selector, '#done');
+  await reply('status', page);
+  assert.equal((await wait).ok, true);
+});
 
 function createFakeHost(botIds = ['bot-a', 'bot-b']) {
   const bots = new Map();
@@ -231,6 +273,48 @@ function parseToolJson(res) {
   return JSON.parse(res.output[0].text);
 }
 
+test('the same desktop can replace its disconnected renderer with a tab still registered', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const service = createBotBrowserService({ host: createFakeHost(['bot-a']) });
+  t.after(() => service.close());
+  const desktop = ownerAuth('desktop-1');
+  const otherDesktop = ownerAuth('desktop-2');
+  const original = 'original-renderer';
+  const replacement = 'replacement-renderer';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const attach = (rendererId, authority) => control({ action: 'rendererAttach', rendererId }, authority);
+  const open = async (rendererId) => {
+    const url = 'https://example.org/';
+    const pending = control({ action: 'open', url });
+    const { command } = await control({ action: 'rendererNext', rendererId });
+    assert.equal(command.operation, 'create');
+    await control({
+      action: 'rendererReply', rendererId, operationId: command.operationId,
+      result: { url, title: 'Example', documentGeneration: 1 },
+    });
+    return pending;
+  };
+
+  assert.equal((await attach(original)).accepted, true);
+  const before = await open(original);
+  assert.equal(before.tabs.length, 1);
+  assert.equal((await attach(replacement)).accepted, false);
+  t.mock.timers.setTime(Date.now() + 12_001);
+  const disconnected = await control({ action: 'status' });
+  assert.equal(disconnected.available, false);
+  assert.equal(disconnected.reason, 'client_browser_disconnected');
+  assert.equal(disconnected.pageId, before.pageId);
+  assert.equal((await attach(replacement, otherDesktop)).accepted, false);
+
+  assert.equal((await attach(replacement)).accepted, true);
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: original }), { code: 'BROWSER_FORBIDDEN' });
+  const after = await open(replacement);
+  assert.equal(after.available, true);
+  assert.equal(after.tabs.length, 1);
+  assert.notEqual(after.sessionId, before.sessionId);
+  assert.notEqual(after.pageId, before.pageId);
+});
+
 test('policy: URL validation blocks file/javascript/chrome/credentialed/internal/OAuth/secret URLs', () => {
   assert.equal(
     validateNavigationUrl('https://console.cloud.google.com/auth/branding', { actor: 'bot' }),
@@ -275,6 +359,19 @@ test('policy: URL validation blocks file/javascript/chrome/credentialed/internal
   );
   assert.equal(containsSecretLeak('Your secret is GOCSPX-abcDEF1234567890'), true);
   assert.equal(containsSecretLeak('Normal page heading'), false);
+});
+
+test('project creation accepts the ordinary Create button and preserves credential protection', () => {
+  const projectUrl = 'https://console.cloud.google.com/projectcreate';
+  const click = (pageUrl, name) => checkBotActionSensitivity({
+    act: { kind: 'click', ref: 'create-button' },
+    pageUrl,
+    targetRefMeta: { role: 'button', name },
+  });
+  assert.equal(click(projectUrl, 'Create').allowed, true);
+  assert.equal(click(projectUrl, 'Create OAuth client').code, 'BROWSER_SECRET_STEP_BLOCKED');
+  assert.equal(click('https://console.cloud.google.com/auth/clients/create', 'Create').code, 'BROWSER_SECRET_STEP_BLOCKED');
+  assert.equal(click(projectUrl, 'Accept terms').code, 'BROWSER_SENSITIVE_BLOCKED');
 });
 
 test('protocol & tool contract: act.wait validates state/selector/networkidle and preserves BROWSER_TIMEOUT', async () => {
@@ -692,6 +789,98 @@ test('concurrent clients: lease token hidden from other client, explicit preempt
   await service.close();
 });
 
+test('ordinary browser input is shared with the Bot and still fenced by device and sensitive pages', async (t) => {
+  const { promise: started, resolve: markStarted } = Promise.withResolvers();
+  const { promise: finish, resolve: finishAction } = Promise.withResolvers();
+  let actionAborted = false;
+  let exclusiveTakeovers = 0;
+  let now = Date.now();
+  const mock = createMockProviderFactory({
+    async onPerform(input) {
+      if (input.action === 'act' && input.act?.ref === 'e1') {
+        input.signal.addEventListener('abort', () => { actionAborted = true; }, { once: true });
+        markStarted();
+        await finish;
+      }
+    },
+  });
+  const service = createBotBrowserService({
+    host: createFakeHost(['bot-a']),
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+    onTakeover: async () => { exclusiveTakeovers += 1; },
+    now: () => now,
+    leaseTtlMs: 1000,
+  });
+  t.after(async () => {
+    finishAction();
+    await service.close();
+  });
+
+  const desktop = ownerAuth('desktop-1');
+  const phone = ownerAuth('phone-1', 'Phone');
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const [tool] = service.toolsForBot();
+  const bot = (input) => tool.execute(input, { conversationId: 1 }, {});
+  const { pageId } = await control({ action: 'open', url: 'https://example.com' });
+  await bot({ action: 'snapshot' });
+
+  const act = bot({ action: 'act', act: { kind: 'click', ref: 'e1' } });
+  await started;
+  const nextBotRead = bot({ action: 'snapshot' });
+  const grant = { action: 'takeover', shared: true };
+  const shared = await control(grant);
+  assert.equal(shared.supportsSharedInput, true);
+  assert.equal(shared.sharedInput, true);
+  assert.equal(shared.pageId, pageId);
+  assert.equal(exclusiveTakeovers, 0);
+  assert.equal(actionAborted, false);
+
+  const frame = await control({ action: 'frame', pageId, lease: shared.lease });
+  const input = {
+    action: 'input', pageId, revision: frame.revision, frameSeq: frame.seq,
+    lease: shared.lease, event: { kind: 'click', x: 0.5, y: 0.5 },
+  };
+  assert.equal((await control(input)).ok, true);
+  await assert.rejects(() => control(input, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+  await assert.rejects(() => control(grant, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+
+  const reconnected = await control(grant);
+  assert.notEqual(reconnected.lease, shared.lease);
+  assert.equal((await control({ action: 'status', lease: shared.lease })).isHolder, false);
+  assert.equal((await control({ action: 'status', lease: reconnected.lease })).isHolder, true);
+
+  const switched = await control({ ...grant, force: true }, phone);
+  assert.equal(switched.sharedInput, true);
+  assert.notEqual(switched.lease, reconnected.lease);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, false);
+  finishAction();
+  assert.notEqual((await act).isError, true);
+  assert.notEqual((await nextBotRead).isError, true);
+
+  now += 1001;
+  const expired = await control({ action: 'status' });
+  assert.equal(expired.phase, 'bot');
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, false);
+
+  const renewed = await control(grant);
+  const exclusive = await control({ action: 'takeover', lease: renewed.lease });
+  assert.notEqual(exclusive.sharedInput, true);
+  assert.equal(exclusiveTakeovers, 1);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, true);
+  await control({ action: 'handback', lease: exclusive.lease });
+
+  const ordinary = await control(grant);
+  const sensitive = await control({
+    action: 'navigate', pageId, lease: ordinary.lease, url: 'https://accounts.google.com/signin',
+  });
+  assert.equal(sensitive.sensitive, true);
+  assert.notEqual(sensitive.sharedInput, true);
+  assert.equal(parseToolJson(await bot({ action: 'status' })).pausedForHuman, true);
+  assert.equal((await bot({ action: 'snapshot' })).isError, true);
+  await assert.rejects(() => control(grant), { code: 'BROWSER_TAKEOVER_REQUIRED' });
+});
+
 test('disconnect/lease expiry fails closed into held and never auto-hands back to bot', async () => {
   let clock = 1_000_000;
   const host = createFakeHost(['bot-a']);
@@ -742,7 +931,7 @@ test('disconnect/lease expiry fails closed into held and never auto-hands back t
   await service.close();
 });
 
-test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks secret frames, bystander frames, and sensitive handback', async () => {
+test('Privacy Shield protects policy, secrets and sign-in even after the owner hands back', async () => {
   const host = createFakeHost(['bot-a']);
   const mock = createMockProviderFactory();
   const service = createBotBrowserService({
@@ -787,31 +976,40 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   assert.equal(parseToolJson(createClick).fallbackToSystemBrowser, true);
   assert.equal(mock.calls.some((c) => c.action === 'act' && c.act?.ref === 'e-create'), false);
 
-  // 4. Human takes over and navigates to /auth/clients -> secret step blocks normal frames AND blocks handback!
-  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  // 4. Handback ends the lease on the same tab but never unlocks a secret page.
+  const secretTakeover = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
   await service.control({
     action: 'navigate',
     botId: 'bot-a',
-    lease: taken.lease,
+    lease: secretTakeover.lease,
     url: 'https://console.cloud.google.com/auth/clients',
   }, desktop);
-
   await assert.rejects(
-    () => service.control({ action: 'frame', botId: 'bot-a', lease: taken.lease }, desktop),
+    () => service.control({ action: 'frame', botId: 'bot-a', lease: secretTakeover.lease }, desktop),
     { code: 'BROWSER_SECRET_STEP_BLOCKED' }
   );
-  await assert.rejects(
-    () => service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop),
-    { code: 'BROWSER_HANDBACK_BLOCKED_SENSITIVE' }
-  );
+  const handback = { action: 'handback', botId: 'bot-a', lease: secretTakeover.lease };
+  await assert.rejects(() => service.control(handback, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+  const returned = await service.control(handback, desktop);
+  assert.equal(returned.pageId, secretTakeover.pageId);
+  assert.equal(returned.phase, 'bot');
+  assert.equal(returned.isHolder, false);
+  assert.equal(returned.secretRisk, true);
+  const blockedSnapshot = await tool.execute({ action: 'snapshot' }, { conversationId: 1 }, {});
+  assert.equal(parseToolJson(blockedSnapshot).status, 'PAUSED_FOR_HUMAN');
+  assert.equal(mock.calls.filter((call) => call.action === 'snapshot').length, 2);
 
-  // 5. On password/login sensitive page (non-secret-dialog), bystander phone cannot view frame while desktop holds lease.
-  await service.control({
+  // 5. Only the active holder can view a login page.
+  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  const login = await service.control({
     action: 'navigate',
     botId: 'bot-a',
     lease: taken.lease,
-    url: 'https://accounts.google.com/v3/signin',
+    url: 'https://accounts.google.com/v3/signin/identifier?service=cloudconsole',
   }, desktop);
+  assert.equal(login.sensitive, true);
+  assert.equal(login.fallbackToSystemBrowser, false);
+  assert.equal(classifyPageSensitivity({ url: 'https://accounts.google.com/v3/signin/oauth/consent' }).fallbackToSystemBrowser, true);
   await assert.rejects(
     () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
     { code: 'BROWSER_SENSITIVE_BLOCKED' }
@@ -820,11 +1018,75 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   const holderFrame = await service.control({ action: 'frame', botId: 'bot-a', lease: taken.lease }, desktop);
   assert.equal(holderFrame.mimeType, 'image/png');
 
-  // 6. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
+  // 6. A refused Google sign-in offers a system-browser recovery and strips session URL data.
+  const rejectionPage = 'https://accounts.google.com/v3/signin/rejected';
+  const rejected = await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken.lease,
+    url: rejectionPage + '?continue=https%3A%2F%2Fconsole.cloud.google.com%2F&dsh=opaque#private',
+  }, desktop);
+  assert.equal(rejected.sensitive, true);
+  assert.equal(rejected.fallbackToSystemBrowser, true);
+  assert.equal(rejected.tabs.find(tab => tab.id === rejected.pageId)?.url, rejectionPage);
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  assert.equal(classifyPageSensitivity({ url: 'https://accounts.google.com.example.com/v3/signin/rejected' }).fallbackToSystemBrowser, false);
+  assert.equal(classifyPageSensitivity({ url: rejectionPage + '/other' }).fallbackToSystemBrowser, false);
+  const returnedFromSignIn = await service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop);
+  assert.equal(returnedFromSignIn.phase, 'bot');
+  assert.equal(returnedFromSignIn.sensitive, true);
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+
+  // 7. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
   const gmailSens = classifyPageSensitivity({ url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox' });
   assert.equal(gmailSens.webLoginNotApiGrant, true);
 
   await service.close();
+});
+
+test('handback can resume the same OAuth overview after a transient prompt closes', async (t) => {
+  let sensitive = true;
+  const mock = createMockProviderFactory({
+    onPerform(input) {
+      if (input.action === 'status') {
+        return { available: true, sensitive, sensitiveCategory: sensitive ? 'password_input' : null };
+      }
+    },
+  });
+  const service = createBotBrowserService({
+    host: createFakeHost(['bot-a']),
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const owner = ownerAuth();
+  const tab = await service.control({
+    action: 'open', botId: 'bot-a', url: 'https://console.cloud.google.com/auth/overview?project=test-cloud-project',
+  }, owner);
+  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, owner);
+  assert.equal(taken.sensitive, true);
+  const [tool] = service.toolsForBot();
+  const status = parseToolJson(await tool.execute({ action: 'status' }, { conversationId: 1 }, {}));
+  assert.equal(status.tabs[0].title, '[Sensitive page — hidden from bot]');
+  assert.equal(new URL(status.tabs[0].url).search, '');
+  sensitive = false;
+
+  const returned = await service.control({
+    action: 'handback', botId: 'bot-a', pageId: tab.pageId, lease: taken.lease, revision: taken.revision,
+  }, owner);
+  assert.equal(returned.phase, 'bot');
+  assert.equal(returned.pageId, tab.pageId);
+  assert.equal(returned.sensitive, false);
+  const snapshot = await tool.execute({ action: 'snapshot' }, { conversationId: 1 }, {});
+  assert.notEqual(snapshot.isError, true);
+  assert.equal(parseToolJson(snapshot).pageId, tab.pageId);
 });
 
 test('defense-in-depth: snapshot containing leaked GOCSPX secret is withheld and holds session', async () => {
@@ -1346,4 +1608,276 @@ test('human frame retains pre-capture gate, never relaxes secret risk, and prese
   assert.equal(mock.calls.filter((c) => c.action === 'frame').length, frameCallsBeforePreCheck);
 
   await service.close();
+});
+
+test('rendererClose fences owner client window, blocks other clients and Host fallback, and allows same-owner reopen or explicit server open', async (t) => {
+  assert.equal(BROWSER_ERROR_CODES.includes('BROWSER_DESKTOP_WINDOW_CLOSED'), false);
+  const safeClosedErr = safeBrowserError({
+    code: 'BROWSER_UNAVAILABLE',
+    message: 'internal secret detail',
+    details: { reason: 'client_browser_window_closed' },
+  });
+  assert.equal(safeClosedErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(safeClosedErr.message, CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE);
+  assert.equal(safeClosedErr.details?.reason, 'client_browser_window_closed');
+  const safeOtherErr = safeBrowserError({
+    code: 'BROWSER_UNAVAILABLE',
+    message: 'should not be reflected',
+    details: { reason: 'arbitrary_reason' },
+  });
+  assert.equal(safeOtherErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(safeOtherErr.message, 'Bot browser is unavailable on this host.');
+  assert.deepEqual(
+    normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01' }),
+    { action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'short' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'rendererClose', botId: 'bot-a', rendererId: 'desktop-renderer-01', extra: true }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.equal(
+    normalizeBrowserControl({ action: 'open', botId: 'bot-a', placement: 'server' }).placement,
+    'server',
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'open', botId: 'bot-a', placement: 'client' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+  assert.throws(
+    () => normalizeBrowserControl({ action: 'status', botId: 'bot-a', placement: 'server' }),
+    { code: 'INVALID_ARGUMENT' },
+  );
+
+  const host = createFakeHost(['bot-a']);
+  const mock = createMockProviderFactory();
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const desktop = ownerAuth('desktop-1', 'Win-Desktop');
+  const otherDesktop = ownerAuth('desktop-2', 'Other-Desktop');
+  const remotePhone = ownerAuth('phone-1', 'Remote-Phone');
+  const firstRenderer = 'desktop-renderer-01';
+  const reopenedRenderer = 'desktop-renderer-02';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const openOnRenderer = async (rendererId, url, title = 'Page') => {
+    const pending = control({ action: 'open', url });
+    const { command } = await control({ action: 'rendererNext', rendererId });
+    assert.equal(command.operation, 'create');
+    await control({
+      action: 'rendererReply',
+      rendererId,
+      operationId: command.operationId,
+      result: { url, title, documentGeneration: 1 },
+    });
+    return pending;
+  };
+
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: firstRenderer }),
+    { accepted: true, rendererId: firstRenderer, windowCloseProtocol: 1 },
+  );
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: firstRenderer }),
+    { accepted: true, rendererId: firstRenderer, windowCloseProtocol: 1 },
+  );
+  const sensitiveUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const opened = await openOnRenderer(firstRenderer, sensitiveUrl, 'Google Sign-in');
+  assert.equal(opened.sensitive, true);
+  assert.equal(opened.tabs.length, 1);
+
+  const takeoverPromise = control({ action: 'takeover' });
+  const { command: statusCmd } = await control({ action: 'rendererNext', rendererId: firstRenderer });
+  assert.equal(statusCmd.operation, 'status');
+  await control({
+    action: 'rendererReply',
+    rendererId: firstRenderer,
+    operationId: statusCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const taken = await takeoverPromise;
+  assert.equal(taken.phase, 'human');
+  assert.ok(taken.lease);
+
+  // Active client renderer cannot be replaced by placement: 'server' or closed by another client / wrong rendererId.
+  await assert.rejects(
+    () => control({ action: 'open', placement: 'server', lease: taken.lease }),
+    { code: 'BROWSER_ACTION_BLOCKED' },
+  );
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: firstRenderer }, otherDesktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: reopenedRenderer }, desktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+  assert.equal(mock.created.size, 0);
+
+  // Start an in-flight command, then close the desktop browser window synchronously.
+  const inFlightNav = control({
+    action: 'navigate',
+    pageId: opened.pageId,
+    lease: taken.lease,
+    url: 'https://example.org/after-signin',
+  });
+  const { command: navCmd } = await control({ action: 'rendererNext', rendererId: firstRenderer });
+  assert.equal(navCmd.operation, 'navigate');
+
+  assert.deepEqual(
+    await control({ action: 'rendererClose', rendererId: firstRenderer }),
+    { ok: true },
+  );
+  await assert.rejects(
+    () => inFlightNav,
+    (err) => err?.code === 'BROWSER_UNAVAILABLE' && err?.details?.reason === 'client_browser_window_closed',
+  );
+
+  // Subsequent status reports explicit window close with no tabs/pages and no Host Chromium fallback.
+  const statusAfterClose = await control({ action: 'status' }, remotePhone);
+  assert.equal(statusAfterClose.available, false);
+  assert.equal(statusAfterClose.canStreamInteract, false);
+  assert.equal(statusAfterClose.reason, 'client_browser_window_closed');
+  assert.equal(statusAfterClose.renderPlacement, 'client');
+  assert.equal(statusAfterClose.rendererId, undefined);
+  assert.equal(statusAfterClose.pageId, undefined);
+  assert.equal(statusAfterClose.sessionId, undefined);
+  assert.deepEqual(statusAfterClose.tabs, []);
+  assert.equal(statusAfterClose.phase, 'bot');
+  assert.equal(statusAfterClose.sensitive, false);
+  assert.equal(statusAfterClose.isHolder, false);
+  assert.equal(mock.created.size, 0);
+
+  const [botTool] = service.toolsForBot();
+  const botStatus = parseToolJson(await botTool.execute({ action: 'status' }, { conversationId: 1 }, {}));
+  assert.equal(botStatus.available, false);
+  assert.equal(botStatus.canStreamInteract, false);
+  assert.equal(botStatus.reason, 'client_browser_window_closed');
+  assert.deepEqual(botStatus.tabs, []);
+
+  const botOpen = await botTool.execute({ action: 'open', url: 'https://example.org/' }, { conversationId: 1 }, {});
+  assert.equal(botOpen.isError, true);
+  const botOpenErr = parseToolJson(botOpen);
+  assert.equal(botOpenErr.code, 'BROWSER_UNAVAILABLE');
+  assert.equal(botOpenErr.reason, 'client_browser_window_closed');
+  assert.equal(botOpenErr.message, CLIENT_BROWSER_WINDOW_CLOSED_MESSAGE);
+
+  await assert.rejects(
+    () => control({ action: 'open', url: 'https://example.org/' }),
+    (err) => err?.code === 'BROWSER_UNAVAILABLE' && err?.details?.reason === 'client_browser_window_closed',
+  );
+  assert.equal(mock.created.size, 0);
+
+  // Closed renderer cannot operate or re-attach; same owner can attach a fresh renderer cleanly.
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: firstRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  await assert.rejects(() => control({ action: 'rendererClose', rendererId: firstRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  assert.equal((await control({ action: 'rendererAttach', rendererId: firstRenderer })).accepted, false);
+
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: reopenedRenderer }),
+    { accepted: true, rendererId: reopenedRenderer, windowCloseProtocol: 1 },
+  );
+  const reopenedStatus = await control({ action: 'status' });
+  assert.equal(reopenedStatus.available, true);
+  assert.equal(reopenedStatus.canStreamInteract, true);
+  assert.equal(reopenedStatus.renderPlacement, 'client');
+  assert.equal(reopenedStatus.rendererId, reopenedRenderer);
+  assert.equal(reopenedStatus.pageId, undefined);
+  assert.deepEqual(reopenedStatus.tabs, []);
+  assert.equal(reopenedStatus.sensitive, false);
+  assert.equal(mock.created.size, 0);
+
+  // Explicit owner open with placement:'server' works only after explicit close with no active renderer.
+  assert.deepEqual(
+    await control({ action: 'rendererClose', rendererId: reopenedRenderer }),
+    { ok: true },
+  );
+  const serverOpened = await control({ action: 'open', url: 'https://example.org/host', placement: 'server' });
+  assert.equal(serverOpened.available, true);
+  assert.equal(serverOpened.renderPlacement, undefined);
+  assert.equal(serverOpened.tabs.length, 1);
+  assert.equal(mock.created.size, 1);
+});
+
+test('abnormal exit with sensitive page allows same-owner fresh renderer replacement while rejecting other clients', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const host = createFakeHost(['bot-a']);
+  const mock = createMockProviderFactory();
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const desktop = ownerAuth('desktop-1', 'Win-Desktop');
+  const otherDesktop = ownerAuth('desktop-2', 'Other-Desktop');
+  const crashedRenderer = 'crashed-renderer-01';
+  const freshRenderer = 'restarted-renderer-02';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+
+  assert.equal((await control({ action: 'rendererAttach', rendererId: crashedRenderer })).accepted, true);
+  const sensitiveUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+  const openPending = control({ action: 'open', url: sensitiveUrl });
+  const { command: createCmd } = await control({ action: 'rendererNext', rendererId: crashedRenderer });
+  await control({
+    action: 'rendererReply',
+    rendererId: crashedRenderer,
+    operationId: createCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const opened = await openPending;
+  assert.equal(opened.sensitive, true);
+
+  const takeoverPromise = control({ action: 'takeover' });
+  const { command: statusCmd } = await control({ action: 'rendererNext', rendererId: crashedRenderer });
+  await control({
+    action: 'rendererReply',
+    rendererId: crashedRenderer,
+    operationId: statusCmd.operationId,
+    result: { url: sensitiveUrl, title: 'Google Sign-in', documentGeneration: 1 },
+  });
+  const taken = await takeoverPromise;
+  assert.equal(taken.phase, 'human');
+
+  // Transient disconnect (> TTL) keeps the guest intact instead of destroying it.
+  t.mock.timers.setTime(Date.now() + 12_001);
+  const disconnected = await control({ action: 'status' });
+  assert.equal(disconnected.available, false);
+  assert.equal(disconnected.reason, 'client_browser_disconnected');
+  assert.equal(disconnected.renderPlacement, 'client');
+  assert.equal(disconnected.pageId, opened.pageId);
+
+  // Other clients cannot replace or close the expired renderer.
+  assert.equal((await control({ action: 'rendererAttach', rendererId: freshRenderer }, otherDesktop)).accepted, false);
+  await assert.rejects(
+    () => control({ action: 'rendererClose', rendererId: crashedRenderer }, otherDesktop),
+    { code: 'BROWSER_FORBIDDEN' },
+  );
+
+  // Same authenticated owner can attach a fresh renderer; old sensitive page and lease are wiped without carryover.
+  assert.deepEqual(
+    await control({ action: 'rendererAttach', rendererId: freshRenderer }),
+    { accepted: true, rendererId: freshRenderer, windowCloseProtocol: 1 },
+  );
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: crashedRenderer }), { code: 'BROWSER_FORBIDDEN' });
+  assert.equal((await control({ action: 'rendererAttach', rendererId: crashedRenderer })).accepted, false);
+
+  const clean = await control({ action: 'status' });
+  assert.equal(clean.available, true);
+  assert.equal(clean.canStreamInteract, true);
+  assert.equal(clean.renderPlacement, 'client');
+  assert.equal(clean.rendererId, freshRenderer);
+  assert.equal(clean.phase, 'bot');
+  assert.equal(clean.pageId, undefined);
+  assert.deepEqual(clean.tabs, []);
+  assert.equal(clean.sensitive, false);
+  assert.equal(mock.created.size, 0);
 });

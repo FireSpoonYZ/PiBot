@@ -7,7 +7,7 @@ const MAX_ENDPOINT_BYTES = 512;
 const unsafe = () => browserError('BROWSER_UNSAFE_ENDPOINT', 'Cannot verify the private Chromium DevTools endpoint.');
 
 // Inspect every ancestor: realpath alone would silently follow a profile junction.
-async function assertPrivateDirectory(directory) {
+export async function assertPrivateWindowsProfileDir(directory) {
   let current = directory;
   for (;;) {
     const info = await lstat(current);
@@ -22,7 +22,7 @@ async function assertPrivateDirectory(directory) {
 
 export async function readWindowsDevToolsEndpoint(profilePath) {
   const filename = path.join(profilePath, 'DevToolsActivePort');
-  await assertPrivateDirectory(profilePath);
+  await assertPrivateWindowsProfileDir(profilePath);
   let info;
   try {
     info = await lstat(filename);
@@ -43,7 +43,7 @@ export async function readWindowsDevToolsEndpoint(profilePath) {
     const bytes = Buffer.alloc(MAX_ENDPOINT_BYTES + 1);
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
     const after = await lstat(filename);
-    await assertPrivateDirectory(profilePath);
+    await assertPrivateWindowsProfileDir(profilePath);
     if (after.isSymbolicLink() || after.nlink !== 1 || bytesRead > MAX_ENDPOINT_BYTES) throw unsafe();
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) return null;
     const contents = bytes.subarray(0, bytesRead).toString('utf8');
@@ -88,9 +88,9 @@ export function windowsCommandLineArgs(commandLine) {
   return args;
 }
 
-export async function verifyWindowsDevToolsOwner({ url, executablePath, nonce, signal, timeoutMs }) {
+async function readWindowsDevToolsProcess({ url, signal, timeoutMs }) {
   const port = Number(new URL(url).port);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/.test(nonce)) throw unsafe();
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw unsafe();
   // Only the validated numeric port enters the script. No browser/profile paths
   // or command-line values are evaluated by PowerShell.
   const script = `
@@ -114,7 +114,32 @@ Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [uint32]$owners[0]) | Se
   });
   let owner;
   try { owner = JSON.parse(stdout.replace(/^\uFEFF/, '')); } catch { throw unsafe(); }
-  if (typeof owner?.ExecutablePath !== 'string' || typeof owner?.CommandLine !== 'string'
-      || path.win32.normalize(owner.ExecutablePath).toLowerCase() !== path.win32.normalize(executablePath).toLowerCase()
+  if (typeof owner?.ExecutablePath !== 'string' || typeof owner?.CommandLine !== 'string') throw unsafe();
+  return owner;
+}
+
+function normalizeWindowsPath(value) {
+  return path.win32.normalize(value).toLowerCase();
+}
+
+export async function verifyWindowsDevToolsOwner({ url, executablePath, nonce, signal, timeoutMs }) {
+  if (!/^[a-f0-9]{64}$/.test(nonce)) throw unsafe();
+  const owner = await readWindowsDevToolsProcess({ url, signal, timeoutMs });
+  if (normalizeWindowsPath(owner.ExecutablePath) !== normalizeWindowsPath(executablePath)
       || !windowsCommandLineArgs(owner.CommandLine).includes(`--pibot-launch-nonce=${nonce}`)) throw unsafe();
+}
+
+export async function isWindowsDevToolsProfileInUse({ url, executablePath, profilePath, nonce, signal, timeoutMs }) {
+  try {
+    const owner = await readWindowsDevToolsProcess({ url, signal, timeoutMs });
+    if (normalizeWindowsPath(owner.ExecutablePath) !== normalizeWindowsPath(executablePath)) return false;
+    const args = windowsCommandLineArgs(owner.CommandLine);
+    const profileArgs = args.filter(arg => arg.startsWith('--user-data-dir='));
+    return profileArgs.length === 1 &&
+      normalizeWindowsPath(profileArgs[0].slice('--user-data-dir='.length)) === normalizeWindowsPath(profilePath) &&
+      !args.includes(`--pibot-launch-nonce=${nonce}`);
+  } catch {
+    // An inconclusive ownership check leaves the regular startup wait in place.
+    return false;
+  }
 }

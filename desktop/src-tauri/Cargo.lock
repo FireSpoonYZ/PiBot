@@ -2587,11 +2587,12 @@ dependencies = [
 
 [[package]]
 name = "pibot"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "base64 0.22.1",
  "dunce",
  "gtk",
+ "javascriptcore-rs",
  "reqwest",
  "serde",
  "serde_json",
@@ -2601,7 +2602,11 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

@@ -474,7 +474,8 @@ export function createDesktopClientCli(options = {}) {
       return;
     }
 
-    if (activeIds.size >= DESKTOP_MAX_IN_FLIGHT_REQUESTS) {
+    const requestLimit = DESKTOP_MAX_IN_FLIGHT_REQUESTS + Number(req.op === 'browser_window_close');
+    if (activeIds.size >= requestLimit) {
       void sendErrorResponse(req.id, messageError('RPC_BUSY', 'maximum in-flight requests reached'), 'not-sent');
       return;
     }

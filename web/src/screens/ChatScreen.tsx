@@ -7,7 +7,6 @@ import {
   MessageSquare,
   Mic,
   MoreHorizontal,
-  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -1137,7 +1136,6 @@ export function ChatScreen({
                 const isAssistantFailure = turn.role === 'assistant' && Boolean(turn.error);
                 const canRetryTurn = isLastTurn && chatTurnAdmission?.phase === 'failed';
                 const showArticle = !isAssistantFailure || hasAssistantVisibleContent(turn);
-                const isUserBubble = turn.role === 'user' && !isWebhookAttribution(attribution) && attribution?.kind !== 'bot';
                 const failureDetail = isAssistantFailure ? resolveAssistantFailureDetail(
                   turn.error === 'model_error' && turn.id === latestTurn?.id && activityFailure
                     ? activityFailure : turn.error,
@@ -1260,32 +1258,13 @@ export function ChatScreen({
                         t={t}
                       />
                     ) : null}
-                    {turnEditable && !coarsePointer ? (
-                      <div className={`bot-chat-turn-footer${isUserBubble ? ' is-user' : ''}`}>
-                        <ChatTurnMeta
-                          role={turn.role}
-                          timestamp={turn.timestamp}
-                          durationMs={showTurnDuration ? turn.durationMs : undefined}
-                          copyText={copyText}
-                        />
-                        <button
-                          type="button"
-                          className="bot-chat-turn-edit-btn"
-                          aria-label={t('编辑消息', 'Edit message')}
-                          onClick={() => onStartEditTurn(turn)}
-                        >
-                          <Pencil size={12} aria-hidden="true" />
-                          <span>{t('编辑', 'Edit')}</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <ChatTurnMeta
-                        role={turn.role}
-                        timestamp={turn.timestamp}
-                        durationMs={showTurnDuration ? turn.durationMs : undefined}
-                        copyText={copyText}
-                      />
-                    )}
+                    <ChatTurnMeta
+                      role={turn.role}
+                      timestamp={turn.timestamp}
+                      durationMs={showTurnDuration ? turn.durationMs : undefined}
+                      copyText={copyText}
+                      onEdit={turnEditable && !coarsePointer ? () => onStartEditTurn(turn) : undefined}
+                    />
                   </div>
                 );
               });
@@ -1382,6 +1361,8 @@ export function ChatScreen({
         </div>
 
         <CurrentGoogleSetupCard
+          active={visible}
+          hostRevision={effectiveChatLive?.googleSetupRevision}
           scopeKey={toolScopeKey}
           presentation={currentGoogleSetup}
           googleContext={googleContext}

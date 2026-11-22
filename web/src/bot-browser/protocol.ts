@@ -1,5 +1,10 @@
 export type BrowserPhase = 'bot' | 'taking' | 'human' | 'held';
 
+export interface BrowserDestination {
+  url: string;
+  pageId?: string;
+}
+
 export type BrowserControlAction =
   | 'status'
   | 'open'
@@ -13,7 +18,9 @@ export type BrowserControlAction =
   | 'takeover'
   | 'input'
   | 'handback'
-  | 'release';
+  | 'release'
+  | 'nativeGrant'
+  | 'nativeDismiss';
 
 export interface BrowserTab {
   id: string;
@@ -25,6 +32,11 @@ export interface BrowserView {
   available: boolean;
   reason?: string;
   canStreamInteract: boolean;
+  supportsSharedInput?: true;
+  sharedInput?: true;
+  nativePresentation?: true;
+  renderPlacement?: 'client' | 'server';
+  rendererId?: string;
   phase: BrowserPhase;
   sessionId?: string;
   pageId?: string;
@@ -34,6 +46,7 @@ export interface BrowserView {
   lease?: string;
   sensitive?: boolean;
   sensitiveReason?: string;
+  fallbackToSystemBrowser?: boolean;
   attentionRequested?: boolean;
   attentionMessage?: string;
   stepText?: string;
@@ -68,6 +81,7 @@ export interface OwnedLease {
 
 export type PendingControlAction =
   | null
+  | 'sharing'
   | 'taking'
   | 'handing-back'
   | 'releasing'
@@ -88,12 +102,13 @@ export interface BoundingRectLike {
 }
 
 export const POLL_INTERVAL_ACTIVE_MS = 380;
+export const POLL_INTERVAL_LOCAL_FRAME_MS = 80;
 export const POLL_INTERVAL_WATCH_MS = 650;
 export const POLL_INTERVAL_IDLE_MS = 1800;
 export const STREAM_DEGRADE_TIMEOUT_MS = 5000;
 export const MAX_FRAME_BASE64_LENGTH = 4 * 1024 * 1024;
 export const MAX_TEXT_INPUT_LENGTH = 1000;
-export const ZOOM_STEPS: readonly number[] = [1, 1.5, 2, 2.5];
+export const ZOOM_STEPS: readonly number[] = [1, 1.25, 1.5, 2, 2.5, 3];
 
 const ALLOWED_PHASES = new Set<BrowserPhase>(['bot', 'taking', 'human', 'held']);
 const ALLOWED_FRAME_MIMES = new Set<BrowserFrame['mimeType']>([
@@ -248,6 +263,7 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
 
   const pageId = asNonEmptyString(obj.pageId);
   const sessionId = asNonEmptyString(obj.sessionId);
+  const rendererId = asNonEmptyString(obj.rendererId);
   const reason = asNonEmptyString(obj.reason);
   const holderLabel = asNonEmptyString(obj.holderLabel);
   const lease = asNonEmptyString(obj.lease);
@@ -265,6 +281,11 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
     available,
     ...(reason ? { reason } : {}),
     canStreamInteract,
+    ...(obj.supportsSharedInput === true ? { supportsSharedInput: true as const } : {}),
+    ...(phase === 'human' && obj.sharedInput === true ? { sharedInput: true as const } : {}),
+    ...(obj.nativePresentation === true ? { nativePresentation: true as const } : {}),
+    ...(obj.renderPlacement === 'client' || obj.renderPlacement === 'server' ? { renderPlacement: obj.renderPlacement } : {}),
+    ...(rendererId ? { rendererId } : {}),
     phase,
     ...(sessionId ? { sessionId } : {}),
     ...(pageId ? { pageId } : {}),
@@ -274,6 +295,9 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
     ...(lease ? { lease } : {}),
     ...(sensitive ? { sensitive: true } : {}),
     ...(sensitiveReason ? { sensitiveReason } : {}),
+    ...(obj.fallbackToSystemBrowser === true || obj.requiresSystemBrowser === true
+      ? { fallbackToSystemBrowser: true }
+      : {}),
     ...(attentionRequested ? { attentionRequested: true } : {}),
     ...(attentionMessage ? { attentionMessage } : {}),
     ...(stepText ? { stepText } : {}),
@@ -371,7 +395,7 @@ export function confirmTakeoverLease(
   view: BrowserView | null,
   fallbackLease?: string | null,
 ): OwnedLease | null {
-  if (!view || !view.available || !view.canStreamInteract) return null;
+  if (!view?.available || (!view.canStreamInteract && !view.nativePresentation)) return null;
   if (view.phase !== 'human') return null;
   if (view.isHolder === false) return null;
   const lease = view.lease ?? asNonEmptyString(fallbackLease);
@@ -388,7 +412,7 @@ export function reconcileLeaseWithView(
   owned: OwnedLease | null,
   view: BrowserView,
 ): { nextLease: OwnedLease | null; isHolder: boolean; preemptedBy: string | null } {
-  if (!view.available || !view.canStreamInteract) {
+  if (!view.available || (!view.canStreamInteract && !view.nativePresentation)) {
     return { nextLease: null, isHolder: false, preemptedBy: null };
   }
 
@@ -515,6 +539,7 @@ export function classifyBrowserError(error: unknown): {
 
 export function classifyPageUrl(rawUrl: string | undefined): {
   isGoogleAuth: boolean;
+  isGoogleSignInRejected: boolean;
   isCloudSecretArea: boolean;
   isKnownSensitiveUrl: boolean;
   isHttpUrl: boolean;
@@ -525,6 +550,7 @@ export function classifyPageUrl(rawUrl: string | undefined): {
   if (!trimmed) {
     return {
       isGoogleAuth: false,
+      isGoogleSignInRejected: false,
       isCloudSecretArea: false,
       isKnownSensitiveUrl: false,
       isHttpUrl: false,
@@ -547,12 +573,17 @@ export function classifyPageUrl(rawUrl: string | undefined): {
       (host.endsWith('.google.com') &&
         (pathname.includes('/o/oauth2') || pathname.includes('/signin/oauth')));
 
+    const isGoogleSignInRejected =
+      parsed.origin === 'https://accounts.google.com' && !parsed.username && !parsed.password &&
+      /^\/(?:v\d+\/)?signin\/rejected\/?$/.test(pathname);
+
     const isCloudSecretArea =
       host === 'console.cloud.google.com' &&
       (pathname.includes('/apis/credentials') || pathname.includes('/auth/clients'));
 
     return {
       isGoogleAuth,
+      isGoogleSignInRejected,
       isCloudSecretArea,
       isKnownSensitiveUrl: isGoogleAuth,
       isHttpUrl,
@@ -562,6 +593,7 @@ export function classifyPageUrl(rawUrl: string | undefined): {
   } catch {
     return {
       isGoogleAuth: false,
+      isGoogleSignInRejected: false,
       isCloudSecretArea: false,
       isKnownSensitiveUrl: false,
       isHttpUrl: false,
@@ -677,6 +709,15 @@ export function mapKeyboardEventKey(key: string): string | null {
   return SPECIAL_KEY_MAP[key] ?? null;
 }
 
+export type ClientBrowserUnavailableKind = 'window-closed' | 'disconnected' | null;
+
+export function classifyClientBrowserUnavailable(view: BrowserView | null): ClientBrowserUnavailableKind {
+  if (!view || view.available) return null;
+  if (view.reason === 'client_browser_window_closed') return 'window-closed';
+  if (view.reason === 'client_browser_disconnected') return 'disconnected';
+  return null;
+}
+
 export function buildBrowserRequest(
   action: BrowserControlAction,
   params: {
@@ -687,6 +728,7 @@ export function buildBrowserRequest(
     url?: string;
     event?: BrowserInputEvent;
     force?: boolean;
+    shared?: boolean;
   },
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
@@ -703,6 +745,7 @@ export function buildBrowserRequest(
   }
   if (params.event) payload.event = params.event;
   if (params.force === true) payload.force = true;
+  if (action === 'takeover' && params.shared === true) payload.shared = true;
   return payload;
 }
 
@@ -713,4 +756,19 @@ export function activeTabOf(view: BrowserView | null): BrowserTab | null {
     if (found) return found;
   }
   return view.tabs[0] ?? null;
+}
+
+export function resolveExternalGuideUrl(view: BrowserView | null): string {
+  const consoleUrl = 'https://console.cloud.google.com/';
+  const currentUrl = activeTabOf(view)?.url;
+  // The rejection URL may contain Google session data. Restart from Cloud Console.
+  if (classifyPageUrl(currentUrl).isGoogleSignInRejected) return consoleUrl;
+
+  for (const candidate of [view?.externalUrl, currentUrl]) {
+    if (!candidate) continue;
+    const meta = classifyPageUrl(candidate);
+    if (meta.isGoogleSignInRejected) return consoleUrl;
+    if (meta.isHttpUrl) return candidate;
+  }
+  return consoleUrl;
 }

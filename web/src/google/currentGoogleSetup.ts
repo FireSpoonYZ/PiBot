@@ -2,7 +2,7 @@
 // and wire-safe mutation guard builder for the active Google Setup wizard.
 // Intentionally free of React/CSS runtime imports so it can be unit-tested directly.
 import type { ChatToolCallItem, ChatTurn } from '../chatTurnModel';
-import type { GoogleSetupControlState, GoogleSetupPresentation } from './types';
+import type { GoogleSetupControlCall, GoogleSetupControlState, GoogleSetupPresentation } from './types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -68,6 +68,41 @@ export function isTerminalGoogleSetupState(state: string | null | undefined): bo
 
 export function isActiveGoogleSetupState(state: string | null | undefined): boolean {
   return state === 'running' || state === 'failed';
+}
+
+export interface GoogleSignInRejectionContext {
+  pageId: string | undefined;
+  isCurrent: () => boolean;
+}
+
+export async function continueGoogleSetupAfterSignInRejection(
+  request: GoogleSetupControlCall,
+  openExternal: (url: string) => Promise<void>,
+  rejection?: GoogleSignInRejectionContext,
+): Promise<boolean> {
+  if (rejection && !rejection.isCurrent()) return false;
+  const current = rejection?.pageId ? await request({ action: 'status' }) : null;
+  if (rejection && !rejection.isCurrent()) return false;
+  if (!current || !rejection || current.browserPageId !== rejection.pageId ||
+      !current.id || !isActiveGoogleSetupState(current.state)) {
+    await openExternal(GOOGLE_CONSOLE_ORIGIN + '/');
+    return false;
+  }
+  if (current.unavailable) throw new Error('Google setup is unavailable');
+
+  const next = await request({
+    action: 'resume',
+    mode: 'guide-browser',
+    runId: current.id,
+    expectedRevision: current.revision,
+  });
+  if (!rejection.isCurrent()) return false;
+  if (next.id !== current.id || next.unavailable || next.mode !== 'guide-browser' || isStaleGoogleSetupResult(next)) {
+    throw new Error('Google setup could not switch to external guidance');
+  }
+  const url = googleSetupConsoleUrl(next.step, next);
+  if (url) await openExternal(url);
+  return rejection.isCurrent();
 }
 
 export function isActiveGoogleSetupPresentation(
@@ -188,7 +223,8 @@ export function deriveGoogleSetupAttention(
     Boolean(blocker) ||
     Boolean(personStep) ||
     OPERATOR_ACTION_CARDS.has(card) ||
-    (mode === 'guide-browser' && Boolean(step));
+    ((mode === 'guide-browser' || mode === 'guide-here') && Boolean(step)) ||
+    (mode === 'do-it-for-me' && step === 'account');
 
   return { runId, stepKey, needsOperatorAction };
 }
@@ -499,6 +535,17 @@ export function isStaleGoogleSetupResult(
 
 const GOOGLE_CONSOLE_ORIGIN = 'https://console.cloud.google.com';
 const GOOGLE_PROJECT_ID_RE = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/;
+
+export function automaticGoogleClientSetup(setup: GoogleSetupControlState | null | undefined) {
+  if (setup?.state !== 'running' || setup.mode !== 'do-it-for-me' || setup.step !== 'client' ||
+      setup.center?.isAdmin === false || setup.personStep === 'client' || !setup.id || !setup.account ||
+      !setup.projectId || !GOOGLE_PROJECT_ID_RE.test(setup.projectId)) return null;
+  const project = Array.isArray(setup.steps)
+    ? setup.steps.find(item => (item.step ?? item.id) === 'project')
+    : setup.steps?.project;
+  if (project?.status !== 'done') return null; // Direct credential import is not an automatic creation request.
+  return { runId: setup.id, projectId: setup.projectId, account: setup.account };
+}
 
 const CHOICE_CONSOLE_APIS: Record<string, readonly string[]> = {
   gmail: ['gmail.googleapis.com'],

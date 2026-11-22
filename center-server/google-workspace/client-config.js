@@ -211,13 +211,13 @@ export function parseGoogleWebClientFile(fileText, expectedRedirectUri) {
 
 /**
  * Validates the `manage('configure', input)` payload.
- * Accepts either `{ clientFile }` or `{ clientId, clientSecret, projectId? }`.
+ * Automatic first-time setup requires a Web JSON file for the exact project.
  */
 export function parseGoogleClientConfigureInput(input, expectedRedirectUri) {
   if (!isPlainObject(input)) {
     throw fail('INVALID_ARGUMENT', 'Expected a configuration object.');
   }
-  const allowedKeys = new Set(['clientFile', 'clientId', 'clientSecret', 'projectId']);
+  const allowedKeys = new Set(['clientFile', 'clientId', 'clientSecret', 'projectId', 'ifUnconfigured']);
   for (const key of Object.keys(input)) {
     if (!allowedKeys.has(key)) {
       throw fail('INVALID_ARGUMENT', `Unexpected configuration field: ${key}`);
@@ -226,6 +226,10 @@ export function parseGoogleClientConfigureInput(input, expectedRedirectUri) {
 
   const hasFile = input.clientFile !== undefined && input.clientFile !== null;
   const hasDirect = input.clientId !== undefined || input.clientSecret !== undefined;
+  const automatic = input.ifUnconfigured === true;
+  if (input.ifUnconfigured !== undefined && (!automatic || !hasFile || !input.projectId)) {
+    throw fail('INVALID_ARGUMENT', 'Automatic Google setup requires a Web client file and project ID.');
+  }
   if (hasFile && hasDirect) {
     throw fail(
       'INVALID_ARGUMENT',
@@ -236,6 +240,9 @@ export function parseGoogleClientConfigureInput(input, expectedRedirectUri) {
   if (hasFile) {
     const parsed = parseGoogleWebClientFile(input.clientFile, expectedRedirectUri);
     const overrideProjectId = validateOptionalProjectId(input.projectId);
+    if (automatic && (!overrideProjectId || parsed.projectId !== overrideProjectId)) {
+      throw fail('INVALID_ARGUMENT', 'The Google Web OAuth client file is not for this project.');
+    }
     const projectId = overrideProjectId ?? parsed.projectId;
     return {
       clientId: parsed.clientId,

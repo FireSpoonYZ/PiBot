@@ -28,18 +28,32 @@ import {
   googleSetupActionsLine,
   googleSetupBlockerLine,
   googleSetupChoicesWords,
+  googleSetupDoneRefusal,
 } from './blocker.js';
 import {
   currentGoogleSetupStep,
+  googleSetupAwaitsClient,
+  googleSetupNeedsKind,
   GOOGLE_SETUP_STEPS,
   personDoesGoogleSetupStep,
 } from './rules.js';
+import {
+  GOOGLE_SETUP_CARD_PRESENTATION,
+  googleSetupCardKey as orcaGoogleSetupCardKey,
+  isNewestGoogleSetupCard as orcaIsNewestGoogleSetupCard,
+} from './vendor/orca/google-setup-card.js';
+import {
+  googleSetupCardsDue as orcaGoogleSetupCardsDue,
+  googleSetupWaitingCard as orcaGoogleSetupWaitingCard,
+  personsTurn as orcaPersonsTurn,
+} from './vendor/orca/google-setup-chat-cards.js';
 
-export const GOOGLE_SETUP_CARD_PRESENTATION = 'google-setup';
+export { GOOGLE_SETUP_CARD_PRESENTATION };
 
 export const GOOGLE_SETUP_CARD_KINDS = Object.freeze([
   'path',
   'account',
+  'kind',
   'services',
   'progress',
   'step',
@@ -54,19 +68,19 @@ export const GOOGLE_WEB_LOGIN_BOUNDARY_NOTICE =
   'Signing into Google inside the bot browser does not grant Google API access (Google API grant != browser web login). Complete Google API authorization in your system browser.';
 
 export function googleSetupCardKey(ref) {
-  return ref?.step ? `step:${ref.step}` : String(ref?.card ?? '');
+  return String(orcaGoogleSetupCardKey(ref ?? {}) ?? '');
 }
 
 export function isNewestGoogleSetupCard(run, ref) {
   if (!run || !ref || run.id !== ref.runId) return false;
-  return (run.cardCopies?.[googleSetupCardKey(ref)] ?? 0) === (ref.copy ?? 0);
+  return orcaIsNewestGoogleSetupCard(run, ref);
 }
 
 function personsTurn(run, step) {
-  const status = run?.steps?.[step]?.status;
+  if (!run?.steps) return false;
   return (
-    status === 'needs-user' ||
-    (status === 'active' && run !== null && personDoesGoogleSetupStep(run, step))
+    orcaPersonsTurn(run, step) ||
+    (run.steps[step]?.status === 'active' && run.browserLock?.active === true && run.browserLock.step === step)
   );
 }
 
@@ -92,25 +106,15 @@ export function googleSetupCardsDue(prev, next) {
     ...(step ? { step } : {}),
   });
 
+  if (next.state !== 'running') return orcaGoogleSetupCardsDue(before, next);
+
   if (!before) {
-    if (next.state !== 'running') return [];
     if (clientDone(next)) {
       return [answered(next, 'services') ? ref('connect') : ref('services')];
     }
-    if (!answered(next, 'path') || next.mode === 'unchosen') {
-      return [ref('path')];
-    }
-    return [answered(next, 'services') ? ref('progress') : ref('services')];
-  }
-
-  if (next.state === 'done') {
-    return before.state === 'done' ? [] : [ref('connected')];
-  }
-  if (next.state === 'failed') {
-    return before.state === 'failed' ? [] : [ref('progress')];
-  }
-  if (next.state !== 'running') {
-    return [];
+    if (!next.answers) return [ref('path')];
+    if (googleSetupWaitingCard(next)?.card === 'kind') return [ref('kind')];
+    return orcaGoogleSetupCardsDue(null, next);
   }
 
   const due = [];
@@ -141,8 +145,14 @@ export function googleSetupCardsDue(prev, next) {
     due.push(ref('account'));
   }
 
+  const kindDue = googleSetupWaitingCard(next)?.card === 'kind';
+  const wasWaitingOnKind = googleSetupWaitingCard(before)?.card === 'kind';
+  if (kindDue && !wasWaitingOnKind) due.push(ref('kind'));
+
   for (const step of GOOGLE_SETUP_STEPS) {
-    if (step !== 'connect' && personsTurn(next, step) && !personsTurn(before, step)) {
+    if (step === 'branding' && kindDue) continue;
+    const wasPersonsTurn = personsTurn(before, step) && !(step === 'branding' && wasWaitingOnKind);
+    if (step !== 'connect' && personsTurn(next, step) && !wasPersonsTurn) {
       // Avoid duplicate client step card when directConfigure already queued it.
       if (!due.some((item) => item.card === 'step' && item.step === step)) {
         due.push(ref('step', step));
@@ -169,7 +179,7 @@ export function googleSetupCardsDue(prev, next) {
 export function googleSetupWaitingCard(run) {
   if (!run || run.state !== 'running') return null;
   const base = { botId: run.botId, runId: run.id };
-  if (clientDone(run)) {
+  if (!googleSetupAwaitsClient(run)) {
     if (!answered(run, 'services') && !(run.services?.length > 0)) {
       return { ...base, card: 'services' };
     }
@@ -186,14 +196,13 @@ export function googleSetupWaitingCard(run) {
   if ((run.accounts?.length ?? 0) > 1 && !run.account && !answered(run, 'account')) {
     return { ...base, card: 'account' };
   }
+  if (googleSetupNeedsKind(run)) return { ...base, card: 'kind' };
+
+  if (!run.browserLock?.active && run.steps) {
+    return orcaGoogleSetupWaitingCard(run) ?? { ...base, card: 'progress' };
+  }
   const handed = GOOGLE_SETUP_STEPS.find((step) => personsTurn(run, step) && step !== 'connect');
-  if (handed) {
-    return { ...base, card: 'step', step: handed };
-  }
-  if (run.clientMissed) {
-    return { ...base, card: 'progress' };
-  }
-  return { ...base, card: 'progress' };
+  return handed ? { ...base, card: 'step', step: handed } : { ...base, card: 'progress' };
 }
 
 /**
@@ -217,7 +226,7 @@ export function stepTitle(step, choices = []) {
   const servicesText = googleSetupChoicesWords(choices);
   switch (step) {
     case 'account':
-      return 'Choose Google account & audience';
+      return 'Choose Google account';
     case 'project':
       return 'Create Google Cloud project';
     case 'apis':
@@ -371,6 +380,19 @@ export function buildSetupCard(ref, run, context = {}) {
       };
     }
 
+    case 'kind': {
+      return {
+        ...base,
+        title: 'Choose the Google OAuth audience',
+        summary: 'Choose who will sign in to this Google OAuth app.',
+        options: [
+          { id: 'personal', label: 'Personal or external users', description: 'Select External in Google Cloud.' },
+          { id: 'work', label: 'Workspace organization only', description: 'Select Internal if the project belongs to that organization and only its members will use the app.' },
+        ],
+        fallbackText: 'Google setup: choose the OAuth audience on the setup card. Select External for personal or external users, or Internal for members of the project’s Workspace organization only.',
+      };
+    }
+
     case 'step': {
       const step = ref.step ?? currentGoogleSetupStep(run) ?? 'account';
       const consoleUrl = googleConsoleStepUrl(step, {
@@ -393,11 +415,15 @@ export function buildSetupCard(ref, run, context = {}) {
             ? {
                 kind: 'policy-consent',
                 botLocked: true,
-                notice:
-                  'Only you may accept the Google API Services: User Data Policy. Take over the page to tick the box and finish, then hand back.',
+                notice: run.mode === 'do-it-for-me'
+                  ? 'Only you may accept the Google API Services: User Data Policy. Finish on Google, then choose Done here so the bot can continue.'
+                  : 'Only you may accept the Google API Services: User Data Policy. Take over the page to tick the box and finish, then hand back.',
               }
             : null;
       const stepNote = run.steps?.[step]?.note;
+      const summary = stepNote ?? stepOwnerSummary(step, {
+        choices, brandingLinks, mode: run.mode, projectId: run.projectId,
+      });
       const actions = blocker?.actions ?? (
         step === 'client'
           ? [{ id: 'configure-client' }, { id: 'check-again' }]
@@ -407,7 +433,7 @@ export function buildSetupCard(ref, run, context = {}) {
         ...base,
         step,
         title: stepTitle(step, choices),
-        summary: stepNote ?? stepOwnerSummary(step, { choices, brandingLinks, projectId: run.projectId }),
+        summary,
         consoleUrl,
         ...(step === 'apis' ? { apiIds: googleConsoleApiIds(choices) } : {}),
         ...(step === 'links' ? { brandingLinks } : {}),
@@ -422,7 +448,7 @@ export function buildSetupCard(ref, run, context = {}) {
           ...action,
           label: googleSetupActionLabel(action),
         })),
-        fallbackText: `Google setup — ${stepTitle(step, choices)}: ${stepNote ?? stepOwnerSummary(step, { choices, brandingLinks, projectId: run.projectId })}`,
+        fallbackText: `Google setup — ${stepTitle(step, choices)}: ${summary}`,
       };
     }
 
@@ -505,12 +531,17 @@ export function buildSetupCard(ref, run, context = {}) {
   }
 }
 
-function stepOwnerSummary(step, { choices, brandingLinks, projectId }) {
+function stepOwnerSummary(step, { choices, brandingLinks, mode, projectId }) {
   switch (step) {
     case 'account':
-      return 'Confirm which Google account owns this Google Cloud project, and whether it uses a Google Workspace organization (Internal) or personal Gmail (External).';
+      return 'Confirm which Google account owns this Google Cloud project.';
     case 'project':
-      return 'Create a new Google Cloud project and provide its Project ID so subsequent steps open that project directly.';
+      if (mode !== 'guide-browser') {
+        return 'Create the project in the built-in browser. PiBot reads the Project ID when the project page opens with project= in the address.';
+      }
+      return projectId
+        ? 'Confirm that the Google Cloud project is ready, then continue.'
+        : 'Create the Google Cloud project, then enter the Project ID from the page address (the value of project=) to continue.';
     case 'apis': {
       const ids = googleConsoleApiIds(choices).join(', ');
       return `Enable the required project APIs (${ids}). Enabling APIs turns on project capabilities only and does not authorize personal data.`;
@@ -699,7 +730,21 @@ export function buildBotGuidance(run, context = {}) {
     allowedBrowserActions = 'drive';
   }
 
-  if (blocker) {
+  if ((step === 'connect' || step === null) && googleSetupDoneRefusal(run, centerStatus) === null) {
+    return {
+      phase: 'active-step',
+      step,
+      mode: run.mode,
+      allowedBrowserActions,
+      consoleUrl,
+      nextAction:
+        'Center verified the connected account and all selected services. Call google_setup(action="done") to finish the setup card. No owner action is needed.',
+      neverRules,
+    };
+  }
+
+  if (blocker && !(step === 'client' && blocker.kind === 'needs-user' && blocker.step === 'client' &&
+      canAutoConfigureWebClient(run, centerStatus))) {
     return {
       phase: 'blocked',
       step,
@@ -709,6 +754,17 @@ export function buildBotGuidance(run, context = {}) {
       blockerLine: googleSetupBlockerLine(blocker),
       ownerButtons: googleSetupActionsLine(blocker),
       nextAction: `Waiting on owner: ${googleSetupBlockerLine(blocker)} Tell them in one line what is true and name only these card buttons: ${googleSetupActionsLine(blocker)}.`,
+      neverRules,
+    };
+  }
+
+  if (googleSetupWaitingCard(run)?.card === 'kind') {
+    return {
+      phase: 'awaiting-kind',
+      step,
+      mode: run.mode,
+      allowedBrowserActions: 'none',
+      nextAction: 'End your turn and wait for the owner to select the audience on the Google setup card. If the owner already chose an audience in chat, record it with google_setup(action="record_typed_answer", card="kind", values=["personal"] or ["work"]). Do not open a separate questionnaire.',
       neverRules,
     };
   }
@@ -736,6 +792,12 @@ export function buildBotGuidance(run, context = {}) {
   };
 }
 
+function canAutoConfigureWebClient(run, centerStatus) {
+  return run.mode === 'do-it-for-me' && run.personStep !== 'client' && Boolean(run.account && run.projectId) &&
+    run.steps?.project?.status === 'done' && centerStatus?.client?.supportsAutoConfigure === true &&
+    centerStatus?.isAdmin !== false;
+}
+
 function buildStepInstruction(step, {
   run,
   choices,
@@ -755,30 +817,39 @@ function buildStepInstruction(step, {
       if (run.mode === 'guide-browser') {
         return {
           nextAction:
-            'Ask in one line which Google account the owner will use for Google Cloud. Record it via google_setup(action="set", account=..., kind=...) — gmail.com/googlemail.com is personal, otherwise do not assume Workspace Internal without checking — then mark account done.',
-          doneSignal: 'Owner names the Google account and work/personal audience.',
+            'Ask in one line which Google account the owner will use for Google Cloud. Record it via google_setup(action="set", account=...), then mark account done. The setup card will ask for the OAuth audience if needed.',
+          doneSignal: 'Target Google account recorded on the setup run.',
+        };
+      }
+      if (run.browserPageId) {
+        return {
+          browserPageId: run.browserPageId,
+          nextAction:
+            `Reuse the Google Cloud Console tab (pageId=${run.browserPageId}). If it has been closed, ask the owner to reopen it from the current card. If Google asks to sign in, stop and let the owner take over or switch to guide-browser. Once they return to Cloud Console, read the Account label on that tab: record one account with set(account), or use set(accounts=[...]) so the owner picks.`,
+          doneSignal: 'Target Google account recorded on the setup run.',
         };
       }
       return {
         nextAction:
-          `Open ${consoleUrl} in the bot browser (save its pageId with google_setup(action="set", browserPageId=...)). If Google asks to sign in, STOP immediately (accounts.google.com is sensitive) and let the owner sign in via takeover or switch to guide-browser. Once signed in on Cloud Console, read the Account label: if one account, record it with set(account); if multiple, record set(accounts=[...]) so the owner picks on the account card.`,
+          'The wizard has not opened a Google Cloud tab yet. Ask the owner to open the Google sign-in page from the current card or switch to guide-browser, then end your turn.',
         doneSignal: 'Target Google account recorded on the setup run.',
       };
 
     case 'project':
       if (run.mode === 'guide-browser') {
         return {
-          nextAction:
-            'Mark project active so the owner gets the Create project step card. Ask them to create the project in their browser, press Done, and share the Project ID (shown under the name or in ?project=...). Record it with set(projectId=...).',
-          doneSignal: 'Owner provides valid Google Cloud Project ID and marks project done.',
+          nextAction: run.projectId
+            ? 'Mark project active and wait for the owner to confirm the project on the setup card. Use the recorded Project ID.'
+            : 'Mark project active so the owner gets the Create project card. The card asks for the Project ID from the console address once the project is created. If the owner provides it in chat, record it with set(projectId=...). Wait for their confirmation on the card.',
+          doneSignal: 'The Project ID is recorded and the owner has marked the project done.',
         };
       }
       return {
         nextAction:
           allowedBrowserActions === 'drive'
-            ? `Mark project active, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), read the generated Project ID right before clicking Create, click Create, wait until /home/dashboard?project=<id> confirms creation, call google_setup(action="set", projectId=<id>), and mark project done.`
-            : `Mark project active and open ${consoleUrl} so the owner can create the project. Do not click or fill. Once the dashboard URL shows ?project=<id>, record set(projectId=<id>) and mark project done.`,
-        doneSignal: 'Google Cloud dashboard shows ?project=<id> and projectId is saved.',
+            ? `Mark project active. Check the setup tab first. If the project still needs to be created, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), and click Create. When the Google Cloud Console opens the project outside the creation form, read project=<id> from the address (for example on /welcome or /home/dashboard). Record the ID with google_setup(action="set", projectId=<id>) and mark project done.`
+            : `Mark project active and check the setup tab. Open ${consoleUrl} if the owner still needs to create the project. Do not click or fill. When the Google Cloud Console opens the project outside the creation form, read project=<id> from the address (for example on /welcome or /home/dashboard). Record set(projectId=<id>) and mark project done.`,
+        doneSignal: 'A Google Cloud Console project page shows a valid project= in the address and projectId is saved.',
       };
 
     case 'apis': {
@@ -799,9 +870,9 @@ function buildStepInstruction(step, {
       return {
         nextAction:
           run.mode === 'guide-browser'
-            ? `Mark branding active so the owner opens ${consoleUrl} and completes Google Auth Platform (app name, support email, Internal for Workspace or External for personal, contact email, User Data Policy checkbox, and Finish). Wait for their Done and record kind (work vs personal).`
+            ? `Mark branding active so the owner opens ${consoleUrl} and completes Google Auth Platform (app name, support email, the recorded audience, contact email, User Data Policy checkbox, and Finish). Wait for their Done.`
             : allowedBrowserActions === 'drive'
-              ? `Mark branding active, open ${consoleUrl}, click Get started, fill non-sensitive fields (app name, support email, Internal/External audience — confirm kind with set(kind), never assume work purely from email domain — and contact email). STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Tick the User Data Policy checkbox under Finish and submit"). Do not click or tick any terms box.`
+              ? `Mark branding active, open ${consoleUrl}, click Get started, and fill the non-sensitive fields (app name, support email, audience, and contact email). Use the recorded kind for the audience: work means Internal and personal means External. STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Review the User Data Policy, finish setup on Google, then choose Done on this card"). Do not click or tick any terms box.`
               : `Mark branding active and open ${consoleUrl} for the owner to complete Google Auth Platform including the User Data Policy checkbox (do not click). Call need_user if needed and wait for owner completion.`,
         doneSignal:
           'Owner ticked the User Data Policy box, finished Auth Platform setup, and overview no longer says not configured.',
@@ -823,7 +894,12 @@ function buildStepInstruction(step, {
           run.mode === 'guide-browser'
             ? `Mark links active so the owner enters ${linksNote} on ${consoleUrl} and saves. Wait for their Done.`
             : allowedBrowserActions === 'drive'
-              ? `Mark links active, open ${consoleUrl}, enter ${linksNote}, click Save, verify all three fields persisted, and mark links done.`
+              ? `Mark links active and open ${consoleUrl} in the existing setup tab. Check the stored values first: ${linksNote}. ` +
+                'If they already match with no unsaved edits, mark links done without clicking Save. Otherwise, fill the missing or different values; add a domain row only if needed and leave the optional terms link alone. ' +
+                'Take a fresh snapshot after editing (use a screenshot if it omits field values or whether Save is enabled). ' +
+                'Click Save yourself when enabled, then reopen the Branding page to verify all three values persisted before marking links done. ' +
+                'If Save is disabled and values are missing, inspect the actual validation message instead of waiting for guessed text. ' +
+                'Do not ask the owner to click Save or Done in this mode; if the browser is still held, ask only for control to be returned.'
               : `Mark links active and open ${consoleUrl} so the owner can enter ${linksNote} and Save (do not click). Verify saved and mark links done.`,
         doneSignal: 'Branding page saved with Center home page, privacy link, and authorized domain.',
       };
@@ -856,9 +932,9 @@ function buildStepInstruction(step, {
         redirectUri,
         sensitiveLockRequired: true,
         requiresSystemBrowser: mustUseSystemBrowser,
-        nextAction: mustUseSystemBrowser
-          ? `SENSITIVE BOUNDARY: Browser observation/actions are locked for client creation. Tell the owner to open ${consoleUrl} in their own system browser, choose Application type "Web application" (NOT Desktop app), add Authorized redirect URI "${redirectUri}" (tick any AI agent box if shown), click Create, and submit the resulting Client ID and Client Secret directly into PiBot's private Center configuration control. Never ask them to paste secrets in chat or download/share a secret file.`
-          : `SENSITIVE BOUNDARY: Calling step/need_user on client locks the bot browser BEFORE clicking Create so the Client Secret dialog is never observed, screenshotted, or logged. Have the owner create a "Web application" client with Authorized redirect URI "${redirectUri}" and save Client ID + Client Secret directly in the private Center configuration control. Once Center confirms client.configured=true, proceed to connect.`,
+        nextAction: canAutoConfigureWebClient(run, centerStatus)
+          ? 'SENSITIVE BOUNDARY: On a supported desktop in Do it for me, the owner-authorized private setup window creates the Web OAuth client and imports it into Center automatically. End your turn so the desktop can finish; do not ask the owner to click Create, import, or confirm. Never open or inspect the credential page with bot_browser. If the desktop reports it could not finish, use the card’s manual fallback and check for an existing client before creating another.'
+          : `SENSITIVE BOUNDARY: Do not open or inspect client creation with bot_browser. When automatic creation is unavailable, the owner creates a "Web application" client at ${consoleUrl} with Authorized redirect URI "${redirectUri}" and saves it in the private Center configuration. Never ask for credentials or screenshots containing them in chat.`,
         doneSignal: 'Trusted Center status reports client.configured === true for this project.',
       };
     }

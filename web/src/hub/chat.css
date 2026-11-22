@@ -587,66 +587,6 @@
   }
 }
 
-/* 桌面端历史用户消息可见/悬停编辑按钮（移动端使用长按 ActionSheet） */
-.bot-chat-turn-footer {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2, 8px);
-  margin-top: 5px;
-  max-width: 100%;
-}
-
-.bot-chat-turn-footer.is-user {
-  align-self: flex-end;
-}
-
-.bot-chat-turn-footer .bot-chat-turn-meta {
-  margin-top: 0;
-}
-
-.bot-chat-turn-edit-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1, 4px);
-  padding: 2px 6px;
-  border: 0;
-  border-radius: var(--radius-sm, 8px);
-  background: transparent;
-  color: var(--color-text-muted, var(--muted));
-  font-size: var(--text-xs, 0.75rem);
-  font-weight: var(--weight-medium, 500);
-  line-height: 1.2;
-  cursor: pointer;
-  transition: opacity var(--dur-fast, 150ms) ease, background-color var(--dur-fast, 150ms) ease, color var(--dur-fast, 150ms) ease;
-}
-
-@media (hover: hover) {
-  .bot-chat-turn-edit-btn {
-    opacity: 0;
-  }
-
-  .bot-chat-turn:hover .bot-chat-turn-edit-btn,
-  .bot-chat-turn:focus-within .bot-chat-turn-edit-btn {
-    opacity: 1;
-  }
-
-  .bot-chat-turn-edit-btn:hover:not(:disabled) {
-    color: var(--color-text, var(--text));
-    background: color-mix(in srgb, var(--color-text, var(--text)) 8%, transparent);
-  }
-}
-
-.bot-chat-turn-edit-btn:active:not(:disabled) {
-  color: var(--color-text, var(--text));
-  background: color-mix(in srgb, var(--color-text, var(--text)) 12%, transparent);
-}
-
-.bot-chat-turn-edit-btn:focus-visible {
-  opacity: 1;
-  outline: 2px solid var(--color-primary, var(--accent));
-  outline-offset: 2px;
-}
-
 /* 强制创建主 Bot 页底部 toast 锚点（复用 .bot-chat-toast 定位） */
 .bot-edit-toast-anchor {
   position: relative;

@@ -314,6 +314,30 @@ public class TauriMainActivity extends TauriActivity {
     }
 
     /**
+     * 剥离已由本 Activity 消费的 IME 与左右系统栏/刘海 insets 后再透传给子 {@link WebView}。
+     *
+     * <p>Android System WebView（Chromium M139+）会原生消费未剥离的 {@code Type.ime()} 来缩小
+     * Visual Viewport 并在底部输入框聚焦时上推 {@code visualViewport.offsetTop}；与本页单一通道
+     * {@code --ime-bottom} 叠加会产生 2 倍偏移（顶栏被顶出屏幕、输入框与键盘之间留出整块键盘高度空白）。
+     * 通过 {@link WindowInsetsCompat.Builder} 将 {@code Type.ime()} 置零且不可见（而非返回
+     * {@link WindowInsetsCompat#CONSUMED}），可确保子 WebView 仍正常收到回调并清除任何残留 IME 状态，
+     * 同时保留上下安全区供 {@code env(safe-area-inset-*)} 兜底。
+     */
+    static WindowInsetsCompat stripImeInsetsForChild(
+            WindowInsetsCompat windowInsets, int consumedLeftPx, int consumedRightPx) {
+        if (windowInsets == null) return null;
+        int left = Math.max(0, consumedLeftPx);
+        int right = Math.max(0, consumedRightPx);
+        WindowInsetsCompat adjusted = (left > 0 || right > 0)
+                ? windowInsets.inset(left, 0, right, 0)
+                : windowInsets;
+        return new WindowInsetsCompat.Builder(adjusted)
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .setVisible(WindowInsetsCompat.Type.ime(), false)
+                .build();
+    }
+
+    /**
      * targetSdk 36 全面屏沉浸：WebView 铺满整屏（top=0, bottom=0，不再因 IME 弹出压缩 WebView），
      * 状态栏/导航栏安全区（{@code --safe-area-inset-top/bottom}）与软键盘高度（{@code --ime-bottom}）
      * 通过单一 CSS 变量通道注入，并借助 {@code WindowInsetsAnimationCompat.Callback} 逐帧同步 IME 动画。
@@ -355,12 +379,12 @@ public class TauriMainActivity extends TauriActivity {
                             null);
                 }
             }
-            return windowInsets;
+            return stripImeInsetsForChild(windowInsets, bars.left, bars.right);
         });
         ViewCompat.setWindowInsetsAnimationCallback(
                 content,
                 new WindowInsetsAnimationCompat.Callback(
-                        WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                        WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_STOP) {
                     @Override public void onPrepare(@NonNull WindowInsetsAnimationCompat animation) {
                         if ((animation.getTypeMask() & WindowInsetsCompat.Type.ime()) != 0) {
                             insetsState.onImeAnimationPrepare(animation);
@@ -391,7 +415,7 @@ public class TauriMainActivity extends TauriActivity {
                                         null);
                             }
                         }
-                        return insets;
+                        return stripImeInsetsForChild(insets, 0, 0);
                     }
 
                     @Override public void onEnd(@NonNull WindowInsetsAnimationCompat animation) {

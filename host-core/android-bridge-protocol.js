@@ -437,6 +437,8 @@ const BOT_BROWSER_ACTIONS = new Set([
   'act',
   'input',
   'release',
+  'nativeGrant',
+  'nativeRevoke',
 ]);
 const BOT_BROWSER_SOURCES = new Set(['agent', 'human']);
 // Human operations have no durable numeric task; the manager still must pass a
@@ -489,7 +491,20 @@ function normalizeBotBrowserArguments(value) {
     throw invalid('INVALID_ARGUMENT', "bot_browser source must be 'agent' or 'human'");
   }
   const allowed = new Set(['action', 'source']);
-  if (action === 'open') {
+  if (action === 'nativeGrant' || action === 'nativeRevoke') {
+    if (value.source !== 'human' || typeof value.grantId !== 'string' || !/^[A-Za-z0-9_-]{16,96}$/.test(value.grantId)) {
+      throw invalid('INVALID_ARGUMENT', 'bot_browser native presentation requires a human grant');
+    }
+    allowed.add('grantId');
+    if (action === 'nativeGrant') {
+      assertId(value.pageId, 'pageId');
+      if (!Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0) {
+        throw invalid('INVALID_ARGUMENT', 'bot_browser native grant requires an expiry');
+      }
+      allowed.add('pageId');
+      allowed.add('expiresAt');
+    }
+  } else if (action === 'open') {
     allowed.add('url');
     allowed.add('width');
     allowed.add('height');
@@ -610,6 +625,10 @@ export function normalizeNativeRequest(request) {
     assertId(actor.scopeId, 'actor.scopeId');
   }
   const taskId = normalizeNativeTaskId(request.taskId, request.tool);
+  if (request.tool === 'bot_browser' && (args.action === 'nativeGrant' || args.action === 'nativeRevoke') &&
+      (typeof taskId !== 'string' || !HUMAN_TASK_ID_RE.test(taskId))) {
+    throw invalid('INVALID_ARGUMENT', 'bot_browser native presentation requires a human taskId');
+  }
   return {
     context: {
       deviceId: actor.deviceId,

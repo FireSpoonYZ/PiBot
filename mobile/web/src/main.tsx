@@ -147,26 +147,53 @@ const isEditableField = (el: Element | null): el is HTMLElement => {
   return el.isContentEditable;
 };
 
-/** F3：WebView 不再随软键盘缩放后，监听 --ime-bottom 增长与 focusin，确保表单输入框滚入可视区。 */
+/** F3：WebView 不再随软键盘缩放后，监听 --ime-bottom 增长与 focusin，确保表单输入框滚入可视区，
+ *  并兜底归零外层文档与未缩放 visualViewport 的纵向偏移，杜绝与 --ime-bottom 叠加形成双倍上移。 */
 function useImeFocusScrollIntoView() {
   useEffect(() => {
     if (typeof window === 'undefined' || typeof document === 'undefined') return;
     let lastImeBottom = readImeBottomCssPx();
     let rafId = 0;
 
+    const resetRootViewportScroll = () => {
+      const vv = window.visualViewport;
+      if (vv && Number.isFinite(vv.scale) && vv.scale > 1.01) return;
+      const docEl = document.documentElement;
+      const body = document.body;
+      if (
+        window.scrollY !== 0 ||
+        window.scrollX !== 0 ||
+        (docEl && (docEl.scrollTop !== 0 || docEl.scrollLeft !== 0)) ||
+        (body && (body.scrollTop !== 0 || body.scrollLeft !== 0)) ||
+        (vv && (vv.offsetTop > 0 || vv.offsetLeft > 0))
+      ) {
+        if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+        if (docEl) {
+          docEl.scrollTop = 0;
+          docEl.scrollLeft = 0;
+        }
+        if (body) {
+          body.scrollTop = 0;
+          body.scrollLeft = 0;
+        }
+      }
+    };
+
     const scheduleScroll = (preferredTarget?: Element | null) => {
       if (rafId !== 0) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         rafId = 0;
+        resetRootViewportScroll();
         const activeEl =
           preferredTarget && preferredTarget.isConnected
             ? preferredTarget
             : document.activeElement;
         if (!isEditableField(activeEl)) return;
-        // 聊天输入区已紧贴 #root 的 --ime-bottom 底部让位上方，无需 scrollIntoView。
-        if (activeEl.closest('.grok-chat-composer-area')) return;
+        // 聊天输入区与主页底栏已紧贴 #root 的 --ime-bottom 底部让位上方，无需 scrollIntoView。
+        if (activeEl.closest('.grok-chat-composer-area, .hub-bottom-bar')) return;
         if (typeof activeEl.scrollIntoView === 'function') {
           activeEl.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+          resetRootViewportScroll();
         }
       });
     };
@@ -179,6 +206,7 @@ function useImeFocusScrollIntoView() {
           : readImeBottomCssPx();
       const increased = nextIme > lastImeBottom;
       lastImeBottom = nextIme;
+      resetRootViewportScroll();
       if (increased && nextIme > 0) {
         scheduleScroll();
       }
@@ -191,24 +219,32 @@ function useImeFocusScrollIntoView() {
       } else {
         lastImeBottom = readImeBottomCssPx();
       }
+      resetRootViewportScroll();
     };
 
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (!isEditableField(target)) return;
+      resetRootViewportScroll();
       const currentIme = Math.max(lastImeBottom, readImeBottomCssPx());
-      if (currentIme > 0 && isEditableField(target)) {
+      if (currentIme > 0) {
         scheduleScroll(target);
       }
     };
 
+    const vv = window.visualViewport;
     window.addEventListener('pibot:ime-change', onImeChange);
     window.addEventListener('pibot:insets-ready', onInsetsReady);
     document.addEventListener('focusin', onFocusIn);
+    vv?.addEventListener('scroll', resetRootViewportScroll);
+    vv?.addEventListener('resize', resetRootViewportScroll);
     return () => {
       if (rafId !== 0) cancelAnimationFrame(rafId);
       window.removeEventListener('pibot:ime-change', onImeChange);
       window.removeEventListener('pibot:insets-ready', onInsetsReady);
       document.removeEventListener('focusin', onFocusIn);
+      vv?.removeEventListener('scroll', resetRootViewportScroll);
+      vv?.removeEventListener('resize', resetRootViewportScroll);
     };
   }, []);
 }

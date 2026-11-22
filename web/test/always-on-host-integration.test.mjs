@@ -60,7 +60,7 @@ function pendingLiveQuestionnaires(liveState) {
 
 // Real Host, control protocol, plugin loader, SDK task scheduler and SQLite. Only
 // Center configuration/credentials and the LLM provider are replaced by fixtures.
-async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0 } = {}) {
+async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0, googleSetup = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pibot-always-on-e2e-'));
   const dataRoot = join(root, 'host');
   const cwd = join(root, 'workspace');
@@ -106,6 +106,10 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   const centerClient = { providerAuth: async () => ({ auth: { apiKey: 'fixture-key' }, source: 'center' }) };
   const centerRuntime = {
     snapshot: { protocol: 1 },
+    ...(googleSetup ? {
+      centerUrl: 'https://center.example.test',
+      getGoogleStatus: async () => ({ reachable: true, isAdmin: true, client: { configured: false }, accounts: [] }),
+    } : {}),
     installer: {
       async getInstalled(id, selector) {
         assert.equal(id, INSTALLATION);
@@ -134,7 +138,22 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   });
   async function start() {
     const opening = await openControlServer({ port: 0, token, deferResume: true, dataRoot,
-      nativeBridge: async () => ({}), centerRuntime });
+      nativeBridge: async () => ({}), centerRuntime,
+      ...(googleSetup ? { createBrowserProvider: () => {
+        let url = null;
+        return {
+          async perform(input) {
+            if (input.action === 'open') url = input.url;
+            return {
+              available: true, canStreamInteract: true,
+              ...(url ? { pageId: 'fixture-google-page', url } : {}),
+              tabs: url ? [{ id: 'fixture-google-page', url }] : [],
+            };
+          },
+          async close() {},
+        };
+      } } : {}),
+    });
     server = opening;
     try {
       client = createControlClient({ url: opening.url, token });
@@ -277,6 +296,122 @@ test('real Host schedule handoff keeps its Stop fence across restart and private
       botId: f.bot.botId, requestId: 'forged-request', text: 'forged route', ...extra,
     }), { code: 'INVALID_ARGUMENT' });
   }
+});
+
+test('Google setup sends committed revisions to both chat watches without a Bot turn', async t => {
+  const f = await hostFixture(t, { googleSetup: true, extraBots: 1 });
+  const [otherBot] = f.peerBots;
+  const phone = f.watchLive();
+  const desktop = f.watchLive();
+  const unrelated = f.watchLive(otherBot.botId);
+  await until(() => phone.state && desktop.state && unrelated.state, 'initial chat snapshots');
+  assert.equal(phone.state.googleSetupRevision, undefined);
+  const historyBefore = await f.history();
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+
+  const start = await control({ action: 'start' });
+  await until(() => phone.state.googleSetupRevision === start.revision &&
+    desktop.state.googleSetupRevision === start.revision, 'new run on both watches');
+
+  const selected = await control({
+    action: 'answer', card: 'path', values: ['guide-browser'], runId: start.id,
+    expectedRevision: start.revision, cardCopy: start.card.copy,
+  });
+  assert.equal(selected.card.card, 'services');
+  await until(() => phone.state.googleSetupRevision === selected.revision &&
+    desktop.state.googleSetupRevision === selected.revision, 'next card on both watches');
+  assert.equal((await control({ action: 'status' })).revision, selected.revision);
+
+  const reconnected = f.watchLive();
+  await until(() => reconnected.state?.googleSetupRevision === selected.revision, 'revision in a new watch snapshot');
+  const cancelled = await control({ action: 'cancel', runId: start.id, expectedRevision: selected.revision });
+  assert.equal(cancelled.state, 'cancelled');
+  await until(() => phone.state.googleSetupRevision === cancelled.revision &&
+    desktop.state.googleSetupRevision === cancelled.revision &&
+    reconnected.state.googleSetupRevision === cancelled.revision, 'cancellation on all watches');
+  assert.equal(unrelated.state.googleSetupRevision, undefined);
+  assert.equal(f.state.calls.length, 0);
+  assert.deepEqual(await f.history(), historyBefore);
+});
+
+test('Google setup waits for services, then resumes the Bot on sign-in confirmation and Continue', async t => {
+  const f = await hostFixture(t, { googleSetup: true });
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+  const requestId = (view) => 'google-setup-' +
+    createHash('sha256').update(JSON.stringify([view.id, view.revision])).digest('hex');
+
+  const start = await control({ action: 'start' });
+  const path = await control({
+    action: 'answer', card: 'path', values: ['do-it-for-me'], runId: start.id,
+    expectedRevision: start.revision, cardCopy: start.card.copy,
+  });
+  assert.equal(path.card.card, 'services');
+  assert.equal(path.resumeQueued, undefined);
+  const account = await control({
+    action: 'answer', card: 'services', values: ['gmail'], runId: start.id,
+    expectedRevision: path.revision, cardCopy: path.card.copy,
+  });
+  assert.equal(account.step, 'account');
+  assert.equal(account.resumeQueued, true);
+  await f.done(requestId(account));
+
+  const confirmation = {
+    action: 'advance', step: 'account', runId: start.id, expectedRevision: account.revision,
+  };
+  const project = await control(confirmation);
+  assert.equal(project.id, start.id);
+  assert.equal(project.steps.account.status, 'done');
+  assert.equal(project.step, 'project');
+  assert.equal(project.resumeQueued, true);
+  const duplicate = await control(confirmation);
+  assert.equal(duplicate.applied, false);
+  assert.equal(duplicate.resumeQueued, undefined);
+  const stale = await control({ ...confirmation, runId: 'previous-run' });
+  assert.equal(stale.stale, true);
+  assert.equal(stale.resumeQueued, undefined);
+  await f.done(requestId(project));
+  const prompt = f.state.calls[1].messages.find(message =>
+    message.role !== 'system' && JSON.stringify(message.content).includes('Card google-setup/step answered: done, account'));
+  assert.ok(prompt, 'the Bot receives the saved login confirmation');
+  const history = await f.history();
+  const entry = history.find(item => item.data?.requestId === requestId(project));
+  assert.equal(entry.kind, 'host.work-trigger');
+  assert.equal(entry.data.attribution.kind, 'host');
+  assert.deepEqual(entry.data.turn.replyTarget, { kind: 'primary' });
+
+  const resume = await control({
+    action: 'answer', card: 'step', values: ['resume'], runId: start.id, expectedRevision: project.revision,
+  });
+  assert.equal(resume.step, 'project');
+  assert.equal(resume.resumeQueued, true);
+  await f.done(requestId(resume));
+  assert.equal(f.state.calls.length, 3);
+});
+
+test('choosing the Google audience queues one automatic branding continuation through the real Host', async t => {
+  const f = await hostFixture(t, { googleSetup: true });
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+  const run = await control({ action: 'start', mode: 'do-it-for-me', choices: ['gmail'] });
+  await control({ action: 'advance', step: 'account', account: 'owner@example.com' });
+  await control({ action: 'advance', step: 'project', projectId: 'test-cloud-project' });
+  const branding = await control({ action: 'advance', step: 'apis' });
+  assert.equal(branding.card.card, 'kind');
+  const answer = {
+    action: 'answer', card: 'kind', values: ['personal'], runId: run.id,
+    expectedRevision: branding.revision, cardCopy: branding.card.copy,
+  };
+
+  const chosen = await control(answer);
+  assert.equal(chosen.id, run.id);
+  assert.equal(chosen.kind, 'personal');
+  assert.equal(chosen.resumeQueued, true);
+  const retry = await control(answer);
+  assert.equal(retry.applied, false);
+  const digest = createHash('sha256').update(JSON.stringify([run.id, chosen.revision])).digest('hex');
+  await f.done(`google-setup-${digest}`);
+  assert.equal(f.state.calls.length, 1);
+  assert.ok(f.state.calls[0].messages.some(message =>
+    message.role !== 'system' && JSON.stringify(message.content).includes('Card google-setup/kind answered: personal')));
 });
 
 test('real questionnaire releases its SDK run, survives restart and resumes its original route exactly once', async t => {

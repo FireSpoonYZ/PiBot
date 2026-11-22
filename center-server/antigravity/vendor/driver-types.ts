@@ -41,6 +41,8 @@ export interface DriverTurnRequest extends DriverProfile {
 	 *  resource block instead of inline prompt text (G1 on ACP). Stream-json
 	 *  embeds the digest in the prompt string and ignores this. */
 	contextBlock?: { uri: string; text: string };
+	/** ACP turn memory carried in the private PreInvocation ephemeralMessage. */
+	turnRecall?: string;
 	signal?: AbortSignal;
 	/** Overall turn cap in minutes (default 10). Fractional values are valid
 	 *  (tests use sub-minute caps). 0 disables the cap. */

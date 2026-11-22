@@ -3,7 +3,7 @@
 //
 // Exports `createGoogleSetupService(options)` ->
 //   { control(input, authority), toolsForBot(context), getAgentBrowserPolicy(botId, url?),
-//     syncBrowserUrl(botId, url), getRun(botId), listRuns(), forgetBot(botId), close() }
+//     syncBrowserUrl(botId, url, pageId, openPageIds), getRun(botId), listRuns(), forgetBot(botId), close() }
 //
 // Design & security invariants (strictly aligned with 04-frontend-interaction.md and integration.md):
 // - Shared Center Google MCP model: configures one Center Web OAuth client + HTTPS callback
@@ -30,6 +30,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-durable';
+import { classifyPageSensitivity, isGoogleCloudConsoleUrl } from '../bot-browser/policy.js';
 import { resolveBotIdentity as defaultResolveBotIdentity } from '../bot-identity.js';
 import {
   advanceGoogleConsole,
@@ -40,7 +41,9 @@ import {
   GOOGLE_SERVICE_CHOICES,
   GOOGLE_SERVICES,
   googleChoices,
+  googleConsoleStepUrl,
   isValidGoogleProjectId,
+  readGoogleConsoleAddress,
 } from './console.js';
 import {
   googleSetupAccount,
@@ -52,6 +55,7 @@ import {
 import {
   assertNonEmptyString,
   assertNoSecretMaterial,
+  containsSecretMaterial,
   GoogleSetupError,
   SETUP_ERROR_CODES,
   SETUP_ERROR_CODE_SET,
@@ -70,6 +74,7 @@ import {
 import {
   applyRunChange,
   assertModeAvailable,
+  assertRecordedProjectId,
   CENTER_CONFIGURED_SKIPPED_STEPS,
   currentGoogleSetupStep,
   evaluateModeAvailability,
@@ -107,6 +112,9 @@ export {
 
 const MAX_TOOL_OUTPUT_BYTES = 50 * 1024;
 const CONTROL_ACTIONS = new Set(['status', 'start', 'answer', 'advance', 'cancel', 'resume']);
+const STEP_CONFIRMATION_FIELDS = new Set([
+  'action', 'botId', 'fresh', 'runId', 'expectedRevision', 'card', 'cardCopy', 'step', 'signal',
+]);
 const SYSTEM_SENSITIVE_LOCK_AUTHORITY = Object.freeze({
   actor: 'system',
   reason: 'google-setup-sensitive-lock',
@@ -115,6 +123,10 @@ const SYSTEM_SENSITIVE_LOCK_AUTHORITY = Object.freeze({
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function usesEmbeddedSetupBrowser(mode) {
+  return mode === 'do-it-for-me' || mode === 'guide-here';
 }
 
 function assertOwnerAuthority(authority) {
@@ -147,6 +159,7 @@ function normalizeCenterStatus(raw) {
   const rawClient = isPlainObject(raw.client) ? raw.client : {};
   const client = {
     configured: rawClient.configured === true,
+    ...(rawClient.supportsAutoConfigure === true ? { supportsAutoConfigure: true } : {}),
     ...(typeof rawClient.clientId === 'string' && rawClient.clientId
       ? { clientId: rawClient.clientId }
       : {}),
@@ -203,6 +216,7 @@ function summarizeCenterForView(centerStatus) {
     ...(typeof centerStatus.isAdmin === 'boolean' ? { isAdmin: centerStatus.isAdmin } : {}),
     client: {
       configured: centerStatus.client?.configured === true,
+      ...(centerStatus.client?.supportsAutoConfigure === true ? { supportsAutoConfigure: true } : {}),
       ...(centerStatus.client?.clientId ? { clientId: centerStatus.client.clientId } : {}),
       ...(centerStatus.client?.projectId ? { projectId: centerStatus.client.projectId } : {}),
       ...(centerStatus.client?.redirectUri ? { redirectUri: centerStatus.client.redirectUri } : {}),
@@ -409,7 +423,7 @@ export function createGoogleSetupService(options = {}) {
     }
   }
 
-  async function lockBrowserForSensitiveStep(run, step, reason, availability) {
+  async function lockBrowserForSensitiveStep(run, step, reason, availability, pageId = run.browserPageId) {
     const requiresSystemBrowser =
       reason === 'google-auth' ||
       (reason === 'oauth-client-secret' && availability?.clientStepRequiresSystemBrowser === true);
@@ -426,9 +440,10 @@ export function createGoogleSetupService(options = {}) {
       try {
         const result = await browserLockHook({
           botId: run.botId,
-          pageId: run.browserPageId,
+          pageId,
           step,
           reason,
+          mode: run.mode,
           blockObservation: true,
           blockActions: true,
         });
@@ -445,7 +460,7 @@ export function createGoogleSetupService(options = {}) {
           {
             action: 'takeover',
             botId: run.botId,
-            ...(run.browserPageId ? { pageId: run.browserPageId } : {}),
+            ...(pageId ? { pageId } : {}),
             reason,
             sensitive: true,
           },
@@ -469,7 +484,7 @@ export function createGoogleSetupService(options = {}) {
     return lockMeta;
   }
 
-  async function notifyBrowserUnlock(run, step, reason) {
+  async function notifyBrowserUnlock(run, step, reason, confirmingOwner) {
     if (typeof browserUnlockHook !== 'function') return;
     try {
       await browserUnlockHook({
@@ -477,6 +492,8 @@ export function createGoogleSetupService(options = {}) {
         pageId: run.browserPageId,
         step,
         reason,
+        ...(confirmingOwner && step === 'branding' && run.mode === 'do-it-for-me' &&
+          run.steps.branding?.status === 'done' ? { confirmingOwner } : {}),
       });
     } catch {
       // Never block setup progress on advisory unlock notification.
@@ -561,7 +578,86 @@ export function createGoogleSetupService(options = {}) {
     };
   }
 
-  async function commitRun(prev, next, { centerStatus, modeAvailability, extraEvent = null }) {
+  function needsEmbeddedAccountPage(run) {
+    return run?.state === 'running' &&
+      usesEmbeddedSetupBrowser(run.mode) &&
+      run.answers?.path?.values?.[0] === run.mode &&
+      Boolean(run.services?.length) &&
+      !run.browserLock?.active &&
+      currentGoogleSetupStep(run) === 'account';
+  }
+
+  async function prepareAccountPage(run, modeAvailability) {
+    if (typeof browserControl !== 'function' || !modeAvailability.modes[run.mode]?.available) return false;
+
+    const botId = run.botId;
+    try {
+      const status = await browserControl({ action: 'status', botId }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+      if (!status?.available || !status.canStreamInteract) return false;
+      if (run.browserPageId && status.tabs?.some(tab => tab.id === run.browserPageId)) return true;
+      delete run.browserPageId;
+
+      // The normal owner navigation rules also protect any active takeover.
+      const opened = await browserControl({
+        action: 'open',
+        botId,
+        url: googleConsoleStepUrl('account'),
+      }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+      if (!opened?.pageId) return false;
+      run.browserPageId = opened.pageId;
+      return true;
+    } catch {
+      // A browser failure must leave the wizard available for retry or external guidance.
+      return false;
+    }
+  }
+
+  function consoleProgressFor(run, pageId) {
+    const previous = consoleProgressByBot.get(run.botId);
+    return previous?.runId === run.id && previous.pageId === pageId ? previous.progress : GOOGLE_CONSOLE_START;
+  }
+
+  function observeConsolePage(run, pageId, url) {
+    const progress = advanceGoogleConsole(consoleProgressFor(run, pageId), url);
+    consoleProgressByBot.set(run.botId, { runId: run.id, pageId, progress });
+    return progress;
+  }
+
+  async function captureEmbeddedProjectId(run) {
+    if (isValidGoogleProjectId(run.projectId) || !usesEmbeddedSetupBrowser(run.mode) ||
+        typeof browserControl !== 'function') return;
+
+    let status;
+    try {
+      status = await browserControl({ action: 'status', botId: run.botId }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+    } catch {
+      return;
+    }
+    if (status?.available === false || !Array.isArray(status?.tabs)) return;
+
+    const boundTab = status.tabs.find((entry) => entry.id === run.browserPageId);
+    const activeTab = status.tabs.find((entry) => entry.id === status.pageId);
+    const tab = boundTab ?? (activeTab && (
+      !run.browserPageId || consoleProgressFor(run, activeTab.id).seen.includes('project-create')
+    ) ? activeTab : null);
+    if (typeof tab?.id !== 'string' || typeof tab.url !== 'string' ||
+        classifyGoogleSetupPageSensitivity(tab.url).sensitive || containsSecretMaterial(tab.url)) return;
+
+    const { page, projectId } = readGoogleConsoleAddress(tab.url);
+    const progress = observeConsolePage(run, tab.id, tab.url);
+    if (projectId && page !== 'project-create' && (page === 'project-dashboard' || progress.done.includes('project'))) {
+      run.projectId = projectId;
+      run.browserPageId = tab.id;
+    }
+  }
+
+  async function commitRun(prev, next, {
+    centerStatus, modeAvailability, extraEvent = null, prepareBrowser = false,
+  }) {
+    if (prepareBrowser && needsEmbeddedAccountPage(next) &&
+        (prev?.id !== next.id || !needsEmbeddedAccountPage(prev) || !next.browserPageId)) {
+      await prepareAccountPage(next, modeAvailability);
+    }
     const dueRefs = googleSetupCardsDue(prev, next);
     const stampedRefs = dueRefs.length > 0 ? stampCardRefs(next, dueRefs) : [];
     const saved = await store.save(next);
@@ -658,6 +754,11 @@ export function createGoogleSetupService(options = {}) {
     }
 
     const botId = assertLocalBot(rawInput.botId, { allowArchived: action === 'status' });
+    // Apply the same normalization before Center and browser-lock checks as when recording the answer.
+    const answerValues = action === 'answer' && isCard(rawInput.card) && Array.isArray(rawInput.values)
+      ? rawInput.values.map((value) => assertNonEmptyString(value, `answers.${rawInput.card}`, 320))
+      : null;
+    const [stepDecision, answeredStep] = rawInput.card === 'step' ? (answerValues ?? []) : [];
 
     return withBotLane(botId, async () => {
       const current = await store.get(botId);
@@ -668,13 +769,9 @@ export function createGoogleSetupService(options = {}) {
         action === 'start' ||
         action === 'advance' ||
         action === 'resume' ||
-        (action === 'answer' &&
-          rawInput.card === 'step' &&
-          Array.isArray(rawInput.values) &&
-          (rawInput.values[0] === 'continue-without' ||
-            rawInput.values[0] === 'keep-account' ||
-            (rawInput.values[0] === 'done' &&
-              (rawInput.values[1] === 'client' || rawInput.values[1] === 'connect'))));
+        stepDecision === 'continue-without' ||
+        stepDecision === 'keep-account' ||
+        (stepDecision === 'done' && (answeredStep === 'client' || answeredStep === 'connect'));
       const centerStatus = await readCenterStatus(botId, {
         fresh: freshCenter,
         signal: rawInput.signal,
@@ -745,7 +842,7 @@ export function createGoogleSetupService(options = {}) {
           }
         }
 
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         return { ...view, applied: true };
       }
 
@@ -819,26 +916,33 @@ export function createGoogleSetupService(options = {}) {
           }
           assertModeAvailable(requestedMode, modeAvailability);
         }
-        if (current.state === 'running' && (requestedMode === undefined || requestedMode === current.mode)) {
-          if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
-            throw setupError(
-              'SETUP_REVISION_CONFLICT',
-              `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
-              { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
-            );
-          }
-          return {
-            ...buildView(botId, current, { centerStatus, modeAvailability }),
-            applied: false,
-            idempotent: true,
-          };
-        }
         if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
           throw setupError(
             'SETUP_REVISION_CONFLICT',
             `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
             { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
           );
+        }
+        if (current.state === 'running' && (requestedMode === undefined || requestedMode === current.mode)) {
+          if (needsEmbeddedAccountPage(current)) {
+            const next = structuredClone(current);
+            const pageReady = await prepareAccountPage(next, modeAvailability);
+            if (next.browserPageId !== current.browserPageId) {
+              next.updatedAt = now();
+              next.revision = current.revision + 1;
+              const view = await commitRun(current, next, { centerStatus, modeAvailability });
+              return { ...view, applied: true };
+            }
+            if (!pageReady) {
+              const { browserPageId: _unconfirmedPage, ...view } = buildView(botId, current, { centerStatus, modeAvailability });
+              return { ...view, applied: false, idempotent: true };
+            }
+          }
+          return {
+            ...buildView(botId, current, { centerStatus, modeAvailability }),
+            applied: false,
+            idempotent: true,
+          };
         }
         const ts = now();
         let next = reviveRun(current, 'owner', { action: 'resume' }, ts);
@@ -858,17 +962,17 @@ export function createGoogleSetupService(options = {}) {
           delete next.personStep;
           next.answers.path = { values: [requestedMode], at: ts };
         }
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         return { ...view, applied: true };
       }
 
       if (action === 'answer') {
         const card = rawInput.card;
-        const values = rawInput.values;
+        const values = answerValues;
         if (!isCard(card)) {
           throw setupError('INVALID_ARGUMENT', `Unknown setup card: ${String(card)}`);
         }
-        if (!Array.isArray(values) || values.length === 0) {
+        if (!values?.length) {
           throw setupError('INVALID_ARGUMENT', 'answer requires a non-empty values array.');
         }
 
@@ -903,6 +1007,7 @@ export function createGoogleSetupService(options = {}) {
           const view = await commitRun(current, revived, {
             centerStatus,
             modeAvailability,
+            prepareBrowser: true,
             extraEvent: { type: 'owner-answer', card, values },
           });
           return { ...view, applied: true };
@@ -943,6 +1048,9 @@ export function createGoogleSetupService(options = {}) {
 
         const next = structuredClone(current);
         const prevLock = next.browserLock;
+        if (card === 'step' && values[0] === 'done' && values[1] === 'project') {
+          await captureEmbeddedProjectId(next);
+        }
         applyRunChange(
           next,
           'owner',
@@ -986,17 +1094,18 @@ export function createGoogleSetupService(options = {}) {
           }
         }
 
-        if (prevLock?.active && !next.browserLock?.active) {
-          await notifyBrowserUnlock(next, prevLock.step, 'owner-completed');
-        }
-
         next.updatedAt = ts;
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, {
           centerStatus,
           modeAvailability,
+          prepareBrowser: true,
           extraEvent: { type: 'owner-answer', card, values },
         });
+        if (prevLock?.active && prevLock.step !== next.browserLock?.step) {
+          const confirmsStep = card === 'step' && values[0] === 'done' && values[1] === prevLock.step;
+          await notifyBrowserUnlock(next, prevLock.step, 'owner-completed', confirmsStep ? authority : undefined);
+        }
         return { ...view, applied: true };
       }
 
@@ -1011,11 +1120,30 @@ export function createGoogleSetupService(options = {}) {
             idempotent: true,
           };
         }
-        if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
+        const requestedStep = rawInput.step;
+        const currentStep = currentGoogleSetupStep(current);
+        // Client and connect confirmations also recheck current Center credentials and readiness.
+        const confirmsStep = rawInput.runId === current.id && isStep(requestedStep) &&
+          requestedStep !== 'client' && requestedStep !== 'connect' &&
+          Object.keys(rawInput).every((key) => STEP_CONFIRMATION_FIELDS.has(key));
+        const expectedRevision = rawInput.expectedRevision;
+        if (confirmsStep && (expectedRevision === undefined || expectedRevision <= current.revision) &&
+            current.steps[requestedStep]?.status === 'done' &&
+            (requestedStep !== 'project' || isValidGoogleProjectId(current.projectId))) {
+          return {
+            ...buildView(botId, current, { centerStatus, modeAvailability }),
+            applied: false,
+            idempotent: true,
+          };
+        }
+        // A project-only confirmation can use the live step and browser state under this run's lane.
+        const canUseCurrentProjectStep = confirmsStep && requestedStep === 'project' &&
+          usesEmbeddedSetupBrowser(current.mode) && expectedRevision < current.revision && currentStep === 'project';
+        if (expectedRevision !== undefined && expectedRevision !== current.revision && !canUseCurrentProjectStep) {
           throw setupError(
             'SETUP_REVISION_CONFLICT',
-            `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
-            { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
+            `Setup revision mismatch: expected ${expectedRevision}, current is ${current.revision}.`,
+            { expectedRevision, currentRevision: current.revision },
           );
         }
 
@@ -1083,6 +1211,10 @@ export function createGoogleSetupService(options = {}) {
               mutated = true;
             }
           } else {
+            if (targetStep === 'project') {
+              await captureEmbeddedProjectId(next);
+              assertRecordedProjectId(next);
+            }
             next.steps[targetStep] = {
               status: 'done',
               by: 'user',
@@ -1108,13 +1240,15 @@ export function createGoogleSetupService(options = {}) {
           };
         }
 
-        if (prevLock?.active && !next.browserLock?.active) {
-          await notifyBrowserUnlock(next, prevLock.step, 'owner-advanced');
-        }
         next.updatedAt = ts;
         next.revision = current.revision + 1;
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
-        return { ...view, applied: true };
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
+        const advancedStep = requestedStep && rawInput.runId === current.id && currentStep === requestedStep &&
+          view.step !== requestedStep && view.steps[requestedStep]?.status === 'done' ? requestedStep : null;
+        if (prevLock?.active && prevLock.step !== next.browserLock?.step) {
+          await notifyBrowserUnlock(next, prevLock.step, 'owner-advanced', advancedStep === prevLock.step ? authority : undefined);
+        }
+        return { ...view, applied: true, ...(advancedStep ? { advancedStep } : {}) };
       }
 
       throw setupError('INVALID_ARGUMENT', `Unhandled setupControl action: ${String(action)}`);
@@ -1189,48 +1323,79 @@ export function createGoogleSetupService(options = {}) {
    * Never reads page bodies or cookies. Detects sensitive URLs (locking immediately)
    * and tracks URL-derived `projectId` without ever completing `client` or `connect`.
    */
-  async function syncBrowserUrl(botId, url) {
+  async function syncBrowserUrl(botId, url, pageId, openPageIds) {
     assertOpen();
     const cleanBotId = assertLocalBot(botId);
-    assertNoSecretMaterial(url, 'url');
+    const sensitivity = classifyGoogleSetupPageSensitivity(url);
+    const address = readGoogleConsoleAddress(url);
+    // The browser privacy shield already handles owner-only web sign-in. Setup
+    // should only request a system browser here for OAuth or rejected sign-in.
+    if (sensitivity.reason === 'google-auth' && address.page !== 'sign-in-refused' &&
+        !classifyPageSensitivity({ url }).fallbackToSystemBrowser) {
+      return { sensitivity, locked: true };
+    }
+    if (!sensitivity.sensitive && !isGoogleCloudConsoleUrl(url)) return { sensitivity, locked: false };
+
+    // Match progress only to the run active when this browser update arrived, even if a
+    // restart using the same page is queued ahead of this observation.
+    if (!sensitivity.sensitive) assertNoSecretMaterial(url, 'url');
+    const observedRun = store.get(cleanBotId).catch(() => null);
     return withBotLane(cleanBotId, async () => {
+      const observed = await observedRun;
       const current = await store.get(cleanBotId);
-      const sensitivity = classifyGoogleSetupPageSensitivity(url);
-      if (!current || current.state !== 'running') {
+      if (current?.state !== 'running' || observed?.id !== current.id || !usesEmbeddedSetupBrowser(current.mode)) {
         return { sensitivity, locked: sensitivity.sensitive, run: current };
       }
 
-      const capabilities = await readPlatformCapabilities(cleanBotId);
-      const modeAvailability = evaluateModeAvailability(capabilities);
-      const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
-
+      const onSetupTab = typeof pageId === 'string' && pageId === current.browserPageId;
       if (sensitivity.sensitive) {
+        // The browser also shields sensitive content in tabs outside this wizard.
+        if (!onSetupTab) return { sensitivity, locked: true, run: current };
         const next = structuredClone(current);
         const step =
           sensitivity.reason === 'oauth-client-secret'
             ? 'client'
             : currentGoogleSetupStep(next) ?? 'account';
-        await lockBrowserForSensitiveStep(next, step, sensitivity.reason, modeAvailability);
+        const currentLock = current.browserLock;
+        if (currentLock?.active && currentLock.step === step && currentLock.reason === sensitivity.reason) {
+          return { sensitivity, locked: true, run: current };
+        }
+        const modeAvailability = evaluateModeAvailability(await readPlatformCapabilities(cleanBotId));
+        await lockBrowserForSensitiveStep(next, step, sensitivity.reason, modeAvailability, pageId);
+        const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
         next.updatedAt = now();
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability });
         return { sensitivity, locked: true, view };
       }
 
-      const prevProgress = consoleProgressByBot.get(cleanBotId) ?? GOOGLE_CONSOLE_START;
-      const nextProgress = advanceGoogleConsole(prevProgress, url);
-      consoleProgressByBot.set(cleanBotId, nextProgress);
+      if (currentGoogleSetupStep(current) !== 'project' || isValidGoogleProjectId(current.projectId) ||
+          typeof pageId !== 'string') {
+        return { sensitivity, locked: false, run: current };
+      }
+      // After a renderer reconnect or closed tab, follow a replacement only when
+      // the original tab is gone and the replacement actually visits the create form.
+      const onReplacementTab = !onSetupTab && Array.isArray(openPageIds) && openPageIds.includes(pageId) &&
+        !openPageIds.includes(current.browserPageId) && (address.page === 'project-create' ||
+          consoleProgressFor(current, pageId).seen.includes('project-create'));
+      if (!onSetupTab && !onReplacementTab) {
+        return { sensitivity, locked: false, run: current };
+      }
+      const progress = observeConsolePage(current, pageId, url);
 
-      if (nextProgress.projectId && nextProgress.projectId !== current.projectId) {
+      if (address.projectId && address.page !== 'project-create' && progress.done.includes('project')) {
+        const modeAvailability = evaluateModeAvailability(await readPlatformCapabilities(cleanBotId));
+        const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
         const next = structuredClone(current);
-        next.projectId = nextProgress.projectId;
+        next.projectId = address.projectId;
+        next.browserPageId = pageId;
         next.updatedAt = now();
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability });
-        return { sensitivity, locked: false, progress: nextProgress, view };
+        return { sensitivity, locked: false, progress, view };
       }
 
-      return { sensitivity, locked: false, progress: nextProgress };
+      return { sensitivity, locked: false, progress };
     });
   }
 

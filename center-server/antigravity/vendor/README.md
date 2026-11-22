@@ -18,6 +18,7 @@ Adapted from upstream [`@estebanforge/pi-antigravity-bridge`](https://www.npmjs.
 - `acp/driver.ts` <- `src/acp/driver.ts`
 - `acp/events.ts` <- `src/acp/events.ts`
 - `acp/jsonrpc.ts` <- `src/acp/jsonrpc.ts`
+- `acp/recall-hook.ts` and `acp/recall-hook-client.cjs` come from `src/acp/` in `@firespoon/pi-antigravity-bridge` `1.10.11` (`04f72f47558d5496fd3d2b56113ac90aebf2380e`) under the same MIT license.
 - `acp/usage-estimate.ts` <- `src/acp/usage-estimate.ts`
 
 ## Adaptations for `center-server`
