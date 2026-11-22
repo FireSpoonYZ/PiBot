@@ -7163,7 +7163,6 @@ export function BotChats({
       <ConversationRow
         className="hub-bot-row"
         title={b.role}
-        preview={plainPreview(b.lastPreview)}
         timestamp={activityIso}
         selected={isSelected}
         unread={unread.has(chatKey)}

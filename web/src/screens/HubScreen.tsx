@@ -19,7 +19,7 @@ import {
 } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { humanizeError, useText } from '../ui';
-import { PlatformLogoIcon, type BotPreviewMeta, type UnifiedBotItem } from '../hub/shared';
+import { PlatformLogoIcon, type UnifiedBotItem } from '../hub/shared';
 import { Chips } from '../bot-settings/primitives';
 import { HubPrimaryHero } from './HubParts';
 import type { HubContextMenuState, HubListEntry } from './types';
@@ -75,9 +75,6 @@ export interface HubScreenProps {
   unreadConversationKeys: ReadonlySet<string>;
   knownBots: ConversationBot[];
   onOpenScopeConversation(room: ScopeConversation, openSettings: boolean): void;
-  botMetaMap: Record<string, BotPreviewMeta>;
-  clearedMap: Record<string, number>;
-  scopeForBot(bot: UnifiedBotItem): string;
   searchQuery: string;
   onChangeSearchQuery(next: string): void;
   hasUpdate?: boolean;
@@ -130,9 +127,6 @@ export function HubScreen({
   unreadConversationKeys,
   knownBots,
   onOpenScopeConversation,
-  botMetaMap,
-  clearedMap,
-  scopeForBot,
   searchQuery,
   onChangeSearchQuery,
   hasUpdate = false,
@@ -486,7 +480,6 @@ export function HubScreen({
                   );
                 }
                 const item = entry.bot!;
-                const meta = botMetaMap[item.key];
                 const offline = botIsOffline(item);
                 const statusUnknown = item.hostKind === 'local' ? !hasLocalHost : !remoteConnected;
                 const isRemoteConnecting = item.hostKind === 'remote' && connectionPhase === 'connecting';
@@ -502,21 +495,10 @@ export function HubScreen({
                     : offline
                       ? t('离线', 'Offline')
                       : t('在线', 'Online');
-                const cachedPreview = meta?.lastText?.trim();
-                // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
-                const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
-                  (cachedPreview === meta?.subtitle?.trim() ||
-                   cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…'); // i18n-ok
-                const itemScopeKey = scopeForBot(item);
-                const isClearNotice = ((itemScopeKey && clearedMap[itemScopeKey] !== undefined) || clearedMap[item.key] !== undefined) &&
-                  (cachedPreview === '对话已清空' || cachedPreview === 'History cleared'); // i18n-ok
-                const preview = item.lastPreview?.trim() ||
-                  (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
                 const rowNode = (
                   <ConversationRow
                     className="hub-bot-row"
                     title={item.role}
-                    preview={preview}
                     timestamp={entry.sortMs || null}
                     connectionLabel={connectionLabel}
                     unread={unreadConversationKeys.has(entry.pinKey)}

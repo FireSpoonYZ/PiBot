@@ -6668,9 +6668,6 @@ ${newer}` : draftSnapshot;
           unreadConversationKeys={unreadConversationKeys}
           knownBots={knownBots}
           onOpenScopeConversation={openScopeConversation}
-          botMetaMap={botMetaMap}
-          clearedMap={clearedMap}
-          scopeForBot={scopeForBot}
           searchQuery={searchQuery}
           onChangeSearchQuery={setSearchQuery}
         />
