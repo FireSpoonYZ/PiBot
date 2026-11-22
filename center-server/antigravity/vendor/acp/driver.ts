@@ -47,6 +47,8 @@ export interface AcpDriverOptions {
 	extraEnv?: Record<string, string>;
 	/** Enable the private PreInvocation listener for actual ACP sessions. */
 	enableTurnRecall?: boolean;
+	/** Select a native effort using the just-selected model's session options. */
+	resolveEffort?: (requested: string, configOptions: unknown) => string | undefined;
 	/** Bridge registration for session/new AND session/load. */
 	mcpServers?: () => AcpMcpServer[];
 	/** Gate B stopgap: how ACP turns synthesize usage while the server sends
@@ -333,7 +335,12 @@ export class AcpDriver implements TurnDriver {
 		// the modes converge anyway).
 		try {
 			await conn.setConfigOption(turn.sessionId, "model", request.model);
-			if (request.effort) await conn.setConfigOption(turn.sessionId, "thought_level", request.effort);
+			if (request.effort) {
+				const effort = this.#opts.resolveEffort
+					? this.#opts.resolveEffort(request.effort, conn.lastConfigOptions)
+					: request.effort;
+				if (effort) await conn.setConfigOption(turn.sessionId, "thought_level", effort);
+			}
 		} catch (err) {
 			this.#failTurn(turn, `ACP model selection failed: ${describe(err)}`);
 			return;

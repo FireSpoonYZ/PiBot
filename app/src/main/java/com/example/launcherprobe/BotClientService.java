@@ -70,6 +70,7 @@ public final class BotClientService extends Service {
             int epoch = lifecycle.get();
             Consumer<Long> listener = hostExitListener;
             BotHostClient.get(BotClientService.this).checkConnection(true);
+            ClipboardSyncController.get(BotClientService.this).onNetworkAvailable();
             main.post(() -> {
                 if (lifecycle.get() == epoch) retryHostOnConnection(listener);
             });
@@ -177,6 +178,7 @@ public final class BotClientService extends Service {
         checkUpdatesSoon();
         BotClientService service = activeService;
         if (service == null) return;
+        ClipboardSyncController.get(service).onCenterStateChanged(false);
         int epoch = service.lifecycle.get();
         Consumer<Long> listener = service.hostExitListener;
         service.main.post(() -> {
@@ -303,6 +305,7 @@ public final class BotClientService extends Service {
             Log.i("BotClientService", "Client lifecycle started");
             activeService = this;
             attachHostListener();
+            ClipboardSyncController.get(this).onLifecycleStarted();
             main.post(check);
             main.post(checkUpdates);
         }
@@ -317,12 +320,13 @@ public final class BotClientService extends Service {
         detachHostListener();
         main.removeCallbacks(check);
         main.removeCallbacks(checkUpdates);
+        CompletableFuture<Void> clipboardClosed = ClipboardSyncController.get(this).shutdown();
         CompletableFuture<Void> clientClosed = BotHostClient.get(this).shutdown();
         BotHostUiBridgeService.closeClientSessions();
         sendBroadcast(new Intent(ACTION_CLOSE_UI).setPackage(getPackageName()));
         updateNotification("正在退出客户端");
         CompletableFuture<Void> hostClosed = BotHostManager.get(this).stop();
-        CompletableFuture<Void> cleanup = CompletableFuture.allOf(hostClosed, clientClosed);
+        CompletableFuture<Void> cleanup = CompletableFuture.allOf(hostClosed, clientClosed, clipboardClosed);
         exitCleanup = cleanup;
         cleanup.whenComplete((ignored, error) -> main.post(() -> {
             if (activeService != this || exitCleanup != cleanup || alive || lifecycle.get() != epoch) return;
@@ -361,6 +365,7 @@ public final class BotClientService extends Service {
     @Override public void onDestroy() {
         alive = false;
         lifecycle.incrementAndGet();
+        ClipboardSyncController.get(this).shutdown();
         detachHostListener();
         if (activeService == this) {
             activeService = null;

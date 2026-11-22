@@ -23,7 +23,7 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use serde_json::{Map, Value, json};
-use tauri::{AppHandle, State, Webview, utils::platform};
+use tauri::{AppHandle, Manager, State, Webview, utils::platform};
 
 use crate::{
   bridge::{self, BridgeError, DesktopBridge},
@@ -697,6 +697,9 @@ async fn store_client_credentials(
   device_token: String,
   ca: String,
 ) {
+  app
+    .state::<crate::clipboard_runtime::ClipboardRuntime>()
+    .on_center_credentials_changing(app);
   let stored = bridge
     .request(
       app,

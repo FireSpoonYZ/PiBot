@@ -975,6 +975,12 @@ export async function collectCargoLicenseSections({
     if (!pkg) {
       throw fail(`cargo resolve node ${node.id} has no matching package entry`);
     }
+    // The in-repo clipboard crates are covered by PiBot's root LICENSE.
+    if (pkg.source == null && typeof pkg.manifest_path === 'string') {
+      const relative = path.relative(ROOT, pkg.manifest_path);
+      if (relative === path.join('clipboard-sync', 'Cargo.toml')
+        || relative === path.join('clipboard-sync', 'relay-client', 'Cargo.toml')) continue;
+    }
     const key = `${pkg.name}@${pkg.version}`;
     if (!seen.has(key)) seen.set(key, pkg);
   }

@@ -68,6 +68,16 @@ pub struct UpdateState {
   inner: Arc<Mutex<UpdateInner>>,
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+impl UpdateState {
+  pub(crate) fn blocks_close_to_tray(&self) -> bool {
+    matches!(
+      self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase,
+      Phase::Installing | Phase::Complete
+    )
+  }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateStatus<'a> {
@@ -156,12 +166,12 @@ fn finish(state: &UpdateState, current: &str, operation: u64, phase: Phase, mess
   snapshot_locked(&inner, current)
 }
 
-struct CenterAuth {
-  fence: String,
-  origin: String,
-  device_id: String,
-  device_token: String,
-  ca_pem: Option<String>,
+pub(crate) struct CenterAuth {
+  pub(crate) fence: String,
+  pub(crate) origin: String,
+  pub(crate) device_id: String,
+  pub(crate) device_token: String,
+  pub(crate) ca_pem: Option<String>,
 }
 
 fn transport_generation(value: &Value, device_id: Option<&str>) -> Option<u64> {
@@ -180,7 +190,7 @@ fn transport_generation(value: &Value, device_id: Option<&str>) -> Option<u64> {
 
 /// Two broker snapshots bracket credential loading; both the native child
 /// generation and the broker's relay generation must remain unchanged.
-async fn resolve_center_auth(app: &AppHandle) -> Result<Option<CenterAuth>, BridgeError> {
+pub(crate) async fn resolve_center_auth(app: &AppHandle) -> Result<Option<CenterAuth>, BridgeError> {
   let bridge = app.state::<DesktopBridge>();
   let (child1, first) = bridge.request_with_session_generation(app, "status").await?;
   let Some(generation) = transport_generation(&first, None) else { return Ok(None) };

@@ -13,6 +13,7 @@ import {
   ANTIGRAVITY_STREAM_PATH,
 } from '../../center-contract/antigravity.js';
 import { openAntigravity } from '../../center-server/antigravity/index.js';
+import { buildThinkingProfile, resolveSessionThoughtLevel } from '../../center-server/antigravity/catalog.ts';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
 import { RESUME_PROMPT } from '../../center-server/antigravity/round-trips.ts';
 import { makeSessionKey, SessionStore } from '../../center-server/antigravity/sessions.ts';
@@ -38,6 +39,18 @@ const COMPACTION_MARKER = 'compacted into the following summary';
 const PENDING_STATUSES = new Set(['queued', 'placed', 'running', 'pending', 'admitted']);
 const USER_ORIGIN = { sender: { kind: 'user' }, replyTo: null };
 const BASE_MODEL_SEL = { modelRef: MODEL_REF, thinkingLevel: 'off', codemode: false, codemodeOnly: false };
+
+test('ACP uses the selected model’s current thinking options for xhigh', () => {
+  const thoughtOption = (...values) => ({ id: 'thought_level', options: values.map(value => ({ value })) });
+  const neon = thoughtOption('low', 'medium', 'high', 'xhigh');
+  const argon = thoughtOption('low', 'medium', 'high');
+  assert.equal(buildThinkingProfile(neon).thinkingLevelMap.xhigh, 'xhigh');
+  assert.equal(buildThinkingProfile(argon).thinkingLevelMap.xhigh, null);
+  assert.equal(resolveSessionThoughtLevel('xhigh', [neon]), 'xhigh');
+  assert.equal(resolveSessionThoughtLevel('xhigh', [argon]), 'high');
+  assert.equal(resolveSessionThoughtLevel('xhigh', [{ id: 'model' }]), undefined);
+  assert.equal(resolveSessionThoughtLevel('xhigh', undefined), 'xhigh');
+});
 const hindsightRoot = fileURLToPath(new URL('../../plugins/hindsight/', import.meta.url));
 const hindsightManifest = JSON.parse(fs.readFileSync(path.join(hindsightRoot, 'capability.json'), 'utf8'));
 

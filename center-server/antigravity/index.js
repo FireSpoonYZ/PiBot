@@ -11,7 +11,7 @@
 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { hasStoredAcpAuthToken, loginAcpProfile, logoutAcpProfile, probeAcpAuth } from "./auth.ts";
-import { probeAcpCatalog, resolveThoughtLevel } from "./catalog.ts";
+import { probeAcpCatalog, resolveSessionThoughtLevel } from "./catalog.ts";
 import { ANTIGRAVITY_BRIDGE_SERVER, ANTIGRAVITY_PROVIDER_ID } from "./constants.ts";
 import { SharedMcpBridge } from "./mcp-bridge.ts";
 import { AGENT_NAME, ensureIsolatedProfile, resolveProfile } from "./profile.ts";
@@ -96,7 +96,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	const store = new SessionStore(profile.sessionsPath);
 	const mcpBridge = new SharedMcpBridge();
 	const sessions = new Map();
-	const modelMap = new Map();
 	const activeCatalogs = new Set();
 	const activeAuthProbes = new Set();
 	let activeLogin = null;
@@ -123,6 +122,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			binArgs: ["acp", "--agent", AGENT_NAME, "--process-per-session"],
 			geminiDir: profile.geminiHome,
 			enableTurnRecall: true,
+			resolveEffort: resolveSessionThoughtLevel,
 			mcpServers: () => [mcpBridge.serverConfig(slot.mcpToken)],
 			permissionPolicy: (req) => (isBridgePermissionRequest(req) ? "auto" : "deny"),
 		});
@@ -349,12 +349,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					};
 				});
 
-			const knownModel = modelMap.get(modelId);
-			const effort =
-				knownModel?.reasoning === false
-					? undefined
-					: resolveThoughtLevel(reasoning, knownModel?.thinkingLevelMap);
-
 			let handle;
 			const active = isContinuation ? slot.driver.reentry() : null;
 			if (active) {
@@ -476,7 +470,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					handle = await slot.driver.run({
 						cwd: profile.workspaceDir,
 						model: modelId,
-						effort,
+						effort: reasoning,
 						mode: "default",
 						skipPermissions: false,
 						conversationId,
@@ -550,7 +544,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						const lateHandle = await slot.driver.run({
 							cwd: profile.workspaceDir,
 							model: modelId,
-							effort,
+							effort: reasoning,
 							mode: "default",
 							skipPermissions: false,
 							conversationId: conv,
@@ -777,7 +771,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					await slot.driver.close("recycle", "oauth logout").catch(() => {});
 				}),
 			);
-			modelMap.clear();
 			logoutAcpProfile(profile);
 			if (!closed) {
 				cachedAuth = {
@@ -800,12 +793,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			const entry = { abortController: ac, promise: probePromise };
 			activeCatalogs.add(entry);
 			try {
-				const models = await probePromise;
-				modelMap.clear();
-				for (const model of models) {
-					modelMap.set(model.id, model);
-				}
-				return models;
+				return await probePromise;
 			} catch (err) {
 				invalidateAuthCacheIfNeeded(err);
 				throw err;

@@ -1,0 +1,6 @@
+[[set]]
+identifier = "clipboard"
+description = "Allows only the native desktop clipboard sync command."
+permissions = [
+  "allow-desktop-clipboard-sync",
+]

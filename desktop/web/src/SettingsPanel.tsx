@@ -1,7 +1,7 @@
 // 桌面客户端设置分栏。
 import * as Dialog from '@radix-ui/react-dialog';
 import {
-  Archive, Check, ChevronDown, Copy, Download, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
+  Archive, Check, ChevronDown, ClipboardCheck, Copy, Download, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DesktopClientStatus, DesktopUiProfile } from '../../../host-core/desktop-client.js';
@@ -10,6 +10,7 @@ import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { openCenterManagement, type DesktopTheme } from './CenterGate';
 import { HostServiceSection, useHostService } from './HostServiceSection';
 import { ClientUpdateSection } from '../../../web/src/ClientUpdateSection';
+import { ClipboardSyncSection } from '../../../web/src/ClipboardSyncSection';
 import { Switch } from '../../../web/src/bot-settings/primitives';
 import { CenterAdminPanel, createBrokerCenterTransport, createCenterApi } from '../../../web/src/center-admin';
 import { RemoveDeviceDialog } from '../../../web/src/center-admin/RemoveDeviceDialog';
@@ -18,7 +19,7 @@ import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 
-export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general' | 'archive' | 'updates';
+export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'clipboard' | 'general' | 'archive' | 'updates';
 import type { CenterAdminTab } from '../../../web/src/center-admin/types';
 export type { CenterAdminTab } from '../../../web/src/center-admin/types';
 
@@ -96,6 +97,7 @@ const TAB_META: Array<{ id: SettingsTab; label: string; desc: string }> = [
   { id: 'connection', label: '中心连接', desc: '查看中心连接状态、当前设备或更换绑定' },
   { id: 'center-admin', label: '中心管理', desc: '免密管理模型服务商、扩展插件、设备与全局密码库' },
   { id: 'runtime', label: '本机与权限', desc: '本机后台服务状态、开机自启与高级排障' },
+  { id: 'clipboard', label: '剪贴板同步', desc: '按设备独立开关，与同一邀请组设备同步文本剪贴板' },
   { id: 'general', label: '外观与通用', desc: '主题模式与对话显示' },
   { id: 'archive', label: '已归档智能体', desc: '查看历史对话、恢复或删除已归档的智能体' },
   { id: 'updates', label: '客户端更新', desc: '查看当前版本、检查并安装更新' },
@@ -491,16 +493,25 @@ export function SettingsPanel(props: SettingsPanelProps) {
     if (id === 'connection') return <Globe size={15} aria-hidden />;
     if (id === 'center-admin') return <ShieldCheck size={15} aria-hidden />;
     if (id === 'runtime') return <Server size={15} aria-hidden />;
+    if (id === 'clipboard') return <ClipboardCheck size={15} aria-hidden />;
     if (id === 'archive') return <Archive size={15} aria-hidden />;
     if (id === 'updates') return <Download size={15} aria-hidden />;
     return <Sliders size={15} aria-hidden />;
   };
 
+  const tabLabel = (tab: (typeof TAB_META)[number]) =>
+    tab.id === 'clipboard' ? t('剪贴板同步', 'Clipboard Sync') : tab.label;
+
+  const activeDesc =
+    activeMeta.id === 'clipboard'
+      ? t('按设备独立开关，与同一邀请组设备同步文本剪贴板', 'Per-device clipboard sync with devices in the same invitation group')
+      : activeMeta.desc;
+
   return (
     <div className="settings-shell-wrap">
       <div className="dialog-head settings-shell-head">
         <Dialog.Title className="dialog-title">设置</Dialog.Title>
-        <Dialog.Description className="sr-only">{activeMeta.desc}</Dialog.Description>
+        <Dialog.Description className="sr-only">{activeDesc}</Dialog.Description>
         <Dialog.Close asChild>
           <button type="button" className="icon-button" aria-label="关闭"><X size={16} aria-hidden /></button>
         </Dialog.Close>
@@ -519,7 +530,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 onClick={() => onTabChange(tab.id)}
               >
                 {renderTabIcon(tab.id)}
-                <span>{tab.label}</span>
+                <span>{tabLabel(tab)}</span>
                 {tab.id === 'connection' && (
                   <span className={`nav-status-dot ${centerTone}`} aria-hidden />
                 )}
@@ -735,6 +746,18 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 props.onRefreshDevices();
               }}
             />
+          )}
+
+          {activeTab === 'clipboard' && (
+            <div className="settings-pane">
+              <div className="settings-pane-header">
+                <h3>{t('剪贴板同步', 'Clipboard Sync')}</h3>
+                <p className="metadata">
+                  {t('按设备独立开关，与加入同一邀请组的设备同步文本剪贴板。', 'Per-device toggle to sync text clipboard across devices in the same group.')}
+                </p>
+              </div>
+              <ClipboardSyncSection variant="desktop" />
+            </div>
           )}
 
           {activeTab === 'updates' && (

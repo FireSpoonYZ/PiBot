@@ -170,6 +170,13 @@ export function resolveThoughtLevel(
 	return undefined;
 }
 
+export function resolveSessionThoughtLevel(requested: string, configOptions: unknown): string | undefined {
+	const options = asConfigOptions(configOptions);
+	if (options.length === 0) return resolveThoughtLevel(requested, undefined);
+	const thinking = buildThinkingProfile(findConfigOption(options, "thought_level"));
+	return thinking.reasoning ? resolveThoughtLevel(requested, thinking.thinkingLevelMap) : undefined;
+}
+
 export async function probeAcpCatalog(
 	profile: ResolvedProfile,
 	opts: { signal?: AbortSignal; log?: (msg: string, data?: unknown) => void } = {},

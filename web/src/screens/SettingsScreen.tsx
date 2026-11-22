@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   AudioLines,
   ChevronsUpDown,
+  ClipboardCheck,
   Clock,
   Code2,
   Download,
@@ -37,6 +38,7 @@ import { LabelStack, ReservedSlot, Skeleton, SkeletonRow } from '../layout';
 import { PlatformLogoIcon, uuid } from '../hub/shared';
 import { Badge, Disclosure, Row, Section } from '../bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from '../ClientUpdateSection';
+import { ClipboardSyncSection } from '../ClipboardSyncSection';
 import { ConfirmDialog, ListRow, Switch } from '../components/ui';
 import type { CenterAdminTab, HubSettingsPage } from './types';
 
@@ -215,9 +217,12 @@ export function HubSettingsView({
   const titleId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const scrollByPage = useRef<Partial<Record<HubSettingsPage, number>>>({});
-  const previousPage = useRef<HubSettingsPage | null>(null);
-  const pendingScrollRestoreRef = useRef<{ page: HubSettingsPage; targetTop: number } | null>(null);
+  const [clipboardOpen, setClipboardOpen] = useState(false);
+  const activeClipboard = page === 'overview' && clipboardOpen;
+  const effectivePage: HubSettingsPage | 'clipboard' = activeClipboard ? 'clipboard' : page;
+  const scrollByPage = useRef<Partial<Record<typeof effectivePage, number>>>({});
+  const previousPage = useRef<typeof effectivePage | null>(null);
+  const pendingScrollRestoreRef = useRef<{ page: typeof effectivePage; targetTop: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
   const onRemoteUpdatedRef = useRef(onRemoteUpdated);
   onRemoteUpdatedRef.current = onRemoteUpdated;
@@ -253,7 +258,7 @@ export function HubSettingsView({
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
 
   const pageHydrated =
-    page === 'overview'
+    effectivePage === 'overview'
       ? centerConn.initialized || voiceLoaded
       : page === 'connection'
         ? centerConn.initialized
@@ -266,16 +271,19 @@ export function HubSettingsView({
               : true;
 
   useLayoutEffect(() => {
+    if (page !== 'overview' && clipboardOpen) {
+      setClipboardOpen(false);
+    }
     const previous = previousPage.current;
-    if (previous === page) return;
-    previousPage.current = page;
+    if (previous === effectivePage) return;
+    previousPage.current = effectivePage;
     if (previous === 'connection') {
       setEditingCenter(false);
       centerConn.setToken('');
     }
     if (previous === 'devices') setRenamingDevice(null);
     setSettingsConfirm(null);
-    const targetTop = scrollByPage.current[page] ?? 0;
+    const targetTop = scrollByPage.current[effectivePage] ?? 0;
     const el = scrollRef.current;
     if (targetTop <= 0 || pageHydrated) {
       pendingScrollRestoreRef.current = null;
@@ -284,25 +292,38 @@ export function HubSettingsView({
         el.scrollTop = targetTop;
       }
     } else {
-      pendingScrollRestoreRef.current = { page, targetTop };
+      pendingScrollRestoreRef.current = { page: effectivePage, targetTop };
       if (el && Math.round(el.scrollTop) !== 0) {
         programmaticScrollTopRef.current = 0;
         el.scrollTop = 0;
       }
     }
-    if (previous || page !== 'overview') titleRef.current?.focus({ preventScroll: true });
-  }, [page, pageHydrated, centerConn.setToken]);
+    if (previous || effectivePage !== 'overview') titleRef.current?.focus({ preventScroll: true });
+  }, [page, clipboardOpen, effectivePage, pageHydrated, centerConn.setToken]);
 
   useLayoutEffect(() => {
     const pending = pendingScrollRestoreRef.current;
-    if (!pending || pending.page !== page || !pageHydrated) return;
+    if (!pending || pending.page !== effectivePage || !pageHydrated) return;
     pendingScrollRestoreRef.current = null;
     const el = scrollRef.current;
     if (el && Math.round(el.scrollTop) !== Math.round(pending.targetTop)) {
       programmaticScrollTopRef.current = Math.round(pending.targetTop);
       el.scrollTop = pending.targetTop;
     }
-  }, [page, pageHydrated]);
+  }, [effectivePage, pageHydrated]);
+
+  useEffect(() => {
+    if (!activeClipboard) return;
+    const handleBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setClipboardOpen(false);
+    };
+    window.addEventListener('app-back', handleBack, true);
+    return () => window.removeEventListener('app-back', handleBack, true);
+  }, [activeClipboard]);
 
   useEffect(() => {
     let active = true;
@@ -567,7 +588,7 @@ export function HubSettingsView({
   return (
     <main className="grok-subpage grok-page-enter hst-settings" aria-labelledby={titleId}>
       <header className="grok-subpage-topbar">
-        {page === 'overview' && onOpenDrawer ? (
+        {page === 'overview' && !activeClipboard && onOpenDrawer ? (
           <button
             type="button"
             className="grok-floating-circle-btn"
@@ -579,11 +600,18 @@ export function HubSettingsView({
             <PanelLeft size={20} strokeWidth={2} />
           </button>
         ) : (
-          <button type="button" className="grok-floating-circle-btn" onClick={onBack} aria-label={t('返回', 'Back')}>
+          <button
+            type="button"
+            className="grok-floating-circle-btn"
+            onClick={activeClipboard ? () => setClipboardOpen(false) : onBack}
+            aria-label={t('返回', 'Back')}
+          >
             <ArrowLeft size={20} />
           </button>
         )}
-        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">{pageTitles[page]}</h2>
+        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">
+          {activeClipboard ? t('剪贴板同步', 'Clipboard Sync') : pageTitles[page]}
+        </h2>
         <span className="hst-topbar-spacer" aria-hidden="true" />
       </header>
 
@@ -597,12 +625,13 @@ export function HubSettingsView({
             return;
           }
           programmaticScrollTopRef.current = null;
-          if (pendingScrollRestoreRef.current?.page === page) {
+          if (pendingScrollRestoreRef.current?.page === effectivePage) {
             pendingScrollRestoreRef.current = null;
           }
-          scrollByPage.current[page] = top;
+          scrollByPage.current[effectivePage] = top;
         }}
       >
+        {activeClipboard && <ClipboardSyncSection variant="mobile" />}
         {page === 'connection' && (
           <>
             <Section>
@@ -907,7 +936,7 @@ export function HubSettingsView({
           )}
         </Section>}
 
-        <div className="hst-overview" hidden={page !== 'overview'}>
+        <div className="hst-overview" hidden={page !== 'overview' || activeClipboard}>
           {/* 1. 中心与管理 */}
           <Section title={t('中心与管理', 'Center & Admin')}>
             <ListRow
@@ -956,6 +985,13 @@ export function HubSettingsView({
               title={t('通知、后台与节点自检', 'Alerts, background & local host')}
               subtitle={t('通知权限、电池优化、Shizuku 与本机节点状态', 'Notifications, battery optimization, Shizuku & local host status')}
               onClick={() => onOpenPage('permissions')}
+              chevron
+            />
+            <Row
+              icon={<ClipboardCheck />}
+              title={t('剪贴板同步', 'Clipboard Sync')}
+              subtitle={t('本机独立开关、邀请组配对与立即发送当前剪贴板', 'Per-device toggle, group pairing & send clipboard now')}
+              onClick={() => setClipboardOpen(true)}
               chevron
             />
           </Section>
