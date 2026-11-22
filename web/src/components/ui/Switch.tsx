@@ -40,6 +40,7 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-label={accessibleLabel}
+      data-state={checked ? 'checked' : 'unchecked'}
       disabled={disabled}
       className={cls}
       onClick={event => {

@@ -29,6 +29,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -78,17 +79,21 @@
 
 .scope-shell-desktop .conversation-chat-header__members {
   flex: none;
+  flex-shrink: 0;
   min-height: 34px;
   padding: 4px 12px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--surface);
   color: var(--text);
   font-size: .82rem;
   font-weight: 600;
+  white-space: nowrap;
 }
-.scope-shell-desktop .conversation-chat-header__members:hover {
-  border-color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+  .scope-shell-desktop .conversation-chat-header__members:hover {
+    border-color: var(--color-primary);
+  }
 }
 
 .scope-shell-desktop .scope-composer-footnote {
@@ -104,8 +109,10 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--accent-strong, var(--accent));
+  color: var(--color-primary);
   font: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -115,6 +122,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px 16px 16px;
   display: flex;
   flex-direction: column;
@@ -142,6 +150,8 @@
   min-height: 30px;
   padding: 3px 12px;
   font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .scope-shell .member-quick-row {
   display: flex;
@@ -152,14 +162,18 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   background: var(--surface);
   padding: 3px 10px 3px 4px;
   min-height: 30px;
   font-size: 12.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.scope-shell .member-chip:hover:not(:disabled) { background: var(--accent-soft, var(--selection)); }
+@media (hover: hover) and (pointer: fine) {
+  .scope-shell .member-chip:hover:not(:disabled) { background: var(--accent-soft); }
+}
 .scope-shell .member-chip-name {
   font-weight: 600;
   overflow-wrap: anywhere;
@@ -251,13 +265,15 @@
 }
 .scope-shell .scope-send-btn {
   flex: none;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   min-height: 42px;
   padding: 0 16px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 @keyframes scope-spin {
@@ -292,10 +308,10 @@
   flex: none;
 }
 .scope-shell .error-banner {
-  background: var(--danger-soft, color-mix(in srgb, var(--danger, #ac3434) 10%, transparent));
-  border: 1px solid var(--danger, #ac3434);
-  border-radius: 12px;
-  color: var(--danger, #ac3434);
+  background: var(--danger-soft, color-mix(in srgb, var(--danger) 10%, transparent));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: var(--radius-md);
+  color: var(--danger);
   padding: 9px 12px;
   margin: 8px 0;
   font-size: 13px;
@@ -309,6 +325,8 @@
   min-height: 0;
   color: inherit;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
   text-decoration: underline;
 }
 .scope-shell .empty-state {
@@ -323,11 +341,13 @@
 .scope-shell .load-more {
   min-height: 30px;
   padding: 4px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
   font-size: 12.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .scope-shell .icon-button {
   display: inline-flex;
@@ -343,42 +363,47 @@
   color: var(--muted);
   flex: none;
 }
-.scope-shell .icon-button:hover:not(:disabled) {
-  background: var(--accent-soft, var(--selection));
-  color: var(--text);
+@media (hover: hover) and (pointer: fine) {
+  .scope-shell .icon-button:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
 }
 .scope-shell .primary-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 8px 20px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--brand, #2B70F6);
-  color: #fff;
-  font-weight: 650;
+  gap: 7px;
+  min-height: 36px;
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-weight: 600;
   white-space: nowrap;
+  flex-shrink: 0;
 }
-.scope-shell .primary-button:disabled { opacity: .55; }
+.scope-shell .primary-button:disabled { opacity: .52; }
 .scope-shell .primary-button.danger-button {
-  background: var(--danger, #ac3434);
-  color: #fff;
+  background: var(--danger);
+  color: var(--color-on-danger);
 }
 .scope-shell .secondary-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 8px 18px;
+  gap: 7px;
+  min-height: 36px;
+  padding: 7px 15px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.scope-shell .secondary-button:disabled { opacity: .55; }
+.scope-shell .secondary-button:disabled { opacity: .52; }
 .scope-shell .toolbar-btn {
   display: inline-flex;
   align-items: center;
@@ -386,10 +411,12 @@
   min-height: 30px;
   padding: 4px 10px;
   font-size: 13px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .scope-shell .entity-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
 
@@ -417,9 +444,10 @@
 .scope-shell .kind-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .scope-shell .scope-kind-tabs {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 3px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--surface);
   border: 1px solid var(--line);
 }
@@ -428,17 +456,19 @@
   align-items: center;
   gap: 5px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: transparent;
   min-height: 28px;
   padding: 3px 14px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .scope-shell .scope-kind-tabs > button.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--color-primary);
+  color: var(--color-on-primary);
 }
 .scope-shell .scope-create-form {
   border-bottom: 1px solid var(--line);

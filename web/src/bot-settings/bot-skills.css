@@ -20,8 +20,8 @@
 }
 
 .bs-skills-learning-card {
-  border-radius: var(--bs-radius);
-  background: var(--bs-card);
+  border-radius: var(--bs-radius, var(--radius-md, 12px));
+  background: var(--bs-card, var(--color-surface-2));
   overflow: hidden;
 }
 
@@ -87,7 +87,8 @@
 }
 
 .bs-skills-prefix-select {
-  width: 140px;
+  width: min(140px, 100%);
+  max-width: 100%;
   flex: none;
 }
 
@@ -108,8 +109,8 @@
   gap: 0;
   min-height: 52px;
   padding: 0;
-  border-radius: var(--bs-radius);
-  background: var(--bs-card);
+  border-radius: var(--bs-radius, var(--radius-md, 12px));
+  background: var(--bs-card, var(--color-surface-2));
 }
 
 .bs-skills-item-main {
@@ -122,28 +123,28 @@
   gap: var(--space-1, 4px);
   padding: var(--space-3, 12px) var(--space-3, 12px) var(--space-3, 12px) 14px;
   border: 0;
-  border-radius: var(--bs-radius) 0 0 var(--bs-radius);
+  border-radius: var(--bs-radius, var(--radius-md, 12px)) 0 0 var(--bs-radius, var(--radius-md, 12px));
   background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
   touch-action: manipulation;
-  transition: background var(--dur-fast, 140ms) ease;
+  transition: background var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bs-skills-item-main:hover {
-    background: color-mix(in srgb, var(--bs-card) 82%, var(--color-text, var(--text)) 6%);
+    background: color-mix(in srgb, var(--bs-card, var(--color-surface-2)) 82%, var(--color-text, var(--text)) 6%);
   }
 }
 
 .bs-skills-item-main:active {
-  background: color-mix(in srgb, var(--bs-card) 78%, var(--color-text, var(--text)) 9%);
+  background: color-mix(in srgb, var(--bs-card, var(--color-surface-2)) 78%, var(--color-text, var(--text)) 9%);
 }
 
 .bs-skills-item-main:focus-visible {
-  outline: 2px solid var(--bs-accent);
+  outline: 2px solid var(--bs-accent, var(--color-primary));
   outline-offset: -2px;
 }
 
@@ -155,6 +156,7 @@
 }
 
 .bs-skills-item-title {
+  min-width: 0;
   font-size: var(--text-md, .94rem);
   font-weight: var(--weight-semibold, 600);
   color: var(--color-text, var(--text));
@@ -207,7 +209,7 @@
 .bs-skills-shared-banner {
   padding: 10px var(--space-3, 12px);
   border-radius: var(--radius-md, 12px);
-  background: color-mix(in srgb, var(--bs-accent) 10%, var(--bs-card));
+  background: color-mix(in srgb, var(--bs-accent, var(--color-primary)) 10%, var(--bs-card, var(--color-surface-2)));
   color: var(--color-text, var(--text));
   font-size: var(--text-sm, .82rem);
   line-height: 1.45;
@@ -220,8 +222,8 @@
   justify-content: space-between;
   gap: 10px;
   padding: 10px 14px;
-  border-radius: var(--bs-radius);
-  background: var(--bs-card);
+  border-radius: var(--bs-radius, var(--radius-md, 12px));
+  background: var(--bs-card, var(--color-surface-2));
 }
 
 .bs-skills-actions-row {
@@ -246,24 +248,28 @@
   border-radius: var(--radius-full, 999px);
   font-size: var(--text-xs, .8rem);
   font-weight: var(--weight-medium, 550);
+  white-space: nowrap;
+  flex-shrink: 0;
   color: var(--color-text-muted, var(--muted));
-  background: var(--bs-card);
+  background: var(--bs-card, var(--color-surface-2));
   cursor: pointer;
   touch-action: manipulation;
   transition: background-color var(--dur-fast, 150ms) ease, color var(--dur-fast, 150ms) ease;
 }
 
-.bs-skills-file-tab::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .bs-skills-file-tab::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bs-skills-file-tab:hover:not(.is-active) {
     color: var(--color-text, var(--text));
     background: var(--color-surface-3, var(--line));
@@ -275,7 +281,7 @@
 }
 
 .bs-skills-file-tab:focus-visible {
-  outline: 2px solid var(--bs-accent);
+  outline: 2px solid var(--bs-accent, var(--color-primary));
   outline-offset: 2px;
 }
 
@@ -288,7 +294,7 @@
   margin: 0;
   padding: var(--space-3, 12px) 14px;
   border-radius: var(--radius-md, 12px);
-  background: var(--bs-card);
+  background: var(--bs-card, var(--color-surface-2));
   color: var(--color-text, var(--text));
   font: .81rem/1.55 ui-monospace, Consolas, monospace;
   white-space: pre-wrap;
@@ -299,8 +305,8 @@
 
 .bs-skills-editor-area {
   min-height: 280px;
-  background: var(--bs-card);
-  border: 1px solid var(--bs-hairline);
+  background: var(--bs-card, var(--color-surface-2));
+  border: 1px solid var(--bs-hairline, var(--color-line));
 }
 
 .bs-skills-form {
@@ -308,8 +314,8 @@
   flex-direction: column;
   gap: var(--space-3, 12px);
   padding: 14px;
-  border-radius: var(--bs-radius);
-  background: var(--bs-card);
+  border-radius: var(--bs-radius, var(--radius-md, 12px));
+  background: var(--bs-card, var(--color-surface-2));
 }
 
 .bs-skills-extra-row {
@@ -323,6 +329,7 @@
 
 .bs-skills-extra-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2, 8px);
@@ -336,5 +343,12 @@
   .bs-skills-filename-input {
     width: 100%;
     flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bs-skills-item-main,
+  .bs-skills-file-tab {
+    transition: none;
   }
 }

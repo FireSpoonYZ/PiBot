@@ -1,11 +1,15 @@
 import { Check, ChevronRight } from 'lucide-react';
 import type { ReactNode, Ref } from 'react';
 
+export type ListRowStatusTone = 'ok' | 'warn' | 'error' | 'idle' | 'accent';
+
 export interface ListRowProps {
   title: ReactNode;
   subtitle?: ReactNode;
   leading?: ReactNode;
   trailing?: ReactNode;
+  statusTone?: ListRowStatusTone;
+  value?: ReactNode;
   onClick?: () => void;
   selected?: boolean;
   radio?: boolean;
@@ -21,6 +25,8 @@ export function ListRow({
   subtitle,
   leading,
   trailing,
+  statusTone,
+  value,
   onClick,
   selected = false,
   radio = false,
@@ -31,6 +37,11 @@ export function ListRow({
   ref,
 }: ListRowProps) {
   const fullMain = !trailing && !radio && !chevron;
+  const hasValue = value !== undefined && value !== null && value !== false && value !== '';
+  const statusDot = statusTone ? (
+    <span className={`ui-status-dot is-${statusTone}`} aria-hidden="true" />
+  ) : null;
+  const titleHasStatus = Boolean(statusDot && !hasValue);
   const cls = [
     'ui-list-row',
     selected ? 'is-selected' : '',
@@ -42,9 +53,24 @@ export function ListRow({
     <>
       {leading ? <span className="ui-list-row-leading" aria-hidden="true">{leading}</span> : null}
       <span className="ui-list-row-text">
-        <span className="ui-list-row-title">{title}</span>
+        <span className={titleHasStatus ? 'ui-list-row-title has-status' : 'ui-list-row-title'}>
+          {titleHasStatus ? (
+            <>
+              {statusDot}
+              <span className="ui-list-row-title-text">{title}</span>
+            </>
+          ) : (
+            title
+          )}
+        </span>
         {subtitle ? <span className="ui-list-row-subtitle">{subtitle}</span> : null}
       </span>
+      {hasValue ? (
+        <span className="ui-row-value">
+          {statusDot}
+          <span className="ui-row-value-text">{value}</span>
+        </span>
+      ) : null}
     </>
   );
 

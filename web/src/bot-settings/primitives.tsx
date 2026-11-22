@@ -1,8 +1,10 @@
 // Bot 设置（模型 / 插件技能 MCP / 高级）三个手机端页面共用的极简 UI 原语。
 // 所有样式以 .bs- 前缀限定在 bot-settings.css 中，不影响其它页面与桌面端。
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Loader2, Lock, Search, X } from 'lucide-react';
 import { Switch as UiSwitch } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { useText } from '../ui';
 import './bot-settings.css';
 
@@ -54,6 +56,7 @@ export interface SettingsSheetProps {
 /** 底部弹出的全高设置面板：抓手 + 居中标题 + 关闭，内容区滚动，底部操作区固定。 */
 export function SettingsSheet({ title, subtitle, onClose, onBack, footer, children }: SettingsSheetProps) {
   const t = useText();
+  const sheetRef = useRef<HTMLElement | null>(null);
   const [backStack, setBackStack] = useState<BackEntry[]>([]);
   const registerBack = useCallback((entry: BackEntry) => {
     setBackStack(prev => [...prev, entry]);
@@ -63,34 +66,72 @@ export function SettingsSheet({ title, subtitle, onClose, onBack, footer, childr
   }, []);
   const contextValue = useMemo(() => ({ registerBack }), [registerBack]);
   const effectiveOnBack = backStack.length > 0 ? backStack[backStack.length - 1].fn : onBack;
+  const effectiveOnBackRef = useRef(effectiveOnBack);
+  effectiveOnBackRef.current = effectiveOnBack;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
-    const hasOpenModal = () => Boolean(document.querySelector('[role="dialog"][data-state="open"]'));
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const rafId = window.requestAnimationFrame(() => {
+      const sheet = sheetRef.current;
+      if (sheet && !sheet.contains(document.activeElement)) {
+        sheet.focus({ preventScroll: true });
+      }
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      if (previouslyFocused && previouslyFocused !== document.body && previouslyFocused.isConnected) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return registerOverlayBackHandler(() => {
+      (effectiveOnBackRef.current ?? onCloseRef.current)();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    const hasOpenModal = () =>
+      Boolean(document.querySelector('[role="dialog"][data-state="open"], [data-ui-dialog="open"]'));
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       if (hasOpenModal()) return;
       event.preventDefault();
-      (effectiveOnBack ?? onClose)();
-    };
-    const onAppBack = (event: Event) => {
-      if (event.defaultPrevented || !effectiveOnBack) return;
-      if (hasOpenModal()) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      effectiveOnBack();
+      event.stopPropagation();
+      (effectiveOnBackRef.current ?? onCloseRef.current)();
     };
     window.addEventListener('keydown', onKey);
-    window.addEventListener('app-back', onAppBack, true);
     return () => {
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('app-back', onAppBack, true);
     };
-  }, [effectiveOnBack, onClose]);
+  }, []);
 
-  return (
+  const content = (
     <SettingsSheetContext.Provider value={contextValue}>
-      <div className="bs-backdrop" role="presentation" onClick={onClose}>
-        <section className="bs-sheet" role="dialog" aria-modal="true" aria-label={title} onClick={event => event.stopPropagation()}>
+      <div
+        className="bs-backdrop"
+        role="presentation"
+        onClick={event => {
+          if (event.target === event.currentTarget) onClose();
+        }}
+      >
+        <section
+          ref={sheetRef}
+          tabIndex={-1}
+          className="bs-sheet"
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          onClick={event => event.stopPropagation()}
+          onKeyDown={event => {
+            if (event.key === 'Escape') event.stopPropagation();
+          }}
+        >
           <div className="bs-grabber" aria-hidden="true" />
           <header className="bs-header">
             <div className="bs-header-side">
@@ -116,6 +157,8 @@ export function SettingsSheet({ title, subtitle, onClose, onBack, footer, childr
       </div>
     </SettingsSheetContext.Provider>
   );
+
+  return typeof document !== 'undefined' ? createPortal(content, document.body) : content;
 }
 
 /* ------------------------------------------------------------------ */

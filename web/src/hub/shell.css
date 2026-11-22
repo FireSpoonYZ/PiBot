@@ -3,6 +3,36 @@
   flex: none;
 }
 
+/* 均衡子页顶栏：两侧对称 1fr（最小 44px），中间标题自适应省略并始终居中不碰撞右侧动作按钮 */
+.grok-subpage-topbar {
+  display: grid;
+  grid-template-columns: minmax(var(--tap-min), 1fr) minmax(0, auto) minmax(var(--tap-min), 1fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.grok-subpage-topbar > :first-child {
+  justify-self: start;
+}
+
+.grok-subpage-topbar > :last-child {
+  justify-self: end;
+}
+
+.grok-subpage-header-title {
+  min-width: 0;
+  max-width: 100%;
+  justify-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.grok-subpage-scroll {
+  overscroll-behavior: contain;
+}
+
 .hub-top-bar {
   gap: var(--space-2);
 }
@@ -30,7 +60,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: opacity var(--dur-fast) var(--ease-out);
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-top-title.is-obscured {
@@ -43,7 +73,10 @@
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--color-text);
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-top-status-btn.is-connecting {
@@ -58,7 +91,7 @@
   color: var(--color-danger);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .hub-top-status-btn:hover {
     background: color-mix(in srgb, var(--color-surface-1) 80%, transparent);
   }
@@ -74,6 +107,7 @@
 }
 
 .hub-top-status-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -113,19 +147,20 @@
   padding: 14px var(--space-4);
   border-radius: var(--radius-lg);
   background: var(--color-surface-2);
-  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
-  box-shadow: 0 12px 36px color-mix(in srgb, var(--color-scrim) 32%, transparent);
+  border: 1px solid var(--color-line);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-scrim) 16%, transparent);
   color: var(--color-text);
   display: flex;
   flex-direction: column;
   gap: 10px;
-  animation: grok-pop-in 180ms var(--ease-out) both;
+  animation: grok-pop-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
 
 .hub-conn-popover-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--color-text);
@@ -160,6 +195,7 @@
 
 .hub-conn-popover-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
@@ -168,7 +204,7 @@
 
 .hub-conn-popover-btn {
   position: relative;
-  min-height: 34px;
+  min-height: 36px;
   padding: 0 14px;
   border-radius: var(--radius-full);
   border: 1px solid var(--color-line);
@@ -179,7 +215,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   white-space: nowrap;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-conn-popover-btn::before {
@@ -192,6 +231,24 @@
   height: max(100%, var(--tap-min));
 }
 
+@media (pointer: coarse) {
+  .hub-conn-popover-btn {
+    min-height: var(--tap-min);
+  }
+  .hub-conn-popover-btn::before {
+    content: none;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .hub-conn-popover-btn:hover:not(:disabled) {
+    background: var(--color-surface-3);
+  }
+  .hub-conn-popover-btn.is-primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+}
+
 .hub-conn-popover-btn.is-primary {
   border-color: var(--color-primary);
   background: var(--color-primary);
@@ -199,6 +256,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .hub-top-title,
+  .hub-top-status-btn,
+  .hub-conn-popover-btn {
+    transition: none;
+  }
+
   .hub-top-status-spin {
     animation: none;
   }
@@ -228,6 +291,7 @@
   color: var(--color-on-primary);
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -272,6 +336,7 @@
 
 .hst-textarea-row .hst-input-label {
   width: auto;
+  max-width: none;
 }
 
 .hst-textarea-row .hst-textarea.hst-ca-textarea {

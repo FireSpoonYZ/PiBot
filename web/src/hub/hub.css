@@ -3,11 +3,20 @@
 /* Hub 主屏在 conversation/dm 子页打开时保持 DOM（隐藏不卸载），返回不丢滚动位置。 */
 .hub-hidden { display: none; }
 
+.hub-scroll-area {
+  overscroll-behavior: contain;
+}
+
+.hub-bot-time {
+  font-variant-numeric: tabular-nums;
+}
+
 /* 主 Bot Hero：横向紧凑卡片（头像左、名称+节点徽章右），真实卡片/占位卡片/骨架卡片严格等高（82px）。 */
 .hub-hero-section { padding: 8px 16px 10px; display: flex; }
 .hub-hero-section::before, .hub-hero-section::after { content: none; }
 .hub-hero-button.hub-hero-card {
   flex: 1 1 auto;
+  min-width: 0;
   max-width: 100%;
   min-height: 82px;
   box-sizing: border-box;
@@ -16,9 +25,17 @@
   gap: 12px;
   padding: 8px 14px;
   border-radius: 18px;
-  background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-line);
   filter: none;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    border-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+}
+@media (hover: hover) and (pointer: fine) {
+  .hub-hero-button.hub-hero-card:hover:not(.hub-hero-skeleton) {
+    background: var(--color-surface-2);
+  }
 }
 .hub-hero-button.hub-hero-card.hub-hero-placeholder {
   border-style: dashed;
@@ -29,7 +46,15 @@
   pointer-events: none;
 }
 .hub-hero-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.hub-hero-card .hub-hero-name { font-size: .95rem; font-weight: 600; color: var(--text); }
+.hub-hero-card .hub-hero-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .95rem;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
 
 /* H5 FLIP 列表容器与项：ul > li 兼容 SortablePinnedChat 同容器检索 */
 .hub-bot-list-items {
@@ -66,7 +91,8 @@
   border: 2px solid var(--color-bg);
   background: var(--color-text-subtle);
   pointer-events: none;
-  transition: background-color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .hub-bot-status-dot.is-online {
   background: var(--color-success);
@@ -81,8 +107,12 @@
   opacity: 0.5;
 }
 
-/* 列表顶部筛选 Chips（复用 bot-settings 原语 .bs-chips/.bs-chip）。 */
+/* 列表顶部筛选 Chips（复用 bot-settings 原语 .bs-chips/.bs-chip）��� */
 .hub-filter-chips { padding: 2px 0 8px; }
+.hub-filter-chips .bs-chip {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
 /* 归档行在 archived-bots 页里降低不透明度以区分。 */
 .hub-bot-row.is-archived { opacity: .72; }
@@ -99,28 +129,39 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
   max-width: 100%;
-  padding: 5px 10px 5px 6px;
+  min-height: 36px;
+  min-width: var(--tap-min);
+  padding: 6px 12px 6px 8px;
   border-radius: var(--radius-full);
   background: var(--color-surface-1);
-  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
+  border: 1px solid var(--color-line);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
+  white-space: nowrap;
   color: var(--color-text);
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
-.group-create-chip::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min));
-  height: max(100%, var(--tap-min));
+@media (pointer: coarse) {
+  .group-create-chip {
+    min-height: var(--tap-min);
+  }
+}
+@media (hover: hover) and (pointer: fine) {
+  .group-create-chip:hover:not(:disabled) {
+    background: var(--color-surface-2);
+  }
 }
 .group-create-chip:active {
   background: var(--color-surface-3);
 }
+.group-create-chip:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 .group-create-chip-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -130,6 +171,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   color: var(--color-text-muted);
 }
 .group-create-search {
@@ -167,10 +209,10 @@
   padding: 11px 14px;
   text-align: left;
   border-bottom: 1px solid color-mix(in srgb, var(--color-line) 55%, transparent);
-  transition: background-color var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .group-create-bot-row:last-child { border-bottom: 0; }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .group-create-bot-row:hover {
     background: color-mix(in srgb, var(--color-surface-1) 75%, transparent);
   }
@@ -195,6 +237,7 @@
   min-width: 0;
 }
 .group-create-bot-name {
+  min-width: 0;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--color-text);
@@ -203,6 +246,7 @@
   white-space: nowrap;
 }
 .group-create-bot-sub {
+  min-width: 0;
   font-size: var(--text-sm);
   color: var(--color-text-muted);
   overflow: hidden;
@@ -219,9 +263,20 @@
   align-items: center;
   justify-content: center;
   color: var(--color-on-primary);
-  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    border-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .group-create-bot-row.is-selected .group-create-check {
   background: var(--color-primary);
   border-color: var(--color-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-hero-button.hub-hero-card,
+  .hub-bot-status-dot,
+  .group-create-chip,
+  .group-create-bot-row,
+  .group-create-check {
+    transition: none;
+  }
 }

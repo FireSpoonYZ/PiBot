@@ -9,6 +9,7 @@ import type { CenterApi } from './transport';
 import {
   BotTreeSelector,
   CaChips,
+  CaConfirmDialog,
   CaDisclosure,
   CaExternalUrlBox,
   CaModal,
@@ -209,6 +210,7 @@ export function CapabilitiesTab({
   const [botBindings, setBotBindings] = useState<Map<string, BotCapabilityConfig>>(new Map());
   const [bindingBusyKeys, setBindingBusyKeys] = useState<Set<string>>(new Set());
   const [detailBusy, setDetailBusy] = useState(false);
+  const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
   const [oauthHintNeeded, setOauthHintNeeded] = useState(false);
 
   const setDetailError = useCallback(
@@ -956,15 +958,16 @@ export function CapabilitiesTab({
 
   const handleUninstall = async () => {
     if (!detailInst) return;
-    if (!window.confirm(t(`确定卸载「${detailInst.displayName}」吗？此操作会从中心与设备移除。`, `Uninstall "${detailInst.displayName}"? This removes it from center and devices.`))) return;
     setDetailBusy(true);
     setDetailError('');
     try {
       await api.uninstallInstallation(detailInst.installationId, { requestId: newRequestId() });
+      setConfirmUninstallOpen(false);
       setDetailOpen(false);
       await loadAll();
       setNotice(t(`已卸载 ${detailInst.displayName}`, `Uninstalled ${detailInst.displayName}`));
     } catch (err) {
+      setConfirmUninstallOpen(false);
       setDetailError(errorMessage(err, t('卸载失败', 'Uninstall failed')));
     } finally {
       setDetailBusy(false);
@@ -1944,7 +1947,7 @@ export function CapabilitiesTab({
                     type="button"
                     className="ca-btn ca-btn-danger ca-btn-sm"
                     disabled={detailBusy}
-                    onClick={() => void handleUninstall()}
+                    onClick={() => setConfirmUninstallOpen(true)}
                   >
                     <Trash2 size={13} />
                     <span>{detailInst.kind === 'skill' ? t('卸载技能', 'Uninstall skill') : t('卸载扩展', 'Uninstall extension')}</span>
@@ -1955,6 +1958,24 @@ export function CapabilitiesTab({
           </div>
         )}
       </CaModal>
+
+      <CaConfirmDialog
+        open={confirmUninstallOpen && Boolean(detailInst)}
+        title={detailInst?.kind === 'skill' ? t('卸载技能', 'Uninstall Skill') : t('卸载扩展', 'Uninstall Extension')}
+        description={
+          detailInst
+            ? t(`卸载「${detailInst.displayName}」后，该能力将从中心目录与所有已同步设备中移除，现有 Bot 绑定也会一并失效。`, `Uninstalling "${detailInst.displayName}" removes it from the center catalog and all synced devices, and revokes existing Bot bindings.`)
+            : ''
+        }
+        confirmLabel={detailInst?.kind === 'skill' ? t('卸载技能', 'Uninstall Skill') : t('卸载扩展', 'Uninstall Extension')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={detailBusy}
+        onCancel={() => {
+          if (!detailBusy) setConfirmUninstallOpen(false);
+        }}
+        onConfirm={() => void handleUninstall()}
+      />
 
       {/* 单 Bot 独立参数覆盖子弹窗 */}
       <CaModal

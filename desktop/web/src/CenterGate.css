@@ -5,8 +5,9 @@
   align-items: flex-start;
   justify-content: center;
   min-height: 100%;
-  padding: 24px;
+  padding: var(--space-6);
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg);
 }
 
@@ -16,12 +17,12 @@
   margin-block: auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 32px 28px;
-  border-radius: 24px;
-  background: var(--surface-elevated, var(--surface));
+  gap: var(--space-4);
+  padding: var(--space-8) 28px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-elevated);
   border: 1px solid var(--line);
-  box-shadow: var(--shadow-md, 0 8px 24px rgb(0 0 0 / 0.08));
+  box-shadow: var(--shadow-md);
 }
 
 .gate-hero {
@@ -56,10 +57,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-.gate-client-label { color: var(--muted); flex-shrink: 0; }
-.gate-copied { color: var(--accent); flex-shrink: 0; }
+.gate-client-label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+.gate-copied { color: var(--color-primary); white-space: nowrap; flex-shrink: 0; }
 
-.gate-form { display: flex; flex-direction: column; gap: 12px; }
+.gate-form { display: flex; flex-direction: column; gap: var(--space-3); }
 
 .gate-field { display: flex; flex-direction: column; gap: 6px; }
 
@@ -68,7 +69,7 @@
   font-weight: 600;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -77,35 +78,41 @@
   font-weight: 500;
   font-size: 12px;
   padding: 2px 10px;
-  border-radius: 999px;
-  background: var(--ok-soft, var(--accent-soft, var(--surface)));
-  color: var(--ok, var(--accent));
+  border-radius: var(--radius-full);
+  background: var(--ok-soft);
+  color: var(--ok);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.gate-field input, .gate-advanced textarea { border-radius: 12px; padding: 10px 12px; }
+.gate-field input, .gate-advanced textarea { border-radius: var(--radius-md); padding: 10px 12px; }
 
 .gate-advanced {
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   background: var(--surface);
 }
 
-.gate-advanced summary {
+.gate-advanced > :not(summary) { margin: 0; }
+.gate-advanced > summary {
   cursor: pointer;
+  padding: 0;
+  border: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--muted);
 }
+.gate-advanced[open] > summary { border-bottom: 0; }
 
 .gate-advanced textarea {
   margin-top: 10px;
   width: 100%;
-  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
-.gate-submit { width: 100%; min-height: 44px; border-radius: 999px; font-weight: 600; }
+.gate-submit { width: 100%; min-height: 42px; border-radius: var(--radius-full); font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 
 .gate-manage {
   display: inline-flex;
@@ -113,8 +120,10 @@
   justify-content: center;
   gap: 6px;
   width: 100%;
-  min-height: 40px;
-  border-radius: 999px;
+  min-height: 38px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .gate-advanced > .gate-form { margin-top: 12px; }
@@ -168,12 +177,14 @@
 
 .gate-step-retry {
   flex: none;
+  flex-shrink: 0;
   font-size: 12px;
   padding: 2px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   background: transparent;
-  color: var(--accent, inherit);
+  color: var(--color-primary);
+  white-space: nowrap;
   cursor: pointer;
 }
 .gate-step-retry:disabled { opacity: 0.6; cursor: default; }
@@ -181,9 +192,9 @@
 .gate-warnings {
   margin: 0;
   padding: 8px 12px 8px 30px;
-  border: 1px solid var(--warn, var(--line));
-  border-radius: 12px;
-  background: var(--surface);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-md);
+  background: var(--warn-soft);
   color: var(--muted);
   font-size: 12.5px;
   display: flex;
@@ -196,7 +207,7 @@
 .gate-hint { margin: 0; color: var(--muted); font-size: 12px; }
 
 .gate-shower-result { margin: 0; font-size: 12.5px; }
-.gate-shower-result.ok { color: var(--ok, var(--accent)); }
+.gate-shower-result.ok { color: var(--ok); }
 .gate-shower-result.error { color: var(--danger); }
 
 /* 配对码输入框：一长串 base64，等宽、任意位置换行，粘贴后一眼能看出整串都在。 */
@@ -204,16 +215,16 @@
   width: 100%;
   resize: vertical;
   min-height: 72px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
-  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
   word-break: break-all;
 }
 
 .gate-hint.gate-hint-warn { color: var(--danger); }
-.gate-hint.gate-hint-ok { color: var(--ok, var(--brand, #2d7a47)); font-weight: 500; }
+.gate-hint.gate-hint-ok { color: var(--ok); font-weight: 500; }
 .gate-advanced-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* 已配对的本机 Host：一个主按钮加一行说明，位于配对码输入框之上。 */

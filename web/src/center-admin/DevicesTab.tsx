@@ -9,6 +9,7 @@ import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   ActionMenu,
+  CaConfirmDialog,
   CaDisclosure,
   CaModal,
   CaNotice,
@@ -145,6 +146,8 @@ export function DevicesTab({
   const [renameDraft, setRenameDraft] = useState('');
   const [oauthBusyId, setOauthBusyId] = useState<string | null>(null);
   const [deviceToRemove, setDeviceToRemove] = useState<CenterDevice | null>(null);
+  const [botToDelete, setBotToDelete] = useState<CenterBotRef | null>(null);
+  const [deletingBot, setDeletingBot] = useState(false);
 
   // Pairing code state (NEVER deleted on modal close!)
   const [pendingPairing, setPendingPairing] = useState<PendingPairingState | null>(() => {
@@ -488,13 +491,30 @@ export function DevicesTab({
         await api.unarchiveBot(bot.deviceId, bot.botId);
         setNotice(t(`已恢复「${bot.name}」`, `Restored "${bot.name}"`));
       } else {
-        if (!window.confirm(t(`确定彻底删除 Bot「${bot.name}」吗？`, `Permanently delete Bot "${bot.name}"?`))) return;
-        await api.deleteBot(bot.deviceId, bot.botId);
-        setNotice(t(`已删除「${bot.name}」`, `Deleted "${bot.name}"`));
+        setBotToDelete(bot);
+        return;
       }
       await loadAll();
     } catch (err) {
       setError(errorMessage(err, t('操作 Bot 失败', 'Bot operation failed')));
+    }
+  };
+
+  const handleConfirmDeleteBot = async () => {
+    if (!botToDelete) return;
+    const target = botToDelete;
+    setDeletingBot(true);
+    setError('');
+    try {
+      await api.deleteBot(target.deviceId, target.botId);
+      setBotToDelete(null);
+      setNotice(t(`已删除「${target.name}」`, `Deleted "${target.name}"`));
+      await loadAll();
+    } catch (err) {
+      setBotToDelete(null);
+      setError(errorMessage(err, t('操作 Bot 失败', 'Bot operation failed')));
+    } finally {
+      setDeletingBot(false);
     }
   };
 
@@ -1497,6 +1517,24 @@ export function DevicesTab({
           </div>
         )}
       </CaModal>
+
+      <CaConfirmDialog
+        open={Boolean(botToDelete)}
+        title={t('删除 Bot', 'Delete Bot')}
+        description={
+          botToDelete
+            ? t(`彻底删除 Bot「${botToDelete.name}」后将无法恢复，该 Bot 的配置与中心绑定将被永久清除。`, `Permanently deleting Bot "${botToDelete.name}" cannot be undone. Its settings and center bindings will be removed.`)
+            : ''
+        }
+        confirmLabel={t('删除 Bot', 'Delete Bot')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={deletingBot}
+        onCancel={() => {
+          if (!deletingBot) setBotToDelete(null);
+        }}
+        onConfirm={() => void handleConfirmDeleteBot()}
+      />
     </div>
   );
 }

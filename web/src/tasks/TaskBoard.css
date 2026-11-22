@@ -108,9 +108,10 @@
   font-size: var(--text-sm, 0.875rem);
   font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
-  transition: filter var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: filter var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 .tb-scope .tb-primary-btn:active:not(:disabled) { filter: brightness(0.94); transform: scale(0.98); }
 .tb-scope .tb-primary-btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -129,10 +130,11 @@
   font-size: var(--text-sm, 0.85rem);
   font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    border-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 .tb-scope .tb-secondary-btn:active:not(:disabled) {
   background: var(--tb-surface);
@@ -177,6 +179,7 @@
   font-size: var(--text-sm, 0.85rem);
   font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
@@ -256,6 +259,7 @@
 
 .tb-scope .view-topbar-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
   flex: none;
@@ -276,6 +280,7 @@
   font-size: var(--text-sm, 0.85rem);
   font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: filter var(--dur-fast, 150ms) var(--ease-out, ease),
     transform var(--dur-fast, 150ms) var(--ease-out, ease);
@@ -361,6 +366,7 @@
 }
 .tb-scope .filter-pills button {
   white-space: nowrap;
+  flex-shrink: 0;
   border: 1px solid var(--tb-line);
   border-radius: var(--radius-full, 999px);
   background: transparent;
@@ -416,6 +422,7 @@
   width: 100%;
 }
 .tb-scope .task-row-title {
+  min-width: 0;
   font-size: var(--text-md, 0.96875rem);
   font-weight: var(--weight-semibold, 600);
   line-height: 1.42;
@@ -434,6 +441,7 @@
   width: 100%;
 }
 .tb-scope .task-row-summary {
+  min-width: 0;
   font-size: var(--text-sm, 0.84375rem);
   line-height: 1.48;
   color: var(--tb-muted);
@@ -456,6 +464,7 @@
 
 .tb-scope .tasks-error-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3, 10px);
@@ -487,6 +496,8 @@
   color: var(--tb-muted);
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: var(--tb-radius-xs);
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
@@ -519,6 +530,8 @@
   color: var(--tb-text);
   font-weight: var(--weight-semibold, 600);
   font-size: var(--text-md, 0.92rem);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     transform var(--dur-fast, 150ms) var(--ease-out, ease);
@@ -625,18 +638,22 @@
   font-weight: var(--weight-semibold, 600);
   padding: var(--space-1, 4px) var(--space-2, 8px);
   min-height: 32px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .receipt-log-link::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .tb-scope .receipt-log-link::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 .tb-scope .receipt-log-link:active { background: var(--tb-selection); }
 
@@ -659,14 +676,16 @@
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .notice-dismiss::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: var(--tap-min, 44px);
-  height: var(--tap-min, 44px);
+@media (pointer: coarse) {
+  .tb-scope .notice-dismiss::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: var(--tap-min, 44px);
+    height: var(--tap-min, 44px);
+  }
 }
 .tb-scope .notice-dismiss:active {
   background: color-mix(in srgb, var(--tb-text) 7%, transparent);
@@ -690,7 +709,7 @@
   border-bottom: 1px solid var(--tb-line-subtle);
 }
 .tb-scope .steps-head-title { font-size: var(--text-sm, 0.875rem); font-weight: var(--weight-semibold, 600); color: var(--tb-text); }
-.tb-scope .steps-head-count { font-size: var(--text-xs, 0.78125rem); color: var(--tb-muted); }
+.tb-scope .steps-head-count { font-size: var(--text-xs, 0.78125rem); color: var(--tb-muted); font-variant-numeric: tabular-nums; }
 .tb-scope .steps-list { display: flex; flex-direction: column; }
 
 .tb-scope .step-item {
@@ -766,6 +785,7 @@
 .tb-scope .step-meta-col {
   flex: 0 0 auto;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
 }
@@ -778,6 +798,7 @@
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
+  flex-shrink: 0;
   color: var(--tb-muted);
   background: color-mix(in srgb, var(--tb-text) 6%, transparent);
 }
@@ -801,19 +822,22 @@
   font-weight: var(--weight-medium, 500);
   color: var(--tb-text);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: border-color var(--dur-fast, 150ms) var(--ease-out, ease),
     background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     transform var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .bot-chip-btn::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .tb-scope .bot-chip-btn::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 .tb-scope .bot-chip-btn:active {
   border-color: var(--tb-accent);
@@ -953,20 +977,23 @@
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
   white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     border-color var(--dur-fast, 150ms) var(--ease-out, ease),
     color var(--dur-fast, 150ms) var(--ease-out, ease),
     opacity var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .mini-pill::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .tb-scope .mini-pill::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 .tb-scope .mini-pill.active {
   background: var(--tb-selection);
@@ -989,6 +1016,7 @@
 }
 .tb-scope .req-edit-actions-right {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
   margin-left: auto;
@@ -1005,6 +1033,8 @@
   color: var(--tb-danger);
   font-size: var(--text-xs, 0.78125rem);
   font-weight: var(--weight-semibold, 600);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     border-color var(--dur-fast, 150ms) var(--ease-out, ease);
@@ -1041,6 +1071,7 @@
   font-size: var(--text-xs, 0.75rem);
   color: var(--tb-muted);
   opacity: 0.82;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ————— 对话输入框上方极简任务提示与引用条 ————— */
@@ -1129,14 +1160,16 @@
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .chat-quote-close::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: var(--tap-min, 44px);
-  height: var(--tap-min, 44px);
+@media (pointer: coarse) {
+  .tb-scope .chat-quote-close::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: var(--tap-min, 44px);
+    height: var(--tap-min, 44px);
+  }
 }
 .tb-scope .chat-quote-close:active {
   background: var(--tb-line-subtle);
@@ -1279,14 +1312,16 @@
   cursor: pointer;
   transition: color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .chat-prompt-task-link::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .tb-scope .chat-prompt-task-link::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 .tb-scope .chat-prompt-task-link:active {
   background: transparent;
@@ -1314,14 +1349,16 @@
   transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     opacity var(--dur-fast, 150ms) var(--ease-out, ease);
 }
-.tb-scope .chat-prompt-cycle-btn::before {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min, 44px));
-  height: max(100%, var(--tap-min, 44px));
+@media (pointer: coarse) {
+  .tb-scope .chat-prompt-cycle-btn::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: max(100%, var(--tap-min, 44px));
+    height: max(100%, var(--tap-min, 44px));
+  }
 }
 .tb-scope .chat-prompt-cycle-btn:active {
   background: var(--tb-warn-soft);
@@ -1377,7 +1414,7 @@
 
 /* ————— 悬停态（仅支持精确悬停设备） ————— */
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .tb-scope .tb-primary-btn:hover:not(:disabled) { filter: brightness(1.05); }
   .tb-scope .tb-secondary-btn:hover:not(:disabled) {
     background: var(--tb-surface);

@@ -6,7 +6,7 @@
   margin: 0;
   padding: 10px 14px;
   border-radius: var(--radius-md, 12px);
-  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 75%, transparent);
+  border: 1px solid var(--color-line, var(--line));
   background: var(--color-surface-2, var(--surface));
   color: var(--color-text-muted, var(--muted));
   font-size: var(--text-sm, .8125rem);
@@ -19,8 +19,8 @@
   padding: 14px var(--space-4, 16px);
   border-radius: var(--radius-lg, 20px);
   background: var(--color-surface-2, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 75%, transparent);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--color-text, var(--text)) 4%, transparent);
+  border: 1px solid var(--color-line, var(--line));
+  box-shadow: none;
 }
 
 .pending-card-avatar { flex: none; width: var(--tap-min, 44px); height: var(--tap-min, 44px); }
@@ -35,7 +35,7 @@
   justify-content: center;
   color: var(--color-text-muted, var(--muted));
   background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 80%, transparent);
-  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 70%, transparent);
+  border: 1px solid var(--color-line, var(--line));
 }
 
 .pending-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -51,13 +51,22 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pending-card-subtitle { flex: none; font-size: var(--text-xs, .75rem); color: var(--color-text-muted, var(--muted)); }
+.pending-card-subtitle {
+  flex: 0 1 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs, .75rem);
+  color: var(--color-text-muted, var(--muted));
+}
 
 .pending-card-text {
   margin: 0;
   font-size: var(--text-sm, .8125rem);
   line-height: 1.45;
   color: var(--color-text, var(--text));
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -65,22 +74,34 @@
 }
 
 .pending-card-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2, 8px); flex-wrap: wrap; margin-top: 2px; }
-.pending-card-status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm, .8125rem); font-weight: var(--weight-semibold, 600); color: var(--color-text-muted, var(--muted)); }
+.pending-card-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--text-sm, .8125rem); font-weight: var(--weight-semibold, 600); color: var(--color-text-muted, var(--muted)); }
 .pending-card-status::before { content: ''; width: 7px; height: 7px; border-radius: var(--radius-full, 999px); background: currentColor; flex: none; }
 .pending-card-status.is-todo { color: var(--color-primary, var(--accent)); }
 .pending-card-status.is-warn { color: var(--color-warning, var(--warn, var(--danger))); }
 .pending-card-status.is-error { color: var(--color-danger, var(--danger)); }
 .pending-card-status.is-ok { color: var(--color-success, var(--accent)); }
-.pending-card-hint { margin: 0; font-size: var(--text-xs, .75rem); color: var(--color-text-muted, var(--muted)); }
-.pending-card-error { margin: 0; font-size: var(--text-sm, .8125rem); color: var(--color-danger, var(--danger)); }
+.pending-card-hint { margin: 0; font-size: var(--text-xs, .75rem); color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
+.pending-card-error { margin: 0; font-size: var(--text-sm, .8125rem); color: var(--color-danger, var(--danger)); overflow-wrap: anywhere; }
 
-.pending-card-actions { display: flex; gap: var(--space-2, 8px); margin-left: auto; }
+.pending-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px var(--space-2, 8px);
+  margin-left: auto;
+  max-width: 100%;
+}
 .pending-card-actions .grok-done-pill-btn,
 .pending-card-actions .hub-outline-btn {
   position: relative;
-  min-height: 34px;
+  min-height: 36px;
   font-size: var(--text-sm, .8125rem);
-  transition: opacity var(--dur-fast, 150ms) var(--ease-out, ease), background var(--dur-fast, 150ms) var(--ease-out, ease), transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: opacity var(--dur-fast, 150ms) cubic-bezier(0.23, 1, 0.32, 1),
+    background-color var(--dur-fast, 150ms) cubic-bezier(0.23, 1, 0.32, 1),
+    transform var(--dur-fast, 150ms) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .pending-card-actions .grok-done-pill-btn { padding: 0 var(--space-4, 16px); }
 .pending-card-actions .hub-outline-btn { padding: 0 14px; border-radius: var(--radius-full, 999px); }
@@ -94,7 +115,17 @@
   min-width: max(100%, var(--tap-min, 44px));
   min-height: max(100%, var(--tap-min, 44px));
 }
-@media (hover: hover) {
+@media (pointer: coarse) {
+  .pending-card-actions .grok-done-pill-btn,
+  .pending-card-actions .hub-outline-btn {
+    min-height: var(--tap-min, 44px);
+  }
+  .pending-card-actions .grok-done-pill-btn::before,
+  .pending-card-actions .hub-outline-btn::before {
+    content: none;
+  }
+}
+@media (hover: hover) and (pointer: fine) {
   .pending-card-actions .grok-done-pill-btn:hover:not(:disabled) { opacity: .9; }
   .pending-card-actions .hub-outline-btn:hover:not(:disabled) { background: var(--color-surface-1, var(--surface)); }
 }
@@ -110,6 +141,8 @@
   align-items: center;
   gap: 6px;
   align-self: flex-start;
+  flex-shrink: 0;
+  white-space: nowrap;
   padding: 6px var(--space-3, 12px);
   border-radius: var(--radius-full, 999px);
   border: 1px solid var(--color-line, var(--line));
@@ -117,7 +150,9 @@
   color: var(--color-text-muted, var(--muted));
   font-size: var(--text-sm, .8125rem);
   font-weight: var(--weight-semibold, 600);
-  transition: background var(--dur-fast, 150ms) var(--ease-out, ease), transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  font-variant-numeric: tabular-nums;
+  transition: background-color var(--dur-fast, 150ms) cubic-bezier(0.23, 1, 0.32, 1),
+    transform var(--dur-fast, 150ms) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .pending-done-toggle::before {
   content: '';
@@ -128,7 +163,7 @@
   min-width: max(100%, var(--tap-min, 44px));
   min-height: max(100%, var(--tap-min, 44px));
 }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .pending-done-toggle:hover:not(:disabled) { background: var(--color-surface-1, var(--surface)); }
 }
 .pending-done-toggle:active:not(:disabled) { background: var(--color-surface-3, var(--surface)); transform: scale(.97); }
@@ -160,4 +195,16 @@
 @keyframes pending-skeleton-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: .45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pending-card-actions .grok-done-pill-btn,
+  .pending-card-actions .hub-outline-btn,
+  .pending-done-toggle {
+    transition: none;
+  }
+  .pending-skeleton-avatar,
+  .pending-skeleton-line {
+    animation: none;
+  }
 }

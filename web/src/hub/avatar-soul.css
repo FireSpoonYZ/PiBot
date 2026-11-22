@@ -1,21 +1,34 @@
 /* avatar-soul lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
-/* 18 个形状改 6 列 3 行；格子触控区域保持 >=44px。 */
+/* 18 个形状自适应网格，360px 窄屏零水平溢出；格子触控区域保持 >=44px。 */
 .grok-shapes-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
   gap: var(--space-2);
 }
 .grok-shape-cell {
-  width: 46px;
-  height: 46px;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
   min-width: var(--tap-min);
   min-height: var(--tap-min);
   border-radius: var(--radius-md);
+  transition: transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    border-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 .grok-shape-cell:focus-visible,
 .grok-color-swatch:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .grok-shape-cell:hover:not(.selected) {
+    background: color-mix(in srgb, var(--color-surface-1) 65%, transparent);
+  }
+  .grok-color-swatch:hover:not(.selected) {
+    border-color: var(--color-line);
+  }
 }
 
 /* 灰色留给离线状态，10 个可选颜色分为两行。 */
@@ -32,6 +45,8 @@
   height: var(--tap-min);
   min-width: var(--tap-min);
   min-height: var(--tap-min);
+  transition: transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    border-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 /* 活动指示与头像交互控件：扩展点击区至 >=44px 并补齐焦点态。 */
@@ -49,6 +64,8 @@
 .sand-activity-learn-link,
 .sand-activity-detail-toggle {
   position: relative;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .sand-activity-learn-link:active,
 .sand-activity-detail-toggle:active {
@@ -67,7 +84,14 @@
   padding: var(--space-4);
 }
 .soul-snippet-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
   margin: 2px 2px var(--space-1);
+}
+.soul-snippet-bar .snippet-chip {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .soul-meta-row {
   display: flex;
@@ -82,8 +106,16 @@
 .soul-meta-limit {
   color: var(--color-text-muted);
   margin-right: var(--space-2);
+  font-variant-numeric: tabular-nums;
 }
 .soul-meta-limit.over {
   color: var(--color-danger);
   font-weight: var(--weight-semibold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grok-shape-cell,
+  .grok-color-swatch {
+    transition: none;
+  }
 }

@@ -1,8 +1,9 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
-import type { ReactNode, Ref } from 'react';
+import { useEffect, useRef, type ReactNode, type Ref } from 'react';
 import { useText } from '../../ui';
 import { IconButton } from './IconButton';
+import { registerOverlayBackHandler } from './overlayStack';
 
 export type OverlayVariant = 'center' | 'sheet' | 'drawer' | 'fullscreen';
 
@@ -34,6 +35,14 @@ export function Overlay({
   ref,
 }: OverlayProps) {
   const t = useText();
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
+
+  useEffect(() => {
+    if (!open) return;
+    return registerOverlayBackHandler(() => onOpenChangeRef.current(false));
+  }, [open]);
+
   const closeVisible = showClose ?? !hideTitle;
   const scrimCls = `ui-overlay-scrim is-${variant}`;
   const contentCls = ['ui-overlay-content', `is-${variant}`, className].filter(Boolean).join(' ');
@@ -42,7 +51,12 @@ export function Overlay({
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className={scrimCls} />
-        <DialogPrimitive.Content ref={ref} className={contentCls}>
+        <DialogPrimitive.Content
+          ref={ref}
+          data-ui-dialog={open ? 'open' : undefined}
+          className={contentCls}
+          onEscapeKeyDown={event => event.stopPropagation()}
+        >
           {variant === 'sheet' ? <div className="ui-overlay-handle" aria-hidden="true" /> : null}
           {hideTitle ? (
             <>

@@ -37,15 +37,20 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--brand, var(--accent));
+  color: var(--color-primary);
   font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.desktop-shell .pending-context-link:hover { text-decoration: underline; }
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .pending-context-link:hover { text-decoration: underline; }
+}
 
 .desktop-shell .pending-panel-body {
   gap: 10px;
   padding: 12px 16px 16px;
+  overscroll-behavior: contain;
 }
 
 .desktop-shell .pending-panel-body > .secondary-button { align-self: flex-start; }
@@ -76,8 +81,8 @@
 }
 
 .desktop-shell .pending-record-copy { min-width: 0; }
-.desktop-shell .pending-record-meta { margin-top: 2px; }
-.desktop-shell .pending-record .status { font-weight: 600; }
+.desktop-shell .pending-record-meta { margin-top: 2px; font-variant-numeric: tabular-nums; }
+.desktop-shell .pending-record .status { font-weight: 600; font-variant-numeric: tabular-nums; }
 .desktop-shell .pending-state-pending,
 .desktop-shell .pending-state-unconfirmed,
 .desktop-shell .pending-outcome-unconfirmed { color: var(--warn); }
@@ -111,6 +116,8 @@
   min-height: 32px;
   padding: 5px 12px;
   font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) {
@@ -128,7 +135,9 @@
   font-size: 12px;
 }
 
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > summary:hover,
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > summary:hover { color: var(--text); }
+}
 .desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts)[open] > summary { color: var(--text); }
 
 .desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > :not(summary) {
@@ -143,7 +152,8 @@
 .desktop-shell .pending-extra-actions { margin-bottom: 4px; }
 .desktop-shell .pending-tech-body { display: flex; flex-direction: column; gap: 4px; }
 .desktop-shell .pending-mono {
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 

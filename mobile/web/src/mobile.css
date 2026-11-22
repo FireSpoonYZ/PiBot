@@ -1,6 +1,13 @@
 /* M18 mobile（Tauri 辅助进程）外壳样式：全面屏沉浸，由内部顶栏/底栏按 --top / --bottom 单次让位；
- * 软键盘统一在 #root 通过 --ime-bottom 单通道让位，不缩放 WebView。
+ * 软键盘统一在 #root 通过 --ime-bottom 单通道让位，不缩放 WebView；
+ * --bottom 提升到 :root，确保挂载在 document.body 上的 Radix Portal 也能继承软键盘让位。
  * 外壳容器使用 overflow: clip（附 hidden 回退），防止焦点或 scrollIntoView 误滚根节点。 */
+:root {
+  --bottom: max(
+    calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)),
+    0px
+  );
+}
 html, body {
   overflow: hidden;
   overflow: clip;
@@ -15,10 +22,6 @@ html, body {
   flex-direction: column;
   padding-top: 0;
   padding-bottom: var(--ime-bottom, 0px);
-  --bottom: max(
-    calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)),
-    0px
-  );
 }
 .mobile-shell { flex: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; overflow: hidden; overflow: clip; background: var(--bg); }
 .mobile-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; overflow: clip; }

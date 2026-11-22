@@ -1,26 +1,33 @@
 /* chat lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
 /* Divider above the destructive "clear history" item in the chat top menu. */
-.grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
+.grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--color-line); }
 
 /* 历史消息编辑态高亮与后续消息淡出 */
 .bot-chat-bubble.is-editing-target {
-  outline: 1.5px solid var(--accent);
+  outline: 1.5px solid var(--color-primary);
   outline-offset: 2px;
 }
 
 .bot-chat-bubble.is-editing-after {
   opacity: 0.45;
-  transition: opacity 160ms ease;
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-/* 聊天顶栏居中 Bot 胶囊文字与固定高度状态副标题（D1：高度恒为 --tap-min） */
+/* 聊天顶栏居中 Bot 胶囊文字与固定高度状态副标题（D1：高度恒为 --tap-min；Quiet Instrument 轻边框与低阴影） */
 .grok-chat-floating-header .grok-chat-center-pill {
   height: var(--tap-min);
   min-height: var(--tap-min);
   max-height: var(--tap-min);
   padding: 4px var(--space-3) 4px 10px;
   box-sizing: border-box;
+  border-color: var(--color-line);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--color-scrim) 6%, transparent);
+}
+
+.grok-chat-floating-header .grok-floating-circle-btn {
+  border-color: var(--color-line);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--color-scrim) 6%, transparent);
 }
 
 .grok-chat-pill-avatar-btn {
@@ -104,14 +111,14 @@
   cursor: pointer;
 }
 
+/* 向下扩展副标题触发区，避免向上侵入上方 Bot 名称按钮的点击区 */
 .grok-chat-pill-sub.is-conn-trigger::before {
   content: '';
   position: absolute;
   left: -4px;
   right: -4px;
-  top: 50%;
-  transform: translateY(-50%);
-  height: 28px;
+  top: 0;
+  bottom: -8px;
 }
 
 .grok-chat-pill-sub.is-conn-trigger .hub-top-status-spin {
@@ -158,8 +165,8 @@
   padding: 0 6px 0 12px;
   border-radius: var(--radius-full);
   background: var(--color-surface-2);
-  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
-  box-shadow: 0 3px 14px color-mix(in srgb, var(--color-scrim) 14%, transparent);
+  border: 1px solid var(--color-line);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--color-scrim) 6%, transparent);
 }
 
 .grok-chat-header-search:focus-within {
@@ -208,6 +215,8 @@
   align-items: center;
   justify-content: center;
   color: var(--color-text-muted);
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .grok-chat-header-search-close::before {
@@ -218,6 +227,20 @@
   transform: translate(-50%, -50%);
   width: var(--tap-min);
   height: var(--tap-min);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .grok-chat-header-search-close:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  }
+}
+
+@media (pointer: coarse) {
+  .grok-chat-header-search-close {
+    width: 36px;
+    height: 36px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -238,16 +261,18 @@
 /* 移动端/共享界面用户气泡轻触操作胶囊（复制 / 编辑） */
 .bot-bubble-action-bar {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 2px;
+  max-width: 100%;
   margin-top: 6px;
   padding: 3px 5px;
   border-radius: var(--radius-full);
   border: 1px solid var(--color-line);
-  background: var(--color-bg);
+  background: var(--color-surface-2);
   color: var(--color-text);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-text) 10%, transparent);
-  animation: grok-pop-up 140ms var(--ease-out) both;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-scrim) 8%, transparent);
+  animation: grok-pop-up 150ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
 
 .bot-bubble-action-btn {
@@ -255,13 +280,15 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  height: 24px;
+  flex-shrink: 0;
+  height: 26px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-full);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   color: var(--color-text);
   white-space: nowrap;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .bot-bubble-action-btn::before {
@@ -279,7 +306,7 @@
   height: 12px;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bot-bubble-action-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--color-text) 7%, transparent);
   }
@@ -292,6 +319,19 @@
 .bot-bubble-action-btn:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .bot-bubble-action-bar {
+    gap: var(--space-1);
+    padding: var(--space-1);
+  }
+
+  .bot-bubble-action-btn {
+    height: auto;
+    min-height: 36px;
+    padding: 0 var(--space-3);
+  }
 }
 
 /* 融合工作槽与失败状态行 */
@@ -316,6 +356,7 @@
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+  white-space: nowrap;
   min-height: 0;
   padding: 2px 6px;
   border: 0;
@@ -325,6 +366,8 @@
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   cursor: pointer;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .sand-activity-detail-toggle::before {
@@ -337,7 +380,7 @@
   height: max(100%, var(--tap-min));
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .sand-activity-detail-toggle:hover {
     color: var(--color-text);
     background: color-mix(in srgb, var(--color-surface-1) 75%, var(--color-text) 10%);
@@ -355,7 +398,7 @@
 }
 
 .sand-activity-detail-toggle svg {
-  transition: transform var(--dur-fast) ease;
+  transition: transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .sand-activity-detail-toggle[aria-expanded="true"] svg {
@@ -370,7 +413,8 @@
   max-height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
-  border: 0;
+  overscroll-behavior: contain;
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-sm);
   box-shadow: none;
   background: var(--color-surface-1);
@@ -383,10 +427,18 @@
   word-break: break-word;
 }
 
-/* F6 + C5 + C7: 相对定位承载绝对定位骨架/空态层；开启 overflow-anchor 稳定历史阅读位置 */
+@media (max-width: 430px) {
+  .sand-activity-failure-detail {
+    margin-left: 0;
+    max-width: 100%;
+  }
+}
+
+/* F6 + C5 + C7: 相对定位承载绝对定位骨架/空态层；开启 overflow-anchor 稳定历史阅读位置与 overscroll-behavior 隔离滚动链 */
 .bot-chat-messages {
   position: relative;
   overflow-anchor: auto;
+  overscroll-behavior: contain;
 }
 
 .bot-chat-messages-content {
@@ -417,13 +469,13 @@
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
-  transition: opacity var(--dur-fast) ease, visibility 0s linear var(--dur-fast);
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1), visibility 0s linear var(--dur-fast);
 }
 
 .bot-chat-empty-overlay.is-visible {
   opacity: 1;
   visibility: visible;
-  transition: opacity var(--dur-fast) ease;
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .bot-chat-state-layer {
@@ -434,7 +486,7 @@
   padding: var(--space-3) var(--space-4) var(--space-6);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--dur-fast) ease;
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .bot-chat-state-layer.is-active {
@@ -514,18 +566,22 @@
   padding: 0 var(--space-4);
   border-radius: var(--radius-full);
   border: 1px solid var(--color-line);
-  background: var(--color-surface-1);
+  background: var(--color-surface-2);
   color: var(--color-text);
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-text) 14%, transparent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--color-scrim) 10%, transparent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  flex-shrink: 0;
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   white-space: nowrap;
   cursor: pointer;
-  animation: grok-pop-up 160ms var(--ease-out) both;
+  transition: border-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+  animation: grok-pop-up 160ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
 
 .grok-composer-floating-dock > .bot-chat-jump-anchor {
@@ -546,7 +602,7 @@
   pointer-events: auto;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bot-chat-jump-latest:hover {
     border-color: var(--color-primary);
   }
@@ -575,9 +631,21 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bot-chat-bubble.is-editing-after,
+  .grok-chat-header-search-close,
+  .bot-bubble-action-btn,
+  .sand-activity-detail-toggle,
+  .sand-activity-detail-toggle svg,
   .bot-chat-empty-overlay,
-  .bot-chat-state-layer {
+  .bot-chat-state-layer,
+  .bot-chat-jump-latest {
     transition: none;
+  }
+
+  .bot-bubble-action-bar,
+  .bot-chat-skeleton-bar,
+  .bot-chat-jump-latest {
+    animation: none;
   }
 }
 

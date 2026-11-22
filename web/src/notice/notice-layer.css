@@ -49,21 +49,17 @@
   flex-direction: column;
   gap: var(--space-2, 8px);
   padding: 10px 12px;
-  border-radius: var(--radius-md, 14px);
-  border: 1px solid color-mix(in srgb, var(--notice-accent) 24%, var(--notice-line));
-  background: color-mix(in srgb, var(--notice-surface) 95%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  border-radius: var(--radius-md, 12px);
+  border: 1px solid color-mix(in srgb, var(--notice-accent) 22%, var(--notice-line));
+  background: color-mix(in srgb, var(--notice-accent) 6%, var(--notice-surface));
   color: var(--color-text, var(--text));
-  box-shadow: var(
-    --shadow-md,
-    0 10px 28px color-mix(in srgb, var(--color-scrim, black) 30%, transparent)
-  );
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-scrim, currentColor) 10%, transparent);
   font-size: var(--text-sm, 0.8125rem);
+  font-variant-numeric: tabular-nums;
   line-height: 1.45;
   overflow-wrap: anywhere;
   will-change: transform, opacity;
-  animation: notice-layer-enter 200ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: notice-layer-enter var(--dur-base, 200ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
 }
 
 .notice-layer-card.is-info {
@@ -75,22 +71,22 @@
 
 .notice-layer-card.is-warning {
   --notice-accent: var(--color-warning, var(--warning, var(--warn)));
-  border-color: color-mix(in srgb, var(--notice-accent) 32%, var(--notice-line));
+  border-color: color-mix(in srgb, var(--notice-accent) 26%, var(--notice-line));
 }
 
 .notice-layer-card.is-error {
   --notice-accent: var(--color-danger, var(--danger));
-  border-color: color-mix(in srgb, var(--notice-accent) 30%, var(--notice-line));
+  border-color: color-mix(in srgb, var(--notice-accent) 26%, var(--notice-line));
 }
 
 .notice-layer-card.is-success {
   --notice-accent: var(--color-success, var(--success, var(--ok, var(--accent))));
-  border-color: color-mix(in srgb, var(--notice-accent) 26%, var(--notice-line));
+  border-color: color-mix(in srgb, var(--notice-accent) 24%, var(--notice-line));
 }
 
 .notice-layer-card.is-exiting {
   pointer-events: none;
-  animation: notice-layer-exit 160ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: notice-layer-exit 160ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
 }
 
 .notice-layer-row {
@@ -103,13 +99,13 @@
 
 .notice-layer-icon {
   flex: none;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm, 6px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--notice-accent) 14%, transparent);
+  background: color-mix(in srgb, var(--notice-accent) 12%, transparent);
   color: var(--notice-accent);
   margin-top: 1px;
 }
@@ -117,6 +113,7 @@
 .notice-layer-icon svg {
   width: 15px;
   height: 15px;
+  stroke-width: 2;
   flex-shrink: 0;
 }
 
@@ -127,13 +124,14 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding-block: 2px;
+  padding-block: 1px;
 }
 
 .notice-layer-title {
   color: var(--color-text, var(--text));
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
+  font-variant-numeric: tabular-nums;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -146,16 +144,20 @@
   padding: 2px 0;
   margin: 0;
   border: 0;
-  border-radius: var(--radius-sm, 8px);
+  border-radius: var(--radius-sm, 6px);
   background: transparent;
   color: var(--color-text-muted, var(--muted));
   font: inherit;
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
   line-height: 1.3;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   touch-action: manipulation;
-  transition: opacity var(--dur-fast, 150ms) ease;
+  transition:
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-detail-toggle::before {
@@ -177,6 +179,7 @@
 .notice-layer-actions {
   flex: none;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -185,24 +188,26 @@
   position: relative;
   min-height: 28px;
   max-width: 144px;
-  padding: 0 11px;
+  padding: 0 10px;
   margin: 0;
-  border: 0;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
-  background: color-mix(in srgb, var(--notice-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--notice-accent) 24%, transparent);
+  border-radius: var(--radius-sm, 6px);
+  background: color-mix(in srgb, var(--notice-accent) 10%, transparent);
   color: var(--notice-accent);
   font: inherit;
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-semibold, 600);
   line-height: 1;
   white-space: nowrap;
+  flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
   touch-action: manipulation;
   transition:
-    opacity var(--dur-fast, 150ms) ease,
-    transform var(--dur-fast, 150ms) ease;
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-action::before {
@@ -222,19 +227,21 @@
   height: 26px;
   padding: 0;
   margin: 0;
-  border: 0;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--notice-line) 55%, transparent);
+  background: transparent;
   color: var(--color-text-muted, var(--muted));
   font: inherit;
   cursor: pointer;
   touch-action: manipulation;
   transition:
-    opacity var(--dur-fast, 150ms) ease,
-    transform var(--dur-fast, 150ms) ease;
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-dismiss::before {
@@ -253,22 +260,27 @@
   flex-shrink: 0;
 }
 
-@media (hover: hover) {
-  .notice-layer-action:hover,
-  .notice-layer-dismiss:hover,
+@media (hover: hover) and (pointer: fine) {
+  .notice-layer-action:hover {
+    background: color-mix(in srgb, var(--notice-accent) 16%, transparent);
+  }
+  .notice-layer-dismiss:hover {
+    background: color-mix(in srgb, var(--notice-line) 85%, transparent);
+    color: var(--color-text, var(--text));
+  }
   .notice-layer-detail-toggle:hover {
-    opacity: 0.82;
+    color: var(--color-text, var(--text));
   }
 }
 
 .notice-layer-action:active,
 .notice-layer-dismiss:active {
-  opacity: 0.7;
-  transform: scale(0.95);
+  opacity: 0.78;
+  transform: scale(0.98);
 }
 
 .notice-layer-detail-toggle:active {
-  opacity: 0.7;
+  opacity: 0.72;
 }
 
 .notice-layer-action:focus-visible,
@@ -285,23 +297,24 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-2, 8px) 10px;
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid color-mix(in srgb, var(--notice-line) 80%, transparent);
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--notice-line);
   background: var(--color-surface-1, var(--surface));
   color: var(--color-text-muted, var(--muted));
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
   font-size: var(--text-xs, 0.75rem);
+  font-variant-numeric: tabular-nums;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
-  animation: notice-layer-detail-in 150ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: notice-layer-detail-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
 }
 
 @keyframes notice-layer-enter {
   from {
     opacity: 0;
-    transform: translate3d(0, 12px, 0) scale(0.97);
+    transform: translate3d(0, 10px, 0) scale(0.98);
   }
   to {
     opacity: 1;
@@ -316,7 +329,7 @@
   }
   to {
     opacity: 0;
-    transform: translate3d(0, 8px, 0) scale(0.97);
+    transform: translate3d(0, 6px, 0) scale(0.98);
   }
 }
 
@@ -340,5 +353,9 @@
   .notice-layer-detail-toggle {
     animation: none !important;
     transition: none !important;
+  }
+  .notice-layer-action:active,
+  .notice-layer-dismiss:active {
+    transform: none !important;
   }
 }

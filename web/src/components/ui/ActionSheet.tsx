@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from 'react';
+import { useRef, type KeyboardEvent, type ReactNode, type Ref } from 'react';
 import { useText } from '../../ui';
 import { Overlay } from './Overlay';
 
@@ -29,7 +29,41 @@ export function ActionSheet({
   ref,
 }: ActionSheetProps) {
   const t = useText();
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const cls = ['ui-action-sheet', className].filter(Boolean).join(' ');
+
+  const focusStep = (startIndex: number, step: 1 | -1) => {
+    const count = items.length;
+    for (let offset = 1; offset <= count; offset += 1) {
+      const next = (startIndex + step * offset + count) % count;
+      if (!items[next].disabled) {
+        itemRefs.current[next]?.focus();
+        return;
+      }
+    }
+  };
+
+  const handleItemKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      focusStep(index, 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      focusStep(index, -1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      const first = items.findIndex(item => !item.disabled);
+      if (first >= 0) itemRefs.current[first]?.focus();
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      for (let i = items.length - 1; i >= 0; i -= 1) {
+        if (!items[i].disabled) {
+          itemRefs.current[i]?.focus();
+          return;
+        }
+      }
+    }
+  };
 
   return (
     <Overlay
@@ -43,9 +77,10 @@ export function ActionSheet({
       className={cls}
     >
       <div className="ui-action-sheet-list" role="menu">
-        {items.map(item => (
+        {items.map((item, index) => (
           <button
             key={item.key}
+            ref={el => { itemRefs.current[index] = el; }}
             type="button"
             role="menuitem"
             disabled={item.disabled}
@@ -55,6 +90,7 @@ export function ActionSheet({
               onOpenChange(false);
               item.onSelect();
             }}
+            onKeyDown={event => handleItemKeyDown(event, index)}
           >
             {item.icon ? <span className="ui-action-sheet-icon" aria-hidden="true">{item.icon}</span> : null}
             <span className="ui-action-sheet-label">{item.label}</span>

@@ -11,6 +11,7 @@ import { openExternalUrl } from './openExternalUrl';
 import {
   CaCardSkeleton,
   CaChips,
+  CaConfirmDialog,
   CaDisclosure,
   CaModal,
   CaNotice,
@@ -268,6 +269,8 @@ export function ProvidersTab({
   const [savingProvider, setSavingProvider] = useState(false);
   const [validatingProvider, setValidatingProvider] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [confirmDeleteProviderOpen, setConfirmDeleteProviderOpen] = useState(false);
+  const [modelToDelete, setModelToDelete] = useState<{ model: Model; fromModal: boolean } | null>(null);
 
   // OAuth flow state
   const [flowId, setFlowId] = useState<string | null>(null);
@@ -704,19 +707,17 @@ export function ProvidersTab({
 
   const handleDeleteProvider = async () => {
     if (!edit || creating) return;
-    const msg = edit.native
-      ? t(`确定重置内置服务商「${edit.name}」的凭据与自定义配置吗？`, `Reset credentials and custom settings for built-in provider "${edit.name}"?`)
-      : t(`确定删除自定义服务商「${edit.name}」及其所有模型吗？`, `Delete custom provider "${edit.name}" and all its models?`);
-    if (!window.confirm(msg)) return;
     setSavingProvider(true);
     setDrawerError('');
     try {
       await api.deleteProvider(edit.id);
+      setConfirmDeleteProviderOpen(false);
       setDrawerOpen(false);
       setEdit(null);
       await refreshPageData();
       setNotice(edit.native ? t(`已重置 ${edit.name}`, `Reset ${edit.name}`) : t(`已删除 ${edit.name}`, `Deleted ${edit.name}`));
     } catch (err) {
+      setConfirmDeleteProviderOpen(false);
       setDrawerError(errorMessage(err, t('删除服务商失败', 'Failed to delete provider')));
     } finally {
       setSavingProvider(false);
@@ -926,17 +927,18 @@ export function ProvidersTab({
 
   const handleDeleteModel = async (model: Model, fromModal = false) => {
     if (!edit) return;
-    if (!window.confirm(t(`确定移除模型「${model.name || model.id}」吗？`, `Remove model "${model.name || model.id}"?`))) return;
     setDrawerError('');
     if (fromModal) setModelError('');
     if (fromModal) setModelSaving(true);
     try {
       await api.deleteModel(edit.id, model.id);
+      setModelToDelete(null);
       if (fromModal) setModelModalOpen(false);
       await loadProviderDetails(edit);
       await refreshPageData();
       setDrawerNotice(t(`已移除模型 ${model.name || model.id}`, `Removed model ${model.name || model.id}`));
     } catch (err) {
+      setModelToDelete(null);
       const msg = errorMessage(err, t('移除模型失败', 'Failed to remove model'));
       if (fromModal) setModelError(msg);
       else setDrawerError(msg);
@@ -1447,7 +1449,7 @@ export function ProvidersTab({
                     type="button"
                     className="ca-btn ca-btn-danger ca-btn-sm"
                     disabled={savingProvider}
-                    onClick={() => void handleDeleteProvider()}
+                    onClick={() => setConfirmDeleteProviderOpen(true)}
                   >
                     <Trash2 size={13} />
                     <span>{edit.native ? t('重置配置', 'Reset settings') : t('删除服务商', 'Delete provider')}</span>
@@ -2003,7 +2005,7 @@ export function ProvidersTab({
                     type="button"
                     className="ca-btn ca-btn-danger ca-btn-sm"
                     disabled={modelSaving}
-                    onClick={() => void handleDeleteModel(modelDraft, true)}
+                    onClick={() => setModelToDelete({ model: modelDraft, fromModal: true })}
                   >
                     <Trash2 size={13} />
                     <span>{t('移除该模型', 'Remove model')}</span>
@@ -2133,6 +2135,46 @@ export function ProvidersTab({
           </div>
         </div>
       </CaModal>
+
+      <CaConfirmDialog
+        open={confirmDeleteProviderOpen && Boolean(edit) && !creating}
+        title={edit?.native ? t('重置内置服务商', 'Reset Built-in Provider') : t('删除自定义服务商', 'Delete Custom Provider')}
+        description={
+          edit
+            ? edit.native
+              ? t(`重置内置服务商「${edit.name}」将清除已保存的凭据与自定义配置，并恢复默认状态。`, `Resetting built-in provider "${edit.name}" clears saved credentials and custom settings, restoring its default state.`)
+              : t(`删除自定义服务商「${edit.name}」将一并移除其下所有模型，且无法恢复。`, `Deleting custom provider "${edit.name}" removes all of its models and cannot be undone.`)
+            : ''
+        }
+        confirmLabel={edit?.native ? t('重置服务商', 'Reset Provider') : t('删除服务商', 'Delete Provider')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={savingProvider}
+        onCancel={() => {
+          if (!savingProvider) setConfirmDeleteProviderOpen(false);
+        }}
+        onConfirm={() => void handleDeleteProvider()}
+      />
+
+      <CaConfirmDialog
+        open={Boolean(modelToDelete) && Boolean(edit)}
+        title={t('移除模型', 'Remove Model')}
+        description={
+          modelToDelete
+            ? t(`移除模型「${modelToDelete.model.name || modelToDelete.model.id}」后，该模型将不再出现在当前服务商的可用列表中。`, `Removing model "${modelToDelete.model.name || modelToDelete.model.id}" removes it from this provider's available model list.`)
+            : ''
+        }
+        confirmLabel={t('移除模型', 'Remove Model')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={modelSaving}
+        onCancel={() => {
+          if (!modelSaving) setModelToDelete(null);
+        }}
+        onConfirm={() => {
+          if (modelToDelete) void handleDeleteModel(modelToDelete.model, modelToDelete.fromModal);
+        }}
+      />
     </div>
   );
 }

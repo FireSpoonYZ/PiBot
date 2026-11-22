@@ -14,6 +14,7 @@ import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
+  CaConfirmDialog,
   CaDisclosure,
   CaModal,
   CaNotice,
@@ -199,6 +200,7 @@ export function OpsTab({
   const [hookInstruction, setHookInstruction] = useState('');
   const [hookEnabled, setHookEnabled] = useState(true);
   const [hookBusy, setHookBusy] = useState(false);
+  const [hookConfirmAction, setHookConfirmAction] = useState<'rotate' | 'delete' | null>(null);
   const [revealedToken, setRevealedToken] = useState<{ url: string; token: string } | null>(null);
 
   const setHookError = useCallback(
@@ -456,15 +458,16 @@ export function OpsTab({
 
   const handleRotateWebhookToken = async () => {
     if (!editingRoute) return;
-    if (!window.confirm(t('轮换后旧密钥将立即失效，确认继续吗？', 'Rotating will immediately invalidate the old token. Continue?'))) return;
     setHookBusy(true);
     setHookError('');
     try {
       const receipt = await api.rotateWebhookToken(editingRoute.id);
+      setHookConfirmAction(null);
       setRevealedToken({ url: receipt.route.url, token: receipt.token });
       setEditingRoute(receipt.route);
       setNotice(t('已生成新触发密钥', 'New webhook token generated'));
     } catch (err) {
+      setHookConfirmAction(null);
       setHookError(errorMessage(err, t('轮换密钥失败', 'Failed to rotate token')));
     } finally {
       setHookBusy(false);
@@ -473,17 +476,18 @@ export function OpsTab({
 
   const handleDeleteWebhook = async () => {
     if (!editingRoute) return;
-    if (!window.confirm(t(`确定删除触发入口「${editingRoute.name}」吗？`, `Delete webhook "${editingRoute.name}"?`))) return;
     setHookBusy(true);
     setHookError('');
     try {
       await api.deleteWebhook(editingRoute.id);
       const remaining = routes.filter(r => r.id !== editingRoute.id);
+      setHookConfirmAction(null);
       setRoutes(remaining);
       setHookModalOpen(false);
       await loadWebhookEventsForRoutes(remaining);
       setNotice(t(`已删除触发入口「${editingRoute.name}」`, `Deleted webhook "${editingRoute.name}"`));
     } catch (err) {
+      setHookConfirmAction(null);
       setHookError(errorMessage(err, t('删除触发入口失败', 'Failed to delete webhook')));
     } finally {
       setHookBusy(false);
@@ -1172,7 +1176,7 @@ export function OpsTab({
                     type="button"
                     className="ca-btn ca-btn-sm"
                     disabled={hookBusy}
-                    onClick={() => void handleRotateWebhookToken()}
+                    onClick={() => setHookConfirmAction('rotate')}
                   >
                     {t('轮换密钥', 'Rotate Token')}
                   </button>
@@ -1188,7 +1192,7 @@ export function OpsTab({
                   type="button"
                   className="ca-btn ca-btn-danger ca-btn-sm"
                   disabled={hookBusy}
-                  onClick={() => void handleDeleteWebhook()}
+                  onClick={() => setHookConfirmAction('delete')}
                 >
                   <Trash2 size={13} aria-hidden="true" />
                   <span>{t('删除入口', 'Delete Webhook')}</span>
@@ -1218,6 +1222,37 @@ export function OpsTab({
           </div>
         </form>
       </CaModal>
+
+      <CaConfirmDialog
+        open={hookConfirmAction !== null && Boolean(editingRoute)}
+        title={
+          hookConfirmAction === 'rotate'
+            ? t('轮换触发密钥', 'Rotate Webhook Token')
+            : t('删除触发入口', 'Delete Webhook')
+        }
+        description={
+          editingRoute
+            ? hookConfirmAction === 'rotate'
+              ? t(`轮换「${editingRoute.name}」的触发密钥后，旧密钥将立即失效，使用旧密钥的外部请求会被拒绝。`, `Rotating the token for "${editingRoute.name}" immediately invalidates the old token. External callers using it will be rejected.`)
+              : t(`删除触发入口「${editingRoute.name}」后，该地址将停止接收外部事件且无法恢复。`, `Deleting webhook "${editingRoute.name}" stops all incoming requests to this endpoint and cannot be undone.`)
+            : ''
+        }
+        confirmLabel={
+          hookConfirmAction === 'rotate'
+            ? t('轮换密钥', 'Rotate Token')
+            : t('删除触发入口', 'Delete Webhook')
+        }
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={hookBusy}
+        onCancel={() => {
+          if (!hookBusy) setHookConfirmAction(null);
+        }}
+        onConfirm={() => {
+          if (hookConfirmAction === 'rotate') void handleRotateWebhookToken();
+          else if (hookConfirmAction === 'delete') void handleDeleteWebhook();
+        }}
+      />
     </div>
   );
 }

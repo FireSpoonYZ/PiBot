@@ -4,6 +4,7 @@
 .grok-profile-title-input,
 .grok-profile-subtitle-input {
   width: 100%;
+  min-width: 0;
   border: 0;
   background: transparent;
   outline: none;
@@ -35,28 +36,50 @@
 
 /* bot-profile: inline cwd error/hints inside the card. */
 .bot-profile-page h3.grok-section-label { margin: 0; }
+.bot-profile-page .grok-subpage-header-title { min-width: 0; }
 .profile-inline-error {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--danger);
+  color: var(--color-danger);
   white-space: normal;
+  overflow-wrap: anywhere;
 }
-.profile-inline-error + button { flex: none; }
+.profile-inline-error + button {
+  flex: none;
+  white-space: nowrap;
+}
 .profile-card-hint {
   margin: 0 18px 12px;
+  overflow-wrap: anywhere;
 }
 .profile-directory-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: var(--space-2);
   padding: 0 14px 12px;
 }
-.profile-lifecycle-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
-.profile-lifecycle-note { font-size: .78rem; font-weight: 400; color: var(--muted); }
-
-/* bot-profile: topbar spacer keeps title centered when back is hidden (forced primary create). */
-.bot-profile-topbar-spacer {
-  width: 40px;
+.profile-directory-actions button {
+  white-space: nowrap;
   flex-shrink: 0;
+}
+.profile-lifecycle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  white-space: normal;
+}
+.profile-lifecycle-note {
+  font-size: .78rem;
+  font-weight: var(--weight-regular);
+  color: var(--color-text-muted);
+}
+
+/* bot-profile: topbar spacer aligned to 44px (--tap-min), matching shell/hst/grok spacers. */
+.bot-profile-topbar-spacer {
+  width: var(--tap-min);
+  flex: none;
 }
 
 /* bot-profile: required-primary notice card on the create screen. */
@@ -65,11 +88,13 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .bot-profile-primary-notice strong {
   display: block;
 }
 .bot-profile-primary-notice span {
   font-size: 0.85rem;
-  opacity: 0.82;
+  color: var(--color-text-muted);
 }
