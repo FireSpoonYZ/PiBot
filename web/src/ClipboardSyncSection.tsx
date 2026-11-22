@@ -1,9 +1,11 @@
 // 设置页“剪贴板同步”共享分区：桌面 SettingsPanel 与 Android SettingsScreen 共用。
-// 仅调用原生剪贴板同步命令，不读写 OS/浏览器剪贴板、不回显明文或原始错误、不记录参数或邀请码。
+// 通过原生命令管理同步组和扫码，不读取剪贴板明文，不记录邀请码或回显原始错误。
 import { invoke } from '@tauri-apps/api/core';
-import { CheckCircle2, CircleAlert, ClipboardCheck, KeyRound, Lock, Plus, RefreshCw, ShieldAlert, Unlock, Upload } from 'lucide-react';
+import { CheckCircle2, CircleAlert, ClipboardCheck, KeyRound, Lock, Plus, QrCode, RefreshCw, ScanLine, ShieldAlert, Upload } from 'lucide-react';
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Badge, Row, Section, Switch, type BadgeTone } from './bot-settings/primitives';
+import { QrSvg } from './center-admin/qrSvg';
+import { MobileHostError, scanClipboardGroupCode } from './native/tauri-host';
 import { useText } from './ui';
 import './ClipboardSyncSection.css';
 
@@ -33,11 +35,12 @@ type SyncRequest =
   | { action: 'revokeBackground' };
 
 type SyncAction = SyncRequest['action'];
+type UiAction = SyncAction | 'scanCode';
 type ErrorKind =
   | 'offline' | 'notPaired' | 'requiresNewCenter' | 'permission' | 'unsupported'
   | 'unauthorized' | 'certificateError' | 'invalidCode' | 'notConfigured' | 'notEnabled'
   | 'emptyClipboard' | 'clipboardFormat' | 'clipboardSize' | 'clipboardSensitive'
-  | 'clipboardRejected' | 'clipboardUnavailable' | 'unknown';
+  | 'clipboardRejected' | 'clipboardUnavailable' | 'invalidQr' | 'cameraDenied' | 'scanUnavailable' | 'unknown';
 type Translate = (zh: string, en: string) => string;
 interface SafeNotice { kind: ErrorKind; tone: 'danger' | 'warning'; title: string; detail: string }
 
@@ -47,6 +50,7 @@ const VALID_CONNECTIONS = new Set<SyncConnection>([
   'groupFull', 'replaced', 'displayUnsupported',
 ]);
 const MOBILE_ONLY = new Set<SyncAction>(['sendNow', 'authorizeBackground', 'revokeBackground']);
+const GROUP_CODE_PATTERN = /^pibot-clipboard-v1:[A-Za-z0-9_-]{43}$/;
 const INVALIDATES_ONLINE = new Set<ErrorKind>([
   'offline', 'notPaired', 'requiresNewCenter', 'unauthorized', 'certificateError', 'unsupported',
 ]);
@@ -121,7 +125,7 @@ function classifyError(error: unknown): ErrorKind {
   return ERROR_PATTERNS.find(([, re]) => re.test(probe))?.[0] ?? 'unknown';
 }
 
-function safeErrorNotice(kind: ErrorKind, action: SyncAction, t: Translate): SafeNotice {
+function safeErrorNotice(kind: ErrorKind, action: UiAction, t: Translate): SafeNotice {
   const map: Record<ErrorKind, Omit<SafeNotice, 'kind'>> = {
     offline: { tone: 'warning', title: t('剪贴板同步离线', 'Clipboard sync offline'), detail: t('无法连接中心剪贴板同步通道，与本机 Host / Bot 状态相互独立。', 'Cannot reach the Center clipboard sync channel (independent of Host/Bot).') },
     notPaired: { tone: 'warning', title: t('设备未配对中心', 'Device not paired'), detail: t('请先在“中心连接”中完成设备配对，再使用剪贴板同步。', 'Pair this device in Center Connection before using clipboard sync.') },
@@ -139,6 +143,9 @@ function safeErrorNotice(kind: ErrorKind, action: SyncAction, t: Translate): Saf
     clipboardSensitive: { tone: 'warning', title: t('不会发送敏感内容', 'Sensitive content not sent'), detail: t('此内容被系统或来源应用标记为敏感。', 'The system or source app marked this item as sensitive.') },
     clipboardRejected: { tone: 'warning', title: t('此文本不会同步', 'Clipboard item not sent'), detail: t('已同步的内容、受控屏幕剪贴板、PiBot 配对码和同步组邀请码不会回传。', 'Received clips, controlled-display clips, and PiBot pairing or group codes are never sent.') },
     clipboardUnavailable: { tone: 'warning', title: t('无法读取系统剪贴板', 'System clipboard unavailable'), detail: t('请在 PiBot 前台保持页面聚焦，再试一次。', 'Keep PiBot in the foreground and retry.') },
+    invalidQr: { tone: 'danger', title: t('同步组二维码无效', 'Invalid sync group QR code'), detail: t('请扫描另一台设备在剪贴板同步设置中显示的邀请二维码。', 'Scan the invitation QR code shown in another device’s clipboard sync settings.') },
+    cameraDenied: { tone: 'warning', title: t('缺少相机权限', 'Camera permission required'), detail: t('请在系统设置中允许 PiBot 使用相机，或输入邀请码加入。', 'Allow PiBot to use the camera in system settings, or join with a group code.') },
+    scanUnavailable: { tone: 'warning', title: t('无法扫码', 'Cannot scan QR code'), detail: t('请在 PiBot 前台重试，或输入邀请码加入。', 'Retry while PiBot is in the foreground, or join with a group code.') },
     unknown: { tone: 'danger', title: t('剪贴板同步操作失败', 'Clipboard sync action failed'), detail: t('未能完成该操作，请检查状态后重试。', 'Could not complete the action. Check status and try again.') },
   };
   return { kind, ...map[kind] };
@@ -189,7 +196,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
 
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyAction, setBusyAction] = useState<SyncAction | null>(null);
+  const [busyAction, setBusyAction] = useState<UiAction | null>(null);
   const [actionError, setActionError] = useState<SafeNotice | null>(null);
   const [statusError, setStatusError] = useState<SafeNotice | null>(null);
   const [infoNotice, setInfoNotice] = useState('');
@@ -202,8 +209,14 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
 
   const mountedRef = useRef(true);
   const mutationRevRef = useRef(0);
+  const revealRevRef = useRef(0);
   const pendingStatusRef = useRef<symbol | null>(null);
   const mutatingRef = useRef(false);
+
+  const hideCode = useCallback(() => {
+    revealRevRef.current += 1;
+    setRevealedCode(null);
+  }, []);
 
   const clearSecretDraft = useCallback(() => {
     setJoinCode('');
@@ -253,34 +266,38 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   useEffect(() => {
     mountedRef.current = true;
     void refreshStatus(false);
-    const hideCode = () => setRevealedCode(null);
     const onVisibility = () => { if (document.hidden) hideCode(); else if (mountedRef.current) void refreshStatus(true); };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('blur', hideCode);
     return () => {
       mountedRef.current = false;
       mutationRevRef.current += 1;
-      setRevealedCode(null);
+      hideCode();
       setJoinCode('');
       setBgConsent(false);
       if (joinInputRef.current) joinInputRef.current.value = '';
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('blur', hideCode);
     };
-  }, [refreshStatus]);
+  }, [hideCode, refreshStatus]);
 
   useEffect(() => {
     const timer = setInterval(() => { if (!document.hidden) void refreshStatus(true); }, 2500);
     return () => clearInterval(timer);
   }, [refreshStatus]);
 
-  const runAction = useCallback(async (request: SyncRequest): Promise<SyncResponse | null> => {
+  const beginAction = useCallback((action: UiAction) => {
     if (mutatingRef.current) return null;
     mutatingRef.current = true;
-    const rev = ++mutationRevRef.current;
-    setBusyAction(request.action);
+    setBusyAction(action);
     setActionError(null);
     setInfoNotice('');
+    return ++mutationRevRef.current;
+  }, []);
+
+  const runAction = useCallback(async (request: SyncRequest): Promise<SyncResponse | null> => {
+    const rev = beginAction(request.action);
+    if (rev === null) return null;
     try {
       const res = await callNative(variant, request);
       if (!mountedRef.current || rev !== mutationRevRef.current) return null;
@@ -297,16 +314,16 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       return null;
     } finally {
       mutatingRef.current = false;
-      if (mountedRef.current && rev === mutationRevRef.current) setBusyAction(null);
+      if (mountedRef.current) setBusyAction(null);
     }
-  }, [applyStatus, t, variant]);
+  }, [applyStatus, beginAction, t, variant]);
 
   const executeNewGroup = async () => {
-    setConfirmNewGroup(false); setRevealedCode(null); clearSecretDraft(); setJoinOpen(false);
+    setConfirmNewGroup(false); hideCode(); clearSecretDraft(); setJoinOpen(false);
     const res = await runAction({ action: 'newGroup' });
     if (!res || !mountedRef.current) return;
     setInfoNotice(res.status.enabled
-      ? t('已创建新的同步组。需要配对其他设备时请点击“显示邀请码”。', 'Created a new sync group. Select "Show group code" to pair another device.')
+      ? t('已创建新的同步组。点击“显示邀请二维码”可邀请其他设备加入。', 'Created a new sync group. Select “Show invitation QR” to invite another device.')
       : t('已创建新的同步组。同步开关仍保持关闭，可按需手动开启。', 'Created a new sync group. The sync switch remains off until you turn it on.'));
   };
 
@@ -314,7 +331,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     event.preventDefault();
     const trimmed = joinCode.trim();
     if (!trimmed) return;
-    setRevealedCode(null);
+    hideCode();
     const res = await runAction({ action: 'joinGroup', code: trimmed });
     if (!res || !mountedRef.current) return;
     clearSecretDraft(); setJoinOpen(false); setConfirmNewGroup(false);
@@ -324,11 +341,40 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   };
 
   const handleShowCode = async () => {
-    if (revealedCode !== null) { setRevealedCode(null); return; }
+    if (revealedCode !== null) { hideCode(); return; }
+    const revealRev = revealRevRef.current;
     const res = await runAction({ action: 'showCode' });
-    if (!res || !mountedRef.current) return;
-    if (res.code) setRevealedCode(res.code);
+    if (!res || !mountedRef.current || revealRev !== revealRevRef.current || document.hidden) return;
+    if (res.code && res.status.configured) setRevealedCode(res.code);
     else setActionError(safeErrorNotice('notConfigured', 'showCode', t));
+  };
+
+  const handleScanCode = async () => {
+    if (variant !== 'mobile') return;
+    const rev = beginAction('scanCode');
+    if (rev === null) return;
+    hideCode();
+    const isCurrent = () => mountedRef.current && rev === mutationRevRef.current;
+    try {
+      const scanned = await scanClipboardGroupCode();
+      if (!isCurrent() || scanned.cancelled) return;
+      const code = scanned.text?.trim() ?? '';
+      if (!GROUP_CODE_PATTERN.test(code)) {
+        setActionError(safeErrorNotice('invalidQr', 'scanCode', t));
+        return;
+      }
+      setJoinCode(code);
+      setJoinOpen(true);
+      setConfirmNewGroup(false);
+      setInfoNotice(t('已识别邀请码，请确认加入同步组。', 'Group code recognized. Confirm to join the sync group.'));
+    } catch (error) {
+      if (!isCurrent()) return;
+      const kind = error instanceof MobileHostError && error.code === 'CAMERA_DENIED' ? 'cameraDenied' : 'scanUnavailable';
+      setActionError(safeErrorNotice(kind, 'scanCode', t));
+    } finally {
+      mutatingRef.current = false;
+      if (mountedRef.current) setBusyAction(null);
+    }
   };
 
   const handleAuthorizeBg = async () => {
@@ -380,9 +426,14 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
         <button type="button" className={secondaryBtn} disabled={groupDisabled} aria-expanded={joinOpen} onClick={() => { setConfirmNewGroup(false); if (joinOpen) { clearSecretDraft(); setJoinOpen(false); } else setJoinOpen(true); }}>
           <KeyRound size={14} aria-hidden="true" /> {t('输入邀请码加入', 'Join with code')}
         </button>
+        {variant === 'mobile' && (
+          <button type="button" className={secondaryBtn} disabled={groupDisabled} onClick={() => void handleScanCode()}>
+            <ScanLine size={14} aria-hidden="true" /> {busyAction === 'scanCode' ? t('正在扫码…', 'Scanning…') : t('扫码加入', 'Scan to join')}
+          </button>
+        )}
         {status?.configured && (
-          <button type="button" className={secondaryBtn} disabled={groupDisabled} onClick={() => void handleShowCode()}>
-            {revealedCode !== null ? <><Lock size={14} aria-hidden="true" /> {t('隐藏邀请码', 'Hide code')}</> : <><Unlock size={14} aria-hidden="true" /> {busyAction === 'showCode' ? t('读取中…', 'Loading…') : t('显示邀请码', 'Show group code')}</>}
+          <button type="button" className={secondaryBtn} disabled={groupDisabled} aria-expanded={revealedCode !== null} onClick={() => void handleShowCode()}>
+            {revealedCode !== null ? <><Lock size={14} aria-hidden="true" /> {t('隐藏邀请信息', 'Hide invitation')}</> : <><QrCode size={14} aria-hidden="true" /> {busyAction === 'showCode' ? t('读取中…', 'Loading…') : t('显示邀请二维码', 'Show invitation QR')}</>}
           </button>
         )}
       </div>
@@ -408,6 +459,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
           {variant === 'desktop' && (
             <input ref={joinInputRef} id={joinInputId} type="password" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} className="cs-input" disabled={busy} value={joinCode} onChange={e => setJoinCode(e.target.value)} placeholder={t('输入另一台设备显示的邀请码', 'Enter the group code shown on another device')} />
           )}
+          {status?.configured && <p className="cs-note">{t('确认加入后，本机将切换到该同步组。', 'Confirming switches this device to the chosen sync group.')}</p>}
           <div className={variant === 'desktop' ? 'cs-actions' : 'hst-actions'}>
             <button type="button" className={secondaryBtn} disabled={busy} onClick={() => { clearSecretDraft(); setJoinOpen(false); }}>{t('取消', 'Cancel')}</button>
             <button type="submit" className={primaryBtn} disabled={busy || !joinCode.trim()}>{busyAction === 'joinGroup' ? t('正在加入…', 'Joining…') : t('保存并加入', 'Join group')}</button>
@@ -416,13 +468,15 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       )}
 
       {revealedCode !== null && (
-        <div className="cs-box" role="region" aria-label={t('剪贴板同步邀请码', 'Clipboard sync group code')}>
+        <div className="cs-box" role="region" aria-label={t('剪贴板同步组邀请', 'Clipboard sync group invitation')}>
           <div className="cs-box-head">
-            <span className="cs-note">{t('当前同步组邀请码', 'Current group code')}</span>
-            <button type="button" className={secondaryBtn} onClick={() => setRevealedCode(null)}><Lock size={13} aria-hidden="true" /> {t('隐藏', 'Hide')}</button>
+            <span className="cs-note">{t('邀请其他设备', 'Invite another device')}</span>
+            <button type="button" className={secondaryBtn} onClick={hideCode}><Lock size={13} aria-hidden="true" /> {t('隐藏', 'Hide')}</button>
           </div>
+          <div className="cs-qr"><QrSvg value={revealedCode} label={t('同步组邀请二维码', 'Sync group invitation QR code')} /></div>
+          <p className="cs-note">{t('在另一台 Android 设备上选择“扫码加入”，也可以输入下方的邀请码。', 'Select “Scan to join” on another Android device, or enter the group code below.')}</p>
           <code className="cs-code">{revealedCode}</code>
-          <p className="cs-note">{t('邀请码不会自动写入剪贴板，失焦或离开页面时自动隐藏。', 'Not automatically copied to clipboard; hides automatically on blur or leaving this page.')}</p>
+          <p className="cs-note">{t('窗口失焦或离开页面时，二维码和邀请码会自动隐藏。', 'The invitation hides automatically when the window loses focus or you leave this page.')}</p>
         </div>
       )}
     </>

@@ -533,12 +533,18 @@ export function pairCenterWithCode(input: {
   return mobileLocalRequest<PairCenterResult>('pairCenterWithCode', params);
 }
 
+type ScanQrResult = { text?: string; cancelled?: boolean };
+
 /**
  * 应用内扫码（ZXing，不依赖 Google 服务）：返回扫到的二维码原文，用户返回/取消时 cancelled=true。
  * 相机权限被拒以 CAMERA_DENIED 拒绝，界面应退回粘贴配对码。UI-local 前台动作。
  */
-export function scanPairingCode(): Promise<{ text?: string; cancelled?: boolean }> {
-  return mobileLocalRequest<{ text?: string; cancelled?: boolean }>('scanPairingCode');
+export function scanPairingCode(): Promise<ScanQrResult> {
+  return mobileLocalRequest('scanPairingCode');
+}
+
+export function scanClipboardGroupCode(): Promise<ScanQrResult> {
+  return mobileLocalRequest('scanPairingCode', { purpose: 'clipboardGroup' });
 }
 
 /** C7 权限/后台真实状态查询；不启动服务或授权流程。 */

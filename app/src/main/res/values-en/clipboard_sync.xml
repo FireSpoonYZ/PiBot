@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="clipboard_sync_scan_prompt">Scan the invitation QR code in Clipboard Sync settings</string>
     <string name="clipboard_share_title">Send with PiBot</string>
     <string name="clipboard_share_confirm">Send this text to your current clipboard sync group?\n\n%1$s</string>
     <string name="clipboard_share_send">Send</string>
