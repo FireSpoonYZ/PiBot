@@ -2,12 +2,8 @@ import { createProvider } from '@earendil-works/pi-ai/models';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript';
 
-// Mirror center-contract/antigravity.js (host-core bundling forbids imports outside host-core/ and plugins/).
-export const ANTIGRAVITY_PROVIDER_ID = 'antigravity-acp';
-export const ANTIGRAVITY_API = 'pibot-antigravity-acp';
-export const ANTIGRAVITY_STREAM_PATH = '/api/host/antigravity/stream';
-export const ANTIGRAVITY_CANCEL_PATH = '/api/host/antigravity/cancel';
-export const ANTIGRAVITY_MAX_FRAME_BYTES = 33554432;
+import { ANTIGRAVITY_API, ANTIGRAVITY_POLL_TOOL, ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
+export { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH, ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_MAX_FRAME_BYTES } from '../center-contract/antigravity.js';
 
 const STREAM_EVENT_TYPES = new Set([
   'start',
@@ -128,7 +124,8 @@ export function createAntigravityProvider({ provider, models: savedModels, strea
         let payload = {
           sessionId,
           modelId: model.id,
-          messages,
+          // The polling tool executes in the bridge, but belongs to the final ACP model declaration.
+          messages: [...messages, { role: 'system', content: '', toolsAdded: [ANTIGRAVITY_POLL_TOOL], timestamp: 0 }],
           ...(model.reasoning && options?.reasoning !== undefined ? { reasoning: options.reasoning } : {}),
         };
         const nextPayload = await options?.onPayload?.(payload, model);

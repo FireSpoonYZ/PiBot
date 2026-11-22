@@ -83,3 +83,19 @@ export function updateProgress(status: ClientUpdateStatus | undefined): number |
   if (typeof done !== 'number' || typeof total !== 'number' || total <= 0) return null;
   return Math.min(100, Math.max(0, Math.round((done / total) * 100)));
 }
+
+/**
+ * 判断单次“下载并安装”意图在收到新状态后应采取的动作：
+ * - 'install'：刚完成下载（phase === 'downloaded'），立即自动衔接安装；
+ * - 'keep'：仍在下载中（phase === 'downloading'），保持等待；
+ * - 'clear'：未开启或已取消/出错/已是最新/进入安装与完成态，清除意图。
+ */
+export function resolveAutoInstallAction(
+  autoInstallArmed: boolean,
+  phase: ClientUpdatePhase | undefined,
+): 'install' | 'keep' | 'clear' {
+  if (!autoInstallArmed) return 'clear';
+  if (phase === 'downloaded') return 'install';
+  if (phase === 'downloading') return 'keep';
+  return 'clear';
+}

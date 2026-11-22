@@ -9,7 +9,7 @@ Operate on Bots and managed skills through the management tools — never by edi
 
 For **everyday peer communication**, call the tools already offered. Use `list_bots` to find peers, `ensure_dm` to open or reuse a private chat, and `send_to` to send a message. Use `list_scopes` to find joined rooms or existing conversations and `read_scope` for their history. `collaboration_publish_room_message` is available through Center MCP.
 
-For **Bot, skill, capability, room administration, and queue/edit management**, prefer the narrow deferred operations available through `tool_search`.
+For **Bot, skill, capability, room administration, and queue/edit management**, prefer the narrow operations below. In Code Mode only, find them with `searchTools()` inside `codemode`, inspect the schema with `describeTool()`, and invoke `tools.*`. Otherwise use `tool_search` when offered.
 
 - Bots & lifecycle: `pibot_bots_list`, `pibot_bot_get`, `pibot_bot_create`, `pibot_bot_update_profile`, `pibot_bot_soul_get`, `pibot_bot_set_soul`, `pibot_bot_set_model`, `pibot_bot_set_cwd`, `pibot_bot_set_avatar`, `pibot_bot_set_primary`, `pibot_bot_session_control`, `pibot_bot_archive`, `pibot_bot_unarchive`, `pibot_bot_delete`
 - Managed skills & learning: `capability_skill_*` (`list`/`read`/`create`/`edit`/`adopt`/`lifecycle`/`delete`), `capability_installation_skill_files_{read,write}`, `capability_learning_{status,configure,run,cancel}`

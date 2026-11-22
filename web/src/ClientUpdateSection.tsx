@@ -1,6 +1,6 @@
 // 设置页“客户端更新”分区：桌面 SettingsPanel 与 Android HubSettingsView 共用。
-// 只渲染原生状态与用户明确操作；不自动下载、不后台静默安装。
-// 固定结构（状态行、进度条、状态槽、操作区、更新说明开关常驻）保证阶段切换零跳动。
+// 只渲染原生状态与用户明确操作；用户点击“下载并安装”后自动衔接安装，不后台静默更新。
+// 可选区块（新版本、进度条、状态说明、更新说明）使用 SmoothExpand 按需平滑展开，避免空闲大段留白。
 import { CheckCircle2, ChevronDown, Download, Loader2, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useText } from './ui';
@@ -74,7 +74,7 @@ export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: bo
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) dismiss(); }} title={t('发现新版本', 'Update available')}>
       <p className="secondary">
-        {t(`PiBot ${release?.version ?? ''} 已发布。现在下载更新吗？`, `PiBot ${release?.version ?? ''} is available. Download the update now?`)}
+        {t(`PiBot ${release?.version ?? ''} 已发布。现在下载并安装更新吗？`, `PiBot ${release?.version ?? ''} is available. Download and install the update now?`)}
       </p>
       <div className="dialog-actions">
         <button type="button" className="quiet-button" onClick={dismiss}>{t('稍后', 'Later')}</button>
@@ -82,7 +82,7 @@ export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: bo
           dismiss();
           update?.download();
           onOpenUpdates();
-        }}>{t('下载更新', 'Download update')}</button>
+        }}>{t('下载并安装', 'Download and install')}</button>
       </div>
     </Dialog>
   );
@@ -226,7 +226,7 @@ function UpdateSectionBody({
   // 稳定按钮标签候选（LabelStack 锁定最大宽度，阶段切换不跳动）
   const labelCheck = t('检查更新', 'Check for updates');
   const labelChecking = t('检查中…', 'Checking…');
-  const labelDownload = t('下载更新', 'Download update');
+  const labelDownload = t('下载并安装', 'Download and install');
   const labelDownloading = t('下载中…', 'Downloading…');
   const labelInstall = t('安装更新', 'Install update');
   const labelInstalling = t('安装中…', 'Installing…');
@@ -407,81 +407,94 @@ function UpdateSectionBody({
 
   const confirmStopOpen = waiting && confirmStop && !installing;
 
+  const hasReleaseRow = Boolean(showRelease && release);
+  const hasStatusMessage = Boolean(statusMessageText);
+
   return (
     <div className="cu-panel">
       <div className="cu-row">
-        <div className="cu-line">
-          <span className="cu-label">{t('当前版本', 'Current version')}</span>
-          <span className="cu-value">{status?.currentVersion || '—'}</span>
+        <div className="cu-meta-lines">
+          <div className="cu-line">
+            <span className="cu-label">{t('当前版本', 'Current version')}</span>
+            <span className="cu-value">{status?.currentVersion || '—'}</span>
+          </div>
+
+          <div className="cu-line">
+            <span className="cu-label">{t('状态', 'Status')}</span>
+            <ReservedSlot inline minHeight={22} align="center" className="cu-value-slot" contentKey={effectivePhase}>
+              <span className={'cu-value' + (effectivePhase === 'error' ? ' is-error' : '')} title={statusSummary}>
+                {statusSummary}
+              </span>
+            </ReservedSlot>
+          </div>
         </div>
 
-        <div className="cu-line">
-          <span className="cu-label">{t('状态', 'Status')}</span>
-          <ReservedSlot inline minHeight={22} align="center" className="cu-value-slot" contentKey={effectivePhase}>
-            <span className={'cu-value' + (effectivePhase === 'error' ? ' is-error' : '')} title={statusSummary}>
-              {statusSummary}
-            </span>
-          </ReservedSlot>
-        </div>
+        <SmoothExpand open={hasReleaseRow} className="cu-expand-region">
+          <div className="cu-expand-inner">
+            <div className="cu-line">
+              <span className="cu-label">{t('新版本', 'New version')}</span>
+              <ReservedSlot
+                inline
+                minHeight={22}
+                align="center"
+                className="cu-value-slot"
+                contentKey={hasReleaseRow && release ? release.id : 'none'}
+              >
+                <span
+                  className={'cu-value' + (hasReleaseRow ? '' : ' is-muted')}
+                  title={hasReleaseRow ? releaseSummary : undefined}
+                >
+                  {releaseSummary}
+                </span>
+              </ReservedSlot>
+            </div>
+          </div>
+        </SmoothExpand>
 
-        <div className="cu-line">
-          <span className="cu-label">{t('新版本', 'New version')}</span>
-          <ReservedSlot
-            inline
-            minHeight={22}
-            align="center"
-            className="cu-value-slot"
-            contentKey={showRelease && release ? release.id : 'none'}
-          >
-            <span
-              className={'cu-value' + (showRelease && release ? '' : ' is-muted')}
-              title={showRelease && release ? releaseSummary : undefined}
-            >
-              {releaseSummary}
-            </span>
-          </ReservedSlot>
-        </div>
-
-        <div
-          className={
-            'cu-progress' +
-            (progressActive ? ' is-active' : ' is-idle') +
-            (progressIndeterminate ? ' is-indeterminate' : '')
-          }
-          role={progressActive ? 'progressbar' : undefined}
-          aria-hidden={!progressActive || undefined}
-          aria-label={progressActive ? (installing ? t('安装进度', 'Installation progress') : t('下载进度', 'Download progress')) : undefined}
-          aria-valuemin={progressActive ? 0 : undefined}
-          aria-valuemax={progressActive ? 100 : undefined}
-          aria-valuenow={progressActive && !progressIndeterminate ? (progress ?? 0) : undefined}
-        >
-          <span
-            className="cu-progress-fill"
-            style={progressIndeterminate ? undefined : { width: fillPercent + '%' }}
-          />
-        </div>
-
-        <ReservedSlot
-          minHeight={58}
-          align="start"
-          className="cu-status-slot"
-          contentKey={statusMessageKey}
-          role={statusMessageTone === 'error' ? 'alert' : 'status'}
-          aria-live={statusMessageTone === 'error' ? 'assertive' : 'polite'}
-        >
-          {statusMessageText ? (
-            <p
+        <SmoothExpand open={progressActive} className="cu-expand-region">
+          <div className="cu-expand-inner">
+            <div
               className={
-                'cu-status-text' +
-                (statusMessageTone === 'error' ? ' is-error' : '') +
-                (statusMessageTone === 'meta' ? ' is-meta' : '')
+                'cu-progress' +
+                (progressActive ? ' is-active' : ' is-idle') +
+                (progressIndeterminate ? ' is-indeterminate' : '')
               }
-              title={statusMessageText}
+              role={progressActive ? 'progressbar' : undefined}
+              aria-hidden={!progressActive || undefined}
+              aria-label={progressActive ? (installing ? t('安装进度', 'Installation progress') : t('下载进度', 'Download progress')) : undefined}
+              aria-valuemin={progressActive ? 0 : undefined}
+              aria-valuemax={progressActive ? 100 : undefined}
+              aria-valuenow={progressActive && !progressIndeterminate ? (progress ?? 0) : undefined}
             >
-              {statusMessageText}
-            </p>
-          ) : null}
-        </ReservedSlot>
+              <span
+                className="cu-progress-fill"
+                style={progressIndeterminate ? undefined : { width: fillPercent + '%' }}
+              />
+            </div>
+          </div>
+        </SmoothExpand>
+
+        <SmoothExpand open={hasStatusMessage} className="cu-expand-region">
+          <div
+            className="cu-expand-inner cu-status-wrap"
+            role={statusMessageTone === 'error' ? 'alert' : 'status'}
+            aria-live={statusMessageTone === 'error' ? 'assertive' : 'polite'}
+          >
+            {hasStatusMessage ? (
+              <p
+                key={statusMessageKey}
+                className={
+                  'cu-status-text' +
+                  (statusMessageTone === 'error' ? ' is-error' : '') +
+                  (statusMessageTone === 'meta' ? ' is-meta' : '')
+                }
+                title={statusMessageText}
+              >
+                {statusMessageText}
+              </p>
+            ) : null}
+          </div>
+        </SmoothExpand>
 
         <div className="cu-actions">
           {waiting && !installing ? (
@@ -537,29 +550,26 @@ function UpdateSectionBody({
           )}
         </div>
 
-        <ReservedSlot
-          minHeight={32}
-          align="center"
-          className="cu-notes-slot"
-          contentKey={hasNotes ? 'notes-available' : 'notes-empty'}
-        >
-          {hasNotes ? (
-            <button
-              type="button"
-              className={`cu-notes-toggle${notesOpen ? ' is-open' : ''}`}
-              aria-expanded={notesOpen}
-              aria-controls={notesPanelId}
-              onClick={() => setNotesOpen(prev => !prev)}
-            >
-              <ChevronDown size={14} className="cu-notes-chevron" aria-hidden="true" />
-              <LabelStack
-                align="start"
-                active={notesOpen ? labelHideNotes : labelShowNotes}
-                labels={[labelShowNotes, labelHideNotes]}
-              />
-            </button>
-          ) : null}
-        </ReservedSlot>
+        <SmoothExpand open={hasNotes} className="cu-expand-region">
+          <div className="cu-expand-inner">
+            {hasNotes ? (
+              <button
+                type="button"
+                className={`cu-notes-toggle${notesOpen ? ' is-open' : ''}`}
+                aria-expanded={notesOpen}
+                aria-controls={notesPanelId}
+                onClick={() => setNotesOpen(prev => !prev)}
+              >
+                <ChevronDown size={14} className="cu-notes-chevron" aria-hidden="true" />
+                <LabelStack
+                  align="start"
+                  active={notesOpen ? labelHideNotes : labelShowNotes}
+                  labels={[labelShowNotes, labelHideNotes]}
+                />
+              </button>
+            ) : null}
+          </div>
+        </SmoothExpand>
       </div>
 
       <SmoothExpand open={hasNotes && notesOpen} className="cu-expand-region">

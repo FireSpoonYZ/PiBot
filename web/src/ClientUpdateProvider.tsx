@@ -15,6 +15,7 @@ import {
   CLIENT_UPDATE_OPEN_EVENT,
   CLIENT_UPDATE_POLL_MS,
   CLIENT_UPDATE_STATUS_EVENT,
+  resolveAutoInstallAction,
   type ClientUpdateOp,
   type ClientUpdateParams,
   type ClientUpdateRequest,
@@ -67,6 +68,10 @@ export function ClientUpdateProvider(props: {
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const opSequence = useRef(0);
   const opInFlight = useRef<{ id: number; op: ClientUpdateOp } | null>(null);
+  const autoInstallRef = useRef(false);
+  const runOpRef = useRef<(op: Exclude<ClientUpdateOp, 'status'>, params?: ClientUpdateParams, automatic?: boolean) => Promise<void>>(
+    async () => {},
+  );
   const statusRevision = useRef(0);
   const pollSequence = useRef(0);
   const appliedPoll = useRef(0);
@@ -84,9 +89,20 @@ export function ClientUpdateProvider(props: {
       // 操作刚发出时原生状态可能仍是上一次的稳定态。
       if (active?.op === 'check' && next.phase !== 'checking') return;
       if (active?.op === 'download' && ['idle', 'checking', 'available', 'up-to-date'].includes(next.phase)) return;
+      if (active?.op === 'install' && next.phase === 'downloaded') return;
       appliedPoll.current = poll;
       if (active) lastPolledOp.current = active.id;
       setStatus(next);
+      // 异步下载平台（如 Android）由轮询/事件观测到 downloaded 后自动衔接安装。
+      if (!active) {
+        const action = resolveAutoInstallAction(autoInstallRef.current, next.phase);
+        if (action === 'install') {
+          autoInstallRef.current = false;
+          void runOpRef.current('install', { stopActive: false });
+        } else if (action === 'clear') {
+          autoInstallRef.current = false;
+        }
+      }
     } catch (error) {
       if (reportError && epoch === epochRef.current && revision === statusRevision.current && poll >= appliedPoll.current) {
         setActionError(errorMessage(error));
@@ -115,9 +131,25 @@ export function ClientUpdateProvider(props: {
           if (lastPolledOp.current !== id || (op !== 'check' && op !== 'download') || (next.phase !== 'checking' && next.phase !== 'downloading')) {
             setStatus(next);
           }
+          if (op === 'download') {
+            const action = resolveAutoInstallAction(autoInstallRef.current, next.phase);
+            if (action === 'install') {
+              autoInstallRef.current = false;
+              opInFlight.current = { id, op: 'install' };
+              setPending('install');
+              const installed = await requestRef.current('install', { stopActive: false });
+              if (epoch === epochRef.current && opInFlight.current?.id === id) {
+                statusRevision.current += 1;
+                setStatus(installed);
+              }
+            } else if (action === 'clear') {
+              autoInstallRef.current = false;
+            }
+          }
         }
       } catch (error) {
         if (epoch === epochRef.current && opInFlight.current?.id === id) {
+          if (op === 'download') autoInstallRef.current = false;
           statusRevision.current += 1;
           if (!automatic) {
             setActionError(errorMessage(error));
@@ -133,15 +165,29 @@ export function ClientUpdateProvider(props: {
     },
     [refresh],
   );
+  runOpRef.current = runOp;
 
-  const check = useCallback(() => void runOp('check', { automatic: false }), [runOp]);
-  const download = useCallback(() => void runOp('download'), [runOp]);
-  const install = useCallback((stopActive: boolean) => void runOp('install', { stopActive }), [runOp]);
-  const cancel = useCallback(() => void runOp('cancel'), [runOp]);
+  const check = useCallback(() => {
+    autoInstallRef.current = false;
+    void runOp('check', { automatic: false });
+  }, [runOp]);
+  const download = useCallback(() => {
+    autoInstallRef.current = true;
+    void runOp('download');
+  }, [runOp]);
+  const install = useCallback((stopActive: boolean) => {
+    autoInstallRef.current = false;
+    void runOp('install', { stopActive });
+  }, [runOp]);
+  const cancel = useCallback(() => {
+    autoInstallRef.current = false;
+    void runOp('cancel');
+  }, [runOp]);
 
   useEffect(() => {
     epochRef.current += 1;
     opInFlight.current = null;
+    autoInstallRef.current = false;
     statusRevision.current += 1;
     setStatus(undefined);
     setPending(null);
@@ -169,6 +215,7 @@ export function ClientUpdateProvider(props: {
     return () => {
       epochRef.current += 1;
       opInFlight.current = null;
+      autoInstallRef.current = false;
       statusRevision.current += 1;
       if (nativeCheck) {
         window.removeEventListener(CLIENT_UPDATE_STATUS_EVENT, syncNative);
@@ -180,7 +227,11 @@ export function ClientUpdateProvider(props: {
     };
   }, [ready, centerKey, nativeCheck, refresh, runOp]);
 
-  const live = (status !== undefined && CLIENT_UPDATE_LIVE_PHASES.has(status.phase)) || pending === 'check' || pending === 'download';
+  const live =
+    (status !== undefined && CLIENT_UPDATE_LIVE_PHASES.has(status.phase)) ||
+    pending === 'check' ||
+    pending === 'download' ||
+    pending === 'install';
   useEffect(() => {
     if (!live || !ready) return;
     const timer = setInterval(() => void refresh(), CLIENT_UPDATE_POLL_MS);

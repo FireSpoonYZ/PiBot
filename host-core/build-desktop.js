@@ -822,6 +822,8 @@ async function collectBundledNpmPackages(metafile, outfile, absWorkingDir) {
       pkg &&
       pkg.name !== '@e-launcher/host-core' &&
       pkg.name !== 'pibot' &&
+      // The in-repo Center contract is covered by the root LICENSE.
+      pkg.root !== path.join(ROOT, 'center-contract') &&
       !roots.has(`${pkg.name}@${pkg.version}`)
     ) {
       roots.set(`${pkg.name}@${pkg.version}`, pkg);
@@ -1128,7 +1130,9 @@ function collectHostRuntimeSources() {
   const files = new Set(roots);
   const queue = roots.filter((file) => /\.[cm]?js$/.test(file));
   const pluginsDir = path.join(ROOT, 'plugins');
-  const operationsDir = path.join(ROOT, 'center-contract', 'operations');
+  const contractDir = path.join(ROOT, 'center-contract');
+  const operationsDir = path.join(contractDir, 'operations');
+  const antigravityContract = path.join(contractDir, 'antigravity.js');
   const pluginRoots = new Set();
   while (queue.length > 0) {
     const file = queue.pop();
@@ -1143,8 +1147,8 @@ function collectHostRuntimeSources() {
       if (!isInsideDir(HERE, target)) {
         if (isInsideDir(pluginsDir, target)) {
           pluginRoots.add(path.join(pluginsDir, path.relative(pluginsDir, target).split(path.sep)[0]));
-        } else if (isInsideDir(operationsDir, target)) {
-          files.add(path.join(ROOT, 'center-contract', 'package.json'));
+        } else if (isInsideDir(operationsDir, target) || target === antigravityContract) {
+          files.add(path.join(contractDir, 'package.json'));
         } else {
           throw fail(`host runtime module ${display} imports ${spec} outside the allowed source roots`);
         }

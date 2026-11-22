@@ -810,6 +810,25 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-label > .metadata {
+  font-weight: var(--weight-regular);
+  margin-top: 2px;
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row > select,
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-select {
+  flex: none;
+  width: auto;
+  min-width: 88px;
+  max-width: min(220px, 50%);
+  padding: 6px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
 :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row > .metadata,
 :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row > .status {
   max-width: 60%;

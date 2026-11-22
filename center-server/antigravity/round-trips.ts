@@ -19,7 +19,7 @@ import {
 	type TranscriptContext,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import type { AntigravityTurnContext } from "../../center-contract/antigravity.js";
+import { ANTIGRAVITY_POLL_TOOL, type AntigravityTurnContext } from "../../center-contract/antigravity.js";
 import { ANTIGRAVITY_API, ANTIGRAVITY_BRIDGE_SERVER, ANTIGRAVITY_PROVIDER_ID } from "./constants.ts";
 import type { McpCallToolResult, McpToolDefinition } from "./mcp-bridge.ts";
 import { isHindsightRecallMessage, validateAntigravityTurnContext } from "./turn-context.js";
@@ -29,7 +29,7 @@ import { toPiUsage } from "./vendor/stream-events.ts";
 export { validateAntigravityTurnContext };
 export type { AntigravityTurnContext };
 
-export const POLL_TOOL_NAME = "bridge_poll_result";
+export const POLL_TOOL_NAME = ANTIGRAVITY_POLL_TOOL.name;
 export const BRIDGE_TIMEOUT_MS = 480_000;
 export const ESCALATED_TIMEOUT_MS = 1_800_000;
 export const ESCALATE_AFTER_MS = 20_000;
@@ -68,19 +68,8 @@ export const TOOL_PRIORITY_NOTE =
 
 export const BRIDGE_POLL_TOOL_DEF: McpToolDefinition = {
 	name: POLL_TOOL_NAME,
-	description:
-		"Poll the result of an escalated host bridge tool call that returned STILL RUNNING with a callId.",
-	inputSchema: {
-		type: "object",
-		properties: {
-			callId: {
-				type: "string",
-				description: "The callId returned in the STILL RUNNING acknowledgement.",
-			},
-		},
-		required: ["callId"],
-		additionalProperties: false,
-	},
+	description: ANTIGRAVITY_POLL_TOOL.description,
+	inputSchema: ANTIGRAVITY_POLL_TOOL.parameters,
 };
 
 export class DisallowedNativeToolError extends Error {
@@ -115,6 +104,7 @@ export function toMcpToolDefinitions(tools: readonly Tool[]): McpToolDefinition[
 			inputSchema: normalizeSchema(tool.parameters),
 		});
 	}
+	// Older Hosts did not declare the bridge-local poll tool in their ACP request.
 	if (!seen.has(POLL_TOOL_NAME)) {
 		out.push(BRIDGE_POLL_TOOL_DEF);
 	}

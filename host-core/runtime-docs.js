@@ -99,8 +99,8 @@ export function codemodeModelTools(profile, modelTools) {
   const removed = new Set(modelTools?.remove ?? []);
   const modelOnly = [...definitions.values()].filter((tool) =>
     tool.name !== 'codemode'
-    && tool.callers?.includes('model')
-    && (!tool.callers.includes('tools') || tool.name === 'ask_user_question')
+    && tool.name !== 'tool_search'
+    && (tool.name === 'ask_user_question' || (tool.callers?.includes('model') && !tool.callers.includes('tools')))
     && !removed.has(tool.name)
     && (tool.deferred !== true || loaded.has(tool.name)));
   return [{ name: 'codemode' }, ...modelOnly.map((tool) => ({ name: tool.name }))];

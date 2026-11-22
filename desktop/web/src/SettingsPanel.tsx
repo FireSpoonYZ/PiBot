@@ -950,18 +950,10 @@ export function SettingsPanel(props: SettingsPanelProps) {
                       </span>
                     </span>
                     <select
+                      className="settings-row-select"
                       aria-label={t('语音朗读倍速', 'Speech Rate')}
                       value={String(speechRate)}
                       onChange={(event) => setSpeechRate(Number(event.target.value))}
-                      style={{
-                        border: '1px solid var(--line)',
-                        borderRadius: 'var(--radius-sm)',
-                        background: 'var(--surface-elevated)',
-                        color: 'var(--text)',
-                        padding: '6px 10px',
-                        fontSize: '13px',
-                        fontVariantNumeric: 'tabular-nums',
-                      }}
                     >
                       {SPEECH_RATE_OPTIONS.map((rate) => (
                         <option key={rate} value={String(rate)}>
