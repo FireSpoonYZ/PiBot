@@ -15,7 +15,7 @@ import {
 import { openAntigravity } from '../../center-server/antigravity/index.js';
 import { buildThinkingProfile, resolveSessionThoughtLevel } from '../../center-server/antigravity/catalog.ts';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
-import { RESUME_PROMPT } from '../../center-server/antigravity/round-trips.ts';
+import { RESUME_PROMPT, toolsFromMessages } from '../../center-server/antigravity/round-trips.ts';
 import { makeSessionKey, SessionStore } from '../../center-server/antigravity/sessions.ts';
 import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
 import { registerAntigravityRoutes } from '../../center-server/antigravity-routes.js';
@@ -257,9 +257,10 @@ function createControlledAcpDriverHarness(t) {
         turnCtx.emit({ type: 'text', delta: reply });
         turnCtx.finish({ conversationId: turnCtx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
       });
-      Promise.resolve(fn(ctx)).catch((err) =>
-        finish({ conversationId: s.conversationId, status: 'ERROR', response: '', error: err instanceof Error ? err.message : String(err), finished: true, aborted: false }),
-      );
+      Promise.resolve(fn(ctx)).catch((err) => {
+        record.error = err;
+        finish({ conversationId: s.conversationId, status: 'ERROR', response: '', error: err instanceof Error ? err.message : String(err), finished: true, aborted: false });
+      });
     });
     return ctrl.handle;
   });
@@ -363,7 +364,7 @@ export function createPlugin({ host }) {
   return { async getInstalled(id, opts) { const e = installed.get(id); return !e || (opts?.version && e.version !== opts.version) ? null : e; } };
 }
 
-async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads }) {
+async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads, callOperation }) {
   const installer = writeTestPlugins(rootDir);
   const hostDataRoot = path.join(rootDir, 'host-data');
   const meta = openHost({ dataRoot: hostDataRoot });
@@ -374,6 +375,7 @@ async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads }) {
   let currentSnapshot = null;
 
   const centerClient = {
+    callOperation,
     providerAuth: async () => ({ auth: { apiKey: 'center-managed' }, source: 'center' }),
     streamAntigravity(payload, opts) {
       capturedPayloads.push(JSON.parse(JSON.stringify(payload)));
@@ -568,6 +570,69 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     throw err;
   } finally {
     await closeAndRemove({ runtime, antigravity, rootDir, hadError });
+  }
+});
+
+test('ACP Code Mode only keeps the top-level catalog fixed while a nested deferred tool runs', async (t) => {
+  const driver = createControlledAcpDriverHarness(t);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-codemode-'));
+  const antigravity = openIsolatedAntigravity(rootDir);
+  const captured = [];
+  const calls = [];
+  let runtime;
+  try {
+    const env = await openTestHostRuntime({
+      rootDir, antigravity, capturedPayloads: captured,
+      async callOperation(call) {
+        calls.push(call);
+        return { tasks: [], timeZone: 'Europe/Amsterdam' };
+      },
+    });
+    runtime = env.runtime;
+    const cwd = path.join(rootDir, 'workspace');
+    fs.mkdirSync(cwd);
+    const bot = await runtime.createBot({ requestId: 'create-code-mode', role: 'ACP Assistant', cwd, makePrimary: true });
+    await env.applySnapshot(env.makeSnapshot(2, [{
+      botId: bot.botId, cwd, model: { ...BASE_MODEL_SEL, codemodeOnly: true },
+      capabilities: [{ ...makeCapability('test-questionnaire', {}), targetVersion: '1.1.0' }],
+    }]));
+
+    driver.setOnRun(async (ctx) => {
+      const declared = toolsFromMessages(captured[0].messages);
+      assert.deepEqual(ctx.mcp.handler.listTools(), declared.map(({ name, description, parameters }) => ({
+        name, description, inputSchema: parameters,
+      })));
+      assert.ok(declared.some((tool) => tool.name === 'ask_user_question'));
+      assert.ok(declared.some((tool) => tool.name === 'bridge_poll_result'));
+      assert.ok(!declared.some((tool) => tool.name === 'tool_search' || tool.name === 'automation_schedule_list'));
+      const stale = await ctx.mcp.handler.onToolCall('stale', 'automation_schedule_list', {}, ctx.signal);
+      assert.equal(stale.isError, true);
+
+      const result = await ctx.mcp.handler.onToolCall('code-mode', 'codemode', {
+        code: `
+          const [match] = await searchTools("automation_schedule_list", { limit: 1 });
+          if (match?.name !== "automation_schedule_list") throw new Error("Missing deferred tool");
+          if (!(await describeTool(match.name))) throw new Error("Missing schema");
+          text(await tools[match.name]({}));
+        `,
+      }, ctx.signal);
+      assert.equal(result.isError, false, JSON.stringify(result));
+      const response = result.content.map((block) => block.text ?? '').join('');
+      assert.match(response, /Europe\/Amsterdam/);
+      ctx.emit({ type: 'text', delta: response });
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response, finished: true, aborted: false });
+    });
+
+    await runtime.submit(bot.botId, { requestId: 'nested-list', text: 'List my schedules with Code Mode.' });
+    const receipt = await env.waitForSubmission(bot.botId, 'nested-list');
+    if (driver.runs[0]?.error) throw driver.runs[0].error;
+    assert.equal(receipt.status, 'done', JSON.stringify(receipt));
+    assert.deepEqual(calls, [{ botId: bot.botId, name: 'automation_schedule_list', args: {} }]);
+    assert.equal(driver.runs.length, 1);
+    assert.equal(captured.length, 2);
+    assert.deepEqual(toolsFromMessages(captured[1].messages), toolsFromMessages(captured[0].messages));
+  } finally {
+    await closeAndRemove({ runtime, antigravity, rootDir });
   }
 });
 

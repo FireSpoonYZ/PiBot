@@ -5,6 +5,7 @@ Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模�
 ## 架构与隔离边界
 
 - **中心单账号、设备侧执行工具**：`agy` 仅在 Center 进程中运行；Host 工具（文件、Shell、Shower、Vault 等）仍在已配对设备本机执行。Center 在隔离 profile 中生成受限的 `pibot-center` 专用 Agent，并动态注入 `pibot-bridge` MCP server，只暴露当前对话声明的 Host 工具，再通过标准 `toolCall` / `toolResult` 往返设备侧。
+- **仅 Code Mode**：Pi 的顶层工具声明不含独立 `tool_search`。用 `codemode` 内的 `searchTools()`、`describeTool()` 与 `tools.*` 按需执行，不改变当前 ACP prompt 的工具表。MCP 桥复用 Host 的最终 ACP 声明，包括仅由桥处理的 `bridge_poll_result`；仍兼容未声明轮询工具的旧 Host。
 - **原生资源发现**由 `PreToolUse` 在执行前拒绝。Center 只在当前轮的 `list_resources` 调用 ID 同时收到已认证的拒绝回执和 ACP `failed` 事件时继续回答，否则按工具隔离错误处理。
 - **独立 Profile 隔离**：Center 专用配置/会话目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`，专用工作目录为 `<CENTER_DATA_ROOT>/antigravity/workspace`。严禁指向宿主机日常 `~/.gemini`，不得复制或抽取个人 Google token，也不得使用全局 `permissions.deny`。
 - **持久化目录**：专用 home 与 `agy` 会话必须位于已有持久数据目录（Docker 为 `/data`，Linux DEB/systemd 为 `/var/lib/pibot-center`）。
