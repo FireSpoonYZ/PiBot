@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ANTIGRAVITY_BRIDGE_SERVER } from "./constants.ts";
-import { ACP_RECALL_HOOK_NAME, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
+import { ACP_RECALL_HOOK_NAME, ACP_RESOURCE_DISCOVERY_TOOL, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
 
 export const AGENT_NAME = "pibot-center";
 export const AGENT_SYSTEM_FILE = "agent.md";
@@ -175,6 +175,10 @@ export function ensureIsolatedProfile(profile: ResolvedProfile): void {
 	const recallHooks = JSON.stringify({
 		[ACP_RECALL_HOOK_NAME]: {
 			PreInvocation: [{ type: "command", command: acpRecallHookCommand(), timeout: 3 }],
+			PreToolUse: [{
+				matcher: `^${ACP_RESOURCE_DISCOVERY_TOOL}$`,
+				hooks: [{ type: "command", command: acpRecallHookCommand(true), timeout: 3 }],
+			}],
 		},
 	}, null, 2) + "\n";
 	if (!fileMatches(recallHooksPath, recallHooks)) {
