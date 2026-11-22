@@ -21,6 +21,36 @@
   -webkit-backdrop-filter: none;
 }
 
+/* Balanced subpage topbar: symmetric 1fr side tracks (>= 44px) so centered title never collides with trailing actions. */
+.grok-subpage-topbar {
+  display: grid;
+  grid-template-columns: minmax(var(--tap-min), 1fr) minmax(0, auto) minmax(var(--tap-min), 1fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.grok-subpage-topbar > :first-child {
+  justify-self: start;
+}
+
+.grok-subpage-topbar > :last-child {
+  justify-self: end;
+}
+
+.grok-subpage-header-title {
+  min-width: 0;
+  max-width: 100%;
+  justify-self: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.grok-subpage-scroll {
+  overscroll-behavior: contain;
+}
+
 .hub-top-bar {
   gap: var(--space-2);
 }
@@ -98,7 +128,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: opacity var(--dur-fast) var(--ease-out);
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-top-title.is-obscured {
@@ -126,7 +156,10 @@
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--ink-primary);
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-top-status-btn.is-connecting {
@@ -157,6 +190,7 @@
 }
 
 .hub-top-status-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -201,13 +235,14 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  animation: grok-pop-in 180ms var(--ease-out) both;
+  animation: grok-pop-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both;
 }
 
 .hub-conn-popover-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--ink-primary);
@@ -242,6 +277,7 @@
 
 .hub-conn-popover-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
@@ -250,7 +286,7 @@
 
 .hub-conn-popover-btn {
   position: relative;
-  min-height: 34px;
+  min-height: 36px;
   padding: 0 14px;
   border-radius: var(--radius-full);
   border: 1px solid var(--border-default);
@@ -261,7 +297,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   white-space: nowrap;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .hub-conn-popover-btn::before {
@@ -272,6 +311,24 @@
   transform: translate(-50%, -50%);
   width: max(100%, var(--tap-min));
   height: max(100%, var(--tap-min));
+}
+
+@media (pointer: coarse) {
+  .hub-conn-popover-btn {
+    min-height: var(--tap-min);
+  }
+  .hub-conn-popover-btn::before {
+    content: none;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .hub-conn-popover-btn:hover:not(:disabled) {
+    background: var(--color-surface-3);
+  }
+  .hub-conn-popover-btn.is-primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
 }
 
 .hub-conn-popover-btn.is-primary {
@@ -433,6 +490,8 @@
 
   .hub-top-center,
   .hub-top-title,
+  .hub-top-status-btn,
+  .hub-conn-popover-btn,
   .shell-update-banner,
   .hub-top-bar .hub-circle-btn,
   .grok-subpage-topbar .grok-floating-circle-btn {
@@ -470,6 +529,7 @@
 
 .hst-textarea-row .hst-input-label {
   width: auto;
+  max-width: none;
 }
 
 .hst-textarea-row .hst-textarea.hst-ca-textarea {

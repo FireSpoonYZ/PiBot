@@ -1,11 +1,13 @@
 // 设置页“剪贴板同步”共享分区：桌面 SettingsPanel 与 Android SettingsScreen 共用。
 // 通过原生命令管理同步组和扫码，不读取剪贴板明文，不记录邀请码或回显原始错误。
 import { invoke } from '@tauri-apps/api/core';
-import { CheckCircle2, CircleAlert, ClipboardCheck, KeyRound, Lock, Plus, QrCode, RefreshCw, ScanLine, ShieldAlert, Upload } from 'lucide-react';
+import { CircleAlert, ClipboardCheck, KeyRound, Lock, Plus, QrCode, RefreshCw, ScanLine, ShieldAlert, Upload } from 'lucide-react';
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Badge, Row, Section, Switch, type BadgeTone } from './bot-settings/primitives';
+import { ActionBar, ConfirmDialog } from './components/ui';
 import { QrSvg } from './center-admin/qrSvg';
 import { MobileHostError, scanClipboardGroupCode } from './native/tauri-host';
+import { useNotice } from './notice';
 import { useText } from './ui';
 import './ClipboardSyncSection.css';
 
@@ -191,6 +193,7 @@ function modeText(status: SyncStatus | null, variant: 'desktop' | 'mobile', t: T
 
 export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile' }) {
   const t = useText();
+  const { notify } = useNotice();
   const joinInputId = useId();
   const joinInputRef = useRef<HTMLInputElement>(null);
 
@@ -199,13 +202,16 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   const [busyAction, setBusyAction] = useState<UiAction | null>(null);
   const [actionError, setActionError] = useState<SafeNotice | null>(null);
   const [statusError, setStatusError] = useState<SafeNotice | null>(null);
-  const [infoNotice, setInfoNotice] = useState('');
   const [revealedCode, setRevealedCode] = useState<string | null>(null);
   const [joinOpen, setJoinOpen] = useState(false);
   const [joinCode, setJoinCode] = useState('');
   const [confirmNewGroup, setConfirmNewGroup] = useState(false);
   const [bgPromptOpen, setBgPromptOpen] = useState(false);
   const [bgConsent, setBgConsent] = useState(false);
+
+  const notifyFeedback = useCallback((title: string, tone: 'success' | 'info' = 'success') => {
+    notify({ id: 'clipboard-sync-status', tone, title });
+  }, [notify]);
 
   const mountedRef = useRef(true);
   const mutationRevRef = useRef(0);
@@ -291,7 +297,6 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     mutatingRef.current = true;
     setBusyAction(action);
     setActionError(null);
-    setInfoNotice('');
     return ++mutationRevRef.current;
   }, []);
 
@@ -319,12 +324,16 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   }, [applyStatus, beginAction, t, variant]);
 
   const executeNewGroup = async () => {
-    setConfirmNewGroup(false); hideCode(); clearSecretDraft(); setJoinOpen(false);
-    const res = await runAction({ action: 'newGroup' });
-    if (!res || !mountedRef.current) return;
-    setInfoNotice(res.status.enabled
-      ? t('已创建新的同步组。点击“显示邀请二维码”可邀请其他设备加入。', 'Created a new sync group. Select “Show invitation QR” to invite another device.')
-      : t('已创建新的同步组。同步开关仍保持关闭，可按需手动开启。', 'Created a new sync group. The sync switch remains off until you turn it on.'));
+    hideCode(); clearSecretDraft(); setJoinOpen(false);
+    try {
+      const res = await runAction({ action: 'newGroup' });
+      if (!res || !mountedRef.current) return;
+      notifyFeedback(res.status.enabled
+        ? t('已创建新的同步组。点击「显示邀请二维码」可邀请其他设备加入。', 'Created a new sync group. Select “Show invitation QR” to invite another device.')
+        : t('已创建新的同步组。同步开关仍保持关闭，可按需手动开启。', 'Created a new sync group. The sync switch remains off until you turn it on.'));
+    } finally {
+      if (mountedRef.current) setConfirmNewGroup(false);
+    }
   };
 
   const handleJoinSubmit = async (event: FormEvent) => {
@@ -335,7 +344,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     const res = await runAction({ action: 'joinGroup', code: trimmed });
     if (!res || !mountedRef.current) return;
     clearSecretDraft(); setJoinOpen(false); setConfirmNewGroup(false);
-    setInfoNotice(res.status.enabled
+    notifyFeedback(res.status.enabled
       ? t('已保存并加入剪贴板同步组。', 'Saved and joined the clipboard sync group.')
       : t('已保存并加入同步组。同步开关仍保持关闭，开启开关后才会同步。', 'Saved and joined the sync group. Turn on the switch to start syncing.'));
   };
@@ -366,7 +375,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       setJoinCode(code);
       setJoinOpen(true);
       setConfirmNewGroup(false);
-      setInfoNotice(t('已识别邀请码，请确认加入同步组。', 'Group code recognized. Confirm to join the sync group.'));
+      notifyFeedback(t('已识别邀请码，请确认加入同步组。', 'Group code recognized. Confirm to join the sync group.'), 'info');
     } catch (error) {
       if (!isCurrent()) return;
       const kind = error instanceof MobileHostError && error.code === 'CAMERA_DENIED' ? 'cameraDenied' : 'scanUnavailable';
@@ -382,9 +391,12 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     const res = await runAction({ action: 'authorizeBackground' });
     if (!res || !mountedRef.current) return;
     setBgPromptOpen(false); setBgConsent(false);
-    setInfoNotice(res.status.mode === 'automatic'
-      ? t('已启用后台自动剪贴板同步（Shizuku）。', 'Enabled background auto clipboard sync (Shizuku).')
-      : t('已记录后台授权，但当前仍处于手动回退模式；请检查 Shizuku 状态或使用“立即发送”。', 'Background consent saved, currently in manual fallback; verify Shizuku or use Send now.'));
+    notifyFeedback(
+      res.status.mode === 'automatic'
+        ? t('已启用后台自动剪贴板同步（Shizuku）。', 'Enabled background auto clipboard sync (Shizuku).')
+        : t('已记录后台授权，但当前仍处于手动回退模式；请检查 Shizuku 状态或使用“立即发送”。', 'Background consent saved, currently in manual fallback; verify Shizuku or use Send now.'),
+      res.status.mode === 'automatic' ? 'success' : 'info',
+    );
   };
 
   const handleRevokeBg = async () => {
@@ -392,7 +404,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     const res = await runAction({ action: 'revokeBackground' });
     if (!res || !mountedRef.current) return;
     setBgPromptOpen(false); setBgConsent(false);
-    setInfoNotice(t('已撤销后台自动同步授权。你仍可以手动发送，也能自动接收。', 'Background authorization revoked. You can still send manually and receive automatically.'));
+    notifyFeedback(t('已撤销后台自动同步授权。你仍可以手动发送，也能自动接收。', 'Background authorization revoked. You can still send manually and receive automatically.'));
   };
 
   const errorNotice = actionError ?? statusError;
@@ -410,16 +422,25 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       <ShieldAlert size={16} aria-hidden="true" />
       <div className="cs-banner-body"><span className="cs-banner-title">{errorNotice.title}</span><span className="cs-banner-detail">{errorNotice.detail}</span></div>
     </div>
-  ) : infoNotice ? (
-    <div className="cs-banner is-success" role="status">
-      <CheckCircle2 size={16} aria-hidden="true" />
-      <div className="cs-banner-body"><span className="cs-banner-detail">{infoNotice}</span></div>
-    </div>
   ) : null;
+
+  const confirmNewGroupDialog = (
+    <ConfirmDialog
+      open={confirmNewGroup}
+      danger
+      busy={busyAction === 'newGroup'}
+      title={t('新建并更换剪贴板同步组？', 'Create a new clipboard sync group?')}
+      description={t('新建组会替换本机保存的邀请码并离开原同步组，不会自动打开同步开关。其他设备需重新扫码或输入新邀请码才能加入。', 'Creating a new group replaces this device’s saved code and leaves the current group without turning sync on. Other devices will need the new QR or code to join.')}
+      confirmLabel={t('创建新同步组', 'Create new group')}
+      cancelLabel={t('取消', 'Cancel')}
+      onCancel={() => setConfirmNewGroup(false)}
+      onConfirm={() => void executeNewGroup()}
+    />
+  );
 
   const groupControls = (
     <>
-      <div className="cs-actions">
+      <ActionBar align="start" className="cs-actions">
         <button type="button" className={primaryBtn} disabled={groupDisabled} onClick={() => (status?.configured ? setConfirmNewGroup(true) : void executeNewGroup())}>
           <Plus size={14} aria-hidden="true" /> {busyAction === 'newGroup' ? t('正在创建…', 'Creating…') : status?.configured ? t('新建并更换组', 'Create new group') : t('创建同步组', 'Create group')}
         </button>
@@ -436,17 +457,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
             {revealedCode !== null ? <><Lock size={14} aria-hidden="true" /> {t('隐藏邀请信息', 'Hide invitation')}</> : <><QrCode size={14} aria-hidden="true" /> {busyAction === 'showCode' ? t('读取中…', 'Loading…') : t('显示邀请二维码', 'Show invitation QR')}</>}
           </button>
         )}
-      </div>
-
-      {confirmNewGroup && (
-        <div className="cs-box is-warn" role="group" aria-label={t('确认新建同步组', 'Confirm creating a new group')}>
-          <p className="cs-note">{t('新建组会替换本机保存的邀请码，不会自动打开同步开关。', 'Creating a new group replaces this device’s saved code without turning sync on.')}</p>
-          <div className="cs-actions">
-            <button type="button" className={secondaryBtn} disabled={busy} onClick={() => setConfirmNewGroup(false)}>{t('取消', 'Cancel')}</button>
-            <button type="button" className={primaryBtn} disabled={busy} onClick={() => void executeNewGroup()}>{t('确认新建组', 'Confirm new group')}</button>
-          </div>
-        </div>
-      )}
+      </ActionBar>
 
       {joinOpen && (
         <form className={variant === 'desktop' ? 'cs-box' : undefined} onSubmit={e => void handleJoinSubmit(e)}>
@@ -460,10 +471,10 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
             <input ref={joinInputRef} id={joinInputId} type="password" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} className="cs-input" disabled={busy} value={joinCode} onChange={e => setJoinCode(e.target.value)} placeholder={t('输入另一台设备显示的邀请码', 'Enter the group code shown on another device')} />
           )}
           {status?.configured && <p className="cs-note">{t('确认加入后，本机将切换到该同步组。', 'Confirming switches this device to the chosen sync group.')}</p>}
-          <div className={variant === 'desktop' ? 'cs-actions' : 'hst-actions'}>
+          <ActionBar align="end" className={variant === 'desktop' ? 'cs-actions' : 'hst-actions'}>
             <button type="button" className={secondaryBtn} disabled={busy} onClick={() => { clearSecretDraft(); setJoinOpen(false); }}>{t('取消', 'Cancel')}</button>
             <button type="submit" className={primaryBtn} disabled={busy || !joinCode.trim()}>{busyAction === 'joinGroup' ? t('正在加入…', 'Joining…') : t('保存并加入', 'Join group')}</button>
-          </div>
+          </ActionBar>
         </form>
       )}
 
@@ -510,6 +521,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
           <p className="cs-note" style={{ marginBottom: 8 }}>{t('每台设备只需配置一次邀请组；新建或加入不会隐式开启同步开关。', 'Configure an invitation group once per device; creating or joining never implicitly enables sync.')}</p>
           <div className="cs-root">{groupControls}</div>
         </section>
+        {confirmNewGroupDialog}
       </div>
     );
   }
@@ -528,7 +540,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
 
       <Section title={t('手动发送当前剪贴板', 'Send Current Clipboard')}>
         <div className="cs-pad">
-          <button type="button" className="hst-btn is-primary cs-send-btn" disabled={!canSendNow} onClick={() => void runAction({ action: 'sendNow' }).then(res => { if (res && mountedRef.current) setInfoNotice(t('已将当前文本交给剪贴板同步通道。', 'Current text queued for clipboard sync.')); })}>
+          <button type="button" className="hst-btn is-primary cs-send-btn" disabled={!canSendNow} onClick={() => void runAction({ action: 'sendNow' }).then(res => { if (res && mountedRef.current) notifyFeedback(t('已将当前文本发送到剪贴板同步组', 'Sent current clipboard text to sync group')); })}>
             <Upload size={16} aria-hidden="true" /> {busyAction === 'sendNow' ? t('正在发送…', 'Sending…') : t('立即发送当前剪贴板', 'Send current clipboard now')}
           </button>
           <p className="cs-note">{canSendNow ? t('也可在其他应用的分享或划词菜单选择“发送到 PiBot 同步组”。这两种手动发送方式都不需要 Shizuku。', 'You can also choose “Send with PiBot” from another app’s share or text-selection menu. Neither method requires Shizuku.') : t('开启同步并显示“同步在线”后即可手动发送当前剪贴板。', 'Available once clipboard sync is enabled and online.')}</p>
@@ -545,13 +557,13 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
               : t('当前未授权后台监听（模式：手动发送）。如需在其他应用复制时自动同步，需先拥有 Shizuku 系统授权并明确同意。', 'Background listening is not authorized (mode: manual). Automatic sync requires an existing Shizuku grant and your explicit consent.')}
           </p>
           {bgAuthorized ? (
-            <div className="cs-actions">
+            <ActionBar align="start" className="cs-actions">
               <button type="button" className="hst-btn is-danger" disabled={groupDisabled} onClick={() => void handleRevokeBg()}>{busyAction === 'revokeBackground' ? t('正在撤销…', 'Revoking…') : t('撤销后台自动同步授权', 'Revoke background authorization')}</button>
-            </div>
+            </ActionBar>
           ) : !bgPromptOpen ? (
-            <div className="cs-actions">
+            <ActionBar align="start" className="cs-actions">
               <button type="button" className="hst-btn" disabled={groupDisabled} onClick={() => { setBgConsent(false); setBgPromptOpen(true); }}>{t('授权后台自动同步…', 'Authorize background sync…')}</button>
-            </div>
+            </ActionBar>
           ) : (
             <div className="cs-box is-warn" role="group" aria-label={t('确认授权后台剪贴板同步', 'Confirm background clipboard sync authorization')}>
               <p className="cs-note">{t('需要已在本机授予 Shizuku 系统权限，且启用后您在其他应用中复制的文本可能会自动发送到当前剪贴板同步组。', 'Requires an existing Shizuku grant on this device. Once authorized, text you copy in other apps can be sent automatically to your sync group.')}</p>
@@ -559,10 +571,10 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
                 <input type="checkbox" checked={bgConsent} disabled={busy} onChange={e => setBgConsent(e.target.checked)} />
                 <span>{t('我已授予 Shizuku 权限，并同意在其他应用中复制的文本可被发送。', 'I have granted Shizuku permission and consent that copies in other apps can be sent.')}</span>
               </label>
-              <div className="cs-actions">
+              <ActionBar align="end" className="cs-actions">
                 <button type="button" className="hst-btn" disabled={busy} onClick={() => { setBgConsent(false); setBgPromptOpen(false); }}>{t('取消', 'Cancel')}</button>
-                <button type="button" className="hst-btn is-primary" disabled={busy || !bgConsent} onClick={() => void handleAuthorizeBg()}>{busyAction === 'authorizeBackground' ? t('正在授权…', 'Authorizing…') : t('确认授权', 'Confirm authorization')}</button>
-              </div>
+                <button type="button" className="hst-btn is-primary" disabled={busy || !bgConsent} onClick={() => void handleAuthorizeBg()}>{busyAction === 'authorizeBackground' ? t('正在授权…', 'Authorizing…') : t('确认授权后台同步', 'Authorize background sync')}</button>
+              </ActionBar>
             </div>
           )}
         </div>
@@ -573,6 +585,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       <Section title={t('邀请组配对', 'Group Pairing')} hint={t('每台设备只需配置一次；新建或加入不会自动开启同步开关，邀请码仅在主动点击时显示。', 'Configure once per device; creating or joining never enables sync automatically, and codes show only on request.')}>
         <div className="cs-pad">{groupControls}</div>
       </Section>
+      {confirmNewGroupDialog}
     </div>
   );
 }

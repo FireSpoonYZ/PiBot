@@ -1,13 +1,13 @@
-/* Bot 设置工作台（右侧 Inspector 抽屉内容区）。全部样式限定在 .bot-studio 根内，
-   避免影响 Android / mobile 复用的共享组件；通用类 .pill-tabs/.primary-button/
-   .secondary-button/.status/.error-banner 由 app.css 提供。 */
+/* Bot settings workbench (Inspector drawer content).
+   Scoped to .bot-studio so shared Android/mobile components stay unaffected.
+   Flattened directly onto .inspector-body canvas — zero nested card borders or double padding. */
 
 .bot-studio {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
   min-width: 0;
-  padding: 12px;
+  padding: 0;
 }
 
 .bot-studio-head {
@@ -15,16 +15,17 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 .bot-studio-tabs {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 3px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--surface);
   max-width: 100%;
 }
@@ -34,14 +35,21 @@
   padding: 4px 12px;
   font-size: 12.5px;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: transparent;
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio-tabs button:hover:not(.active):not(:disabled) {
+    color: var(--text);
+  }
 }
 .bot-studio-tabs button.active {
-  background: var(--surface-elevated, var(--bg));
-  color: var(--accent-strong);
-  box-shadow: 0 1px 3px rgb(0 0 0 / .08);
+  background: var(--surface-elevated);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-sm);
 }
 
 .bot-studio-actions {
@@ -51,33 +59,36 @@
 }
 .bot-studio-actions .secondary-button.warn {
   color: var(--warn);
-  border-color: #edd28a;
-  background: #fff8e6;
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
 }
 
 .bot-studio .bot-studio-lock {
   padding: 8px 10px;
-  border: 1px solid #e6b8b5;
-  border-radius: 10px;
-  background: var(--danger-soft, #fdeceb);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12.5px;
 }
 
-.bot-studio .studio-card {
+/* Flattened wrapper: .inspector-body owns the single outer padding layer;
+   child sections/items provide their own single-level surface where needed. */
+.bot-studio .studio-card,
+.inspector-body .studio-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--bg);
+  gap: var(--space-3);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   min-width: 0;
 }
 .bot-studio .studio-card-header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 6px 10px;
   min-width: 0;
@@ -88,6 +99,7 @@
 }
 .bot-studio .metadata {
   font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -100,15 +112,43 @@
 .bot-studio .form-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
-.bot-studio-disclosure > summary {
+/* Disclosure without outer card box (avoids wrapping inner cards/groups inside details box) */
+.bot-studio .bot-studio-disclosure,
+.desktop-shell .bot-studio-disclosure {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.bot-studio .bot-studio-disclosure > summary,
+.desktop-shell .bot-studio-disclosure > summary {
   width: fit-content;
+  padding: 4px 0;
+  border: 0;
   font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
   cursor: pointer;
 }
-.bot-studio-disclosure[open] > summary { margin-bottom: 8px; }
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .bot-studio-disclosure > summary:hover,
+  .desktop-shell .bot-studio-disclosure > summary:hover {
+    color: var(--text);
+  }
+}
+.bot-studio .bot-studio-disclosure[open] > summary,
+.desktop-shell .bot-studio-disclosure[open] > summary {
+  margin-bottom: var(--space-2);
+  border-bottom: 0;
+  color: var(--text);
+}
+.bot-studio .bot-studio-disclosure > :not(summary),
+.desktop-shell .bot-studio-disclosure > :not(summary) {
+  margin: 0;
+}
+
 .bot-studio-advanced {
   display: grid;
   gap: 10px;
@@ -120,15 +160,17 @@
   align-self: flex-start;
   padding: 4px 8px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   cursor: pointer;
 }
-.avatar-studio .avatar-studio-trigger:hover { background: var(--surface); }
+@media (hover: hover) and (pointer: fine) {
+  .avatar-studio .avatar-studio-trigger:hover { background: var(--surface-hover); }
+}
 .avatar-studio .avatar-studio-trigger small { color: var(--muted); }
 
-/* 快捷片段胶囊 */
+/* Quick SOUL snippet chips */
 .bot-studio .soul-snippet-bar {
   display: flex;
   flex-wrap: wrap;
@@ -136,33 +178,38 @@
   gap: 6px;
 }
 .bot-studio .snippet-chip {
-  min-height: 26px;
-  padding: 2px 10px;
+  min-height: 28px;
+  padding: 3px 10px;
   font-size: 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.bot-studio .snippet-chip:hover:not(:disabled) {
-  border-color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .snippet-chip:hover:not(:disabled) {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
 }
 .bot-studio .soul-textarea {
   width: 100%;
   box-sizing: border-box;
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.55;
   min-height: 180px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
-  background: var(--surface);
+  background: var(--surface-elevated);
   color: var(--text);
   resize: vertical;
 }
 
-/* 模型与推理：生效概览、单选列表、分段档位 */
+/* Model & reasoning controls */
 .bot-studio .bot-studio-effective {
   display: flex;
   flex-wrap: wrap;
@@ -170,8 +217,8 @@
   align-items: center;
   gap: 6px 14px;
   padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 26%, var(--line));
+  border-radius: var(--radius-md);
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-size: 12px;
@@ -190,6 +237,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 .bot-studio .bot-studio-field > input,
 .bot-studio .bot-studio-field > select {
@@ -199,6 +247,7 @@
 .bot-studio .bot-studio-field-label {
   font-size: 12.5px;
   font-weight: 600;
+  color: var(--text);
 }
 
 .bot-studio .bot-studio-model-row {
@@ -209,15 +258,17 @@
   padding: 8px 10px;
   text-align: left;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   min-width: 0;
 }
-.bot-studio .bot-studio-model-row:hover:not(:disabled) {
-  background: var(--bg);
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .bot-studio-model-row:hover:not(:disabled) {
+    background: var(--surface-hover);
+  }
 }
 .bot-studio .bot-studio-model-row.active {
-  border-color: var(--accent);
+  border-color: var(--color-primary);
   background: var(--accent-soft);
 }
 .bot-studio .bot-studio-model-name {
@@ -226,7 +277,7 @@
   overflow-wrap: anywhere;
 }
 .bot-studio .bot-studio-model-ref {
-  font-family: var(--mono);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
   overflow-wrap: anywhere;
@@ -235,20 +286,28 @@
 .bot-studio .bot-studio-choices {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .bot-studio .bot-studio-choice {
   min-height: 28px;
-  padding: 3px 12px;
+  padding: 3px 11px;
   font-size: 12px;
   font-weight: 600;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface);
+  border-radius: var(--radius-full);
+  background: var(--surface-elevated);
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .bot-studio-choice:hover:not(.active):not(:disabled) {
+    color: var(--text);
+    border-color: var(--color-line-strong);
+  }
 }
 .bot-studio .bot-studio-choice.active {
-  border-color: var(--accent);
+  border-color: var(--color-primary);
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
@@ -256,64 +315,86 @@
 .bot-studio .bot-model-panel {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-3);
+  min-width: 0;
 }
 .bot-studio .bot-model-status-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-2) 10px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  min-width: 0;
 }
 .bot-studio .bot-model-default-badge {
   margin-left: 6px;
-  padding: 1px 6px;
+  padding: 1px 7px;
   font-size: 11px;
   font-weight: 500;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   border: 1px solid var(--line);
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .bot-studio .bot-model-save-indicator {
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   flex: none;
 }
 .bot-studio .bot-model-mode-cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--space-2);
+}
+@container (max-width: 380px) {
+  .bot-studio .bot-model-mode-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .bot-studio .bot-model-mode-card {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
+  min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
   color: var(--text);
   text-align: left;
   cursor: pointer;
 }
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .bot-model-mode-card:hover:not(.active):not(:disabled) {
+    border-color: var(--color-line-strong);
+    background: var(--surface);
+  }
+}
 .bot-studio .bot-model-mode-card strong { font-size: 13px; }
 .bot-studio .bot-model-mode-card.active {
-  border-color: var(--accent);
+  border-color: var(--color-primary);
   background: var(--accent-soft);
 }
+
+/* Flat wrapper: ModelPicker renders its own .bs-card surface */
 .bot-studio .bot-model-picker-wrap {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  min-width: 0;
 }
 .bot-studio .bot-model-empty-card {
-  padding: 16px;
+  padding: var(--space-4);
   border: 1px dashed var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -323,34 +404,41 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 8px;
 }
 .bot-studio .bot-model-radio-row {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-2);
+  padding: 9px 11px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
   cursor: pointer;
+  min-width: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .bot-studio .bot-model-radio-row:hover:not(.active) {
+    background: var(--surface);
+  }
 }
 .bot-studio .bot-model-radio-row.active {
-  border-color: var(--accent);
+  border-color: var(--color-primary);
   background: var(--accent-soft);
 }
 .bot-studio .bot-model-radio-copy {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .bot-studio .bot-model-radio-copy strong { font-size: 12.5px; }
 .bot-studio .soul-preview-box {
   min-height: 180px;
   max-height: 360px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
-  background: var(--surface);
+  background: var(--surface-elevated);
 }

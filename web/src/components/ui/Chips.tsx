@@ -6,13 +6,16 @@ export interface ChipOption<V extends string = string> {
   disabled?: boolean;
 }
 
-interface ChipsBaseProps<V extends string> {
+type ChipsLabelProps =
+  | { 'aria-label': string; label?: string }
+  | { 'aria-label'?: string; label: string };
+
+type ChipsBaseProps<V extends string> = ChipsLabelProps & {
   options: readonly ChipOption<V>[];
-  'aria-label': string;
   disabled?: boolean;
   className?: string;
   ref?: Ref<HTMLDivElement>;
-}
+};
 
 export type ChipsSingleProps<V extends string = string> = ChipsBaseProps<V> & {
   multiple?: false;
@@ -32,10 +35,12 @@ export function Chips<V extends string = string>(props: ChipsProps<V>) {
   const {
     options,
     'aria-label': ariaLabel,
+    label,
     disabled = false,
     className = '',
     ref,
   } = props;
+  const accessibleLabel = ariaLabel ?? label;
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const isPressed = (optionValue: V): boolean => (
@@ -91,7 +96,13 @@ export function Chips<V extends string = string>(props: ChipsProps<V>) {
   const cls = ['ui-chips', className].filter(Boolean).join(' ');
 
   return (
-    <div ref={ref} role="group" aria-label={ariaLabel} className={cls}>
+    <div
+      ref={ref}
+      role="group"
+      aria-label={accessibleLabel}
+      aria-disabled={disabled || undefined}
+      className={cls}
+    >
       {options.map((option, index) => {
         const pressed = isPressed(option.value);
         const itemDisabled = Boolean(disabled || option.disabled);

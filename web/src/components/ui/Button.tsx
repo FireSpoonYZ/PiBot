@@ -35,6 +35,7 @@ export function Button({
     `is-${variant}`,
     size === 'sm' ? 'is-sm' : '',
     fullWidth ? 'is-full' : '',
+    loading ? 'is-loading' : '',
     className,
   ].filter(Boolean).join(' ');
 

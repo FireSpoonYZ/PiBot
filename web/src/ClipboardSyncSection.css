@@ -1,12 +1,15 @@
 /* 剪贴板同步共享样式：仅 .cs- 前缀，桌面 SettingsPanel 与 Android SettingsScreen 共用。 */
-.cs-root { display: flex; flex-direction: column; gap: var(--space-3, 12px); }
+.cs-root { display: flex; flex-direction: column; gap: var(--space-3, 12px); min-width: 0; }
 .cs-actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); align-items: center; }
+.cs-actions button,
+.cs-box-head button,
+.cs-send-btn { white-space: nowrap; flex-shrink: 0; }
 .cs-note { margin: 0; font-size: var(--text-sm, .82rem); line-height: 1.5; color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
-.cs-pad { padding: 10px 14px; display: flex; flex-direction: column; gap: var(--space-2, 8px); }
+.cs-pad { padding: 10px 14px; display: flex; flex-direction: column; gap: var(--space-2, 8px); min-width: 0; }
 .cs-pad .cs-send-btn { width: 100%; min-height: var(--tap-min, 44px); }
 
 .cs-banner {
-  display: flex; align-items: flex-start; gap: var(--space-2, 8px); padding: 10px var(--space-3, 12px);
+  display: flex; align-items: flex-start; gap: var(--space-2, 8px); min-width: 0; padding: 10px var(--space-3, 12px);
   border-radius: var(--radius-md, 12px); border: 1px solid var(--color-line, var(--line));
   background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 75%, transparent);
   font-size: var(--text-sm, .82rem); line-height: 1.5; color: var(--color-text, var(--text));
@@ -31,7 +34,7 @@
 .cs-banner-detail { color: var(--color-text, var(--text)); opacity: .9; overflow-wrap: anywhere; }
 
 .cs-box {
-  display: flex; flex-direction: column; gap: var(--space-2, 8px); padding: 10px var(--space-3, 12px);
+  display: flex; flex-direction: column; gap: var(--space-2, 8px); min-width: 0; padding: 10px var(--space-3, 12px);
   border-radius: var(--radius-md, 12px); border: 1px solid var(--color-line, var(--line));
   background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 70%, transparent);
 }
@@ -39,7 +42,7 @@
   border-color: color-mix(in srgb, var(--color-warning, var(--warn)) 35%, transparent);
   background: color-mix(in srgb, var(--color-warning, var(--warn)) 8%, transparent);
 }
-.cs-box-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cs-box-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .cs-qr {
   align-self: center;
   width: min(100%, 205px);

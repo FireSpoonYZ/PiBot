@@ -3,6 +3,8 @@
 .vault-panel {
   --bs-accent: var(--signal-primary, var(--color-primary, var(--brand, var(--accent))));
   --bs-card: var(--surface-1, var(--color-surface-1, var(--surface)));
+  --bs-hairline: var(--border-subtle, color-mix(in srgb, var(--color-line, var(--line)) 80%, transparent));
+  --bs-radius: var(--radius-md, 12px);
   display: grid;
   gap: 14px;
   min-width: 0;
@@ -28,7 +30,15 @@
 .vault-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-2, 8px);
+}
+
+.vault-actions button,
+.vault-panel .bs-btn,
+.vault-panel .bs-link {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .vault-ext-bar {
@@ -66,9 +76,14 @@
 
 .vault-permission {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: var(--space-3, 12px);
+}
+
+.vault-permission > :first-child {
+  min-width: 0;
 }
 
 .vault-items {
@@ -107,6 +122,7 @@
   border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
 }
 
+.vault-panel .vault-header-bar,
 .vault-header-bar {
   display: flex;
   flex-wrap: wrap;
@@ -130,6 +146,7 @@
 
 .vault-switch-wrap {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
   flex-shrink: 0;
@@ -150,8 +167,16 @@
   padding: var(--space-3, 12px) 14px;
 }
 
+.vault-delete-confirm {
+  display: grid;
+  gap: var(--space-2, 8px);
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+}
+
 .vault-footer-link {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-start;
   padding-top: 2px;
 }

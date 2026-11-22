@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import type * as React from 'react';
 import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
+import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import type { JsonObject, JsonSchema, JsonValue } from './types';
+
+const CREDENTIAL_LOOKUP_DEBOUNCE_MS = 350;
 
 function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -83,65 +86,89 @@ function CredentialField({
   onChange: (next: string | undefined) => void;
 }): React.JSX.Element {
   const t = useText();
-  const [status, setStatus] = useState<'empty' | 'loading' | 'configured' | 'unset' | 'error'>('empty');
-  const [statusMsg, setStatusMsg] = useState('');
+  const [status, setStatus] = useState<'empty' | 'loading' | 'configured' | 'unset' | 'missing'>('empty');
   const [secret, setSecret] = useState('');
   const [revision, setRevision] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  const trimmedId = value.trim();
+  const secretInputId = `${id}-secret`;
 
   useEffect(() => {
     let active = true;
     setSecret('');
     setRevision(null);
-    if (!value) {
+    setSaveError('');
+
+    if (!trimmedId) {
       setStatus('empty');
-      setStatusMsg(t('未填写凭证 ID', 'No credential ID'));
       return;
     }
+
     setStatus('loading');
-    setStatusMsg(t('读取凭证状态…', 'Loading credential status…'));
-    api
-      .getCredential(value)
-      .then(info => {
-        if (!active) return;
-        setRevision(info.revision);
-        setStatus(info.configured ? 'configured' : 'unset');
-        setStatusMsg(info.configured ? t('已配置密钥', 'Secret configured') : t('未配置密钥', 'Secret not configured'));
-      })
-      .catch(() => {
-        if (!active) return;
-        setStatus('error');
-        setStatusMsg(t('暂未找到此凭证，可输入密钥直接创建', 'Credential not found yet; enter a secret to create it'));
-      });
+    const timer = window.setTimeout(() => {
+      api
+        .getCredential(trimmedId)
+        .then(info => {
+          if (!active) return;
+          setRevision(info.revision);
+          setStatus(info.configured ? 'configured' : 'unset');
+        })
+        .catch(() => {
+          if (!active) return;
+          setStatus('missing');
+        });
+    }, CREDENTIAL_LOOKUP_DEBOUNCE_MS);
+
     return () => {
       active = false;
+      window.clearTimeout(timer);
     };
-  }, [api, t, value]);
+  }, [api, trimmedId]);
+
+  const statusLabel = useMemo(() => {
+    switch (status) {
+      case 'loading':
+        return t('检查中…', 'Checking…');
+      case 'configured':
+        return t('已配置密钥', 'Secret configured');
+      case 'unset':
+        return t('未配置密钥', 'Secret unset');
+      case 'missing':
+        return t('新凭证（输入密钥即可创建）', 'New credential (enter secret to create)');
+      default:
+        return t('未填写凭证 ID', 'No credential ID');
+    }
+  }, [status, t]);
 
   const handleSaveSecret = async () => {
-    if (!value || !secret || busy) return;
+    if (!trimmedId || !secret || busy || disabled) return;
     setBusy(true);
+    setSaveError('');
     try {
-      const info = await api.putCredential(value, { value: secret, expectedRevision: revision });
+      const info = await api.putCredential(trimmedId, { value: secret, expectedRevision: revision });
       setRevision(info.revision);
       setSecret('');
       setStatus(info.configured ? 'configured' : 'unset');
-      setStatusMsg(info.configured ? t('已配置密钥', 'Secret configured') : t('未配置密钥', 'Secret not configured'));
     } catch (err) {
-      setStatus('error');
-      setStatusMsg(err instanceof Error ? err.message : String(err));
+      const detail = errorMessage(err, t('中心拒绝了写入请求', 'Center rejected the request'));
+      setSaveError(
+        t(`保存密钥失败：${detail}。请确认凭证 ID 无误后重试。`, `Failed to save secret: ${detail}. Check the credential ID and try again.`),
+      );
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="ca-cred-box">
-      <div className="ca-inline-row">
+    <div className="ca-cred-box ca-form-stack">
+      <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
         <input
           id={id}
           type="text"
           className="ca-input"
+          style={{ flex: 1 }}
           value={value}
           disabled={disabled || busy}
           required={required}
@@ -150,46 +177,66 @@ function CredentialField({
         />
         <span
           className={`ca-pill ${
-            status === 'configured' ? 'ca-pill-ok' : status === 'error' ? 'ca-pill-warn' : 'ca-pill-muted'
+            status === 'configured' ? 'ca-pill-ok' : status === 'missing' ? 'ca-pill-warn' : 'ca-pill-muted'
           }`}
         >
-          {statusMsg}
+          {statusLabel}
         </span>
       </div>
-      {value && !disabled && (
-        <div className="ca-inline-row ca-mt-2">
-          <input
-            type="password"
-            className="ca-input"
-            autoComplete="new-password"
-            placeholder={t('输入新密钥写入（仅保存到中心，不回显）', 'Enter a new secret (stored on center, never shown again)')}
-            value={secret}
-            disabled={busy}
-            onChange={e => setSecret(e.target.value)}
-          />
-          <button
-            type="button"
-            className="ca-btn ca-btn-secondary ca-btn-sm"
-            disabled={!secret || busy}
-            onClick={() => void handleSaveSecret()}
-          >
-            <LabelStack
-              active={busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
-              labels={[t('保存密钥', 'Save secret'), t('保存中…', 'Saving…')]}
+      {trimmedId && !disabled && (
+        <div className="ca-field">
+          <label htmlFor={secretInputId} className="ca-field-label">
+            {t('凭证密钥', 'Credential secret')}
+          </label>
+          <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+            <input
+              id={secretInputId}
+              type="password"
+              className="ca-input"
+              style={{ flex: 1 }}
+              autoComplete="new-password"
+              placeholder={t('输入新密钥写入（仅保存到中心，不回显）', 'Enter a new secret (stored on center, never shown again)')}
+              value={secret}
+              disabled={busy}
+              onChange={e => {
+                setSecret(e.target.value);
+                if (saveError) setSaveError('');
+              }}
             />
-          </button>
+            <button
+              type="button"
+              className="ca-btn ca-btn-secondary ca-btn-sm"
+              disabled={!secret || busy}
+              aria-busy={busy}
+              onClick={() => void handleSaveSecret()}
+            >
+              <LabelStack
+                active={busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
+                labels={[t('保存密钥', 'Save secret'), t('保存中…', 'Saving…')]}
+              />
+            </button>
+          </div>
         </div>
+      )}
+      {saveError && (
+        <p className="ca-error-text" role="alert" style={{ margin: 0 }}>
+          {saveError}
+        </p>
       )}
     </div>
   );
 }
 
 function StringArrayField({
+  id,
+  ariaLabelledBy,
   value,
   disabled,
   enumOptions,
   onChange,
 }: {
+  id: string;
+  ariaLabelledBy: string;
   value: string[];
   disabled?: boolean;
   enumOptions?: string[];
@@ -201,7 +248,7 @@ function StringArrayField({
   if (enumOptions && enumOptions.length > 0) {
     const selected = new Set(value);
     return (
-      <div className="ca-check-group">
+      <div className="ca-check-group" role="group" aria-labelledby={ariaLabelledBy}>
         {enumOptions.map(opt => (
           <label key={opt} className="ca-check-label">
             <input
@@ -222,8 +269,15 @@ function StringArrayField({
     );
   }
 
+  const addDraft = () => {
+    const trimmed = draft.trim();
+    if (!trimmed || disabled) return;
+    onChange([...value, trimmed]);
+    setDraft('');
+  };
+
   return (
-    <div className="ca-array-box">
+    <div className="ca-array-box" role={disabled ? 'group' : undefined} aria-labelledby={disabled ? ariaLabelledBy : undefined}>
       {value.length > 0 && (
         <div className="ca-tag-list">
           {value.map((item, idx) => (
@@ -244,21 +298,19 @@ function StringArrayField({
         </div>
       )}
       {!disabled && (
-        <div className={`ca-inline-row${value.length > 0 ? ' ca-mt-2' : ''}`}>
+        <div className={`ca-inline-row${value.length > 0 ? ' ca-mt-2' : ''}`} style={{ flexWrap: 'nowrap' }}>
           <input
+            id={id}
             type="text"
             className="ca-input"
+            style={{ flex: 1 }}
             value={draft}
             placeholder={t('输入条目后点击添加', 'Enter an item and click Add')}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
               if (e.key === 'Enter') {
                 e.preventDefault();
-                const trimmed = draft.trim();
-                if (trimmed) {
-                  onChange([...value, trimmed]);
-                  setDraft('');
-                }
+                addDraft();
               }
             }}
           />
@@ -266,15 +318,9 @@ function StringArrayField({
             type="button"
             className="ca-btn ca-btn-secondary ca-btn-sm"
             disabled={!draft.trim()}
-            onClick={() => {
-              const trimmed = draft.trim();
-              if (trimmed) {
-                onChange([...value, trimmed]);
-                setDraft('');
-              }
-            }}
+            onClick={addDraft}
           >
-            {t('添加', 'Add')}
+            {t('添加条目', 'Add item')}
           </button>
         </div>
       )}
@@ -294,6 +340,9 @@ export interface SchemaConfigFormProps {
   submitLabel?: string;
   submitBusy?: boolean;
   onSubmit?: () => void;
+  cancelLabel?: string;
+  onCancel?: () => void;
+  error?: string;
 }
 
 export function SchemaConfigForm({
@@ -308,9 +357,15 @@ export function SchemaConfigForm({
   submitLabel,
   submitBusy,
   onSubmit,
+  cancelLabel,
+  onCancel,
+  error,
 }: SchemaConfigFormProps): React.JSX.Element {
   const t = useText();
+  const formIdPrefix = useId();
+  const rawJsonId = `${formIdPrefix}-raw-json`;
   const overrideMode = baseConfig !== undefined;
+  const formDisabled = Boolean(disabled || submitBusy);
   const [rawOpen, setRawOpen] = useState(false);
   const [rawText, setRawText] = useState(() => JSON.stringify(formData ?? {}, null, 2));
   const [rawError, setRawError] = useState('');
@@ -333,10 +388,12 @@ export function SchemaConfigForm({
 
     const fieldKey = path[path.length - 1] ?? '';
     const ui = fieldUiObject(uiSchema, path);
-    const title = (typeof ui?.['ui:title'] === 'string' && ui['ui:title']) ||
+    const title =
+      (typeof ui?.['ui:title'] === 'string' && ui['ui:title']) ||
       (typeof node.title === 'string' && node.title) ||
       fieldKey;
-    const description = (typeof ui?.['ui:description'] === 'string' && ui['ui:description']) ||
+    const description =
+      (typeof ui?.['ui:description'] === 'string' && ui['ui:description']) ||
       (typeof node.description === 'string' ? node.description : '');
     const placeholder = typeof ui?.['ui:placeholder'] === 'string' ? ui['ui:placeholder'] : undefined;
     const widget = typeof ui?.['ui:widget'] === 'string' ? ui['ui:widget'] : undefined;
@@ -379,7 +436,7 @@ export function SchemaConfigForm({
       return (
         <fieldset className="ca-fieldset">
           <legend className="ca-fieldset-title">{title}</legend>
-          {description && <p className="ca-field-help">{description}</p>}
+          {description && <p className="ca-field-help ca-mb-2">{description}</p>}
           <div className="ca-form-stack">
             {propEntries.map(([key, child]) => (
               <div key={key}>
@@ -399,11 +456,19 @@ export function SchemaConfigForm({
     const hasOverride = rawOverrideValue !== undefined;
     const inheritedValue = baseConfig ? getAtPath(baseConfig, path) : undefined;
     const effectiveVal = overrideMode
-      ? (hasOverride ? rawOverrideValue : inheritedValue ?? node.default)
-      : (rawOverrideValue !== undefined ? rawOverrideValue : node.default);
+      ? hasOverride
+        ? rawOverrideValue
+        : inheritedValue ?? node.default
+      : rawOverrideValue !== undefined
+        ? rawOverrideValue
+        : node.default;
 
-    const fieldDisabled = Boolean(disabled) || (overrideMode && !hasOverride);
-    const inputId = `ca-field-${path.join('-')}`;
+    const fieldDisabled = formDisabled || (overrideMode && !hasOverride);
+    const safePath = path
+      .map(seg => seg.replace(/[^a-zA-Z0-9]/g, ch => `_${ch.charCodeAt(0).toString(16)}_`))
+      .join('--');
+    const inputId = `${formIdPrefix}-field-${safePath}`;
+    const labelId = `${inputId}-label`;
 
     const updateField = (next: JsonValue | undefined) => {
       onChange(setAtPath(formData, path, next));
@@ -411,17 +476,18 @@ export function SchemaConfigForm({
 
     const toggleOverride = (checked: boolean) => {
       if (checked) {
-        const seed = inheritedValue !== undefined
-          ? inheritedValue
-          : node.default !== undefined
-            ? node.default
-            : node.type === 'boolean'
-              ? false
-              : node.type === 'array'
-                ? []
-                : node.type === 'number' || node.type === 'integer'
-                  ? 0
-                  : '';
+        const seed =
+          inheritedValue !== undefined
+            ? inheritedValue
+            : node.default !== undefined
+              ? node.default
+              : node.type === 'boolean'
+                ? false
+                : node.type === 'array'
+                  ? []
+                  : node.type === 'number' || node.type === 'integer'
+                    ? 0
+                    : '';
         onChange(setAtPath(formData, path, seed as JsonValue));
       } else {
         onChange(setAtPath(formData, path, undefined));
@@ -430,9 +496,10 @@ export function SchemaConfigForm({
 
     const enumValues = Array.isArray(node.enum) ? node.enum : null;
     const itemsNode = isJsonObject(node.items) ? resolveSchemaRef(node.items, schema) : null;
-    const itemEnums = itemsNode && isJsonObject(itemsNode) && Array.isArray(itemsNode.enum)
-      ? itemsNode.enum.map(v => String(v))
-      : undefined;
+    const itemEnums =
+      itemsNode && isJsonObject(itemsNode) && Array.isArray(itemsNode.enum)
+        ? itemsNode.enum.map(v => String(v))
+        : undefined;
 
     let control: React.ReactNode = null;
 
@@ -474,7 +541,7 @@ export function SchemaConfigForm({
           className={`ca-switch ${checked ? 'is-on' : ''}`}
           onClick={() => updateField(!checked)}
         >
-          <span className="ca-switch-thumb" />
+          <span className="ca-switch-thumb" aria-hidden="true" />
         </button>
       );
     } else if (node.type === 'number' || node.type === 'integer') {
@@ -484,7 +551,7 @@ export function SchemaConfigForm({
           id={inputId}
           type="number"
           step={node.type === 'integer' ? 1 : 'any'}
-          className="ca-input"
+          className="ca-input ca-num"
           disabled={fieldDisabled}
           required={required}
           placeholder={placeholder}
@@ -503,6 +570,8 @@ export function SchemaConfigForm({
       const arr = Array.isArray(effectiveVal) ? effectiveVal.map(v => String(v)) : [];
       control = (
         <StringArrayField
+          id={inputId}
+          ariaLabelledBy={labelId}
           value={arr}
           disabled={fieldDisabled}
           enumOptions={itemEnums}
@@ -563,18 +632,60 @@ export function SchemaConfigForm({
       );
     }
 
+    if (node.type === 'boolean') {
+      return (
+        <div className="ca-field">
+          <div className="ca-inline-between">
+            <label htmlFor={inputId} className="ca-field-label">
+              {title}
+              {required && <span className="ca-req">*</span>}
+            </label>
+            <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+              {overrideMode && (
+                <label className="ca-override-toggle">
+                  <input
+                    type="checkbox"
+                    disabled={formDisabled}
+                    checked={hasOverride}
+                    onChange={e => toggleOverride(e.target.checked)}
+                  />
+                  <LabelStack
+                    active={hasOverride ? t('覆盖全局', 'Override') : t('继承全局', 'Inherit')}
+                    labels={[t('覆盖全局', 'Override'), t('继承全局', 'Inherit')]}
+                    align="start"
+                  />
+                </label>
+              )}
+              {control}
+            </div>
+          </div>
+          {description && <p className="ca-field-help">{description}</p>}
+        </div>
+      );
+    }
+
+    const isGroupControl =
+      node.type === 'array' && (Boolean(itemEnums && itemEnums.length > 0) || fieldDisabled);
+
     return (
       <div className="ca-field">
         <div className="ca-field-head">
-          <label htmlFor={inputId} className="ca-field-label">
-            {title}
-            {required && <span className="ca-req">*</span>}
-          </label>
+          {isGroupControl ? (
+            <span id={labelId} className="ca-field-label">
+              {title}
+              {required && <span className="ca-req">*</span>}
+            </span>
+          ) : (
+            <label htmlFor={inputId} className="ca-field-label">
+              {title}
+              {required && <span className="ca-req">*</span>}
+            </label>
+          )}
           {overrideMode && (
             <label className="ca-override-toggle">
               <input
                 type="checkbox"
-                disabled={disabled}
+                disabled={formDisabled}
                 checked={hasOverride}
                 onChange={e => toggleOverride(e.target.checked)}
               />
@@ -586,45 +697,41 @@ export function SchemaConfigForm({
             </label>
           )}
         </div>
-        {node.type === 'boolean' ? (
-          <div className="ca-inline-between">
-            {description ? <span className="ca-field-help">{description}</span> : <span />}
-            {control}
-          </div>
-        ) : (
-          <>
-            {control}
-            {description && <p className="ca-field-help">{description}</p>}
-          </>
-        )}
+        {control}
+        {description && <p className="ca-field-help">{description}</p>}
       </div>
     );
   };
 
   const applyRawJson = () => {
+    if (formDisabled) return;
     try {
       const parsed = JSON.parse(rawText || '{}') as unknown;
       if (!isJsonObject(parsed)) {
-        setRawError(t('配置必须是 JSON 对象', 'Configuration must be a JSON object'));
+        setRawError(t('配置顶层必须是 JSON 对象（例如 {}）。请修正结构后重试。', 'Configuration root must be a JSON object (e.g. {}). Fix the structure and try again.'));
         return;
       }
       setRawError('');
       onChange(parsed);
     } catch (err) {
-      setRawError(err instanceof Error ? err.message : t('JSON 解析失败', 'Failed to parse JSON'));
+      const detail = err instanceof Error ? err.message : t('语法错误', 'Syntax error');
+      setRawError(t(`JSON 解析失败：${detail}。请检查括号与引号后重试。`, `Failed to parse JSON: ${detail}. Check braces and quotes, then try again.`));
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (formDisabled) return;
     onSubmit?.();
   };
 
   return (
-    <form className="ca-schema-form" onSubmit={handleSubmit}>
+    <form className="ca-schema-form ca-form-stack" onSubmit={handleSubmit}>
       {typeof resolvedRoot === 'boolean' ? (
         <div className="ca-empty-hint">
-          {resolvedRoot ? t('请使用下方高级 JSON 编辑器配置参数。', 'Use the advanced JSON editor below to configure parameters.') : t('当前扩展无配置项。', 'This extension has no configuration options.')}
+          {resolvedRoot
+            ? t('请使用下方高级 JSON 编辑器配置参数。', 'Use the advanced JSON editor below to configure parameters.')
+            : t('当前扩展无配置项。', 'This extension has no configuration options.')}
         </div>
       ) : (
         renderNode(resolvedRoot, [], false)
@@ -642,17 +749,28 @@ export function SchemaConfigForm({
           </button>
           {rawOpen && (
             <div className="ca-disclosure-body smooth-expand-mount">
+              <label htmlFor={rawJsonId} className="sr-only">
+                {t('高级 JSON 配置', 'Advanced JSON config')}
+              </label>
               <textarea
+                id={rawJsonId}
                 rows={6}
                 className="ca-textarea ca-mono"
-                disabled={disabled}
+                disabled={formDisabled}
                 value={rawText}
-                onChange={e => setRawText(e.target.value)}
+                onChange={e => {
+                  setRawText(e.target.value);
+                  if (rawError) setRawError('');
+                }}
               />
               <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
-                {rawError ? <p className="ca-error-text">{rawError}</p> : null}
+                {rawError ? (
+                  <p className="ca-error-text" role="alert">
+                    {rawError}
+                  </p>
+                ) : null}
               </ReservedSlot>
-              {!disabled && (
+              {!formDisabled && (
                 <div className="ca-inline-end ca-mt-2">
                   <button
                     type="button"
@@ -668,14 +786,39 @@ export function SchemaConfigForm({
         </div>
       )}
 
-      {submitLabel && (
-        <div className="ca-form-actions">
-          <button type="submit" className="ca-btn ca-btn-primary" disabled={disabled || submitBusy}>
-            <LabelStack
-              active={submitBusy ? t('保存中…', 'Saving…') : submitLabel}
-              labels={[submitLabel, t('保存中…', 'Saving…')]}
-            />
-          </button>
+      {error && (
+        <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+          <p className="ca-error-text" role="alert">
+            {error}
+          </p>
+        </ReservedSlot>
+      )}
+
+      {(submitLabel || onCancel) && (
+        <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+          {onCancel && (
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={Boolean(submitBusy)}
+              onClick={onCancel}
+            >
+              {cancelLabel ?? t('取消', 'Cancel')}
+            </button>
+          )}
+          {submitLabel && (
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={formDisabled}
+              aria-busy={Boolean(submitBusy)}
+            >
+              <LabelStack
+                active={submitBusy ? t('保存中…', 'Saving…') : submitLabel}
+                labels={[submitLabel, t('保存中…', 'Saving…')]}
+              />
+            </button>
+          )}
         </div>
       )}
     </form>

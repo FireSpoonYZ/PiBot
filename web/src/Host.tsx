@@ -50,6 +50,7 @@ import { useConversationUnread } from './gbot-ui/useConversationUnread';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
 import './bot-communications-mobile.css';
+import type { BotAvatar } from '../../center-contract/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopUiProfile, CenterModelPicker } from '../../host-core/desktop-client.js';
 import type {
@@ -202,6 +203,7 @@ import { CLIENT_UPDATE_OPEN_EVENT } from './ClientUpdate';
 import { ShellUpdateBanner, useHasShellUpdate } from './components/ShellUpdateBanner';
 import './hub/schedules.css';
 import { ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
+import { hasOpenOverlay } from './components/ui/overlayStack';
 import { parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
 import { decideChatAutoScroll, hasIncomingChatContent, type ChatScrollMetrics } from './hub/chatScrollLogic';
 import { useConnectionPhase, useConnectionPhaseContext, type ConnectionPhase } from './connection';
@@ -334,8 +336,32 @@ function buildScopedLiveBinding(
   };
 }
 
+const BOT_SCOPED_SCREENS: ReadonlySet<MobileHubScreen> = new Set([
+  'chat',
+  'bot-profile',
+  'bot-profile-manage',
+  'bot-edit',
+  'bot-avatar',
+  'bot-soul',
+  'bot-skills',
+  'bot-schedules',
+  'bot-screen',
+  'bot-browser',
+  'bot-google-setup',
+]);
+
+const CREATE_AVATAR_DRAFT_KEY = '__create__';
+
+function isLocalAndroidBot(
+  bot: Pick<UnifiedBotItem, 'hostKind' | 'platform'> | null | undefined,
+): boolean {
+  return Boolean(bot && (bot.hostKind === 'local' || bot.platform?.toLowerCase() === 'android'));
+}
+
 export interface HostPageProps {
+  /** Called when hardware/gesture Back reaches a root screen (e.g. mobileHide() on Android). */
   onBack?(): void;
+  /** Retained for HostPageProps compatibility with mobile shell callers. */
   persistentPending?: boolean;
   connectionEpoch?: number;
   active?: boolean;
@@ -348,12 +374,15 @@ export interface HostPageProps {
 }
 
 export function HostPage({
+  onBack,
   connectionEpoch = 0,
   active = true,
   getOrCreateRemoteClient,
   onRefreshConnection,
   onOpenSystemSettings,
 }: HostPageProps = {}) {
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
   const t = useText();
   const tRef = useRef(t);
   tRef.current = t;
@@ -372,6 +401,9 @@ export function HostPage({
     typeof window !== 'undefined' ? parseHashToRootEntry(window.location.hash) : { screen: 'hub' },
     { syncHash: active },
   );
+  // Stable bridge so earlier effects/callbacks always route through popScreen().
+  const popScreenRef = useRef<() => boolean>(() => false);
+  const popCurrentScreen = useCallback((): boolean => popScreenRef.current(), []);
   const screen = nav.current.screen;
   const settingsPage: HubSettingsPage =
     nav.current.screen === 'settings' ? (nav.current.settingsPage ?? 'overview') : 'overview';
@@ -704,9 +736,9 @@ export function HostPage({
   const [editVoiceSpeed, setEditVoiceSpeed] = useState('1x');
   const [editVoiceLang, setEditVoiceLang] = useState('自动'); // i18n-ok
 
-  // Avatar Picker state (15848.jpg)
-  const [avatarTab, setAvatarTab] = useState<'shape' | 'expression'>('shape');
-  const [draftAvatar, setDraftAvatar] = useState<GrokAvatarPreset>(GROK_AVATAR_PRESETS[0]);
+  // Avatar Picker state (isolated per botKey so cross-Bot navigation never overwrites another Bot's draft)
+  const [avatarTabByBot, setAvatarTabByBot] = useState<Record<string, 'shape' | 'expression'>>({});
+  const [draftAvatarsByBot, setDraftAvatarsByBot] = useState<Record<string, BotAvatar>>({});
 
   // Bot Soul & Extensions state
   const [botSoul, setBotSoul] = useState<BotSoul | null>(null);
@@ -1597,7 +1629,11 @@ export function HostPage({
     taskFetchAttemptedRef.current.clear();
     setTaskActionFailures({});
     setRetryingTaskActionKey(null);
-  }, [taskScopeKey]);
+    const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+    if (currentNav?.screen === 'tasks' && currentNav.taskId) {
+      nav.replaceTop({ ...currentNav, taskId: null });
+    }
+  }, [taskScopeKey, nav.replaceTop, nav.stackRef]);
 
   const wasTasksScreenRef = useRef(screen === 'tasks');
   useEffect(() => {
@@ -1984,7 +2020,7 @@ export function HostPage({
     setBotConfirmModal(null);
     setScheduleDeleteTarget(null);
     if (screen === 'conversation' || screen === 'dm') {
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeSessionKey]);
@@ -1999,7 +2035,7 @@ export function HostPage({
     setGroupCreateAttempt(null);
     setGroupCreateError('');
     if (screen === 'group-create') {
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeAccountKey]);
@@ -2946,6 +2982,18 @@ export function HostPage({
     setEditTargetHost('local');
     setEditModelRef('');
     setEditAvatarPreset(nextPreset);
+    setDraftAvatarsByBot(prev => {
+      if (!(CREATE_AVATAR_DRAFT_KEY in prev)) return prev;
+      const next = { ...prev };
+      delete next[CREATE_AVATAR_DRAFT_KEY];
+      return next;
+    });
+    setAvatarTabByBot(prev => {
+      if (!(CREATE_AVATAR_DRAFT_KEY in prev)) return prev;
+      const next = { ...prev };
+      delete next[CREATE_AVATAR_DRAFT_KEY];
+      return next;
+    });
     setEditInitialSoul('');
     setBotSoulKey(null);
     setBotSoulLoading(false);
@@ -3216,9 +3264,19 @@ export function HostPage({
   }, [mustCreatePrimaryBot, screen, openCreateBotPage]);
 
   const openAvatarPicker = (currentPreset: GrokAvatarPreset) => {
-    setDraftAvatar({ ...currentPreset });
-    setAvatarTab('shape');
-    nav.push({ screen: 'bot-avatar' });
+    const isCreateMode = screen === 'bot-edit' && editMode === 'create';
+    const targetBotKey = isCreateMode ? null : (activeBot?.key ?? null);
+    const draftKey = targetBotKey ?? CREATE_AVATAR_DRAFT_KEY;
+    setDraftAvatarsByBot(prev =>
+      prev[draftKey] ? prev : { ...prev, [draftKey]: { ...currentPreset } },
+    );
+    setAvatarTabByBot(prev =>
+      prev[draftKey] ? prev : { ...prev, [draftKey]: 'shape' },
+    );
+    nav.push({
+      screen: 'bot-avatar',
+      botKey: targetBotKey,
+    });
   };
 
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
@@ -4185,7 +4243,7 @@ ${newer}` : draftSnapshot;
           if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
             setRoomSettingsOpen(false);
             setScopeConversationTarget(null);
-            if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
           }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
@@ -4222,7 +4280,7 @@ ${newer}` : draftSnapshot;
           if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
             setRoomSettingsOpen(false);
             setScopeConversationTarget(null);
-            if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
           }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
@@ -4238,7 +4296,7 @@ ${newer}` : draftSnapshot;
         });
       }
     },
-    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, t],
+    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, popCurrentScreen, nav.resetTo, t],
   );
 
   const openRoomDeleteConfirm = useCallback(
@@ -4292,7 +4350,7 @@ ${newer}` : draftSnapshot;
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
-              if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+              if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
             }
             setRoomDeleteModal(null);
             refreshRoomConversationsRef.current();
@@ -4307,7 +4365,7 @@ ${newer}` : draftSnapshot;
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
-              if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+              if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
             }
             setRoomDeleteModal(null);
             refreshRoomConversationsRef.current();
@@ -4330,7 +4388,7 @@ ${newer}` : draftSnapshot;
       if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
         setRoomSettingsOpen(false);
         setScopeConversationTarget(null);
-        if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+        if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
       }
       setRoomDeleteModal(null);
       refreshRoomConversationsRef.current();
@@ -4372,7 +4430,7 @@ ${newer}` : draftSnapshot;
           : null,
       );
     }
-  }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, nav.pop, nav.resetTo, t]);
+  }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, popCurrentScreen, nav.resetTo, t]);
 
   const refreshDirectoryAfterConfig = useCallback(() => {
     void syncLocalBots();
@@ -4402,7 +4460,7 @@ ${newer}` : draftSnapshot;
       if (editMode === 'create' && screen === 'bot-soul') {
         setEditInitialSoul(soulDraft);
         setSoulDirty(false);
-        if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+        if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
         return;
       }
       if (!activeBot) return;
@@ -4443,7 +4501,7 @@ ${newer}` : draftSnapshot;
           setSoulDirty(false);
         }
       }
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     });
 
 
@@ -5464,11 +5522,13 @@ ${newer}` : draftSnapshot;
     }
     const next = nav.pop();
     if (!next) return false;
-    if (next.botKey && (next.screen === 'bot-profile' || next.screen === 'chat')) {
+    if (next.botKey && BOT_SCOPED_SCREENS.has(next.screen)) {
       setActiveBotKey(next.botKey);
     }
-    if (leaving.screen === 'chat' && next.screen === 'tasks' && taskReturnId) {
-      setActiveTaskId(taskReturnId);
+    if (next.screen === 'tasks') {
+      const restoredTaskId = next.taskId ?? null;
+      setActiveTaskId(restoredTaskId);
+      setTaskReturnId(restoredTaskId);
       setCreatingTask(false);
       setTaskInitialEditMode(false);
     }
@@ -5476,7 +5536,8 @@ ${newer}` : draftSnapshot;
       refreshDirectoryAfterConfig();
     }
     return true;
-  }, [nav.pop, nav.stackRef, cancelActiveObservation, taskReturnId, refreshDirectoryAfterConfig]);
+  }, [nav.pop, nav.stackRef, cancelActiveObservation, refreshDirectoryAfterConfig]);
+  popScreenRef.current = popScreen;
 
   const openCenterSettings = useCallback(() => {
     saveCurrentChatAnchor();
@@ -5502,8 +5563,10 @@ ${newer}` : draftSnapshot;
   }, [popScreen, nav.resetTo]);
 
   const backFromSettings = useCallback(() => {
-    popScreen();
-  }, [popScreen]);
+    if (!popScreen() && settingsPage !== 'overview') {
+      nav.resetTo({ screen: 'settings', settingsPage: 'overview' });
+    }
+  }, [popScreen, settingsPage, nav.resetTo]);
 
   const backFromProfileManage = useCallback(() => {
     restoreProfileManageFocus.current = true;
@@ -5602,6 +5665,10 @@ ${newer}` : draftSnapshot;
       if (activeTaskId !== null) {
         setActiveTaskId(null);
         setTaskInitialEditMode(false);
+        const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+        if (currentNav?.screen === 'tasks' && currentNav.taskId) {
+          nav.replaceTop({ ...currentNav, taskId: null });
+        }
         return true;
       }
     }
@@ -5650,6 +5717,8 @@ ${newer}` : draftSnapshot;
     groupCreating,
     mustCreatePrimaryBot,
     editMode,
+    nav.stackRef,
+    nav.replaceTop,
     popScreen,
     t,
   ]);
@@ -5657,8 +5726,14 @@ ${newer}` : draftSnapshot;
   useEffect(() => {
     if (!active) return;
     const onAppBack = (ev: Event) => {
+      if (ev.defaultPrevented || hasOpenOverlay()) return;
       if (handleStepBack()) {
         ev.preventDefault();
+        return;
+      }
+      if (onBackRef.current) {
+        ev.preventDefault();
+        onBackRef.current();
       }
     };
     window.addEventListener('app-back', onAppBack);
@@ -6126,7 +6201,7 @@ ${newer}` : draftSnapshot;
       botName: activeBot.role,
       hostLabel: activeBot.hostLabel,
       hostPlatform: activeBot.platform,
-      isLocalAndroid: activeBot.hostKind === 'local' && !inTauriUi,
+      isLocalAndroid: isLocalAndroidBot(activeBot),
       connected: botPanelConnected,
       callGoogleSetup,
       callBrowser,
@@ -6145,7 +6220,6 @@ ${newer}` : draftSnapshot;
   }, [
     activeBot,
     remoteIdentity,
-    inTauriUi,
     botPanelConnected,
     callGoogleSetup,
     callBrowser,
@@ -6465,6 +6539,10 @@ ${newer}` : draftSnapshot;
               setCreatingTask(true);
               setActiveTaskId(null);
               setTaskInitialEditMode(false);
+              const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+              if (currentNav?.screen === 'tasks' && currentNav.taskId) {
+                nav.replaceTop({ ...currentNav, taskId: null });
+              }
             }}
             onCloseCreate={() => {
               if (globalTasks.createDraft.trim()) globalTasks.markDraftLeftUnpublished();
@@ -6475,6 +6553,10 @@ ${newer}` : draftSnapshot;
               setCreatingTask(false);
               setActiveTaskId(taskId);
               setTaskInitialEditMode(Boolean(openInEditMode));
+              const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+              if (currentNav?.screen === 'tasks' && (currentNav.taskId ?? null) !== (taskId ?? null)) {
+                nav.replaceTop({ ...currentNav, taskId: taskId ?? null });
+              }
             }}
             onOpenMobileDrawer={openLeftDrawer}
             onJumpToChat={({ deviceId, botId, taskId, stepId }) => {
@@ -6500,6 +6582,10 @@ ${newer}` : draftSnapshot;
                 stepId: stepId ?? null,
               });
               setTaskReturnId(taskId);
+              const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+              if (currentNav?.screen === 'tasks' && currentNav.taskId !== taskId) {
+                nav.replaceTop({ ...currentNav, taskId });
+              }
               openBotChat(targetBot, 'tasks');
             }}
           />
@@ -7076,7 +7162,7 @@ ${newer}` : draftSnapshot;
             identity={mobileGoogleContext?.identity}
             botId={activeBot.botId}
             botName={activeBot.role}
-            isLocalAndroid={activeBot.hostKind === 'local' || activeBot.platform?.toLowerCase() === 'android'}
+            isLocalAndroid={isLocalAndroidBot(activeBot)}
             autoStart
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={openBotBrowser}
@@ -7226,28 +7312,68 @@ ${newer}` : draftSnapshot;
       )}
 
       {/* ==================== SCREEN 5: AVATAR PICKER VIEW (15848.jpg) ==================== */}
-      {screen === 'bot-avatar' && (
-        <BotAvatarScreen
-          activeBot={activeBot}
-          avatarTab={avatarTab}
-          onChangeAvatarTab={setAvatarTab}
-          draftAvatar={draftAvatar}
-          setDraftAvatar={setDraftAvatar}
-          action={action}
-          onBack={() => {
-            if (!popScreen()) nav.resetTo({ screen: 'hub' });
-          }}
-          onDone={() =>
-            void action.run(async () => {
-              setEditAvatarPreset(draftAvatar);
-              if (nav.previous?.screen === 'bot-profile' && activeBot) {
-                await saveAvatar(activeBot, draftAvatar);
-              }
+      {screen === 'bot-avatar' && (() => {
+        const currentNav = nav.current;
+        const targetBotKey = currentNav.botKey === null ? null : (currentNav.botKey ?? activeBotKey);
+        const draftKey = targetBotKey ?? CREATE_AVATAR_DRAFT_KEY;
+        const expectedNavBotKey = currentNav.botKey ?? null;
+        const targetBot = targetBotKey
+          ? (allBotItems.find(b => b.key === targetBotKey) ?? (activeBot?.key === targetBotKey ? activeBot : null))
+          : null;
+        const fallbackAvatar: BotAvatar = targetBot
+          ? resolveBotAvatarPreset(botAvatarKey(targetBot), targetBot.role, targetBot.isPrimary)
+          : editAvatarPreset;
+        const currentDraftAvatar = draftAvatarsByBot[draftKey] ?? fallbackAvatar;
+        const currentAvatarTab = avatarTabByBot[draftKey] ?? 'shape';
+        return (
+          <BotAvatarScreen
+            activeBot={targetBot}
+            avatarTab={currentAvatarTab}
+            onChangeAvatarTab={tab => {
+              setAvatarTabByBot(prev => ({ ...prev, [draftKey]: tab }));
+            }}
+            draftAvatar={currentDraftAvatar}
+            setDraftAvatar={updater => {
+              setDraftAvatarsByBot(prev => {
+                const base = prev[draftKey] ?? fallbackAvatar;
+                const next = typeof updater === 'function' ? updater(base) : updater;
+                return { ...prev, [draftKey]: next };
+              });
+            }}
+            action={action}
+            onBack={() => {
               if (!popScreen()) nav.resetTo({ screen: 'hub' });
-            })
-          }
-        />
-      )}
+            }}
+            onDone={() =>
+              void action.run(async () => {
+                const avatarToSave = currentDraftAvatar;
+                if (nav.previous?.screen === 'bot-profile' && targetBot) {
+                  await saveAvatar(targetBot, avatarToSave);
+                }
+                if (!targetBotKey || activeBot?.key === targetBotKey) {
+                  setEditAvatarPreset(avatarToSave);
+                }
+                setDraftAvatarsByBot(prev => {
+                  if (!(draftKey in prev)) return prev;
+                  const next = { ...prev };
+                  delete next[draftKey];
+                  return next;
+                });
+                setAvatarTabByBot(prev => {
+                  if (!(draftKey in prev)) return prev;
+                  const next = { ...prev };
+                  delete next[draftKey];
+                  return next;
+                });
+                const latestNav = nav.stackRef.current[nav.stackRef.current.length - 1];
+                if (latestNav?.screen === 'bot-avatar' && (latestNav.botKey ?? null) === expectedNavBotKey) {
+                  if (!popScreen()) nav.resetTo({ screen: 'hub' });
+                }
+              })
+            }
+          />
+        );
+      })()}
 
       {/* ==================== SCREEN 6: SOUL DOCUMENT EDITOR (SOUL.md) ==================== */}
       {screen === 'bot-soul' && (
@@ -7465,7 +7591,7 @@ ${newer}` : draftSnapshot;
             botName={activeBot.role}
             mode="tools"
             hostPlatform={activeBot.platform}
-            isLocalAndroid={activeBot.hostKind === 'local' && !inTauriUi}
+            isLocalAndroid={isLocalAndroidBot(activeBot)}
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={() => {
               setModelTarget(null);

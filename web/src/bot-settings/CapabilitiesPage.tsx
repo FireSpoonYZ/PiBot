@@ -1,6 +1,6 @@
 // 单 Bot 工具与插件配置页（默认 mode="tools" 过滤掉 skill，由 BotSkillsPage 专属承接）：
 // 无密码墙、无内部版本/底层状态术语、无裸 JSON 框；开启开关时自动先触发全局启用。
-import { useCallback, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { ChevronRight, ExternalLink, Plug } from 'lucide-react';
 import type { JsonValue } from '../../../center-contract/index.js';
 import type { CenterBotCapabilityEntry } from '../../../host-core/desktop-client.js';
@@ -10,7 +10,9 @@ import {
   useBotCapabilities,
   type Field,
 } from '../../../desktop/web/src/useBotCapabilities';
+import { ActionBar } from '../components/ui';
 import { openCenterManagement } from '../native';
+import { useNotice } from '../notice';
 import { GoogleCapabilitySection } from '../google/GoogleCapabilitySection';
 import { isSharedGoogleCapabilityEntry } from '../google/googleCopy';
 import type { GoogleSetupControlCall } from '../google/types';
@@ -25,6 +27,7 @@ import {
   SearchField,
   Section,
   SettingsSheet,
+  StatusLine,
   Switch,
   useSettingsSheetBack,
 } from './primitives';
@@ -71,12 +74,19 @@ export function CapabilitiesPage({
   onOpenCenterAdmin,
 }: CapabilitiesPageProps) {
   const t = useText();
+  const { notify } = useNotice();
   const fieldIdPrefix = useId();
   const state = useBotCapabilities({ api, identity, deviceId, botId, t });
-  const { setEditor } = state;
+  const { setEditor, setNotice } = state;
   const [query, setQuery] = useState('');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [enablingId, setEnablingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!state.notice) return;
+    notify({ id: 'bot-capabilities-status', tone: 'success', title: state.notice });
+    setNotice('');
+  }, [notify, setNotice, state.notice]);
 
   const openCenterProviders = () => {
     if (onOpenCenterAdmin) {
@@ -284,15 +294,7 @@ export function CapabilitiesPage({
           )}
         </Section>
 
-        <div className="bs-cap-editor-actions">
-          <button
-            type="button"
-            className="bs-btn is-primary"
-            disabled={busy}
-            onClick={() => void state.saveEditor(entry)}
-          >
-            {busy ? t('保存中...', 'Saving...') : t('保存设置', 'Save')}
-          </button>
+        <ActionBar align="end" className="bs-cap-editor-actions">
           <button
             type="button"
             className="bs-btn is-ghost"
@@ -301,7 +303,16 @@ export function CapabilitiesPage({
           >
             {t('取消', 'Cancel')}
           </button>
-        </div>
+          <button
+            type="button"
+            className="bs-btn is-primary"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => void state.saveEditor(entry)}
+          >
+            {busy ? t('保存中...', 'Saving...') : t('保存工具设置', 'Save tool settings')}
+          </button>
+        </ActionBar>
       </div>
     );
   };
@@ -357,9 +368,35 @@ export function CapabilitiesPage({
       ...(mode === 'all' ? [{ value: 'skill' as const, label: t('技能', 'Skills') }] : []),
     ];
 
+    const enabledCount = modeEntries.filter(
+      entry => Boolean(entry.config?.enabled) && entry.installation.enabled && entry.installation.activation?.status === 'enabled',
+    ).length;
+    const modeErrorCount = modeEntries.filter(
+      entry => state.capabilityErrors.some(err => err.installationId === entry.installation.installationId),
+    ).length;
+    const savingAny = Boolean(state.busy || enablingId);
+    const readinessTone = savingAny
+      ? 'accent'
+      : modeErrorCount > 0
+        ? 'warning'
+        : enabledCount > 0
+          ? 'success'
+          : 'neutral';
+    const readinessText = savingAny
+      ? t('正在同步工具设置...', 'Saving tool settings...')
+      : modeErrorCount > 0
+        ? t(`已启用 ${enabledCount}/${modeEntries.length} 项 · ${modeErrorCount} 项需检查`, `${enabledCount}/${modeEntries.length} enabled · ${modeErrorCount} need attention`)
+        : t(`已为本 Bot 启用 ${enabledCount}/${modeEntries.length} 项工具与插件`, `${enabledCount}/${modeEntries.length} tools & plugins enabled for this Bot`);
+
     return (
       <>
         {googleSection}
+        <StatusLine
+          tone={readinessTone}
+          trailing={savingAny ? <span className="bs-save-status" aria-live="polite">{t('保存中...', 'Saving...')}</span> : undefined}
+        >
+          {readinessText}
+        </StatusLine>
         <div className="bs-cap-toolbar">
           <SearchField
             value={query}
@@ -388,13 +425,17 @@ export function CapabilitiesPage({
                 key={inst.installationId}
                 title={inst.displayName}
                 subtitle={
-                  capError
-                    ? t('当前配置或连接需要检查', 'Configuration needs attention')
-                    : !inst.enabled || inst.activation?.status !== 'enabled'
-                      ? t('开启后将自动启用该工具并授权给当前 Bot', 'Will auto-activate and enable for this Bot')
-                      : botEnabled
-                        ? t('已为本 Bot 启用', 'Enabled for this Bot')
-                        : t('未启用', 'Disabled')
+                  working
+                    ? enablingId === inst.installationId
+                      ? t('正在全局启用并授权...', 'Activating and enabling...')
+                      : t('正在保存状态...', 'Saving status...')
+                    : capError
+                      ? t('当前配置或连接需要检查', 'Configuration needs attention')
+                      : !inst.enabled || inst.activation?.status !== 'enabled'
+                        ? t('开启后将自动启用该工具并授权给当前 Bot', 'Will auto-activate and enable for this Bot')
+                        : botEnabled
+                          ? t('已为本 Bot 启用', 'Enabled for this Bot')
+                          : t('未启用', 'Disabled')
                 }
                 onClick={hasParams ? () => state.openEditor(entry) : undefined}
                 trailing={(
@@ -423,10 +464,12 @@ export function CapabilitiesPage({
           })}
         </div>
 
-        <button type="button" className="bs-link" onClick={openCenterProviders}>
-          {t('前往中心管理插件与 MCP 服务', 'Manage plugins & MCP in Center')}
-          <ExternalLink aria-hidden="true" />
-        </button>
+        <ActionBar align="start">
+          <button type="button" className="bs-link" onClick={openCenterProviders}>
+            {t('前往中心管理插件与 MCP 服务', 'Manage plugins & MCP in Center')}
+            <ExternalLink aria-hidden="true" />
+          </button>
+        </ActionBar>
       </>
     );
   };
@@ -439,7 +482,6 @@ export function CapabilitiesPage({
         </div>
       ) : null}
       <ErrorNotice error={state.error} onDismiss={() => state.setError('')} />
-      {state.notice ? <ErrorNotice error={state.notice} tone="success" compact onDismiss={() => state.setNotice('')} /> : null}
       {editingEntry ? renderEditor(editingEntry) : renderList()}
     </>
   );

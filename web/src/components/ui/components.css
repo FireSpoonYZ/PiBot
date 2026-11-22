@@ -56,8 +56,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   gap: var(--space-2, 8px);
-  min-height: 44px;
+  min-height: var(--tap-min, 44px);
   padding: 0 var(--space-4, 16px);
   border: 1px solid transparent;
   border-radius: var(--radius-md, 12px);
@@ -176,6 +177,40 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* ActionBar                                                           */
+/* ------------------------------------------------------------------ */
+
+.ui-action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.ui-action-bar.is-align-end {
+  justify-content: flex-end;
+}
+
+.ui-action-bar.is-align-start {
+  justify-content: flex-start;
+}
+
+.ui-action-bar.is-align-between {
+  justify-content: space-between;
+}
+
+.ui-action-bar > button,
+.ui-action-bar > a {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.ui-confirm-actions {
+  margin-top: var(--space-5, 20px);
+}
+
+/* ------------------------------------------------------------------ */
 /* IconButton                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -185,6 +220,7 @@
   align-items: center;
   justify-content: center;
   flex: none;
+  flex-shrink: 0;
   width: var(--tap-min, 44px);
   height: var(--tap-min, 44px);
   min-width: var(--tap-min, 44px);
@@ -287,6 +323,7 @@
   display: inline-flex;
   align-items: center;
   flex: none;
+  flex-shrink: 0;
   width: 46px;
   height: 28px;
   min-height: 28px;
@@ -384,15 +421,17 @@
   background: var(--surface-inset, var(--color-surface-1, var(--surface)));
 }
 
-.ui-segmented-item {
+.ui-segmented-item,
+.ui-seg-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   min-width: 0;
   min-height: 36px;
   padding: 0 var(--space-3, 12px);
-  border: 0;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm, 8px);
   background: transparent;
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
@@ -404,12 +443,14 @@
   touch-action: manipulation;
   transition:
     background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
     color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
     box-shadow var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
     opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-.ui-segmented-item::before {
+.ui-segmented-item::before,
+.ui-seg-btn::before {
   content: '';
   position: absolute;
   top: 50%;
@@ -420,17 +461,21 @@
 }
 
 @media (pointer: coarse) {
-  .ui-segmented-item {
+  .ui-segmented-item,
+  .ui-seg-btn {
     min-height: var(--tap-min, 44px);
   }
 }
 
 .ui-segmented-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ui-segmented-item.is-active {
+.ui-segmented-item.is-active,
+.ui-seg-btn.is-active {
   background: var(--surface-raised, var(--color-surface-2, var(--surface-elevated, var(--bg))));
   color: var(--ink-primary, var(--color-text, var(--text)));
   font-weight: var(--weight-semibold, 600);
@@ -438,23 +483,27 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .ui-segmented-item:hover:not(:disabled):not(.is-active) {
+  .ui-segmented-item:hover:not(:disabled):not(.is-active),
+  .ui-seg-btn:hover:not(:disabled):not(.is-active) {
     color: var(--ink-primary, var(--color-text, var(--text)));
     background: var(--surface-1, var(--color-surface-1, var(--surface)));
   }
 }
 
-.ui-segmented-item:active:not(:disabled) {
+.ui-segmented-item:active:not(:disabled),
+.ui-seg-btn:active:not(:disabled) {
   transform: none;
   opacity: 0.86;
 }
 
-.ui-segmented-item:focus-visible {
+.ui-segmented-item:focus-visible,
+.ui-seg-btn:focus-visible {
   outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
   outline-offset: -2px;
 }
 
-.ui-segmented-item:disabled {
+.ui-segmented-item:disabled,
+.ui-seg-btn:disabled {
   opacity: 0.42;
   cursor: not-allowed;
 }
@@ -474,6 +523,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   gap: var(--space-1, 4px);
   min-height: 36px;
   padding: 0 var(--space-3, 12px);
@@ -483,6 +533,7 @@
   color: var(--ink-secondary, var(--color-text, var(--text)));
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
+  font-variant-numeric: tabular-nums;
   line-height: 1.25;
   white-space: nowrap;
   cursor: pointer;
@@ -554,6 +605,7 @@
   inset: 0;
   z-index: var(--z-dialog, 300);
   background: var(--scrim, var(--color-scrim));
+  overscroll-behavior: contain;
   animation: ui-fade-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
@@ -594,7 +646,10 @@
   width: min(520px, calc(100% - var(--space-8, 32px)));
   max-height: calc(
     var(--viewport-height, 100dvh) - var(--top, 0px) - min(14vh, 96px) -
-      max(var(--bottom, env(safe-area-inset-bottom, 0px)), var(--ime-bottom, 0px)) -
+      max(
+        var(--raw-safe-bottom, var(--safe-area-inset-bottom, var(--bottom, env(safe-area-inset-bottom, 0px)))),
+        var(--ime-bottom, 0px)
+      ) -
       var(--space-4, 16px)
   );
   border-radius: var(--radius-lg, 16px);
@@ -616,6 +671,7 @@
   border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
   border-radius: var(--radius-xl, 20px) var(--radius-xl, 20px) 0 0;
   padding-bottom: var(--bottom, 0px);
+  overscroll-behavior: contain;
   animation: ui-sheet-in var(--dur-sheet, 300ms) var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1));
 }
 
@@ -630,6 +686,7 @@
   border-radius: 0 var(--radius-lg, 16px) var(--radius-lg, 16px) 0;
   padding-top: var(--top, 0px);
   padding-bottom: var(--bottom, 0px);
+  overscroll-behavior: contain;
   animation: ui-drawer-in var(--dur-sheet, 300ms) var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1));
 }
 
@@ -645,6 +702,7 @@
   padding-bottom: max(var(--bottom, 0px), var(--ime-bottom, 0px));
   padding-left: var(--safe-left, 0px);
   padding-right: var(--safe-right, 0px);
+  overscroll-behavior: contain;
   animation: ui-fade-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
@@ -852,6 +910,7 @@ body:has(.bb-panel--fullscreen, .bot-browser-dialog, .shower-theater) .dialog-co
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   width: 100%;
   min-height: 50px;
   margin-top: var(--space-2, 8px);
@@ -862,6 +921,7 @@ body:has(.bb-panel--fullscreen, .bot-browser-dialog, .shower-theater) .dialog-co
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   font-size: var(--text-md, 0.9375rem);
   font-weight: var(--weight-semibold, 600);
+  white-space: nowrap;
   cursor: pointer;
   touch-action: manipulation;
   transition:
@@ -892,6 +952,95 @@ body:has(.bb-panel--fullscreen, .bot-browser-dialog, .shower-theater) .dialog-co
 .ui-action-sheet-item:disabled {
   opacity: 0.42;
   cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ */
+/* InlineNotice                                                        */
+/* ------------------------------------------------------------------ */
+
+.ui-inline-notice {
+  --ui-notice-accent: var(--state-info, var(--color-info, var(--signal-primary, var(--accent))));
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3, 12px);
+  min-width: 0;
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  border: 1px solid color-mix(in srgb, var(--ui-notice-accent) 26%, var(--border-default, var(--color-line, var(--line))));
+  border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--ui-notice-accent) 6%, var(--surface-raised, var(--color-surface-2, var(--bg))));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.ui-inline-notice.is-info {
+  --ui-notice-accent: var(--state-info, var(--color-info, var(--signal-primary, var(--accent))));
+}
+
+.ui-inline-notice.is-success {
+  --ui-notice-accent: var(--state-live, var(--color-success, var(--ok, var(--accent))));
+}
+
+.ui-inline-notice.is-warning {
+  --ui-notice-accent: var(--state-attention, var(--color-warning, var(--warn, var(--danger))));
+}
+
+.ui-inline-notice.is-error {
+  --ui-notice-accent: var(--state-danger, var(--color-danger, var(--danger)));
+}
+
+.ui-inline-notice-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
+  color: var(--ui-notice-accent);
+}
+
+.ui-inline-notice-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ui-inline-notice-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+}
+
+.ui-inline-notice-title {
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.45;
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  overflow-wrap: anywhere;
+}
+
+.ui-inline-notice-desc {
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.5;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  overflow-wrap: anywhere;
+}
+
+.ui-inline-notice-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-1, 4px);
+}
+
+.ui-inline-notice-dismiss {
+  flex: none;
+  margin: -6px -8px -6px 0;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
 }
 
 /* ------------------------------------------------------------------ */
@@ -988,6 +1137,7 @@ body:has(.bb-panel--fullscreen, .bot-browser-dialog, .shower-theater) .dialog-co
 .ui-toast-action {
   position: relative;
   flex: none;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1036,7 +1186,7 @@ body:has(.bb-panel--fullscreen, .bot-browser-dialog, .shower-theater) .dialog-co
 }
 
 /* ------------------------------------------------------------------ */
-/* ListRow                                                             */
+/* ListRow & Status Dot                                                */
 /* ------------------------------------------------------------------ */
 
 .ui-list-row {
@@ -1131,7 +1281,7 @@ button.ui-list-row-main:disabled {
 }
 
 .ui-list-row-text {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -1145,6 +1295,18 @@ button.ui-list-row-main:disabled {
   overflow-wrap: anywhere;
 }
 
+.ui-list-row-title.has-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.ui-list-row-title-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .ui-list-row.is-selected .ui-list-row-title {
   font-weight: var(--weight-semibold, 600);
 }
@@ -1154,6 +1316,58 @@ button.ui-list-row-main:disabled {
   line-height: 1.4;
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   overflow-wrap: anywhere;
+}
+
+.ui-status-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--ink-tertiary, var(--color-text-subtle, var(--color-text-muted, var(--muted))));
+}
+
+.ui-status-dot.is-ok {
+  background: var(--state-live, var(--color-success, var(--ok, var(--signal-primary, var(--accent)))));
+}
+
+.ui-status-dot.is-warn {
+  background: var(--state-attention, var(--color-warning, var(--warn, var(--state-danger, var(--danger)))));
+}
+
+.ui-status-dot.is-error {
+  background: var(--state-danger, var(--color-danger, var(--danger)));
+}
+
+.ui-status-dot.is-idle {
+  background: var(--ink-tertiary, var(--color-text-subtle, var(--color-text-muted, var(--muted))));
+}
+
+.ui-status-dot.is-accent {
+  background: var(--signal-primary, var(--color-primary, var(--brand, var(--accent))));
+}
+
+.ui-row-value {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 48%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-regular, 400);
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-row-value-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ui-list-row-trailing {
@@ -2196,10 +2410,12 @@ button.ui-list-row-main:disabled {
   .ui-switch,
   .ui-switch-knob,
   .ui-segmented-item,
+  .ui-seg-btn,
   .ui-chip,
   .ui-overlay-content.is-sheet,
   .ui-action-sheet-item,
   .ui-action-sheet-cancel,
+  .ui-inline-notice,
   .ui-toast-action,
   .ui-list-row-main,
   .ui-inline-banner-dismiss,

@@ -1,7 +1,9 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
+import { createPortal } from 'react-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, ChevronRight, Copy, MoreHorizontal, X } from 'lucide-react';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { LabelStack, Skeleton, SkeletonRow } from '../layout';
 import { useNotice } from '../notice';
 import type { NoticeAction, NoticeTone } from '../notice';
@@ -103,6 +105,7 @@ export function CaModal({
   onOpenChange,
   title,
   description,
+  ariaDescription,
   variant = 'drawer',
   wide,
   children,
@@ -111,48 +114,40 @@ export function CaModal({
   onOpenChange: (open: boolean) => void;
   title: string;
   description?: string;
+  ariaDescription?: string;
   variant?: 'modal' | 'drawer';
   wide?: boolean;
   children: React.ReactNode;
 }): React.JSX.Element {
   const t = useText();
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
 
   useEffect(() => {
     if (!open) return;
-    const handleBack = (event: Event) => {
-      if (event.defaultPrevented) return;
-      const openDialogs = document.querySelectorAll('[data-ui-dialog="open"]');
-      if (openDialogs.length > 0 && contentRef.current && openDialogs[openDialogs.length - 1] !== contentRef.current) {
-        return;
-      }
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      onOpenChange(false);
-    };
-    window.addEventListener('app-back', handleBack, true);
-    return () => window.removeEventListener('app-back', handleBack, true);
-  }, [open, onOpenChange]);
+    return registerOverlayBackHandler(() => onOpenChangeRef.current(false));
+  }, [open]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <div className="ca-modal-portal">
-          <Dialog.Overlay className="ca-dialog-overlay" />
+        <div className="ca-modal-portal ca-modal-layer">
+          <Dialog.Overlay className="ca-dialog-overlay ca-modal-overlay" />
           <Dialog.Content
             ref={contentRef}
             data-ui-dialog={open ? 'open' : undefined}
-            className={`ca-dialog-content ${variant === 'modal' ? 'is-modal' : 'is-drawer'}${
+            className={`ca-dialog-content ca-modal-content ${variant === 'modal' ? 'is-modal' : 'is-drawer'}${
               wide ? ' is-wide' : ''
             }`}
           >
             <div className="ca-dialog-header">
-              <div>
+              <div className="ca-dialog-head-text">
                 <Dialog.Title className="ca-dialog-title">{title}</Dialog.Title>
                 {description ? (
                   <Dialog.Description className="ca-dialog-desc">{description}</Dialog.Description>
                 ) : (
-                  <Dialog.Description className="sr-only">{title}</Dialog.Description>
+                  <Dialog.Description className="sr-only">{ariaDescription ?? title}</Dialog.Description>
                 )}
               </div>
               <Dialog.Close asChild>
@@ -170,6 +165,68 @@ export function CaModal({
         </div>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+export interface CaConfirmDialogProps {
+  open: boolean;
+  title: string;
+  description?: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void | Promise<void>;
+}
+
+export function CaConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  cancelLabel,
+  danger = false,
+  busy = false,
+  onCancel,
+  onConfirm,
+}: CaConfirmDialogProps): React.JSX.Element {
+  const t = useText();
+  const resolvedCancel = cancelLabel ?? t('取消', 'Cancel');
+  const resolvedConfirm = confirmLabel ?? t('确认', 'Confirm');
+
+  return (
+    <CaModal
+      open={open}
+      onOpenChange={nextOpen => {
+        if (!nextOpen && !busy) onCancel();
+      }}
+      title={title}
+      ariaDescription={typeof description === 'string' ? description : undefined}
+      variant="modal"
+    >
+      <div className="ca-confirm-body">
+        {description ? <p className="ca-confirm-desc">{description}</p> : null}
+        <div className="ca-modal-footer">
+          <button
+            type="button"
+            className="ca-btn"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            {resolvedCancel}
+          </button>
+          <button
+            type="button"
+            className={`ca-btn ${danger ? 'ca-btn-danger' : 'ca-btn-primary'}`}
+            disabled={busy}
+            onClick={() => void onConfirm()}
+          >
+            {resolvedConfirm}
+          </button>
+        </div>
+      </div>
+    </CaModal>
   );
 }
 
@@ -662,62 +719,281 @@ export interface ActionMenuItem {
 
 export function ActionMenu({ items }: { items: ActionMenuItem[] }): React.JSX.Element {
   const t = useText();
+  const menuId = useId();
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; placement: 'bottom' | 'top' } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const initialFocusRef = useRef<'first' | 'last'>('first');
+
+  const getEnabledItems = useCallback((): HTMLButtonElement[] => {
+    const menu = menuRef.current;
+    if (!menu) return [];
+    return Array.from(
+      menu.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]:not(:disabled):not([aria-disabled="true"])',
+      ),
+    );
+  }, []);
+
+  const hasExternalOpenDialog = useCallback((): boolean => {
+    if (typeof document === 'undefined') return false;
+    const dialogs = document.querySelectorAll('[data-ui-dialog="open"]');
+    for (const dialog of dialogs) {
+      if (!triggerRef.current || !dialog.contains(triggerRef.current)) {
+        return true;
+      }
+    }
+    return false;
+  }, []);
+
+  const closeAndRestoreFocus = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const trigger = triggerRef.current;
+    if (!trigger || typeof window === 'undefined') return;
+    const rect = trigger.getBoundingClientRect();
+    const menuEl = menuRef.current;
+    const menuW = menuEl ? menuEl.offsetWidth : 168;
+    const menuH = menuEl ? menuEl.offsetHeight : Math.max(44, items.length * 36 + 8);
+    const gap = 4;
+    const pad = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    const preferredLeft = rect.right - menuW;
+    const maxLeft = Math.max(pad, vw - menuW - pad);
+    const left = Math.min(Math.max(preferredLeft, pad), maxLeft);
+
+    const spaceBelow = vh - rect.bottom - pad;
+    const spaceAbove = rect.top - pad;
+    const flipUp = spaceBelow < menuH + gap && spaceAbove > spaceBelow;
+
+    let top: number;
+    if (flipUp) {
+      top = Math.max(pad, rect.top - menuH - gap);
+    } else {
+      const maxTop = Math.max(pad, vh - menuH - pad);
+      top = Math.min(rect.bottom + gap, maxTop);
+    }
+
+    setPos({
+      top: Math.round(top),
+      left: Math.round(left),
+      placement: flipUp ? 'top' : 'bottom',
+    });
+  }, [open, items.length]);
 
   useEffect(() => {
-    if (!open) return;
-    const onPointer = (e: PointerEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+    if (!open) {
+      initialFocusRef.current = 'first';
+      return;
+    }
+
+    if (hasExternalOpenDialog()) {
+      setOpen(false);
+      return;
+    }
+
+    let rafId: number | null = null;
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        if (hasExternalOpenDialog()) {
+          setOpen(false);
+          return;
+        }
+        const enabled = getEnabledItems();
+        if (enabled.length > 0) {
+          const target =
+            initialFocusRef.current === 'last' ? enabled[enabled.length - 1] : enabled[0];
+          target.focus();
+        } else {
+          menuRef.current?.focus();
+        }
+        initialFocusRef.current = 'first';
+      });
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+
+    const onFocusIn = (e: FocusEvent) => {
+      if (hasExternalOpenDialog()) {
         setOpen(false);
+        return;
+      }
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (hasExternalOpenDialog()) {
+        setOpen(false);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeAndRestoreFocus();
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        setOpen(false);
+        return;
+      }
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        e.stopPropagation();
+        const enabled = getEnabledItems();
+        if (enabled.length === 0) return;
+        const activeEl = document.activeElement as HTMLButtonElement | null;
+        const currentIndex = activeEl ? enabled.indexOf(activeEl) : -1;
+        let nextIndex: number;
+        if (e.key === 'Home') {
+          nextIndex = 0;
+        } else if (e.key === 'End') {
+          nextIndex = enabled.length - 1;
+        } else if (e.key === 'ArrowDown') {
+          nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % enabled.length;
+        } else {
+          nextIndex =
+            currentIndex === -1
+              ? enabled.length - 1
+              : (currentIndex - 1 + enabled.length) % enabled.length;
+        }
+        enabled[nextIndex]?.focus();
       }
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null;
+      if (target && menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
-    document.addEventListener('pointerdown', onPointer);
-    document.addEventListener('keydown', onKey);
+
+    const onResize = () => {
+      setOpen(false);
+    };
+
+    let dialogObserver: MutationObserver | null = null;
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      dialogObserver = new MutationObserver(() => {
+        if (hasExternalOpenDialog()) {
+          setOpen(false);
+        }
+      });
+      dialogObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-ui-dialog'],
+      });
+    }
+
+    const unregisterBack = registerOverlayBackHandler(closeAndRestoreFocus);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('focusin', onFocusIn, true);
+    document.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+
     return () => {
-      document.removeEventListener('pointerdown', onPointer);
-      document.removeEventListener('keydown', onKey);
+      if (rafId !== null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(rafId);
+      }
+      dialogObserver?.disconnect();
+      unregisterBack();
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('focusin', onFocusIn, true);
+      document.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
     };
-  }, [open]);
+  }, [open, closeAndRestoreFocus, getEnabledItems, hasExternalOpenDialog]);
 
   return (
-    <div className="ca-menu-wrap" ref={wrapRef}>
+    <div className="ca-menu-wrap">
       <button
+        ref={triggerRef}
         type="button"
         className="ca-btn ca-btn-ghost ca-btn-icon"
         aria-label={t('更多操作', 'More actions')}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         onClick={e => {
           e.stopPropagation();
+          initialFocusRef.current = 'first';
           setOpen(prev => !prev);
+        }}
+        onKeyDown={e => {
+          if (open) return;
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            e.stopPropagation();
+            initialFocusRef.current = e.key === 'ArrowUp' ? 'last' : 'first';
+            setOpen(true);
+          }
         }}
       >
         <MoreHorizontal size={16} aria-hidden="true" />
       </button>
-      {open && (
-        <div className="ca-menu-pop" role="menu">
-          {items.map((item, idx) => (
-            <button
-              key={`${item.label}-${idx}`}
-              type="button"
-              role="menuitem"
-              disabled={item.disabled}
-              className={`ca-menu-item${item.danger ? ' is-danger' : ''}`}
-              onClick={e => {
-                e.stopPropagation();
-                setOpen(false);
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
+      {open && typeof document !== 'undefined'
+        ? createPortal(
+            <div className="ca-modal-portal">
+              <div
+                ref={menuRef}
+                id={menuId}
+                className={`ca-menu-pop${pos?.placement === 'top' ? ' is-top' : ''}`}
+                role="menu"
+                tabIndex={-1}
+                style={
+                  pos
+                    ? { top: `${pos.top}px`, left: `${pos.left}px` }
+                    : { top: 0, left: 0, visibility: 'hidden' }
+                }
+              >
+                {items.map((item, idx) => (
+                  <button
+                    key={`${item.label}-${idx}`}
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    disabled={item.disabled}
+                    className={`ca-menu-item${item.danger ? ' is-danger' : ''}`}
+                    onClick={e => {
+                      e.stopPropagation();
+                      setOpen(false);
+                      item.onSelect();
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

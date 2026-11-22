@@ -12,26 +12,20 @@ import {
 } from 'react';
 import { useText } from '../../ui';
 import { IconButton } from './IconButton';
+import {
+  FLOATING_UI_EXEMPT_SELECTOR,
+  matchesFloatingUiNode,
+  registerTopLayer,
+  type TopLayerCloseOptions,
+} from './overlayStack';
 
-export const FLOATING_UI_EXEMPT_SELECTOR =
-  '.ui-popover-menu, .ui-select-listbox, .conn-status-popover, .composer-popover, .notice-layer-root, [data-floating-ui="true"]';
+export { FLOATING_UI_EXEMPT_SELECTOR, registerTopLayer, type TopLayerCloseOptions };
 
 const FLOATING_POPOVER_OPEN_SELECTOR =
   '.ui-popover-menu[data-ui-dialog="open"], .ui-select-listbox[data-ui-dialog="open"], .conn-status-popover[data-ui-dialog="open"], .composer-popover[data-ui-dialog="open"], .gbot-context-menu[data-ui-dialog="open"], [data-floating-ui="true"][data-ui-dialog="open"]';
 
 const EXTERNAL_OVERLAY_SELECTOR =
   '.notice-layer-card:not(.is-exiting), [data-ui-dialog="open"], [role="dialog"][aria-modal="true"]';
-
-function matchesFloatingUiNode(target: EventTarget | null | undefined): boolean {
-  if (!target) return false;
-  if (target instanceof Element) {
-    return Boolean(target.closest(FLOATING_UI_EXEMPT_SELECTOR));
-  }
-  if (target instanceof Node && target.parentElement) {
-    return Boolean(target.parentElement.closest(FLOATING_UI_EXEMPT_SELECTOR));
-  }
-  return false;
-}
 
 export function isEventInsideFloatingUi(
   event: { target: EventTarget | null } | Event | null | undefined,
@@ -141,118 +135,6 @@ export function useViewportInsetEffect(onChange: () => void, active: boolean): v
       observer?.disconnect();
     };
   }, [active]);
-}
-
-export interface TopLayerCloseOptions {
-  kind: 'toast' | 'floating' | 'modal';
-  getElement: () => HTMLElement | null;
-  onClose: (reason: 'escape' | 'back') => void;
-  canHandleEscape?: (event: KeyboardEvent) => boolean;
-  canHandleBack?: (event: Event) => boolean;
-  blockBackWhenDisabled?: boolean;
-}
-
-interface TopLayerRecord {
-  id: number;
-  optionsRef: { current: TopLayerCloseOptions };
-}
-
-let topLayerSeq = 0;
-const topLayerStack: TopLayerRecord[] = [];
-let topLayerListenersInstalled = false;
-
-function handleFloatingFocusBubble(event: FocusEvent): void {
-  if (event.type === 'focusin') {
-    if (matchesFloatingUiNode(event.target)) {
-      event.stopPropagation();
-    }
-  } else if (event.type === 'focusout') {
-    if (matchesFloatingUiNode(event.relatedTarget)) {
-      event.stopPropagation();
-    }
-  }
-}
-
-function dispatchTopLayerEscape(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
-
-  // 1. Focused toast always wins Escape without touching any underlying modal.
-  const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
-  if (activeEl) {
-    for (let i = topLayerStack.length - 1; i >= 0; i -= 1) {
-      const opts = topLayerStack[i].optionsRef.current;
-      if (opts.kind !== 'toast') continue;
-      const el = opts.getElement();
-      if (!el || !el.contains(activeEl)) continue;
-      if (opts.canHandleEscape && !opts.canHandleEscape(event)) continue;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      opts.onClose('escape');
-      return;
-    }
-  }
-
-  // 2. LIFO over non-toast layers: if topmost layer is floating (popover/select/menu/inline-confirm),
-  //    consume Escape BEFORE Radix document-capture useEscapeKeydown or frozen SettingsSheet.
-  //    If topmost layer is a modal (Radix Dialog/Overlay/Lightbox/Theater), defer to Radix DismissableLayer.
-  for (let i = topLayerStack.length - 1; i >= 0; i -= 1) {
-    const opts = topLayerStack[i].optionsRef.current;
-    if (opts.kind === 'toast') continue;
-    if (opts.kind === 'modal') {
-      return;
-    }
-    if (opts.canHandleEscape && !opts.canHandleEscape(event)) continue;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    opts.onClose('escape');
-    return;
-  }
-}
-
-function dispatchTopLayerBack(event: Event): void {
-  if (event.defaultPrevented) return;
-  for (let i = topLayerStack.length - 1; i >= 0; i -= 1) {
-    const opts = topLayerStack[i].optionsRef.current;
-    if (opts.kind === 'toast') continue;
-    if (opts.canHandleBack && !opts.canHandleBack(event)) {
-      if (opts.blockBackWhenDisabled) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      continue;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    opts.onClose('back');
-    return;
-  }
-}
-
-function ensureTopLayerListeners(): void {
-  if (topLayerListenersInstalled || typeof window === 'undefined') return;
-  topLayerListenersInstalled = true;
-  window.addEventListener('keydown', dispatchTopLayerEscape, true);
-  window.addEventListener('app-back', dispatchTopLayerBack, true);
-  if (typeof document !== 'undefined' && document.documentElement) {
-    // Bubble on <html> runs strictly AFTER React portal listeners on <body>
-    // and strictly BEFORE Radix FocusScope's bubble listeners on `document`.
-    document.documentElement.addEventListener('focusin', handleFloatingFocusBubble);
-    document.documentElement.addEventListener('focusout', handleFloatingFocusBubble);
-  }
-}
-
-// Install once at module load so capture order precedes dynamically mounted SettingsSheet / Host listeners.
-ensureTopLayerListeners();
-
-export function registerTopLayer(optionsRef: { current: TopLayerCloseOptions }): () => void {
-  ensureTopLayerListeners();
-  const record: TopLayerRecord = { id: ++topLayerSeq, optionsRef };
-  topLayerStack.push(record);
-  return () => {
-    const idx = topLayerStack.indexOf(record);
-    if (idx !== -1) topLayerStack.splice(idx, 1);
-  };
 }
 
 export function useTopLayerClose(active: boolean, options: TopLayerCloseOptions): void {

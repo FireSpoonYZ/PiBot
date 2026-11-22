@@ -1,8 +1,9 @@
 // Bot 设置工作台（桌面端）：统一 6 大核心设置项（模型 / 人设 / 技能 / 工具扩展 / 定时任务 / 密码凭据）。
 // 模型采用免密二态即点即存视图，技能由 BotSkillsPage 独立承担，工具扩展仅展示 MCP 与插件。
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { RefreshCw } from 'lucide-react';
 import type { CenterBotModelConfig, CenterModelPicker, CenterModelSelection } from '../../../host-core/desktop-client.js';
-import type { BotSoul, RemoteControlMethodMap } from '../../../host-core/index.js';
+import type { BotSoul, ModelCatalogEntry, RemoteControlMethodMap } from '../../../host-core/index.js';
 import { toError } from './api';
 import { BotCapabilities } from './BotCapabilities';
 import type { GoogleSetupControlCall } from '../../../web/src/google/types';
@@ -12,6 +13,7 @@ import type { CenterAdminTab } from './SettingsPanel';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { BotSkillsPage } from '../../../web/src/bot-settings/BotSkillsPage';
 import { ModelPicker } from '../../../web/src/bot-settings/ModelPicker';
+import { ActionBar, useDirtyForm } from '../../../web/src/components/ui';
 import { Markdown } from '../../../web/src/Markdown';
 import { VaultPanel, type VaultCall } from '../../../web/src/vault/VaultPanel';
 import './BotSettings.css';
@@ -247,6 +249,18 @@ function soulBytes(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
+type ModelWithOptionalProvider = ModelCatalogEntry & {
+  providerName?: string;
+  available?: boolean;
+};
+
+function providerOfModel(model: ModelWithOptionalProvider | undefined, modelRef?: string | null): string | null {
+  if (model?.providerName && model.providerName.trim()) return model.providerName.trim();
+  const ref = model?.modelRef ?? modelRef ?? '';
+  const slash = ref.indexOf('/');
+  return slash > 0 ? ref.slice(0, slash) : null;
+}
+
 function resolveCodemodeChoice(sel: CenterModelSelection): CodeModeChoice {
   if (sel.codemodeOnly === true) return 'only';
   if (sel.codemode === true) return 'hybrid';
@@ -364,8 +378,8 @@ function BotModelSection({
       <div className="studio-empty-state">
         {error ? (
           <div className="error-banner" role="alert">
-            {error}
-            <button type="button" onClick={() => void loadAll()}>重试</button>
+            <span>读取模型配置失败：{error}，请确认连接正常后重试。</span>
+            <button type="button" onClick={() => void loadAll()}>重试读取</button>
           </div>
         ) : (
           <p className="metadata">暂未获取到模型配置。</p>
@@ -374,9 +388,10 @@ function BotModelSection({
     );
   }
 
-  const models = catalog?.models ?? [];
+  const models = (catalog?.models ?? []) as ModelWithOptionalProvider[];
   const globalRef = config.global.modelRef ?? null;
   const globalEntry = globalRef ? models.find((m) => m.modelRef === globalRef) : undefined;
+  const globalProvider = providerOfModel(globalEntry, globalRef);
   const globalDisplay = globalEntry?.name || globalRef || '未设置全局默认';
 
   const hasBotOverride = typeof config.overrides.modelRef === 'string' && config.overrides.modelRef.length > 0;
@@ -384,7 +399,10 @@ function BotModelSection({
 
   const effectiveRef = config.effective.modelRef ?? globalRef;
   const effectiveEntry = effectiveRef ? models.find((m) => m.modelRef === effectiveRef) : undefined;
+  const effectiveProvider = providerOfModel(effectiveEntry, effectiveRef);
   const effectiveDisplay = effectiveEntry?.name || effectiveRef || '暂未配置可用模型';
+  const effectiveUnavailable = effectiveEntry?.available === false;
+  const effectiveDotClass = !effectiveRef ? 'is-idle' : effectiveUnavailable ? 'is-warn' : 'is-ok';
   const supportsReasoning = effectiveEntry ? effectiveEntry.reasoning === true : false;
   const codemodeChoice = resolveCodemodeChoice(config.overrides);
 
@@ -437,14 +455,38 @@ function BotModelSection({
     });
   };
 
+  const botOverrideEntry = hasBotOverride
+    ? models.find((m) => m.modelRef === config.overrides.modelRef)
+    : undefined;
+  const botOverrideDisplay = hasBotOverride
+    ? (botOverrideEntry?.name || config.overrides.modelRef || '')
+    : '从已配置服务商中任选';
+
   return (
     <div className="bot-model-panel">
-      <div className="bot-model-status-bar">
+      <div className="bot-model-status-bar" role="status" aria-label="当前生效模型">
         <div className="bot-studio-model-summary">
-          <span className="metadata">当前生效模型</span>
-          <strong>
-            {effectiveDisplay}
-            {!hasBotOverride && effectiveRef ? <span className="bot-model-default-badge">默认</span> : null}
+          <span className="metadata" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span className={`ui-status-dot ${effectiveDotClass}`} aria-hidden="true" />
+            <span>当前生效模型</span>
+            {effectiveProvider ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{effectiveProvider}</span>
+              </>
+            ) : null}
+          </span>
+          <strong style={{ display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+            <span>{effectiveDisplay}</span>
+            {!hasBotOverride && effectiveRef ? <span className="bot-model-default-badge" style={{ marginLeft: 0 }}>默认</span> : null}
+            {effectiveUnavailable ? (
+              <span
+                className="bot-model-default-badge"
+                style={{ marginLeft: 0, color: 'var(--warn)', borderColor: 'var(--warn-line)' }}
+              >
+                不可用
+              </span>
+            ) : null}
           </strong>
         </div>
         <div className="bot-model-save-indicator" aria-live="polite">
@@ -455,14 +497,14 @@ function BotModelSection({
 
       {error && (
         <div className="error-banner" role="alert">
-          {error}
-          <button type="button" onClick={() => setError(null)}>关闭</button>
+          <span>保存模型设置失败：{error}，请重试或重新选择模型。</span>
+          <button type="button" onClick={() => setError(null)}>关闭提示</button>
         </div>
       )}
 
       {catalog && models.length === 0 ? (
         <div className="bot-model-empty-card">
-          <p className="metadata">中心尚未添加可用模型服务商。</p>
+          <p className="metadata">中心尚未添加可用模型服务商，请先配置服务商后再选择模型。</p>
           {onOpenCenterAdmin && (
             <button type="button" className="primary-button" onClick={() => onOpenCenterAdmin('providers')}>
               去中心管理配置服务商 →
@@ -483,7 +525,9 @@ function BotModelSection({
                 onClick={selectFollowGlobal}
               >
                 <strong>跟随全局默认</strong>
-                <span className="metadata">{globalDisplay}</span>
+                <span className="metadata">
+                  {globalProvider && globalEntry ? `${globalDisplay} · ${globalProvider}` : globalDisplay}
+                </span>
               </button>
               <button
                 type="button"
@@ -494,17 +538,13 @@ function BotModelSection({
                 onClick={selectCustomMode}
               >
                 <strong>为此智能体指定模型</strong>
-                <span className="metadata">
-                  {hasBotOverride
-                    ? (models.find((m) => m.modelRef === config.overrides.modelRef)?.name || config.overrides.modelRef)
-                    : '从已配置服务商中任选'}
-                </span>
+                <span className="metadata">{botOverrideDisplay}</span>
               </button>
             </div>
           </div>
 
           {isCustom && catalog && identity && (
-            <div className="bot-model-picker-wrap">
+            <div className="bot-model-picker-wrap bs-inline-panel">
               <ModelPicker
                 catalog={catalog}
                 api={api}
@@ -513,12 +553,16 @@ function BotModelSection({
                 onChange={selectModelRef}
                 onStarsChange={(starredModels) => setCatalog((prev) => (prev ? { ...prev, starredModels } : prev))}
                 disabled={!online}
+                onOpenCenterAdmin={onOpenCenterAdmin ? () => onOpenCenterAdmin('providers') : undefined}
               />
             </div>
           )}
 
           {supportsReasoning && (
-            <div className="bot-studio-field">
+            <div
+              className="bot-studio-field"
+              style={{ borderTop: '1px solid var(--line-subtle)', paddingTop: 'var(--space-3)' }}
+            >
               <span className="bot-studio-field-label">思考强度</span>
               <div className="bot-studio-choices" role="radiogroup" aria-label="思考强度">
                 {THINKING_CHOICES.map((choice) => {
@@ -544,26 +588,28 @@ function BotModelSection({
             </div>
           )}
 
-          <details className="bot-studio-disclosure">
-            <summary>高级工具调用方式</summary>
-            <div className="bot-model-advanced-radios" role="radiogroup" aria-label="高级工具调用方式">
-              {CODEMODE_CHOICES.map((choice) => (
-                <label key={choice.id} className={'bot-model-radio-row' + (codemodeChoice === choice.id ? ' active' : '')}>
-                  <input
-                    type="radio"
-                    name={`codemode-${botId}`}
-                    checked={codemodeChoice === choice.id}
-                    disabled={!online}
-                    onChange={() => selectCodemode(choice.id)}
-                  />
-                  <span className="bot-model-radio-copy">
-                    <strong>{choice.label}</strong>
-                    <span className="metadata">{choice.desc}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </details>
+          <div style={{ borderTop: '1px solid var(--line-subtle)', paddingTop: 'var(--space-3)' }}>
+            <details className="bot-studio-disclosure">
+              <summary>高级工具调用方式</summary>
+              <div className="bot-model-advanced-radios" role="radiogroup" aria-label="高级工具调用方式">
+                {CODEMODE_CHOICES.map((choice) => (
+                  <label key={choice.id} className={'bot-model-radio-row' + (codemodeChoice === choice.id ? ' active' : '')}>
+                    <input
+                      type="radio"
+                      name={`codemode-${botId}`}
+                      checked={codemodeChoice === choice.id}
+                      disabled={!online}
+                      onChange={() => selectCodemode(choice.id)}
+                    />
+                    <span className="bot-model-radio-copy">
+                      <strong>{choice.label}</strong>
+                      <span className="metadata">{choice.desc}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </details>
+          </div>
         </>
       )}
     </div>
@@ -630,6 +676,8 @@ function BotSettingsSession({
   const byteOverLimit = currentBytes > SOUL_MAX_BYTES;
   const byteWarn = !byteOverLimit && currentBytes > SOUL_MAX_BYTES * 0.85;
 
+  useDirtyForm(soulDirty);
+
   function insertSoulSnippet(snippet: string): void {
     setSoulMode('edit');
     soulEditor.update((text) => {
@@ -641,7 +689,12 @@ function BotSettingsSession({
   return (
     <section className="bot-studio" aria-label="智能体配置">
       {tab === undefined || studioTab === 'soul' ? (
-        <div className="bot-studio-head">
+        <div
+          className="bot-studio-head"
+          style={studioTab === 'soul' && tab !== undefined
+            ? { paddingBottom: 'var(--space-2)', borderBottom: '1px solid var(--line-subtle)' }
+            : undefined}
+        >
           {tab === undefined ? (
             <div className="pill-tabs bot-studio-tabs" role="tablist" aria-label="智能体设置页签">
               {STUDIO_TABS.map((item) => {
@@ -660,22 +713,52 @@ function BotSettingsSession({
                 );
               })}
             </div>
-          ) : null}
+          ) : (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
+              <label htmlFor={soulInputId} style={{ fontSize: 14, fontWeight: 650, color: 'var(--text)' }}>
+                人设 (SOUL.md)
+              </label>
+              {soulDirty ? (
+                <span
+                  role="status"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '1px 8px',
+                    borderRadius: 'var(--radius-full)',
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: 600,
+                    color: 'var(--warn)',
+                    background: 'var(--warn-soft)',
+                    border: '1px solid var(--warn-line)',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  有未保存修改
+                </span>
+              ) : null}
+            </div>
+          )}
 
           {studioTab === 'soul' ? (
-            <div className="bot-studio-actions">
+            <div className="bot-studio-actions" style={{ flexWrap: 'nowrap' }}>
               <button
                 type="button"
-                className="secondary-button"
+                className="pill-button"
                 onClick={() => void soulEditor.load(false)}
                 disabled={!online || soulEditor.busy}
               >
-                {soulEditor.loading ? '读取中…' : '↻ 重新读取'}
+                <RefreshCw size={13} aria-hidden="true" />
+                {soulEditor.loading ? '读取中…' : '重新读取'}
               </button>
               {soulEditor.draft !== null || soulEditor.problem ? (
                 <button
                   type="button"
-                  className={`secondary-button ${soulEditor.problem ? 'warn' : ''}`}
+                  className={`pill-button ${soulEditor.problem ? 'warn' : ''}`}
+                  style={soulEditor.problem
+                    ? { color: 'var(--warn)', borderColor: 'var(--warn-line)', background: 'var(--warn-soft)' }
+                    : undefined}
                   onClick={() => void soulEditor.load(true)}
                   disabled={!online || soulEditor.busy}
                 >
@@ -688,25 +771,25 @@ function BotSettingsSession({
       ) : null}
 
       {!online && studioTab !== 'skills' ? (
-        <div className="status">当前连接已断开：仅显示已读取的内容，修改暂不可保存。</div>
+        <div className="status">当前连接已断开：仅显示已读取的内容，重新连接后可保存修改。</div>
       ) : null}
 
       {studioTab === 'soul' && soulEditor.error ? (
         <div className="error-banner" role="alert">
-          {soulEditor.error}
-          <button type="button" onClick={() => soulEditor.setError(null)}>关闭</button>
+          <span>{soulEditor.error}</span>
+          <button type="button" onClick={() => soulEditor.setError(null)}>关闭提示</button>
         </div>
       ) : null}
       {studioTab === 'soul' && soulEditor.notice ? <div className="status online">{soulEditor.notice}</div> : null}
       {studioTab === 'soul' && soulEditor.problem ? (
         <div className="bot-studio-lock" role="status">
-          {soulEditor.problem === 'conflict' ? '远端人设已更新。' : '上次保存结果待核对。'}
-          本地草稿已保留，如需同步远端版本请点击「采用远端设置」。
+          {soulEditor.problem === 'conflict' ? '远端人设已在其他位置更新。' : '上次人设保存回执待核对。'}
+          本地草稿已保留；如需同步远端最新版本请点击「采用远端设置」。
         </div>
       ) : null}
 
       {studioTab === 'model' ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="模型设置">
+        <div role="tabpanel" aria-label="模型设置" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', minWidth: 0 }}>
           <BotModelSection
             api={api}
             identity={identity}
@@ -719,9 +802,37 @@ function BotSettingsSession({
       ) : null}
 
       {studioTab === 'soul' ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="人设 (SOUL.md)">
-          <div className="studio-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <label htmlFor={soulInputId}>人设 (SOUL.md)</label>
+        <div role="tabpanel" aria-label="人设 (SOUL.md)" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', minWidth: 0 }}>
+          <div className="studio-card-header">
+            {tab === undefined ? (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
+                <label htmlFor={soulInputId}>人设 (SOUL.md)</label>
+                {soulDirty ? (
+                  <span
+                    role="status"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '1px 8px',
+                      borderRadius: 'var(--radius-full)',
+                      fontSize: 'var(--text-xs)',
+                      fontWeight: 600,
+                      color: 'var(--warn)',
+                      background: 'var(--warn-soft)',
+                      border: '1px solid var(--warn-line)',
+                      whiteSpace: 'nowrap',
+                      flexShrink: 0,
+                    }}
+                  >
+                    有未保存修改
+                  </span>
+                ) : null}
+              </div>
+            ) : (
+              <span className="metadata">
+                {soul ? `${currentBytes.toLocaleString()} / ${SOUL_MAX_BYTES.toLocaleString()} 字节` : 'SOUL.md'}
+              </span>
+            )}
             <div className="bot-studio-choices" role="tablist" aria-label="人设模式">
               <button
                 type="button"
@@ -765,13 +876,25 @@ function BotSettingsSession({
                 </div>
               )}
 
-              {byteWarn ? (
-                <p className={byteOverLimit ? 'error-banner' : 'hint'} role="status">
-                  {byteOverLimit ? '人设超过 64 KiB 上限。' : '人设接近 64 KiB 上限。'} 当前 {currentBytes.toLocaleString()} 字节。
+              {byteOverLimit ? (
+                <p className="error-banner" role="alert">
+                  人设内容已超过 64 KiB 上限（当前 {currentBytes.toLocaleString()} / {SOUL_MAX_BYTES.toLocaleString()} 字节），请精简后再保存。
+                </p>
+              ) : byteWarn ? (
+                <p className="hint" role="status">
+                  人设内容接近 64 KiB 上限（当前 {currentBytes.toLocaleString()} / {SOUL_MAX_BYTES.toLocaleString()} 字节）。
                 </p>
               ) : null}
 
-              <div className="form-actions">
+              <ActionBar align="end" style={{ flexWrap: 'nowrap' }}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => soulEditor.update(() => null)}
+                  disabled={!soulDirty || soulEditor.busy || !!soulEditor.problem}
+                >
+                  放弃修改
+                </button>
                 <button
                   type="button"
                   className="primary-button"
@@ -782,35 +905,27 @@ function BotSettingsSession({
                 >
                   {soulEditor.saving ? '保存中…' : '保存人设'}
                 </button>
-                {soulDirty && !soulEditor.problem ? (
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() => soulEditor.update(() => null)}
-                    disabled={soulEditor.busy}
-                  >
-                    放弃修改
-                  </button>
-                ) : null}
-              </div>
+              </ActionBar>
 
               {soulMode === 'edit' && (
-                <details className="bot-studio-disclosure">
-                  <summary>插入常用人设片段</summary>
-                  <div className="soul-snippet-bar">
-                    {SOUL_SNIPPETS.map((snippet) => (
-                      <button
-                        key={snippet.label}
-                        type="button"
-                        className="snippet-chip"
-                        disabled={soulEditor.busy}
-                        onClick={() => insertSoulSnippet(snippet.content)}
-                      >
-                        {snippet.label}
-                      </button>
-                    ))}
-                  </div>
-                </details>
+                <div style={{ borderTop: '1px solid var(--line-subtle)', paddingTop: 'var(--space-3)' }}>
+                  <details className="bot-studio-disclosure">
+                    <summary>插入常用人设片段</summary>
+                    <div className="soul-snippet-bar">
+                      {SOUL_SNIPPETS.map((snippet) => (
+                        <button
+                          key={snippet.label}
+                          type="button"
+                          className="snippet-chip"
+                          disabled={soulEditor.busy}
+                          onClick={() => insertSoulSnippet(snippet.content)}
+                        >
+                          {snippet.label}
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+                </div>
               )}
               <p className="hint">人设保存在设备本地 SOUL.md，将在下一次对话请求时生效。</p>
             </>
@@ -821,7 +936,7 @@ function BotSettingsSession({
       ) : null}
 
       {studioTab === 'skills' && identity ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="技能 (Skills)">
+        <div role="tabpanel" aria-label="技能 (Skills)" style={{ minWidth: 0 }}>
           <BotSkillsPage
             key={`${identity.targetDeviceId}\u0000${botId}`}
             api={api}
@@ -834,7 +949,7 @@ function BotSettingsSession({
       ) : null}
 
       {studioTab === 'capabilities' && identity ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="工具扩展 (MCP & 插件)">
+        <div role="tabpanel" aria-label="工具扩展 (MCP & 插件)" style={{ minWidth: 0 }}>
           <BotCapabilities
             key={`${identity.targetDeviceId}\u0000${botId}`}
             api={api}
@@ -853,7 +968,7 @@ function BotSettingsSession({
       ) : null}
 
       {studioTab === 'schedules' && identity ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="定时任务">
+        <div role="tabpanel" aria-label="定时任务" style={{ minWidth: 0 }}>
           <BotSchedules
             key={`${identity.targetDeviceId}\u0000${botId}`}
             api={api}
@@ -865,7 +980,7 @@ function BotSettingsSession({
       ) : null}
 
       {studioTab === 'vault' ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="密码凭据">
+        <div role="tabpanel" aria-label="密码凭据" style={{ minWidth: 0 }}>
           <VaultPanel
             identityKey={botPanelIdentityKey}
             botId={botId}

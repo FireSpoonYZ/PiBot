@@ -1,1 +1,97 @@
 /* errors lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* Quiet Instrument：收敛内联与浮层错误提示阴影，窄屏避免动作按钮挤压正文或命中区重叠 */
+.inline-error {
+  box-shadow: none;
+  transition: opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.grok-notice-card.is-dark-glass {
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-scrim) 16%, transparent);
+}
+
+.grok-notice-main {
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+}
+
+.grok-notice-content {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.grok-notice-detail-toggle {
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.grok-notice-detail-code {
+  max-height: 200px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.grok-notice-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-left: auto;
+  max-width: 100%;
+}
+
+.grok-notice-action-pill {
+  flex-shrink: 0;
+  white-space: nowrap;
+  box-shadow: none;
+  transition: transform var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1),
+    opacity var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.grok-notice-dismiss-btn {
+  flex-shrink: 0;
+  transition: background-color var(--dur-fast) cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* 防止相邻动作胶囊与关闭按钮的 ::before 44px 命中区水平重叠 */
+.grok-notice-action-pill::before,
+.grok-notice-dismiss-btn::before {
+  width: 100%;
+  height: max(100%, var(--tap-min));
+}
+
+@media (pointer: coarse) {
+  .grok-notice-action-pill {
+    min-height: 36px;
+  }
+  .grok-notice-dismiss-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .grok-notice-action-pill:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .grok-notice-dismiss-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-line) 75%, transparent);
+  }
+  .grok-notice-detail-toggle:hover:not(:disabled) {
+    background: var(--color-line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-error {
+    animation: none;
+    transition: none;
+  }
+  .grok-notice-action-pill,
+  .grok-notice-dismiss-btn,
+  .grok-notice-detail-toggle {
+    transition: none;
+  }
+}

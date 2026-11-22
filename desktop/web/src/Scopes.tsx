@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   ArrowDown,
   MessageSquare,
@@ -24,7 +25,7 @@ import type {
   StoredMessage,
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
-import { Button, InlineBanner } from '../../../web/src/components/ui';
+import { ActionBar, Button, InlineBanner } from '../../../web/src/components/ui';
 import { useText } from '../../../web/src/ui';
 import {
   ConversationChatHeader,
@@ -62,10 +63,14 @@ function truncate(s: string, n: number): string {
  * 消息作者可读名：bot 作者用可信 sourceDeviceId + botId 匹配已知目录，
  * user 作者回退通用“我”。绝不输出 botId/deviceId/scopeId。
  */
-function authorName(m: StoredMessage, bots: readonly ConversationBot[], meLabel: string): string {
+function authorName(
+  m: StoredMessage,
+  bots: readonly ConversationBot[],
+  t: (zh: string, en: string) => string,
+): string {
   const author = m.message.author;
-  if (author.kind !== 'bot') return meLabel;
-  return conversationMemberName({ deviceId: m.message.sourceDeviceId, botId: author.botId }, bots);
+  if (author.kind !== 'bot') return t('我', 'Me');
+  return conversationMemberName({ deviceId: m.message.sourceDeviceId, botId: author.botId }, bots, t);
 }
 
 /** 历史分页参数：分页 lane 确认的 ScopeHistoryOptions 形状（order/tailCursor）；ascending 保持旧契约。 */
@@ -206,7 +211,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
         } else {
           const errMsg = t(
             '发送结果未确认。已冻结原发送记录，不会自动补发；请查询发送状态确认。',
-            'Delivery is unconfirmed. The original record is frozen and will not auto-resend; check status to confirm.',
+            'Send result is unconfirmed. The original record is frozen and will not auto-resend; check send status to verify.',
           );
           drafts.markUnconfirmed(started.handle);
           setSendError(errMsg);
@@ -222,11 +227,11 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
         const errMsg = cleared === 'conflict'
           ? t(
               '草稿尚未清空：磁盘草稿已被更新。原发送记录保留且未发送；请查看新版草稿并选择“保留新版草稿，结束旧尝试”，不会自动清空或补发。',
-              'Draft not cleared: a newer draft exists on disk. The original record is kept unsent; review the newer draft and choose “Keep newer draft & finish old attempt”.',
+              'Draft not cleared: a newer draft exists on disk. The queued message was not sent; review the newer draft and choose “Keep newer draft & end attempt”.',
             )
           : t(
               `草稿尚未清空：消息已入队但未远程发送，请在${recordsLabel}中处理。`,
-              `Draft not cleared: message is queued but not sent remotely. Manage it in ${recordsLabel}.`,
+              `Draft not cleared: the message is queued locally and not yet sent remotely. Handle it in ${recordsLabel}.`,
             );
         drafts.markFailed(started.handle, errMsg);
         setSendError(errMsg);
@@ -242,7 +247,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
             )
           : t(
               '离线：消息已入队，连接后请在待发送面板显式发送。',
-              'Offline: message queued. Send it from Pending queue once connected.',
+              'Offline: message queued. Send it explicitly from Pending queue once connected.',
             ));
         return;
       }
@@ -255,7 +260,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
         drafts.markUnconfirmed(started.handle);
         setSendError(t(
           '发送回执未确认。消息已入队，不会自动补发；请查询发送状态确认。',
-          'Send receipt unconfirmed. Message is queued and will not auto-resend; check status to confirm.',
+          'Send receipt unconfirmed. The message is queued and will not auto-resend; check send status to verify.',
         ));
       }
     } finally {
@@ -275,16 +280,16 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
-      setSendError(t(`发送被拒。可查看${recordsLabel}了解详情。`, `Send rejected. Check ${recordsLabel} for details.`));
+      setSendError(t(`发送被拒。可查看${recordsLabel}了解详情。`, `Message rejected. Check ${recordsLabel} for details.`));
     } else if (rec.state === 'unconfirmed') {
       const errMsg = desktop
-        ? t('发送结果未确认，可在发送记录核对。', 'Send result unconfirmed. Check Send records to verify.')
-        : t('发送结果未确认，请等待待发送面板对账。', 'Send result unconfirmed. Reconcile in Pending queue.');
+        ? t('发送结果未确认，可在发送记录核对。', 'Send result unconfirmed; verify in Send records.')
+        : t('发送结果未确认，请等待待发送面板对账。', 'Send result unconfirmed; reconcile in Pending queue.');
       drafts.markUnconfirmed(handle);
       setSendError(errMsg);
     } else {
       drafts.finishSend(handle);
-      setSendError(t('消息已入队，等待发送结果。', 'Message queued, awaiting result.'));
+      setSendError(t('消息已入队，等待发送结果。', 'Message queued; awaiting send result.'));
     }
   }
 
@@ -299,15 +304,15 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
       setLastRecord({ deviceId, id: outcome.recordId, accepted: outcome.recordState === 'accepted' });
     }
     if (outcome.action === 'finished') {
-      setSendError(desktop && outcome.recordState === 'accepted' ? null : t('发送状态已确定，本地发送尝试已结束。', 'Send status confirmed; local attempt finished.'));
+      setSendError(desktop && outcome.recordState === 'accepted' ? null : t('发送状态已确定，本地发送尝试已结束。', 'Send status resolved; local send attempt finished.'));
       // 只读对账也确认受理时刷新消息；读失败只进 histError。
       if (outcome.recordState === 'accepted') onAccepted();
     } else if (outcome.action === 'kept') {
-      setSendError(t('已找到原发送记录，仍在等待终态。', 'Original send record found; still waiting for final status.'));
+      setSendError(t('已找到原发送记录，仍在等待终态。', 'Found original send record; still awaiting final status.'));
     } else if (outcome.action === 'ready-clear-retry') {
-      setSendError(t('已确认原发送记录，可重试清空本地草稿。', 'Original send record verified; you can retry clearing the local draft.'));
+      setSendError(t('已确认原发送记录，可重试清空本地草稿。', 'Original send record confirmed; you can retry clearing the local draft.'));
     } else {
-      setSendError(t('未找到匹配的发送记录；保持未确认状态，不会自动补发。', 'No matching send record found; keeping unconfirmed without auto-resending.'));
+      setSendError(t('未找到匹配的发送记录；保持未确认状态，不会自动补发。', 'No matching send record found; staying unconfirmed without auto-resending.'));
     }
   }
 
@@ -317,14 +322,14 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
     const r = await drafts.retryClearAfterVerify(handle);
     if (r === 'cleared') {
       setRecOutcome(null);
-      setSendError(t(`本地草稿已清空，可从${recordsLabel}继续发送。`, `Local draft cleared. Continue sending from ${recordsLabel}.`));
+      setSendError(t(`本地草稿已清空，可从${recordsLabel}继续发送。`, `Local draft cleared; continue sending from ${recordsLabel}.`));
     } else if (r === 'conflict') {
       setSendError(t(
         '草稿尚未清空：磁盘草稿已被更新；请查看新版草稿并选择“保留新版草稿，结束旧尝试”。',
-        'Draft not cleared: a newer draft exists on disk. Choose “Keep newer draft & finish old attempt”.',
+        'Draft not cleared: disk draft updated. Review it and choose “Keep newer draft & end attempt”.',
       ));
     } else {
-      setSendError(t('重试本地清空失败，仍保持当前状态。', 'Retry clearing local draft failed; keeping current state.'));
+      setSendError(t('重试本地清空失败，仍保持当前状态。', 'Failed to retry clearing local draft; keeping current state.'));
     }
   }
 
@@ -334,9 +339,9 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
     const r = drafts.adoptNewerDraftAndFinish(handle);
     if (r.ok) {
       setRecOutcome(null);
-      setSendError(t(`已保留新版草稿。旧消息尚未发送，可在${recordsLabel}查看。`, `Kept newer draft. The earlier message was not sent and can be viewed in ${recordsLabel}.`));
+      setSendError(t(`已保留新版草稿。旧消息尚未发送，可在${recordsLabel}查看。`, `Kept newer draft. The earlier message was not sent and can be inspected in ${recordsLabel}.`));
     } else {
-      setSendError(r.error ?? t('无法采用新版草稿', 'Could not adopt newer draft'));
+      setSendError(r.error ?? t('无法采用新版草稿', 'Unable to adopt newer draft'));
     }
   }
 
@@ -346,9 +351,9 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
     const r = drafts.releaseIfNotSent(handle);
     if (r.ok) {
       setRecOutcome(null);
-      setSendError(t('已恢复编辑（确认未入队）。', 'Editing resumed (confirmed not queued).'));
+      setSendError(t('已恢复编辑（确认未入队）。', 'Editing restored (confirmed not queued).'));
     } else {
-      setSendError(r.error ?? t('无法恢复编辑', 'Could not resume editing'));
+      setSendError(r.error ?? t('无法恢复编辑', 'Unable to restore editing'));
     }
   }
 
@@ -360,85 +365,116 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
       ? { deviceId: attempt.owner.targetDeviceId, scopeId, recordId: attempt.pendingId ?? undefined }
       : null
     : lastRecord ? { deviceId: lastRecord.deviceId, scopeId, recordId: lastRecord.id } : null;
-  const recordAction = onOpenSendRecords && recordTarget ? (
+  const recordLinkAction = onOpenSendRecords && recordTarget ? (
     <button type="button" className="scope-send-record-link" onClick={() => onOpenSendRecords(recordTarget)}>
       {t('查看发送记录', 'View send records')}
     </button>
   ) : null;
+  const conflictSummary = drafts.conflict
+    ? t('磁盘上的新版草稿：', 'Newer draft on disk: ')
+      + (truncate(drafts.conflict.text, 160) || t('（空文本）', '(empty text)'))
+      + (drafts.conflict.files.length > 0
+        ? t(`（${drafts.conflict.files.length} 个文件引用）`, ` (${drafts.conflict.files.length} file refs)`)
+        : '')
+    : null;
 
-  return (
-    <div className="composer scope-composer">
-      {drafts.error ? (
-        <InlineBanner
-          tone="danger"
-          role="alert"
-          compact
-          title={t('草稿保存失败，本地输入已保留。', 'Failed to save draft; your input is kept locally.')}
-          actions={
-            <Button variant="secondary" size="sm" onClick={drafts.retrySave}>
-              {t('重试保存', 'Retry save')}
-            </Button>
-          }
-        />
-      ) : null}
-      {drafts.conflict ? (
+  // 单一优先级状态栏：attempt 冻结/未确认 > 草稿保存失败 > 磁盘草稿冲突 > 移动端发送错误；绝不堆叠多条横幅。
+  let composerNotice: ReactNode = null;
+  if (attempt) {
+    if (attempt.phase === 'not-sent') {
+      composerNotice = (
         <InlineBanner
           tone="attention"
-          role="status"
+          role="alert"
           compact
-          title={t('磁盘上的新版草稿', 'Newer draft on disk')}
-          detail={
-            (truncate(drafts.conflict.text, 160) || t('（空文本）', '(empty)')) +
-            (drafts.conflict.files.length > 0
-              ? t(`（${drafts.conflict.files.length} 个文件引用）`, ` (${drafts.conflict.files.length} file refs)`)
-              : '')
-          }
-        />
-      ) : null}
-      {drafts.attempt ? (
-        drafts.attempt.phase === 'not-sent' ? (
-          <InlineBanner
-            tone="attention"
-            role="alert"
-            compact
-            title={t('发送未入队。', 'Message was not queued.')}
-            detail={desktop && sendError ? sendError : undefined}
-            actions={
+          title={t('发送未入队。', 'Message was not queued.')}
+          detail={sendError ?? t('原消息未产生队列记录，可恢复编辑后重试。', 'No queue record was created; resume editing to retry.')}
+          actions={
+            <>
               <Button variant="secondary" size="sm" onClick={() => releaseNotSent()}>
                 {t('恢复编辑', 'Resume editing')}
               </Button>
-            }
-          />
-        ) : (
-          <InlineBanner
-            tone="danger"
-            role="alert"
-            compact
-            title={t('正在确认发送状态，消息不会自动补发。', 'Confirming send status; message will not auto-resend.')}
-            detail={desktop && sendError ? sendError : undefined}
-            actions={
-              <>
-                {drafts.attempt.phase === 'cleared' || drafts.attempt.phase === 'failed' || drafts.attempt.phase === 'unconfirmed' ? (
-                  <Button variant="secondary" size="sm" onClick={() => void queryPending()}>
-                    {t('查询发送状态', 'Check status')}
-                  </Button>
-                ) : null}
-                {drafts.conflict && recOutcome?.found ? (
-                  <Button variant="secondary" size="sm" onClick={() => adoptNewerDraft()}>
-                    {t('保留新版草稿，结束旧尝试', 'Keep newer draft & finish')}
-                  </Button>
-                ) : null}
-                {recOutcome?.action === 'ready-clear-retry' ? (
-                  <Button variant="secondary" size="sm" onClick={() => void retryClearVerified()}>
-                    {t('重试清空草稿', 'Retry clear draft')}
-                  </Button>
-                ) : null}
-                {recordAction}
-              </>
-            }
-          />
-        )
-      ) : null}
+              {drafts.error ? (
+                <Button variant="secondary" size="sm" onClick={drafts.retrySave}>
+                  {t('重试保存', 'Retry save')}
+                </Button>
+              ) : null}
+            </>
+          }
+        />
+      );
+    } else {
+      const canQuery = attempt.phase === 'cleared' || attempt.phase === 'failed' || attempt.phase === 'unconfirmed';
+      const detailLines = [sendError, conflictSummary].filter((line): line is string => Boolean(line));
+      const hasNoticeActions = Boolean(
+        canQuery || (drafts.conflict && recOutcome?.found) || recOutcome?.action === 'ready-clear-retry' || drafts.error || (onOpenSendRecords && recordTarget),
+      );
+      composerNotice = (
+        <InlineBanner
+          tone={attempt.phase === 'unconfirmed' ? 'attention' : 'danger'}
+          role="alert"
+          compact
+          title={t('正在确认发送状态，消息不会自动补发。', 'Confirming send status; message will not auto-resend.')}
+          detail={detailLines.length > 0 ? detailLines.join(' ') : undefined}
+          actions={hasNoticeActions ? (
+            <>
+              {canQuery ? (
+                <Button variant="secondary" size="sm" onClick={() => void queryPending()}>
+                  {t('查询发送状态', 'Check status')}
+                </Button>
+              ) : null}
+              {drafts.conflict && recOutcome?.found ? (
+                <Button variant="secondary" size="sm" onClick={() => adoptNewerDraft()}>
+                  {t('保留新版草稿，结束旧尝试', 'Keep newer draft & finish')}
+                </Button>
+              ) : null}
+              {recOutcome?.action === 'ready-clear-retry' ? (
+                <Button variant="secondary" size="sm" onClick={() => void retryClearVerified()}>
+                  {t('重试清空草稿', 'Retry clear draft')}
+                </Button>
+              ) : null}
+              {drafts.error ? (
+                <Button variant="secondary" size="sm" onClick={drafts.retrySave}>
+                  {t('重试保存', 'Retry save')}
+                </Button>
+              ) : null}
+              {recordLinkAction}
+            </>
+          ) : undefined}
+        />
+      );
+    }
+  } else if (drafts.error) {
+    composerNotice = (
+      <InlineBanner
+        tone="danger"
+        role="alert"
+        compact
+        title={t('草稿保存失败，本地输入已保留。', 'Failed to save draft; your input is kept locally.')}
+        actions={
+          <Button variant="secondary" size="sm" onClick={drafts.retrySave}>
+            {t('重试保存', 'Retry save')}
+          </Button>
+        }
+      />
+    );
+  } else if (conflictSummary) {
+    composerNotice = (
+      <InlineBanner
+        tone="attention"
+        role="status"
+        compact
+        title={t('磁盘上的新版草稿', 'Newer draft on disk')}
+        detail={conflictSummary}
+      />
+    );
+  } else if (!desktop && sendError) {
+    composerNotice = <InlineBanner tone="danger" role="alert" compact title={sendError} />;
+  }
+
+  return (
+    <div className="composer scope-composer">
+      {composerNotice}
       {replyTo ? (
         <div className="message-replyto scope-reply-bar">
           <Reply size={13} aria-hidden="true" />
@@ -499,15 +535,14 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
               ? t('草稿保存在本机。', 'Draft saved locally.')
               : t(`${deviceName}暂时不可用。草稿保存在本机。`, `${deviceName} is temporarily unavailable. Draft saved locally.`)}
           </span>
-          {!attempt && (sendError || lastRecord?.accepted || recordAction) ? (
+          {!attempt && (sendError || lastRecord?.accepted || recordLinkAction) ? (
             <span role="status">
               {sendError ?? (lastRecord?.accepted ? t('消息已受理。', 'Message accepted.') : '')}
-              {recordAction}
+              {recordLinkAction}
             </span>
           ) : null}
         </div>
       ) : null}
-      {!desktop && sendError ? <InlineBanner tone="danger" role="alert" compact title={sendError} /> : null}
     </div>
   );
 }
@@ -551,7 +586,7 @@ function MemberEditor({ current, candidates, names, onChange }: {
       ) : null}
       <ul className="member-list">
         {current.map((m) => {
-          const memberLabel = conversationMemberName(m, names);
+          const memberLabel = conversationMemberName(m, names, t);
           return (
             <li key={`${m.deviceId}:${m.botId}`} className="member-row">
               <span className="member-row-avatar">{memberAvatar(m, names, 26)}</span>
@@ -621,7 +656,6 @@ function ScopeDetail({
   onSettingsOpenChange?: (open: boolean) => void;
 }) {
   const t = useText();
-  const meLabel = t('我', 'Me');
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -650,6 +684,11 @@ function ScopeDetail({
   const [settingsOpenState, setSettingsOpenState] = useState(false);
   const isSettingsControlled = settingsOpen !== undefined;
   const showSettings = isRoom && (isSettingsControlled ? Boolean(settingsOpen) : settingsOpenState);
+  /** 同一群聊内首次打开设置后保持挂载（切换回聊天时用 CSS 隐藏），避免丢弃未确认的 CAS 冻结状态或编辑草稿；切换不同 scopeId 时重置。 */
+  const [settingsMounted, setSettingsMounted] = useState(() => isRoom && showSettings);
+  useEffect(() => {
+    if (showSettings && isRoom) setSettingsMounted(true);
+  }, [showSettings, isRoom]);
 
   const changeSettingsOpen = useCallback(
     (nextOpen: boolean) => {
@@ -951,7 +990,7 @@ function ScopeDetail({
       missing.map(async (id) => {
         try {
           const stored = await api.call(identity, 'getScopeMessage', { scopeId: localScope, messageId: id });
-          return [id, stored ? { author: authorName(stored, bots, meLabel), text: stored.message.text } : null] as const;
+          return [id, stored ? { author: authorName(stored, bots, t), text: stored.message.text } : null] as const;
         } catch {
           return [id, null] as const;
         }
@@ -961,7 +1000,7 @@ function ScopeDetail({
       setReplyQuotes((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
     });
     return () => { cancelled = true; };
-  }, [history, replyQuotes, api, identity, sess, scope.scope.scopeId, bots, meLabel]);
+  }, [history, replyQuotes, api, identity, sess, scope.scope.scopeId, bots, t]);
 
   function onMsgListScroll() {
     if (showSettings) return;
@@ -1014,6 +1053,7 @@ function ScopeDetail({
     setNewCount(0);
     setReplyQuotes({});
     setSettingsOpenState(false);
+    setSettingsMounted(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope.scope.scopeId]);
 
@@ -1035,11 +1075,48 @@ function ScopeDetail({
   }, [pollNew, pollScopeState, identity, online, pageActive, docVisible]);
 
   const memberCount = scope.scope.members.length;
-  const title = desktop && !isRoom && participant ? dmRowTitle(scope, bots, participant) : conversationTitle(scope.scope, bots);
+  const title = desktop && !isRoom && participant
+    ? dmRowTitle(scope, bots, t, participant)
+    : conversationTitle(scope.scope, bots, t);
+  // 单一优先级房间状态栏：历史加载错误优先于离线提示，不堆叠多条横幅。
+  const roomStatusBar: ReactNode = histError ? (
+    <div style={{ flex: 'none', padding: '8px 16px 0' }}>
+      <InlineBanner
+        tone="danger"
+        role="alert"
+        compact
+        className="scope-inline-banner"
+        title={histError}
+        detail={!online ? t('当前处于离线状态，恢复连接后可重新加载消息。', 'Currently offline; reconnect to reload messages.') : undefined}
+        actions={(
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void loadHistory(true)}
+            disabled={!online || histLoading}
+          >
+            {histLoading ? t('正在加载…', 'Loading…') : t('重新加载消息', 'Reload messages')}
+          </Button>
+        )}
+      />
+    </div>
+  ) : !online ? (
+    <div style={{ flex: 'none', padding: '8px 16px 0' }}>
+      <InlineBanner
+        tone="attention"
+        role="status"
+        compact
+        className="scope-inline-banner"
+        title={t('离线：显示最后读取的消息，不自动请求。', 'Offline: showing last fetched messages without auto-refresh.')}
+      />
+    </div>
+  ) : null;
+
   return (
     <div className="scope-detail">
       <div
         className={showSettings ? 'scope-chat-surface scope-chat-surface-hidden' : 'scope-chat-surface'}
+        hidden={showSettings}
         aria-hidden={showSettings || undefined}
       >
         <ConversationChatHeader
@@ -1050,34 +1127,13 @@ function ScopeDetail({
           readOnly={!canWrite}
           onOpenMenu={isRoom && !desktop ? openSettings : undefined}
           onShowMembers={isRoom && desktop ? openSettings : undefined}
-          membersLabel={isRoom && desktop ? t('成员', 'Members') : undefined}
+          membersLabel={isRoom && desktop ? t('管理群聊', 'Manage group') : undefined}
         />
+
+        {roomStatusBar}
 
         {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room + 可写 API 允许用户消息输入。 */}
         <div className="message-list scope-message-list" ref={msgListRef} onScroll={onMsgListScroll}>
-          {!online ? (
-            <InlineBanner
-              tone="attention"
-              role="status"
-              compact
-              className="scope-inline-banner"
-              title={t('离线：显示最后读取的消息，不自动请求。', 'Offline: showing last fetched messages without auto-refresh.')}
-            />
-          ) : null}
-          {histError ? (
-            <InlineBanner
-              tone="danger"
-              role="alert"
-              compact
-              className="scope-inline-banner"
-              title={histError}
-              actions={
-                <Button variant="secondary" size="sm" onClick={() => void loadHistory(true)} disabled={!online}>
-                  {t('重试', 'Retry')}
-                </Button>
-              }
-            />
-          ) : null}
           {histCursor && !histLoading ? (
             <button type="button" className="load-more scope-load-earlier" onClick={() => void loadOlder()} disabled={!online}>
               {t('加载更早消息', 'Load earlier messages')}
@@ -1091,7 +1147,7 @@ function ScopeDetail({
             const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
             const replyQuote = replyTo
               ? replySource
-                ? { author: authorName(replySource, bots, meLabel), text: replySource.message.text }
+                ? { author: authorName(replySource, bots, t), text: replySource.message.text }
                 : replyQuotes[replyTo] ?? null
               : null;
             const divider = i === 0
@@ -1102,7 +1158,7 @@ function ScopeDetail({
                 {divider}
                 <ConversationMessage
                   message={msg}
-                  authorName={authorName(msg, bots, meLabel)}
+                  authorName={authorName(msg, bots, t)}
                   replyQuote={replyQuote}
                   onReply={canWrite && isRoom ? () => setRoomReply(msg.message.messageId) : undefined}
                   onOpenLink={onOpenLink}
@@ -1160,19 +1216,26 @@ function ScopeDetail({
         ) : null}
       </div>
 
-      {showSettings ? (
-        <GroupSettings
-          api={api}
-          variant={variant}
-          membersApi={membersApi}
-          scope={scope}
-          bots={bots}
-          memberCandidates={memberCandidates ?? bots}
-          canWrite={canWrite}
-          onChanged={onChanged}
-          onClose={() => changeSettingsOpen(false)}
-          onDeleted={onDeleted}
-        />
+      {isRoom && (settingsMounted || showSettings) ? (
+        <div
+          className={showSettings ? 'scope-chat-surface' : 'scope-chat-surface scope-chat-surface-hidden'}
+          hidden={!showSettings}
+          aria-hidden={!showSettings || undefined}
+        >
+          <GroupSettings
+            key={scope.scope.scopeId}
+            api={api}
+            variant={variant}
+            membersApi={membersApi}
+            scope={scope}
+            bots={bots}
+            memberCandidates={memberCandidates ?? bots}
+            canWrite={canWrite}
+            onChanged={onChanged}
+            onClose={() => changeSettingsOpen(false)}
+            onDeleted={onDeleted}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -1255,22 +1318,27 @@ function ScopeCreateForm({ api, bots, onCreated }: {
       </div>
       <MemberEditor current={members} candidates={bots} names={bots} onChange={setMembers} />
       {error ? <InlineBanner tone="danger" role="alert" compact title={error} /> : null}
-      <div className="form-actions">
+      <ActionBar align="end" className="form-actions">
         <button type="submit" className="primary-button" disabled={busy || !identity || !api.transportConnected}>
-          {busy ? t('创建中…', 'Creating…') : t('创建会话', 'Create conversation')}
+          {busy ? t('正在创建会话…', 'Creating conversation…') : t('创建会话', 'Create conversation')}
         </button>
-      </div>
+      </ActionBar>
     </form>
   );
 }
 
 /** DM 行标题：另一成员名字（participant 是自身则取对方）；多会话靠预览/时间区分，不追加 scope ID。 */
-function dmRowTitle(scope: ScopeInfo, bots: readonly ConversationBot[], self?: MessageMember): string {
+function dmRowTitle(
+  scope: ScopeInfo,
+  bots: readonly ConversationBot[],
+  t: (zh: string, en: string) => string,
+  self?: MessageMember,
+): string {
   const peers = self
     ? scope.scope.members.filter((m) => !(m.deviceId === self.deviceId && m.botId === self.botId))
     : scope.scope.members;
   const target = peers.length > 0 ? peers : scope.scope.members;
-  return target.map((m) => conversationMemberName(m, bots)).join('、');
+  return target.map((m) => conversationMemberName(m, bots, t)).join(t('、', ', '));
 }
 
 export function Scopes({
@@ -1372,12 +1440,13 @@ export function Scopes({
       : null,
   );
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRetryTick, setDetailRetryTick] = useState(0);
   const [showCreate, setShowCreate] = useState(false);
   const [bots, setBots] = useState<BotRecord[]>([]);
   /** 目录 + 实时 listBots 合并后的命名/头像表（已知优先 listBots，目录提供归档/远端名与设备名）。 */
   const mergedBots = useMemo(() => mergeKnownBots(bots, knownBots), [bots, knownBots]);
   const dmLabel = variant === 'desktop' ? t('智能体间通信', 'Agent communications') : t('私聊', 'Direct chats');
-  const participantLabel = participant ? (participantName ?? conversationMemberName(participant, mergedBots)) : '';
+  const participantLabel = participant ? (participantName ?? conversationMemberName(participant, mergedBots, t)) : '';
   const listTitle = participant
     ? t(`${participantLabel}的${dmLabel}`, `${participantLabel} · ${dmLabel}`)
     : scopeKind === 'dm'
@@ -1494,7 +1563,7 @@ export function Scopes({
         // 详情核对：scopeKind/participant 不匹配的内容绝不渲染。
         if (scopeKind && s.scope.kind !== scopeKind) {
           setSelected(null);
-          setDetailError(t('该会话不是预期的类型，已停止显示。', 'This conversation does not match the expected type.'));
+          setDetailError(t('该会话不是预期的类型，已停止显示。', 'This conversation does not match the expected type and is hidden.'));
           return;
         }
         if (participant && !(s.scope.kind === 'dm' && s.scope.members.some((m) => m.deviceId === participant.deviceId && m.botId === participant.botId))) {
@@ -1516,7 +1585,7 @@ export function Scopes({
       }
     });
     return () => { cancelled = true; };
-  }, [api, sess, identity, selectedId, online, scopeKind, participant, handleScopeDeleted, t]);
+  }, [api, sess, identity, selectedId, online, scopeKind, participant, handleScopeDeleted, detailRetryTick, t]);
 
   useEffect(() => {
     if (!identity || botsSessRef.current === sess || !api.transportConnected) return;
@@ -1576,24 +1645,24 @@ export function Scopes({
           }
           onBack={!detailOnly ? onBack : undefined}
         />
-        <div className="scope-list-toolbar">
+        <ActionBar align="between" className="scope-list-toolbar">
           <button
             type="button"
             className="icon-button"
             onClick={() => convList.refresh()}
             disabled={!online || convList.loading}
-            title={t('刷新列表', 'Refresh list')}
-            aria-label={t('刷新列表', 'Refresh list')}
+            title={t('刷新会话列表', 'Refresh conversations')}
+            aria-label={t('刷新会话列表', 'Refresh conversations')}
           >
             <RefreshCw size={14} aria-hidden="true" className={convList.loading ? 'scope-spin' : undefined} />
           </button>
           {showCreateEntry ? (
             <button type="button" className="toolbar-btn" onClick={() => setShowCreate((v) => !v)} disabled={!identity}>
               <Plus size={13} aria-hidden="true" />
-              {showCreate ? t('取消', 'Cancel') : t('新建会话', 'New chat')}
+              {showCreate ? t('取消新建', 'Cancel creation') : t('新建会话', 'New conversation')}
             </button>
           ) : null}
-        </div>
+        </ActionBar>
         {convList.error ? (
           <InlineBanner
             tone="danger"
@@ -1601,14 +1670,19 @@ export function Scopes({
             compact
             className="scope-list-banner"
             title={t('会话列表加载失败，请重试。', 'Failed to load conversations. Please retry.')}
-            actions={
-              <Button variant="secondary" size="sm" onClick={() => convList.refresh()}>
-                {t('重试', 'Retry')}
+            detail={!online ? t('当前处于离线状态，恢复连接后可重新加载。', 'Currently offline; reconnect to reload.') : undefined}
+            actions={(
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => convList.refresh()}
+                disabled={!online || convList.loading}
+              >
+                {t('重新加载列表', 'Reload list')}
               </Button>
-            }
+            )}
           />
-        ) : null}
-        {!online ? (
+        ) : !online ? (
           <InlineBanner
             tone="attention"
             role="status"
@@ -1633,7 +1707,7 @@ export function Scopes({
               ? (variant === 'desktop' ? t('暂无智能体间通信。', 'No agent communications yet.') : t('该 Bot 暂无私聊。', 'No direct chats for this Bot.'))
               : t('暂无会话。', 'No conversations yet.')}
             {!participant && identity
-              ? t('点击“新建会话”创建。', ' Click “New chat” to create one.')
+              ? t('点击“新建会话”创建。', ' Click “New conversation” to create one.')
               : (!identity ? t('请先连接。', ' Connect first.') : '')}
           </div>
         ) : (
@@ -1643,8 +1717,8 @@ export function Scopes({
                 <ConversationRow
                   title={
                     participant
-                      ? dmRowTitle(c.scope, mergedBots, participant)
-                      : conversationTitle(c.scope.scope, mergedBots)
+                      ? dmRowTitle(c.scope, mergedBots, t, participant)
+                      : conversationTitle(c.scope.scope, mergedBots, t)
                   }
                   preview={c.lastPreview}
                   timestamp={c.lastActivityAt}
@@ -1696,7 +1770,22 @@ export function Scopes({
           />
         ) : detailError ? (
           <div className="scope-detail-error">
-            <InlineBanner tone="danger" role="alert" title={detailError} />
+            <InlineBanner
+              tone="danger"
+              role="alert"
+              title={detailError}
+              detail={!online ? t('当前处于离线状态，恢复连接后可重新加载会话。', 'Currently offline; reconnect to reload this conversation.') : undefined}
+              actions={selectedId ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={!online}
+                  onClick={() => setDetailRetryTick((n) => n + 1)}
+                >
+                  {t('重新加载会话', 'Reload conversation')}
+                </Button>
+              ) : undefined}
+            />
           </div>
         ) : detailOnly && selectedId ? null : (
           <div className="empty-state">

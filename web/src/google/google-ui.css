@@ -86,6 +86,7 @@
 
 .gws-head-actions {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -121,6 +122,7 @@
 
 .gws-status-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2, 8px);
@@ -162,6 +164,7 @@
   background: var(--surface-1, var(--color-surface-1, var(--surface)));
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .gws-pill.is-ok {
@@ -209,6 +212,8 @@
   color: var(--ink-primary, var(--color-text, var(--text)));
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   touch-action: manipulation;
   transition:
@@ -278,6 +283,8 @@
   color: var(--signal-primary, var(--color-primary, var(--accent)));
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
 }
 
@@ -313,6 +320,7 @@
 
 .gws-uri-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2, 8px);
@@ -336,6 +344,8 @@
 
 .gws-seg {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   padding: 3px;
   border-radius: var(--radius-sm, 8px);
   background: var(--surface-inset, var(--color-surface-3, var(--surface)));
@@ -351,6 +361,8 @@
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition:
     background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
@@ -419,8 +431,15 @@
 
 .gws-inline-input-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
+}
+
+.gws-inline-input-row .gws-input {
+  flex: 1 1 180px;
+  min-width: 0;
+  width: auto;
 }
 
 /* Service choice cards */
@@ -989,6 +1008,7 @@
 
 .gws-compact-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2, 8px);
@@ -1019,6 +1039,7 @@
 
 .gws-compact-head-actions {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1, 4px);
   flex: none;
@@ -1044,6 +1065,7 @@
   font-weight: var(--weight-medium, 500);
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   touch-action: manipulation;
   transition:
     background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
@@ -1054,6 +1076,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -1073,8 +1096,9 @@
   bottom: calc(100% + 6px);
   right: 0;
   z-index: var(--z-popover, 100);
-  min-width: 230px;
-  max-width: min(280px, calc(100vw - 24px));
+  min-width: min(230px, calc(100vw - 24px));
+  width: min(280px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
   display: grid;
   gap: 2px;
   padding: 6px;
@@ -1085,7 +1109,9 @@
 }
 
 .gws-popover.is-compact-menu {
-  min-width: 184px;
+  min-width: min(184px, calc(100vw - 24px));
+  width: max-content;
+  max-width: calc(100vw - 24px);
 }
 
 .gws-popover-item {
@@ -1243,6 +1269,8 @@
   border-radius: var(--radius-full, 999px);
   border: 1px solid var(--border-default, var(--color-line, var(--line)));
   font-size: var(--text-xs, 0.75rem);
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
 }
 

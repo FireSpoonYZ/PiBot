@@ -1,18 +1,23 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { ArrowLeft, X } from 'lucide-react';
-import { useId, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { useText } from '../../ui';
+import { ActionBar } from './ActionBar';
+import { Button } from './Button';
 import {
   hasOpenFloatingPopover,
   isEventInsideFloatingUi,
   useTopLayerClose,
 } from './Overlay';
+import './components.css';
+
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 export interface DialogProps {
   open: boolean;
   onOpenChange(open: boolean): void;
   title: string;
-  description?: string;
+  description?: ReactNode;
   ariaDescribedBy?: string;
   children: ReactNode;
   sheet?: boolean;
@@ -22,6 +27,7 @@ export interface DialogProps {
   onBack?(): void;
   actions?: ReactNode;
   dismissDisabled?: boolean;
+  closeDisabled?: boolean;
   onCloseAutoFocus?(event: Event): void;
 }
 
@@ -39,16 +45,34 @@ export function Dialog({
   onBack,
   actions,
   dismissDisabled = false,
+  closeDisabled = false,
   onCloseAutoFocus,
 }: DialogProps) {
   const t = useText();
   const contentRef = useRef<HTMLDivElement>(null);
+  const previousActiveRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+  const isDismissDisabled = Boolean(dismissDisabled || closeDisabled);
+
+  useIsomorphicLayoutEffect(() => {
+    if (open && !wasOpenRef.current) {
+      if (typeof document !== 'undefined') {
+        const active = document.activeElement as HTMLElement | null;
+        if (active && active !== document.body && !contentRef.current?.contains(active)) {
+          previousActiveRef.current = active;
+        } else {
+          previousActiveRef.current = null;
+        }
+      }
+    }
+    wasOpenRef.current = open;
+  }, [open]);
 
   useTopLayerClose(open, {
     kind: 'modal',
     getElement: () => contentRef.current,
-    canHandleBack: () => !dismissDisabled,
-    blockBackWhenDisabled: dismissDisabled,
+    canHandleBack: () => !isDismissDisabled,
+    blockBackWhenDisabled: isDismissDisabled,
     onClose: () => {
       if (onBack) onBack();
       else onOpenChange(false);
@@ -63,7 +87,7 @@ export function Dialog({
     <DialogPrimitive.Root
       open={open}
       onOpenChange={next => {
-        if (!next && dismissDisabled) return;
+        if (!next && isDismissDisabled) return;
         onOpenChange(next);
       }}
     >
@@ -75,7 +99,7 @@ export function Dialog({
           className={`dialog-content ${sheet ? 'sheet' : drawer ? 'drawer' : ''} ${className}`}
           {...describedByProps}
           onPointerDownOutside={event => {
-            if (dismissDisabled || isEventInsideFloatingUi(event)) {
+            if (isDismissDisabled || isEventInsideFloatingUi(event)) {
               event.preventDefault();
             }
           }}
@@ -85,12 +109,12 @@ export function Dialog({
             }
           }}
           onInteractOutside={event => {
-            if (dismissDisabled || isEventInsideFloatingUi(event)) {
+            if (isDismissDisabled || isEventInsideFloatingUi(event)) {
               event.preventDefault();
             }
           }}
           onEscapeKeyDown={event => {
-            if (dismissDisabled) {
+            if (isDismissDisabled) {
               event.preventDefault();
               event.stopPropagation();
               return;
@@ -105,7 +129,20 @@ export function Dialog({
               onBack();
             }
           }}
-          onCloseAutoFocus={onCloseAutoFocus}
+          onCloseAutoFocus={event => {
+            onCloseAutoFocus?.(event);
+            if (event.defaultPrevented) {
+              previousActiveRef.current = null;
+              return;
+            }
+            if (contentRef.current?.isConnected) return;
+            const target = previousActiveRef.current;
+            previousActiveRef.current = null;
+            if (target && target !== document.body && target.isConnected) {
+              event.preventDefault();
+              target.focus({ preventScroll: true });
+            }
+          }}
           onOpenAutoFocus={event => {
             event.preventDefault();
             requestAnimationFrame(() => contentRef.current?.focus());
@@ -118,9 +155,9 @@ export function Dialog({
                 type="button"
                 className="icon-button dialog-back"
                 aria-label={t('返回', 'Back')}
-                disabled={dismissDisabled}
+                disabled={isDismissDisabled}
                 onClick={() => {
-                  if (!dismissDisabled) onBack();
+                  if (!isDismissDisabled) onBack();
                 }}
               >
                 <ArrowLeft aria-hidden="true" />
@@ -131,7 +168,7 @@ export function Dialog({
             <DialogPrimitive.Close
               className="icon-button"
               aria-label={t('关闭', 'Close')}
-              disabled={dismissDisabled}
+              disabled={isDismissDisabled}
             >
               <X aria-hidden="true" />
             </DialogPrimitive.Close>
@@ -149,7 +186,7 @@ export function Dialog({
 export interface ConfirmDialogProps {
   open: boolean;
   title: string;
-  description: string;
+  description: ReactNode;
   danger?: boolean;
   onCancel(): void;
   onConfirm(): void;
@@ -180,6 +217,8 @@ export function ConfirmDialog({
   const t = useText();
   const descId = useId();
   const confirmDialogClass = ['bs-confirm-dialog', contentClassName].filter(Boolean).join(' ');
+  const hasDescription =
+    description !== undefined && description !== null && description !== false && description !== '';
   return (
     <Dialog
       open={open}
@@ -187,39 +226,39 @@ export function ConfirmDialog({
         if (!value && !busy) onCancel();
       }}
       title={title}
-      ariaDescribedBy={description ? descId : undefined}
+      ariaDescribedBy={hasDescription ? descId : undefined}
       overlayClassName="bs-confirm-overlay"
       className={confirmDialogClass}
       dismissDisabled={busy}
       onCloseAutoFocus={onCloseAutoFocus}
     >
-      <p id={descId} className="secondary">{description}</p>
+      {hasDescription ? (
+        <p id={descId} className="secondary">{description}</p>
+      ) : null}
       {error ? (
         <p className="ui-confirm-error" role="alert">{error}</p>
       ) : null}
-      <div className="dialog-actions">
-        <button
-          type="button"
-          className="button secondary-button"
+      <ActionBar align="end" className="ui-confirm-actions">
+        <Button
+          variant="secondary"
           disabled={busy}
           onClick={() => {
             if (!busy) onCancel();
           }}
         >
           {cancelLabel ?? t('取消', 'Cancel')}
-        </button>
-        <button
-          type="button"
-          className={danger ? 'button danger-button' : 'button'}
+        </Button>
+        <Button
+          variant={danger ? 'danger' : 'primary'}
+          loading={busy}
           disabled={busy || disabled}
-          aria-busy={busy || undefined}
           onClick={() => {
             if (!busy && !disabled) onConfirm();
           }}
         >
           {confirmLabel ?? t('确认', 'Confirm')}
-        </button>
-      </div>
+        </Button>
+      </ActionBar>
     </Dialog>
   );
 }

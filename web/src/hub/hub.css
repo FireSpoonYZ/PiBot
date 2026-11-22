@@ -3,6 +3,14 @@
 /* Keep HubScreen mounted when navigating to chats, profiles, or create screens. */
 .hub-hidden { display: none; }
 
+.hub-scroll-area {
+  overscroll-behavior: contain;
+}
+
+.hub-bot-time {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Primary Bot Hero: flat raised hairline card with 12px radius; equal 82px height across states. */
 .hub-hero-section {
   padding: var(--space-3) var(--space-4) var(--space-2);
@@ -14,6 +22,7 @@
 }
 .hub-hero-button.hub-hero-card {
   flex: 1 1 auto;
+  min-width: 0;
   max-width: 100%;
   min-height: 82px;
   box-sizing: border-box;
@@ -61,6 +70,10 @@
   gap: var(--space-1);
 }
 .hub-hero-card .hub-hero-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--ink-primary);
@@ -120,6 +133,10 @@
 .hub-filter-chips {
   padding: 2px 0 var(--space-2);
 }
+.hub-filter-chips .bs-chip {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
 /* Archived row subtle visual differentiation. */
 .hub-bot-row.is-archived {
@@ -138,23 +155,29 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
   max-width: 100%;
-  padding: 5px 10px 5px 6px;
+  min-height: 36px;
+  min-width: var(--tap-min);
+  padding: 6px 12px 6px 8px;
   border-radius: var(--radius-full);
   background: var(--surface-1);
   border: 1px solid var(--border-subtle);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
+  white-space: nowrap;
   color: var(--ink-primary);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
-.group-create-chip::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min));
-  height: max(100%, var(--tap-min));
+@media (pointer: coarse) {
+  .group-create-chip {
+    min-height: var(--tap-min);
+  }
+}
+@media (hover: hover) and (pointer: fine) {
+  .group-create-chip:hover:not(:disabled) {
+    background: var(--surface-raised);
+  }
 }
 .group-create-chip:active {
   background: var(--surface-inset);
@@ -164,6 +187,7 @@
   outline-offset: 2px;
 }
 .group-create-chip-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -173,6 +197,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
   color: var(--ink-secondary);
 }
 .group-create-search {
@@ -299,6 +324,7 @@
   white-space: nowrap;
 }
 .group-create-bot-sub {
+  min-width: 0;
   font-size: var(--text-sm);
   color: var(--ink-secondary);
   overflow: hidden;
@@ -325,6 +351,7 @@
 @media (prefers-reduced-motion: reduce) {
   .hub-hero-button.hub-hero-card,
   .hub-bot-status-dot,
+  .group-create-chip,
   .group-create-search-clear,
   .group-create-bot-row,
   .group-create-check {
