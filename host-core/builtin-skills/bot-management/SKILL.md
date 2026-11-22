@@ -5,14 +5,18 @@ description: Manage e-launcher Bots across devices — create, save, or update t
 
 # Bot management
 
-Operate on Bots and managed skills through the management tools — never by editing their files, databases, or runtime state directly. Prefer the narrow deferred operation tools via `tool_search`:
+Operate on Bots and managed skills through the management tools — never by editing their files, databases, or runtime state directly.
+
+For **everyday peer communication**, call the tools already offered. Use `list_bots` to find peers, `ensure_dm` to open or reuse a private chat, and `send_to` to send a message. Use `list_scopes` to find joined rooms or existing conversations and `read_scope` for their history. `collaboration_publish_room_message` is available through Center MCP.
+
+For **Bot, skill, capability, room administration, and queue/edit management**, prefer the narrow deferred operations available through `tool_search`.
 
 - Bots & lifecycle: `pibot_bots_list`, `pibot_bot_get`, `pibot_bot_create`, `pibot_bot_update_profile`, `pibot_bot_soul_get`, `pibot_bot_set_soul`, `pibot_bot_set_model`, `pibot_bot_set_cwd`, `pibot_bot_set_avatar`, `pibot_bot_set_primary`, `pibot_bot_session_control`, `pibot_bot_archive`, `pibot_bot_unarchive`, `pibot_bot_delete`
 - Managed skills & learning: `capability_skill_*` (`list`/`read`/`create`/`edit`/`adopt`/`lifecycle`/`delete`), `capability_installation_skill_files_{read,write}`, `capability_learning_{status,configure,run,cancel}`
 - Capabilities & installations: `capability_bot_{list,get,binding_set}`, `capability_installation_{list,get,deployments,diagnose,updates_check,config_set,sharing_set,toggle,update,uninstall}`, `capability_operation_get`
-- Collaboration & other-Bot queue/edit controls: `collaboration_*` (`list_scopes`, `get_scope`, `create_room`, `rename_room`, `update_room_members`, `leave_room`, `delete_room`, `withdraw_queued`, `steer_queued`, `edit_message`, `stop_work`, `resume_work`)
+- Collaboration management & other-Bot queue/edit controls: `collaboration_*` (`list_scopes`, `get_scope`, `create_room`, `rename_room`, `update_room_members`, `leave_room`, `delete_room`, `withdraw_queued`, `steer_queued`, `edit_message`, `stop_work`, `resume_work`)
 
-Legacy local tools stay available where only they provide local behavior or for compatibility: `send_to` / `ensure_dm` / `list_scopes` / `read_scope` for local collaboration messaging (`collaboration_publish_room_message` is MCP-only), local `set_bot_soul` to queue self-SOUL edits safely mid-turn, and `manage_bot_skill` / `manage_bot_learning` / `manage_bot_installation` (including `install`/`catalog`/`describe`/`probe`). Load the matching file under `references/` (resolve paths against this skill's directory) for detailed workflows.
+Use local `set_bot_soul` to queue self-SOUL edits safely mid-turn. The deferred wrappers `manage_bot_skill`, `manage_bot_learning`, and `manage_bot_installation` remain available for the supported management workflows. Load the matching file under `references/` in this skill's directory for details.
 
 ## Hard rules
 

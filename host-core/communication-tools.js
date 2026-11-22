@@ -327,7 +327,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     ...(collaboration ? [
       tool({
         name: 'list_bots',
-        description: 'List the network device and Bot directory. Pages are best effort if the directory changes; errors identify devices whose Bots could not be read.',
+        description: 'List devices and Bots on your network to find an online peer. Each item with type "bot" includes its name, role description, online status, and the bot.deviceId and bot.botId to pass to ensure_dm. Use nextOffset to page until it is null. Items with type "error" identify devices whose Bots could not be read. Membership may change while paging.',
         properties: { offset: { type: 'integer', minimum: 0 }, limit: LIMIT_SCHEMA },
         async run(args) {
           const snapshot = await collaboration.listBots();
@@ -552,8 +552,17 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     ] : []),
     tool({
       name: 'ensure_dm',
-      description: 'Reuse an installed DM with this peer, or create a managed DM including this Bot. The scope receipt is not proof of remote delivery or work.',
-      properties: { peer: MEMBER_SCHEMA },
+      description: 'Open or reuse a private chat with another Bot. Set peer.deviceId and peer.botId from a Bot returned by list_bots. Pass the returned scope.scopeId as scopeId to send_to. This tool returns the local conversation state. Call send_to to send the message.',
+      properties: {
+        peer: {
+          ...MEMBER_SCHEMA,
+          description: 'The other Bot to message. Use bot.deviceId and bot.botId from a type "bot" item returned by list_bots.',
+          properties: {
+            deviceId: { ...ID_SCHEMA, description: 'Target peer Bot\'s deviceId from list_bots (bot.deviceId).' },
+            botId: { ...ID_SCHEMA, description: 'Target peer Bot\'s botId from list_bots (bot.botId).' },
+          },
+        },
+      },
       required: ['peer'],
       async run(args, identity, log, api, context) {
         assertId(args.peer.deviceId, 'peer.deviceId');
@@ -624,7 +633,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'list_scopes',
-      description: 'List installed scopes containing this Bot as a current member. Offsets are best effort when membership changes.',
+      description: 'List the existing private chats and group rooms this Bot belongs to. Use scopes[].scopeId from the result with send_to or read_scope. To open or reuse a DM with a known peer, call ensure_dm directly. Membership may change while paging.',
       properties: { offset: { type: 'integer', minimum: 0 }, limit: LIMIT_SCHEMA },
       run(args, identity, log) {
         const offset = args.offset ?? 0;
@@ -664,13 +673,17 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'send_to',
-      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. Omit scopeId to reply to the current turn\'s default DM or room destination; provide scopeId explicitly to address a specific or different scope. When this turn targets the user\'s primary chat, reply to the user directly with plain assistant text — there is no default scopeId for primary chat. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use local paths or structured attachment references (attachment://<id>, looked up via session_search action "attachments") for uploaded user images, never base64 in text.',
+      description: 'Send another Bot a private message, delegate a task, return a result, or post in a group chat you belong to. For a private chat, get scopeId from ensure_dm. For an existing conversation, get it from list_scopes. Omit scopeId when using the verified DM or room destination of this turn. In the user\'s primary chat, reply to the user in plain assistant text. The "stored" receipt confirms local recording only. Replies arrive in later turns. Continue independent work and end the turn when all you can do is wait. The Host automatically links a reply in the current DM to the incoming message. To stay silent, pass "(pass)" as text with no files. For attachments, pass local paths or attachment://<id> references from session_search. All recipient Hosts must be online for file transfer.',
       properties: {
         scopeId: {
           ...ID_SCHEMA,
-          description: 'Target installed DM or room scopeId. Optional when replying to a turn whose default destination is a DM or room: omit scopeId to send to the current turn\'s default DM/room reply target. Required when addressing another scope explicitly, initiating a new peer/room message, or in a primary user chat turn (where replies to the user go in plain assistant text rather than send_to).',
+          description: 'The private chat or group conversation ID. Use scope.scopeId returned by ensure_dm or create_room, or scopes[].scopeId from list_scopes. Set this field to address a specific conversation or when sending from the user\'s primary chat. You can omit it to use the current turn\'s verified DM or room destination.',
         },
-        text: { type: 'string', minLength: 1 },
+        text: {
+          type: 'string',
+          minLength: 1,
+          description: 'Message body to send. When delegating a task, include the goal, relevant context, expected result, and constraints (and identify who should act in a room). When replying to a peer, return the concrete result or answer. Pass "(pass)" (with no files) to stay silent without publishing when a room turn or pure-FYI DM needs no reply.',
+        },
         files: FILES_SCHEMA,
       },
       required: ['text'],
