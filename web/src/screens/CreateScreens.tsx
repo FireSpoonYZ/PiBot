@@ -1,14 +1,17 @@
-import { useId } from 'react';
-import { ArrowLeft, Check, ChevronRight, Pencil, Search, X } from 'lucide-react';
+import { useEffect, useId } from 'react';
+import { ArrowLeft, Check, Pencil, Search, X } from 'lucide-react';
 import type { CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem, MessageMember } from '../../../host-core/index.js';
 import { GrokBotAvatar, resolveBotAvatarPreset, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
-import { ErrorNotice, FloatingPillToast, useText } from '../ui';
+import { ErrorNotice, useText } from '../ui';
+import { useNotice } from '../notice';
 import { LabelStack, ReservedSlot } from '../layout';
 import { PlatformLogoIcon, type GroupCreateAttempt, type UnifiedBotItem } from '../hub/shared';
-import { Switch } from '../components/ui';
+import { ActionBar, Button, InlineNotice, ListRow, Switch } from '../components/ui';
 import type { ActionController, CreateBotAttempt } from './types';
+
+const PRIMARY_BACK_NOTICE_ID = 'create-bot:primary-required';
 
 export interface CreateBotScreenProps {
   mustCreatePrimaryBot: boolean;
@@ -35,8 +38,8 @@ export interface CreateBotScreenProps {
   createModelPicker: CenterModelPicker | null;
   createModelLoading: boolean;
   action: ActionController;
-  primaryBackNotice: { text: string; seq: number } | null;
-  onDismissPrimaryBackNotice(): void;
+  primaryBackNotice?: { text: string; seq: number } | null;
+  onDismissPrimaryBackNotice?(): void;
   onBack(): void;
   onSave(): void;
   onOpenAvatarPicker(preset: GrokAvatarPreset): void;
@@ -68,17 +71,40 @@ export function CreateBotScreen({
   createModelLoading,
   action,
   primaryBackNotice,
-  onDismissPrimaryBackNotice,
   onBack,
   onSave,
   onOpenAvatarPicker,
 }: CreateBotScreenProps) {
   const t = useText();
+  const { notify, dismiss } = useNotice();
   const createNameId = useId();
   const createSubtitleId = useId();
   const createCwdId = useId();
   const createHostId = useId();
   const createModelId = useId();
+
+  const hasPrimaryBackNotice = Boolean(primaryBackNotice);
+  const primaryBackNoticeSeq = primaryBackNotice?.seq;
+  const primaryBackNoticeText = primaryBackNotice?.text ?? '';
+
+  useEffect(() => {
+    if (!hasPrimaryBackNotice || !primaryBackNoticeText) {
+      dismiss(PRIMARY_BACK_NOTICE_ID);
+      return;
+    }
+    notify({
+      id: PRIMARY_BACK_NOTICE_ID,
+      tone: 'warning',
+      title: primaryBackNoticeText,
+      durationMs: 3000,
+    });
+  }, [hasPrimaryBackNotice, primaryBackNoticeSeq, primaryBackNoticeText, notify, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss(PRIMARY_BACK_NOTICE_ID);
+    };
+  }, [dismiss]);
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -115,15 +141,11 @@ export function CreateBotScreen({
 
       <div className="grok-subpage-scroll">
         {mustCreatePrimaryBot && (
-          <div className="grok-field-section">
-            <section className="grok-card-group bot-profile-primary-notice">
-              <strong>{t('当前设备尚未创建主 Bot', 'Primary Bot Required')}</strong>
-              <span>
-                {t('每台设备至少需要一个主 Bot。请先创建本机主 Bot 后再进入主页。',
-                  'Every device requires at least one primary bot. Create one to enter the hub.')}
-              </span>
-            </section>
-          </div>
+          <InlineNotice
+            tone="info"
+            title={t('当前设备尚未创建主 Bot', 'Primary Bot Required')}
+            description={t('每台设备至少需要一个主 Bot。请先创建本机主 Bot 后再进入主页。', 'Every device requires at least one primary bot. Create one to enter the hub.')}
+          />
         )}
         {createAttempt && (
           <div className="grok-field-section">
@@ -133,26 +155,27 @@ export function CreateBotScreen({
                 <code className="grok-pending-freeze-id">{createAttempt.requestId.slice(0, 12)}</code>
               </div>
               <p className="grok-pending-freeze-desc">
-                {t('上次创建请求的回执尚未确认，请先按原请求 ID 对账，避免重复创建。',
-                  'Previous creation receipt is unconfirmed. Reconcile the original request ID first.')}
+                {t('上次创建请求的回执尚未确认，请先按原请求 ID 对账，避免重复创建。', 'Previous creation receipt is unconfirmed. Reconcile the original request ID first.')}
               </p>
-              <div className="grok-pending-freeze-actions">
-                <button
-                  type="button"
-                  className="grok-done-pill-btn"
+              <ActionBar align="end">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={action.busy}
+                  onClick={onClearCreateAttempt}
+                >
+                  {t('清除冻结状态', 'Clear Freeze')}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={action.busy}
                   disabled={action.busy}
                   onClick={onReconcileCreateAttempt}
                 >
                   {t('按原 ID 对账', 'Reconcile Original ID')}
-                </button>
-                <button
-                  type="button"
-                  className="hub-outline-btn"
-                  onClick={onClearCreateAttempt}
-                >
-                  {t('清除冻结状态', 'Clear Freeze')}
-                </button>
-              </div>
+                </Button>
+              </ActionBar>
             </section>
           </div>
         )}
@@ -213,15 +236,12 @@ export function CreateBotScreen({
         <div className="grok-field-section">
           <label className="grok-section-label">{t('外观', 'Appearance')}</label>
           <div className="grok-card-group">
-            <button
-              type="button"
-              className="grok-card-row"
+            <ListRow
+              title={t('头像', 'Avatar')}
+              value={t('形状与配色', 'Shape & color')}
+              chevron
               onClick={() => onOpenAvatarPicker(editAvatarPreset)}
-            >
-              <span className="grok-row-label">{t('头像', 'Avatar')}</span>
-              <span className="grok-row-value" />
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
+            />
           </div>
         </div>
 
@@ -234,13 +254,14 @@ export function CreateBotScreen({
                 <select
                   id={createHostId}
                   className="grok-inline-select"
+                  style={{ flex: '0 1 auto', minWidth: 0, maxWidth: '65%' }}
                   value={editTargetHost}
                   onChange={e => onChangeTargetHost(e.target.value)}
                 >
                   <option value="local">{t('本机', 'Local')}</option>
                   {remoteDevices.filter(device => device.deviceId !== localDeviceId).map(device => (
                     <option key={device.deviceId} value={device.deviceId} disabled={!device.online}>
-                      {device.displayName || device.deviceId}{device.platform ? ` · ${device.platform}` : ''}{device.online ? '' : ' · offline'}
+                      {device.displayName || device.deviceId}{device.platform ? ` · ${device.platform}` : ''}{device.online ? '' : t(' · 离线', ' · offline')}
                     </option>
                   ))}
                 </select>
@@ -253,14 +274,16 @@ export function CreateBotScreen({
           <div className="grok-field-section">
             <label className="grok-section-label">{t('主 Bot 设置', 'Primary Role')}</label>
             <div className="grok-card-group">
-              <div className="grok-card-row no-active">
-                <span className="grok-row-label">{t('创建后设为该节点的主 Bot', 'Set as Primary Bot on this host')}</span>
-                <Switch
-                  checked={editMakePrimary}
-                  onCheckedChange={onChangeMakePrimary}
-                  aria-label={t('创建后设为该节点的主 Bot', 'Set as Primary Bot on this host')}
-                />
-              </div>
+              <ListRow
+                title={t('创建后设为该节点的主 Bot', 'Set as Primary Bot on this host')}
+                trailing={
+                  <Switch
+                    checked={editMakePrimary}
+                    onCheckedChange={onChangeMakePrimary}
+                    aria-label={t('创建后设为该节点的主 Bot', 'Set as Primary Bot on this host')}
+                  />
+                }
+              />
             </div>
           </div>
         )}
@@ -274,6 +297,7 @@ export function CreateBotScreen({
                 <select
                   id={createModelId}
                   className="grok-inline-select"
+                  style={{ flex: '0 1 auto', minWidth: 0, maxWidth: '65%' }}
                   value={editModelRef}
                   onChange={e => onChangeModelRef(e.target.value)}
                 >
@@ -297,13 +321,16 @@ export function CreateBotScreen({
                 </select>
               </div>
             ) : createModelLoading ? (
-              <div className="grok-card-row no-active">
-                {t('正在加载中心模型列表…', 'Loading center models…')}
-              </div>
+              <ListRow
+                title={t('正在加载中心模型列表…', 'Loading center models…')}
+                statusTone="idle"
+              />
             ) : (
-              <div className="grok-card-row no-active">
-                {t('未连接中心，创建后可在资料页绑定中心并选择模型', 'Not connected to center; bind to center in Bot profile to select a model')}
-              </div>
+              <ListRow
+                title={t('未连接中心', 'Center not connected')}
+                subtitle={t('创建后可在资料页绑定中心并选择模型', 'Bind to a center in Bot profile to choose a model')}
+                statusTone="idle"
+              />
             )}
           </div>
         </div>
@@ -312,15 +339,6 @@ export function CreateBotScreen({
           <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
         </ReservedSlot>
       </div>
-      {primaryBackNotice && (
-        <div className="bot-edit-toast-anchor">
-          <FloatingPillToast
-            message={primaryBackNotice.text}
-            tone="warning"
-            onDismiss={onDismissPrimaryBackNotice}
-          />
-        </div>
-      )}
     </main>
   );
 }
@@ -363,6 +381,7 @@ export function CreateGroupScreen({
   onOpenCreateBot,
 }: CreateGroupScreenProps) {
   const t = useText();
+  const groupTitleId = useId();
   const unarchivedCandidates = allBotItems.filter(item => !item.archivedAt);
   const q = groupSearchQuery.trim().toLowerCase();
   const filteredCandidates = q
@@ -414,30 +433,28 @@ export function CreateGroupScreen({
 
       <div className="grok-subpage-scroll">
         {groupCreateAttempt && (
-          <div className="grok-field-section">
-            <div className="grok-card-group">
-              <div className="grok-card-row no-active" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
-                <span style={{ fontSize: '.9rem', lineHeight: 1.5, color: 'var(--text)' }}>
-                  {t('上次创建请求结果尚未确认，已冻结原请求 ID 与成员列表，点击右上角「按原请求重试」不会重复建群。',
-                    'Previous create request is unconfirmed. Original request ID and members are frozen so retrying will not duplicate the group.')}
-                </span>
-                <button
-                  type="button"
-                  className="hub-outline-btn"
-                  disabled={groupCreating}
-                  onClick={onDiscardGroupCreateAttempt}
-                >
-                  {t('放弃冻结并重新编辑', 'Discard & Edit Again')}
-                </button>
-              </div>
-            </div>
-          </div>
+          <InlineNotice
+            tone="warning"
+            title={t('上次建群请求尚未确认', 'Previous group request unconfirmed')}
+            description={t('已冻结原请求 ID 与成员列表，点击右上角「按原请求重试」不会重复建群。', 'Original request ID and members are frozen so retrying will not duplicate the group.')}
+            action={
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={groupCreating}
+                onClick={onDiscardGroupCreateAttempt}
+              >
+                {t('放弃冻结并重新编辑', 'Discard & Edit Again')}
+              </Button>
+            }
+          />
         )}
 
         <div className="grok-field-section">
-          <label className="grok-section-label">{t('群名称（选填）', 'Group Name (Optional)')}</label>
+          <label className="grok-section-label" htmlFor={groupTitleId}>{t('群名称（选填）', 'Group Name (Optional)')}</label>
           <div className="grok-card-group">
             <input
+              id={groupTitleId}
               className="grok-card-input"
               value={groupCreateAttempt ? groupCreateAttempt.title ?? '' : groupTitle}
               onChange={e => onChangeGroupTitle(e.target.value)}

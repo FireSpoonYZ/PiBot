@@ -6,7 +6,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Settings,
   Trash2,
   X,
 } from 'lucide-react';
@@ -17,6 +16,7 @@ import type {
   MessageScope,
   ScopeInfo,
 } from '../../../host-core/index.js';
+import { ActionBar, useDirtyForm } from '../../../web/src/components/ui';
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../../../web/src/GrokBotAvatar';
 import {
   ConversationGroupAvatar,
@@ -876,6 +876,7 @@ export function GroupSettings({
 
   const trimmedTitleInput = titleInput.trim();
   const isTitleChanged = trimmedTitleInput !== savedTitle;
+  useDirtyForm((titleEditing && isTitleChanged) || editMode);
   const candidateChoices = memberCandidates.filter(
     (b) => !editMembers.some((m) => m.deviceId === b.deviceId && m.botId === b.botId),
   );
@@ -910,26 +911,18 @@ export function GroupSettings({
 
       <div className="scope-settings-scroll">
         <div className="scope-settings-container">
+          {/* ————— 1. 头部概览 ————— */}
           <section className="scope-settings-hero">
             <div className="scope-settings-hero-avatar">
               <ConversationGroupAvatar members={scope.scope.members} bots={bots} size={desktop ? 40 : 64} />
             </div>
             <div className="scope-settings-hero-text">
               <h1 className="scope-settings-hero-title">{displayTitle}</h1>
+              <p className="metadata" style={{ margin: '2px 0 0', fontVariantNumeric: 'tabular-nums' }}>
+                {memberCount} 位成员
+                {desktop && memberDevices.length > 0 ? ` · ${memberDevices.length} 台参与设备` : ''}
+              </p>
             </div>
-            {canManage || titleEditing ? (
-              <button
-                type="button"
-                className="secondary-button scope-title-edit-btn"
-                ref={titleEditButtonRef}
-                aria-expanded={titleEditing}
-                disabled={titleSaving || Boolean(titleFrozenAttempt)}
-                onClick={() => setTitleEditing(open => !open)}
-              >
-                <Pencil size={14} aria-hidden />
-                {titleEditing ? '收起编辑' : '修改群名'}
-              </button>
-            ) : null}
           </section>
 
           {!canManage ? (
@@ -952,9 +945,10 @@ export function GroupSettings({
 
           {syncStateError ? (
             <div className="error-banner" role="alert">
-              {syncStateError}
+              <span>{syncStateError}</span>
               <button
                 type="button"
+                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                 onClick={() => void fetchLatestFromAuthority()}
                 disabled={syncingState || !wOnline}
               >
@@ -963,69 +957,122 @@ export function GroupSettings({
             </div>
           ) : null}
 
-          <section className="scope-settings-section" aria-label="群聊名称" hidden={!titleEditing && !titleNotice && !titleError}>
-            <div className="scope-settings-card" hidden={!titleEditing}>
-              <div className="scope-title-input-row">
-                <input
-                  type="text"
-                  className="scope-title-input"
-                  ref={titleInputRef}
-                  value={titleInput}
-                  maxLength={120}
-                  placeholder={autoTitle || '输入群聊名称（留空则按成员自动拼接）'}
-                  aria-label="群聊名称"
-                  disabled={!canManage || titleSaving || Boolean(titleFrozenAttempt)}
-                  onChange={(e) => handleTitleInputChange(e.target.value)}
-                />
-                {canManage && titleInput.length > 0 && !titleSaving && !titleFrozenAttempt ? (
-                  <button
-                    type="button"
-                    className="icon-button scope-title-clear-btn"
-                    onClick={handleClearTitleInput}
-                    title="清空输入（保存后恢复自动群名）"
-                    aria-label="清空群聊名称输入"
+          {/* ————— 2. 群聊名称区块 ————— */}
+          <section className="scope-settings-section" aria-label="群聊名称">
+            <div className="scope-settings-section-head">
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
+                <span className="scope-settings-section-label">群聊名称</span>
+                {titleEditing && isTitleChanged ? (
+                  <span
+                    role="status"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '1px 8px',
+                      borderRadius: 'var(--radius-full)',
+                      fontSize: 'var(--text-xs)',
+                      fontWeight: 600,
+                      color: 'var(--warn)',
+                      background: 'var(--warn-soft)',
+                      border: '1px solid var(--warn-line)',
+                      whiteSpace: 'nowrap',
+                      flexShrink: 0,
+                    }}
                   >
-                    <X size={15} />
-                  </button>
+                    有未保存修改
+                  </span>
                 ) : null}
               </div>
+              {canManage || titleEditing ? (
+                <button
+                  type="button"
+                  className="secondary-button scope-title-edit-btn"
+                  ref={titleEditButtonRef}
+                  aria-expanded={titleEditing}
+                  disabled={titleSaving || Boolean(titleFrozenAttempt)}
+                  onClick={() => setTitleEditing(open => !open)}
+                >
+                  <Pencil size={14} aria-hidden="true" />
+                  {titleEditing ? '收起编辑' : '修改群名称'}
+                </button>
+              ) : null}
+            </div>
 
-              {canManage ? (
-                <div className="scope-title-actions-row">
-                  <span className="scope-title-hint">
-                    {trimmedTitleInput.length === 0
-                      ? savedTitle
-                        ? `保存空名称将恢复默认群名：${autoTitle}`
-                        : `留空时默认显示：${autoTitle}`
-                      : `${trimmedTitleInput.length} / 120 字符`}
+            <div className="scope-settings-card">
+              {!titleEditing ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '12px 16px' }}>
+                  <strong style={{ fontSize: '0.94rem', fontWeight: 600, color: 'var(--text)', overflowWrap: 'anywhere' }}>
+                    {savedTitle || autoTitle}
+                  </strong>
+                  <span className="metadata">
+                    {savedTitle ? '已使用自定义群名称' : '未设置自定义名称，默认按群成员自动命名'}
                   </span>
-                  <div className="scope-title-buttons">
-                    {titleDirtyRef.current && isTitleChanged && !titleFrozenAttempt ? (
+                </div>
+              ) : (
+                <>
+                  <div className="scope-title-input-row">
+                    <input
+                      type="text"
+                      className="scope-title-input"
+                      ref={titleInputRef}
+                      value={titleInput}
+                      maxLength={120}
+                      placeholder={autoTitle || '输入群聊名称（留空则按成员自动拼接）'}
+                      aria-label="群聊名称"
+                      disabled={!canManage || titleSaving || Boolean(titleFrozenAttempt)}
+                      onChange={(e) => handleTitleInputChange(e.target.value)}
+                    />
+                    {canManage && titleInput.length > 0 && !titleSaving && !titleFrozenAttempt ? (
                       <button
                         type="button"
-                        className="secondary-button scope-compact-btn"
-                        disabled={titleSaving}
-                        onClick={handleResetTitleInput}
+                        className="icon-button scope-title-clear-btn"
+                        onClick={handleClearTitleInput}
+                        title="清空输入（保存后恢复自动群名）"
+                        aria-label="清空群聊名称输入"
                       >
-                        重置
+                        <X size={15} />
                       </button>
                     ) : null}
-                    <button
-                      type="button"
-                      className="primary-button scope-compact-btn"
-                      disabled={!wOnline || titleSaving || !isTitleChanged || Boolean(titleFrozenAttempt)}
-                      onClick={() => void saveTitle()}
-                    >
-                      <Check size={14} />
-                      {titleSaving
-                        ? '保存中…'
-                        : trimmedTitleInput === '' && savedTitle !== ''
-                          ? '恢复默认名称'
-                          : '保存名称'}
-                    </button>
                   </div>
-                </div>
-              ) : null}
+
+                  {canManage ? (
+                    <div className="scope-title-actions-row">
+                      <span className="scope-title-hint" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        {trimmedTitleInput.length === 0
+                          ? savedTitle
+                            ? `保存空名称将恢复默认群名：${autoTitle}`
+                            : `留空时默认显示：${autoTitle}`
+                          : `${trimmedTitleInput.length} / 120 字符`}
+                      </span>
+                      <ActionBar align="end" className="scope-title-buttons" style={{ flexWrap: 'nowrap' }}>
+                        {titleDirtyRef.current && isTitleChanged && !titleFrozenAttempt ? (
+                          <button
+                            type="button"
+                            className="secondary-button scope-compact-btn"
+                            disabled={titleSaving}
+                            onClick={handleResetTitleInput}
+                          >
+                            放弃修改
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="primary-button scope-compact-btn"
+                          disabled={!wOnline || titleSaving || !isTitleChanged || Boolean(titleFrozenAttempt)}
+                          onClick={() => void saveTitle()}
+                        >
+                          <Check size={14} aria-hidden="true" />
+                          {titleSaving
+                            ? '保存中…'
+                            : trimmedTitleInput === '' && savedTitle !== ''
+                              ? '恢复默认群名'
+                              : '保存群名称'}
+                        </button>
+                      </ActionBar>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
 
             {titleNotice ? (
@@ -1041,6 +1088,7 @@ export function GroupSettings({
                   <span className="scope-inline-banner-actions">
                     <button
                       type="button"
+                      style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                       onClick={() => void reconcileTitleAttempt()}
                       disabled={titleSaving || syncingState || !wOnline}
                     >
@@ -1048,6 +1096,7 @@ export function GroupSettings({
                     </button>
                     <button
                       type="button"
+                      style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                       onClick={() => void retryFrozenTitleAttempt()}
                       disabled={titleSaving || !wOnline}
                     >
@@ -1059,20 +1108,20 @@ export function GroupSettings({
             ) : null}
           </section>
 
-          {/* ————— 群成员卡片：自然名称与设备信息，CAS 添加/移除（最少 2 位） ————— */}
+          {/* ————— 3. 群成员区块：自然名称与设备信息，CAS 添加/移除（最少 2 位） ————— */}
           <section className="scope-settings-section" aria-label="群成员">
             <div className="scope-settings-section-head">
-              <span className="scope-settings-section-label">
+              <span className="scope-settings-section-label" style={{ fontVariantNumeric: 'tabular-nums' }}>
                 {editMode ? `编辑群成员（已选 ${editMembers.length} 位）` : `群成员（${memberCount} 位）`}
               </span>
               {canManage && !editMode ? (
                 <button
                   type="button"
-                  className="secondary-button scope-member-edit-btn"
+                  className="secondary-button scope-compact-btn scope-member-edit-btn"
                   onClick={() => void enterEdit()}
                   disabled={enteringEdit}
                 >
-                  <RefreshCw size={13} className={enteringEdit ? 'scope-spin' : undefined} />
+                  <RefreshCw size={13} aria-hidden="true" className={enteringEdit ? 'scope-spin' : undefined} />
                   {enteringEdit ? '读取最新成员…' : '管理成员'}
                 </button>
               ) : null}
@@ -1081,8 +1130,13 @@ export function GroupSettings({
             {enterEditError ? (
               <div className="error-banner" role="alert">
                 <span>{enterEditError}</span>
-                <button type="button" onClick={() => void enterEdit()} disabled={enteringEdit}>
-                  重试
+                <button
+                  type="button"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                  onClick={() => void enterEdit()}
+                  disabled={enteringEdit}
+                >
+                  重试读取成员
                 </button>
               </div>
             ) : null}
@@ -1131,14 +1185,16 @@ export function GroupSettings({
 
                   <div className="scope-settings-candidates-block">
                     <span className="scope-settings-candidates-title">添加成员</span>
-                    {desktop && candidateChoices.length > 0 ? <input
-                      className="scope-member-search"
-                      type="search"
-                      placeholder="按智能体名称或设备搜索"
-                      aria-label="搜索可添加的成员"
-                      value={memberQuery}
-                      onChange={(e) => setMemberQuery(e.target.value)}
-                    /> : null}
+                    {desktop && candidateChoices.length > 0 ? (
+                      <input
+                        className="scope-member-search"
+                        type="search"
+                        placeholder="按智能体名称或设备搜索"
+                        aria-label="搜索可添加的成员"
+                        value={memberQuery}
+                        onChange={(e) => setMemberQuery(e.target.value)}
+                      />
+                    ) : null}
                     {matchingCandidates.length > 0 ? (
                       <div className="member-quick-row scope-settings-candidates-grid">
                         {matchingCandidates.map((b) => {
@@ -1161,7 +1217,7 @@ export function GroupSettings({
                                 <span className="member-chip-name">{displayRole}</span>
                                 {meta ? <span className="scope-candidate-chip-meta">{meta}</span> : null}
                               </span>
-                              <Plus size={14} className="scope-candidate-chip-plus" />
+                              <Plus size={14} aria-hidden="true" className="scope-candidate-chip-plus" />
                             </button>
                           );
                         })}
@@ -1184,6 +1240,7 @@ export function GroupSettings({
                         <span className="scope-inline-banner-actions">
                           <button
                             type="button"
+                            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                             onClick={() => void reconcileMembersAttempt()}
                             disabled={savingMembers || syncingState || !wOnline}
                           >
@@ -1191,6 +1248,7 @@ export function GroupSettings({
                           </button>
                           <button
                             type="button"
+                            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                             onClick={() => void retryFrozenMembersAttempt()}
                             disabled={savingMembers || !wOnline}
                           >
@@ -1201,6 +1259,7 @@ export function GroupSettings({
                         <span className="scope-inline-banner-actions">
                           <button
                             type="button"
+                            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                             onClick={() => void syncBaselineKeepMemberSelection()}
                             disabled={savingMembers || enteringEdit || syncingState || !wOnline}
                           >
@@ -1211,14 +1270,14 @@ export function GroupSettings({
                     </div>
                   ) : null}
 
-                  <div className="form-actions scope-settings-edit-actions">
+                  <ActionBar align="end" className="scope-settings-edit-actions" style={{ flexWrap: 'nowrap' }}>
                     <button
                       type="button"
                       className="secondary-button scope-compact-btn"
                       disabled={savingMembers}
                       onClick={cancelEdit}
                     >
-                      取消
+                      取消编辑
                     </button>
                     <button
                       type="button"
@@ -1228,123 +1287,151 @@ export function GroupSettings({
                     >
                       {savingMembers ? '保存中…' : '保存成员'}
                     </button>
-                  </div>
+                  </ActionBar>
                 </>
               ) : null}
             </div>
           </section>
 
+          {/* ————— 4. 可折叠危险操作区：解散并删除群聊 ————— */}
           {canManage ? (
-            <div className="scope-settings-card">
-              <button
-                type="button"
-                className="scope-settings-management-row"
-                aria-expanded={managementOpen}
-                disabled={preparingDelete || deleting || confirmDeleteOpen}
-                onClick={() => setManagementOpen(open => !open)}
-              >
-                <Settings size={17} aria-hidden />
-                <span>管理群聊</span>
-                <ChevronRight className="scope-settings-management-chevron" size={16} aria-hidden />
-              </button>
-            </div>
-          ) : null}
-
-          {canManage && managementOpen ? (
             <section className="scope-settings-section" aria-label="解散并删除群聊">
-              {!confirmDeleteOpen ? (
-                <>
-                  <div className="scope-settings-card">
-                    <button
-                      type="button"
-                      className="scope-danger-row-btn"
-                      disabled={preparingDelete || deleting || !wOnline}
-                      onClick={() => void requestDeleteRoom()}
-                    >
-                      <Trash2 size={18} />
-                      <span>{preparingDelete ? '正在读取群状态…' : '解散并删除群聊'}</span>
-                    </button>
-                  </div>
-                  {deleteError ? (
-                    <div className="error-banner" role="alert">
-                      <span>{deleteError}</span>
+              <div className="scope-settings-card">
+                <button
+                  type="button"
+                  className="scope-settings-management-row"
+                  aria-expanded={managementOpen}
+                  disabled={preparingDelete || deleting || confirmDeleteOpen}
+                  onClick={() => setManagementOpen(open => !open)}
+                >
+                  <Trash2 size={16} aria-hidden="true" style={{ color: 'var(--danger)' }} />
+                  <span style={{ color: 'var(--danger)', fontWeight: 600 }}>解散并删除群聊</span>
+                  <ChevronRight className="scope-settings-management-chevron" size={16} aria-hidden="true" />
+                </button>
+
+                {managementOpen && !confirmDeleteOpen ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      padding: '12px 16px 14px',
+                      borderTop: '1px solid var(--line-subtle)',
+                    }}
+                  >
+                    <p className="scope-delete-confirm-desc" style={{ color: 'var(--muted)' }}>
+                      解散群聊会同步清除所有参与设备上的该群聊与全部历史记录，且不可恢复。
+                    </p>
+                    {deleteError ? (
+                      <div className="error-banner" role="alert">
+                        <span>{deleteError}</span>
+                        <button
+                          type="button"
+                          style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                          onClick={() => void requestDeleteRoom()}
+                          disabled={preparingDelete || !wOnline}
+                        >
+                          重试读取群状态
+                        </button>
+                      </div>
+                    ) : null}
+                    <ActionBar align="end" style={{ flexWrap: 'nowrap' }}>
                       <button
                         type="button"
+                        className="secondary-button danger-outline scope-compact-btn"
+                        disabled={preparingDelete || deleting || !wOnline}
                         onClick={() => void requestDeleteRoom()}
-                        disabled={preparingDelete || !wOnline}
                       >
-                        重试
+                        <Trash2 size={14} aria-hidden="true" />
+                        {preparingDelete ? '正在读取群状态…' : '解散并删除群聊'}
                       </button>
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <div className="scope-delete-confirm-card" role="alertdialog" aria-label="确认解散并删除群聊">
-                  <div className="scope-delete-confirm-head">
-                    <Trash2 size={18} />
-                    <strong>确认解散并删除群聊「{displayTitle}」？</strong>
+                    </ActionBar>
                   </div>
-                  <p className="scope-delete-confirm-desc">
-                    {desktop
-                      ? `解散涉及 ${deviceSummary}。群聊历史和成员关系会被永久删除。`
-                      : '解散后将永久删除该群聊，所有设备上的群聊历史消息与成员关系都会一并删除，且不可恢复。'}
-                  </p>
-                  {deleteError ? (
-                    <div className="error-banner" role="alert">
-                      <span>{deleteError}</span>
-                      {deleteFrozenAttempt ? (
-                        <span className="scope-inline-banner-actions">
-                          <button
-                            type="button"
-                            onClick={() => void reconcileDeleteAttempt()}
-                            disabled={deleting || !wOnline}
-                          >
-                            查询群状态
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void confirmDeleteRoom()}
-                            disabled={deleting || !wOnline}
-                          >
-                            原请求重试
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="scope-inline-banner-actions">
-                          <button
-                            type="button"
-                            onClick={() => void requestDeleteRoom()}
-                            disabled={preparingDelete || deleting || !wOnline}
-                          >
-                            重新同步状态
-                          </button>
-                        </span>
-                      )}
+                ) : null}
+
+                {managementOpen && confirmDeleteOpen ? (
+                  <div
+                    role="alertdialog"
+                    aria-label="确认解散并删除群聊"
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      padding: '14px 16px 16px',
+                      borderTop: '1px solid color-mix(in srgb, var(--danger) 30%, var(--line))',
+                      background: 'var(--danger-soft)',
+                    }}
+                  >
+                    <div className="scope-delete-confirm-head">
+                      <Trash2 size={16} aria-hidden="true" />
+                      <strong>确认解散并删除群聊「{displayTitle}」？</strong>
                     </div>
-                  ) : null}
-                  <div className="confirm-delete-actions scope-delete-confirm-actions">
-                    <button
-                      type="button"
-                      className="secondary-button scope-compact-btn"
-                      disabled={deleting}
-                      onClick={cancelDeleteRoom}
+                    <p className="scope-delete-confirm-desc">
+                      {desktop
+                        ? `解散涉及 ${deviceSummary}。群聊历史和成员关系会被永久删除，且不可恢复。`
+                        : '解散后将永久删除该群聊，所有设备上的群聊历史消息与成员关系都会一并删除，且不可恢复。'}
+                    </p>
+                    {deleteError ? (
+                      <div className="error-banner" role="alert">
+                        <span>{deleteError}</span>
+                        {deleteFrozenAttempt ? (
+                          <span className="scope-inline-banner-actions">
+                            <button
+                              type="button"
+                              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                              onClick={() => void reconcileDeleteAttempt()}
+                              disabled={deleting || !wOnline}
+                            >
+                              查询群状态
+                            </button>
+                            <button
+                              type="button"
+                              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                              onClick={() => void confirmDeleteRoom()}
+                              disabled={deleting || !wOnline}
+                            >
+                              原请求重试
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="scope-inline-banner-actions">
+                            <button
+                              type="button"
+                              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                              onClick={() => void requestDeleteRoom()}
+                              disabled={preparingDelete || deleting || !wOnline}
+                            >
+                              重新同步状态
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    ) : null}
+                    <ActionBar
+                      align="end"
+                      className="confirm-delete-actions scope-delete-confirm-actions"
+                      style={{ flexWrap: 'nowrap' }}
                     >
-                      取消
-                    </button>
-                    <button
-                      type="button"
-                      className="primary-button danger-button scope-compact-btn"
-                      disabled={deleting || !wOnline}
-                      onClick={() => void confirmDeleteRoom()}
-                    >
-                      {deleting ? '正在解散并删除…' : '确认解散并删除'}
-                    </button>
+                      <button
+                        type="button"
+                        className="secondary-button scope-compact-btn"
+                        disabled={deleting}
+                        onClick={cancelDeleteRoom}
+                      >
+                        取消解散
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-button danger-button scope-compact-btn"
+                        disabled={deleting || !wOnline}
+                        onClick={() => void confirmDeleteRoom()}
+                      >
+                        {deleting ? '正在解散并删除…' : '确认解散并删除'}
+                      </button>
+                    </ActionBar>
                   </div>
-                </div>
-              )}
-              {!confirmDeleteOpen ? <p className="scope-settings-footnote">
-                解散群聊会同步清除所有参与设备上的该群聊与全部历史记录。
-              </p> : null}
+                ) : null}
+              </div>
             </section>
           ) : null}
         </div>

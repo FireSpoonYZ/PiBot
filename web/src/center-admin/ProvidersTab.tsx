@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
-import { Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { LabelStack } from '../layout';
 import { useText } from '../ui';
 import { readTabCache, writeTabCache } from './cache';
@@ -102,6 +103,19 @@ const EXTRA_MODEL_KEYS = [
   'samplingParamsByThinkingLevel',
 ] as const;
 
+type ProviderDetailView =
+  | { mode: 'list' }
+  | { mode: 'create' }
+  | { mode: 'detail'; providerId: string };
+
+type ProvidersModal =
+  | null
+  | { kind: 'default-picker' }
+  | { kind: 'discover'; mode: 'remote' | 'restore' }
+  | { kind: 'edit-model'; creating: boolean }
+  | { kind: 'confirm-delete-provider' }
+  | { kind: 'confirm-delete-model'; model: Model; returnToEdit: boolean };
+
 function deriveSlug(name: string, baseUrl: string, existingIds: Set<string>): string {
   const fromName = name
     .trim()
@@ -139,6 +153,18 @@ function providerSortRank(p: Provider): number {
   const idx = NATIVE_PROVIDER_ORDER.indexOf(p.id);
   if (idx >= 0) return idx;
   return p.native ? 100 : 200;
+}
+
+function countModelsByProvider(pickerRes: ModelPickerResponse): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of pickerRes.models) {
+    const slash = item.modelRef.indexOf('/');
+    if (slash > 0) {
+      const pid = item.modelRef.slice(0, slash);
+      counts[pid] = (counts[pid] ?? 0) + 1;
+    }
+  }
+  return counts;
 }
 
 interface ProvidersCacheData {
@@ -191,6 +217,8 @@ export function ProvidersTab({
   const tRef = useRef(t);
   tRef.current = t;
   const loadGenRef = useRef(0);
+  const detailLoadGenRef = useRef(0);
+  const flowGenRef = useRef(0);
 
   const { showNotice, clearNotice } = useCaTabNotices('providers', active);
 
@@ -210,53 +238,27 @@ export function ProvidersTab({
     [clearNotice, showNotice],
   );
 
-  const setDrawerError = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('drawer-error', msg, { tone: 'danger' });
-      else clearNotice('drawer-error');
-    },
-    [clearNotice, showNotice],
-  );
+  // Unified mutually exclusive modal state (max modal depth = 1)
+  const [activeModal, setActiveModal] = useState<ProvidersModal>(null);
+  const [confirmError, setConfirmError] = useState('');
 
-  const setDrawerNotice = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('drawer-notice', msg, { tone: 'ok' });
-      else clearNotice('drawer-notice');
-    },
-    [clearNotice, showNotice],
-  );
-
-  const setModelError = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('model-error', msg, { tone: 'danger' });
-      else clearNotice('model-error');
-    },
-    [clearNotice, showNotice],
-  );
-
-  const setDiscoverError = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('discover-error', msg, { tone: 'danger' });
-      else clearNotice('discover-error');
-    },
-    [clearNotice, showNotice],
-  );
-
-  // Global model selector modal
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // Global default picker & overview state
   const [pickerFilter, setPickerFilter] = useState<'all' | 'starred'>('all');
   const [pickerQuery, setPickerQuery] = useState('');
   const [pickerBusy, setPickerBusy] = useState(false);
+  const [pickerError, setPickerError] = useState('');
   const [syncBusy, setSyncBusy] = useState(false);
 
-  // Provider search
+  // Provider overview filter & row state
   const [providerQuery, setProviderQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState<'enabled' | 'all'>('enabled');
   const [togglingProviderId, setTogglingProviderId] = useState<string | null>(null);
 
-  // Provider unified drawer
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
+  // In-page Provider Detail view state
+  const [detailView, setDetailView] = useState<ProviderDetailView>({ mode: 'list' });
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [detailNotice, setDetailNotice] = useState('');
   const [edit, setEdit] = useState<Provider | null>(null);
   const [customIdEdited, setCustomIdEdited] = useState(false);
   const [customJson, setCustomJson] = useState('{}');
@@ -266,11 +268,10 @@ export function ProvidersTab({
   const [models, setModels] = useState<Model[]>([]);
   const [removedModels, setRemovedModels] = useState<Model[]>([]);
   const [modelQuery, setModelQuery] = useState('');
+  const [togglingModelId, setTogglingModelId] = useState<string | null>(null);
   const [savingProvider, setSavingProvider] = useState(false);
   const [validatingProvider, setValidatingProvider] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [confirmDeleteProviderOpen, setConfirmDeleteProviderOpen] = useState(false);
-  const [modelToDelete, setModelToDelete] = useState<{ model: Model; fromModal: boolean } | null>(null);
 
   // OAuth flow state
   const [flowId, setFlowId] = useState<string | null>(null);
@@ -279,22 +280,24 @@ export function ProvidersTab({
   const [authBusy, setAuthBusy] = useState(false);
   const flowTimerRef = useRef<number | null>(null);
 
-  // Model edit modal
-  const [modelModalOpen, setModelModalOpen] = useState(false);
-  const [modelCreating, setModelCreating] = useState(false);
+  // Single-layer Model edit modal state
   const [modelDraft, setModelDraft] = useState<Model | null>(null);
   const [modelExtraJson, setModelExtraJson] = useState('{}');
   const [modelSaving, setModelSaving] = useState(false);
+  const [modelFormError, setModelFormError] = useState('');
 
-  // Discover / Restore models modal
-  const [discoverOpen, setDiscoverOpen] = useState(false);
-  const [discoverMode, setDiscoverMode] = useState<'remote' | 'restore'>('remote');
+  // Single-layer Discover / Restore models modal state
   const [discovered, setDiscovered] = useState<Model[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [discoverQuery, setDiscoverQuery] = useState('');
   const [discoverDeviceId, setDiscoverDeviceId] = useState('');
   const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [discoverBusy, setDiscoverBusy] = useState(false);
+  const [discoverFetching, setDiscoverFetching] = useState(false);
+  const [discoverSaving, setDiscoverSaving] = useState(false);
+  const [discoverFormError, setDiscoverFormError] = useState('');
+
+  const creating = detailView.mode === 'create';
+  const inDetailView = detailView.mode !== 'list';
 
   const refreshPageData = useCallback(async () => {
     const [provList, pickerRes, cfgRes, batchAuth] = await Promise.all([
@@ -306,16 +309,7 @@ export function ProvidersTab({
     setProviders(provList);
     setPicker(pickerRes);
     setModelConfig(cfgRes);
-
-    const counts: Record<string, number> = {};
-    for (const item of pickerRes.models) {
-      const slash = item.modelRef.indexOf('/');
-      if (slash > 0) {
-        const pid = item.modelRef.slice(0, slash);
-        counts[pid] = (counts[pid] ?? 0) + 1;
-      }
-    }
-    setModelCountByProvider(counts);
+    setModelCountByProvider(countModelsByProvider(pickerRes));
 
     if (batchAuth && (Object.keys(batchAuth).length > 0 || !provList.some(p => p.native))) {
       setAuthByProvider(batchAuth);
@@ -340,7 +334,7 @@ export function ProvidersTab({
     } catch (err) {
       if (gen !== loadGenRef.current) return;
       const t = tRef.current;
-      const msg = errorMessage(err, t('加载模型配置失败', 'Failed to load model settings'));
+      const msg = errorMessage(err, t('加载模型配置失败，请重试', 'Failed to load model settings. Please try again.'));
       if (hasLoadedRef.current) {
         if (activeRef.current) {
           showNotice('load-error', msg, {
@@ -374,6 +368,8 @@ export function ProvidersTab({
   useEffect(() => {
     return () => {
       loadGenRef.current += 1;
+      detailLoadGenRef.current += 1;
+      flowGenRef.current += 1;
     };
   }, []);
 
@@ -389,6 +385,7 @@ export function ProvidersTab({
   }, [authByProvider, cacheKey, hasLoaded, modelConfig, modelCountByProvider, picker, providers]);
 
   const stopFlowPoll = useCallback(() => {
+    flowGenRef.current += 1;
     if (flowTimerRef.current !== null) {
       window.clearTimeout(flowTimerRef.current);
       flowTimerRef.current = null;
@@ -397,9 +394,33 @@ export function ProvidersTab({
 
   useEffect(() => () => stopFlowPoll(), [stopFlowPoll]);
 
+  const closeProviderDetail = useCallback(() => {
+    detailLoadGenRef.current += 1;
+    stopFlowPoll();
+    setFlowId(null);
+    setFlow(null);
+    setPromptInput('');
+    setDetailError('');
+    setDetailNotice('');
+    setDetailLoading(false);
+    setActiveModal(null);
+    setConfirmError('');
+    setDetailView({ mode: 'list' });
+    setEdit(null);
+  }, [stopFlowPoll]);
+
+  useEffect(() => {
+    if (!active || !inDetailView) return;
+    return registerOverlayBackHandler(() => {
+      closeProviderDetail();
+    });
+  }, [active, closeProviderDetail, inDetailView]);
+
   const loadProviderDetails = useCallback(
     async (provider: Provider) => {
-      setDrawerError('');
+      const gen = ++detailLoadGenRef.current;
+      setDetailLoading(true);
+      setDetailError('');
       try {
         const [allModels, status, cred] = await Promise.all([
           api.listModels(provider.id, true),
@@ -411,6 +432,7 @@ export function ProvidersTab({
               })
             : Promise.resolve(null),
         ]);
+        if (gen !== detailLoadGenRef.current) return;
         setModels(allModels.filter(m => !m.removed));
         setRemovedModels(allModels.filter(m => m.removed));
         setAuthStatus(status);
@@ -419,24 +441,36 @@ export function ProvidersTab({
         }
         setCredential(cred);
       } catch (err) {
-        setDrawerError(errorMessage(err, t('读取服务商详情失败', 'Failed to load provider details')));
+        if (gen !== detailLoadGenRef.current) return;
+        setDetailError(
+          errorMessage(
+            err,
+            t('读取服务商详情失败，请检查中心连接后重试', 'Failed to load provider details. Check center connectivity and retry.'),
+          ),
+        );
+      } finally {
+        if (gen === detailLoadGenRef.current) setDetailLoading(false);
       }
     },
     [api, t],
   );
 
   const openExistingProvider = (provider: Provider) => {
+    detailLoadGenRef.current += 1;
     stopFlowPoll();
     setFlowId(null);
     setFlow(null);
-    setCreating(false);
+    setPromptInput('');
+    setActiveModal(null);
+    setConfirmError('');
+    setDetailView({ mode: 'detail', providerId: provider.id });
     setEdit({ ...provider });
     setCustomIdEdited(true);
     setCustomJson(JSON.stringify(provider.custom ?? {}, null, 2));
     setKeyValue('');
     setModelQuery('');
-    setDrawerNotice('');
-    setDrawerError('');
+    setDetailNotice('');
+    setDetailError('');
     setModels([]);
     setRemovedModels([]);
     setCredential(null);
@@ -446,15 +480,19 @@ export function ProvidersTab({
         provider.baseUrl.trim() || (provider.custom && Object.keys(provider.custom).length > 0),
       ),
     );
-    setDrawerOpen(true);
     void loadProviderDetails(provider);
   };
 
   const openCreateProvider = () => {
+    detailLoadGenRef.current += 1;
     stopFlowPoll();
     setFlowId(null);
     setFlow(null);
-    setCreating(true);
+    setPromptInput('');
+    setActiveModal(null);
+    setConfirmError('');
+    setDetailLoading(false);
+    setDetailView({ mode: 'create' });
     setEdit({
       id: '',
       name: '',
@@ -470,14 +508,13 @@ export function ProvidersTab({
     setCustomJson('{}');
     setKeyValue('');
     setModelQuery('');
-    setDrawerNotice('');
-    setDrawerError('');
+    setDetailNotice('');
+    setDetailError('');
     setModels([]);
     setRemovedModels([]);
     setCredential(null);
     setAuthStatus(null);
     setAdvancedOpen(false);
-    setDrawerOpen(true);
   };
 
   const starredSet = useMemo(() => new Set(picker?.starredModels ?? []), [picker]);
@@ -495,12 +532,9 @@ export function ProvidersTab({
     const list = picker.models.filter(item => {
       if (pickerFilter === 'starred' && !starredSet.has(item.modelRef)) return false;
       if (!q) return true;
-      return (
-        item.name.toLowerCase().includes(q) ||
-        item.modelRef.toLowerCase().includes(q)
-      );
+      return item.name.toLowerCase().includes(q) || item.modelRef.toLowerCase().includes(q);
     });
-    // In 'all' mode, pin starred models at the top while keeping original relative order
+    // Pin starred models to the top while keeping original relative order
     return [...list].sort((a, b) => {
       const sa = starredSet.has(a.modelRef) ? 0 : 1;
       const sb = starredSet.has(b.modelRef) ? 0 : 1;
@@ -508,10 +542,15 @@ export function ProvidersTab({
     });
   }, [picker, pickerFilter, pickerQuery, starredSet]);
 
-  const saveGlobalSelection = async (patch: Partial<ModelSelection>, successMsg?: string) => {
-    if (!modelConfig) return;
+  const saveGlobalSelection = async (
+    patch: Partial<ModelSelection>,
+    successMsg?: string,
+    options?: { reportInlinePicker?: boolean },
+  ): Promise<boolean> => {
+    if (!modelConfig) return false;
     setPickerBusy(true);
     setError('');
+    if (options?.reportInlinePicker) setPickerError('');
     try {
       const next: ModelSelection = { ...modelConfig.global, ...patch };
       if (!next.modelRef) delete next.modelRef;
@@ -525,9 +564,17 @@ export function ProvidersTab({
       setModelConfig(updated);
       const refreshedPicker = await api.getModelPicker();
       setPicker(refreshedPicker);
+      setModelCountByProvider(countModelsByProvider(refreshedPicker));
       if (successMsg) setNotice(successMsg);
+      return true;
     } catch (err) {
-      setError(errorMessage(err, t('保存全局默认模型失败', 'Failed to save global default model')));
+      const msg = errorMessage(
+        err,
+        t('保存全局默认模型失败，请检查配置并重试', 'Failed to save global default model. Check settings and try again.'),
+      );
+      if (options?.reportInlinePicker) setPickerError(msg);
+      else setError(msg);
+      return false;
     } finally {
       setPickerBusy(false);
     }
@@ -538,7 +585,10 @@ export function ProvidersTab({
       const res = await api.setModelStar(modelRef, nextStar);
       setPicker(prev => (prev ? { ...prev, starredModels: res.starredModels } : prev));
     } catch (err) {
-      setError(errorMessage(err, t('收藏状态更新失败', 'Failed to update star status')));
+      const msg = errorMessage(err, t('更新收藏状态失败，请重试', 'Failed to update star status. Please retry.'));
+      if (activeModal?.kind === 'default-picker') setPickerError(msg);
+      else if (inDetailView) setDetailError(msg);
+      else setError(msg);
     }
   };
 
@@ -557,7 +607,7 @@ export function ProvidersTab({
         );
       }
     } catch (err) {
-      setError(errorMessage(err, t('同步模型目录失败', 'Failed to sync model catalog')));
+      setError(errorMessage(err, t('同步模型目录失败，请检查网络后重试', 'Failed to sync model catalog. Check connectivity and try again.')));
     } finally {
       setSyncBusy(false);
     }
@@ -566,6 +616,7 @@ export function ProvidersTab({
   const handleToggleProviderRow = async (provider: Provider, nextEnabled: boolean) => {
     setTogglingProviderId(provider.id);
     setError('');
+    if (inDetailView) setDetailError('');
     try {
       const updated = await api.putProvider(provider.id, {
         expectedRevision: provider.revision,
@@ -579,8 +630,11 @@ export function ProvidersTab({
       if (edit?.id === updated.id) setEdit(updated);
       const pickerRes = await api.getModelPicker();
       setPicker(pickerRes);
+      setModelCountByProvider(countModelsByProvider(pickerRes));
     } catch (err) {
-      setError(errorMessage(err, t('切换服务商状态失败', 'Failed to toggle provider status')));
+      const msg = errorMessage(err, t('切换服务商状态失败，请重试', 'Failed to update provider status. Please retry.'));
+      if (inDetailView) setDetailError(msg);
+      else setError(msg);
     } finally {
       setTogglingProviderId(null);
     }
@@ -588,29 +642,37 @@ export function ProvidersTab({
 
   const persistProvider = async (verifyAfterSave: boolean) => {
     if (!edit) return;
-    setDrawerError('');
-    setDrawerNotice('');
+    setDetailError('');
+    setDetailNotice('');
 
     let parsedCustom: JsonObject = {};
     try {
       const raw = JSON.parse(customJson || '{}') as unknown;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-        setDrawerError(t('高级协议覆盖必须是 JSON 对象', 'Advanced protocol overrides must be a JSON object'));
+        setDetailError(
+          t('高级协议覆盖必须是 JSON 对象（例如 {}），请修正后再保存。', 'Advanced protocol overrides must be a JSON object (e.g. {}). Fix the value and save again.'),
+        );
         return;
       }
       parsedCustom = raw as JsonObject;
     } catch (err) {
-      setDrawerError(err instanceof Error ? err.message : t('高级协议 JSON 解析失败', 'Failed to parse advanced protocol JSON'));
+      const reason = err instanceof Error ? err.message : t('JSON 语法无效', 'Invalid JSON syntax');
+      setDetailError(
+        t(`高级协议 JSON 解析失败（${reason}），请修正格式或恢复为 {}。`, `Invalid advanced protocol JSON (${reason}). Fix the syntax or reset to {}.`),
+      );
       return;
     }
 
     if (!edit.native && !edit.baseUrl.trim() && typeof parsedCustom.baseUrl !== 'string') {
-      setDrawerError(t('请填写 API Base URL（例如 https://api.example.com/v1）', 'Please enter an API Base URL (e.g. https://api.example.com/v1)'));
+      setDetailError(
+        t('请填写 API Base URL（例如 https://api.example.com/v1），再点击保存。', 'Enter an API Base URL (e.g. https://api.example.com/v1), then save again.'),
+      );
       return;
     }
 
     const existingIds = new Set(providers.map(p => p.id));
-    const finalId = creating
+    const wasCreating = creating;
+    const finalId = wasCreating
       ? customIdEdited && edit.id.trim()
         ? edit.id.trim()
         : deriveSlug(edit.name, edit.baseUrl, existingIds)
@@ -631,18 +693,21 @@ export function ProvidersTab({
       api: edit.api.trim() || 'openai-completions',
       credentialRef,
       configured: true,
-      enabled: creating || Boolean(trimmedKey) ? true : edit.enabled,
+      enabled: wasCreating || Boolean(trimmedKey) ? true : edit.enabled,
       custom: parsedCustom,
     };
 
     setSavingProvider(true);
     try {
-      const saved = creating
+      const saved = wasCreating
         ? await api.createProvider(payload)
         : await api.putProvider(payload.id, {
             expectedRevision: edit.revision,
             value: payload,
           });
+
+      setDetailView({ mode: 'detail', providerId: saved.id });
+      setEdit(saved);
 
       if (trimmedKey && saved.credentialRef) {
         const curCred =
@@ -660,20 +725,22 @@ export function ProvidersTab({
         setKeyValue('');
       }
 
-      setCreating(false);
-      setEdit(saved);
-
       let verifyMsg = '';
+      let verifyFailed = false;
       if (verifyAfterSave) {
         setValidatingProvider(true);
         try {
           const check = await api.validateProvider(saved.id, {});
-          verifyMsg = check.ok
-            ? t(`连接验证通过：${check.message}`, `Connection verified: ${check.message}`)
-            : t(`已保存，但验证未通过：${check.message}`, `Saved, but verification failed: ${check.message}`);
+          if (check.ok) {
+            verifyMsg = t(`连接验证通过：${check.message}`, `Connection verified: ${check.message}`);
+          } else {
+            verifyFailed = true;
+            verifyMsg = t(`配置已保存，但连接验证未通过：${check.message}。请检查密钥或接口地址后重试。`, `Settings saved, but verification failed: ${check.message}. Check the key or API URL and retry.`);
+          }
         } catch (vErr) {
-          const errMsg = errorMessage(vErr, t('操作失败', 'Operation failed'));
-          verifyMsg = t(`已保存，验证失败：${errMsg}`, `Saved, verification failed: ${errMsg}`);
+          verifyFailed = true;
+          const errMsg = errorMessage(vErr, t('请求未响应', 'Request failed'));
+          verifyMsg = t(`配置已保存，但连接验证失败：${errMsg}。请检查网络或配置后重试。`, `Settings saved, but verification failed: ${errMsg}. Check connectivity or settings and retry.`);
         } finally {
           setValidatingProvider(false);
         }
@@ -681,9 +748,20 @@ export function ProvidersTab({
 
       await refreshPageData();
       await loadProviderDetails(saved);
-      setDrawerNotice(verifyMsg || (creating ? t('服务商已创建并启用', 'Provider created and enabled') : t('配置已保存', 'Settings saved')));
+      if (verifyFailed) {
+        setDetailError(verifyMsg);
+      } else {
+        setDetailNotice(
+          verifyMsg || (wasCreating ? t('服务商已创建并启用', 'Provider created and enabled') : t('服务商配置已保存', 'Provider settings saved')),
+        );
+      }
     } catch (err) {
-      setDrawerError(errorMessage(err, t('保存服务商失败', 'Failed to save provider')));
+      setDetailError(
+        errorMessage(
+          err,
+          t('保存服务商失败，请检查输入内容与中心连接后重试', 'Failed to save provider. Check the fields and center connection, then try again.'),
+        ),
+      );
     } finally {
       setSavingProvider(false);
     }
@@ -692,14 +770,16 @@ export function ProvidersTab({
   const handleValidateOnly = async () => {
     if (!edit || creating) return;
     setValidatingProvider(true);
-    setDrawerError('');
-    setDrawerNotice('');
+    setDetailError('');
+    setDetailNotice('');
     try {
       const res = await api.validateProvider(edit.id, keyValue.trim() ? { apiKey: keyValue.trim() } : {});
-      if (res.ok) setDrawerNotice(t(`连接正常：${res.message}`, `Connection OK: ${res.message}`));
-      else setDrawerError(t(`连接验证失败：${res.message}`, `Connection check failed: ${res.message}`));
+      if (res.ok) setDetailNotice(t(`连接正常：${res.message}`, `Connection OK: ${res.message}`));
+      else setDetailError(t(`连接验证失败：${res.message}。请核对密钥或接口地址后重试。`, `Connection check failed: ${res.message}. Verify the key or API URL and retry.`));
     } catch (err) {
-      setDrawerError(errorMessage(err, t('验证连接失败', 'Failed to verify connection')));
+      setDetailError(
+        errorMessage(err, t('验证连接失败，请检查中心网络后重试', 'Failed to verify connection. Check center connectivity and try again.')),
+      );
     } finally {
       setValidatingProvider(false);
     }
@@ -708,43 +788,50 @@ export function ProvidersTab({
   const handleDeleteProvider = async () => {
     if (!edit || creating) return;
     setSavingProvider(true);
-    setDrawerError('');
+    setConfirmError('');
     try {
+      const deletedName = edit.name || edit.id;
+      const wasNative = edit.native;
       await api.deleteProvider(edit.id);
-      setConfirmDeleteProviderOpen(false);
-      setDrawerOpen(false);
-      setEdit(null);
+      closeProviderDetail();
       await refreshPageData();
-      setNotice(edit.native ? t(`已重置 ${edit.name}`, `Reset ${edit.name}`) : t(`已删除 ${edit.name}`, `Deleted ${edit.name}`));
+      setNotice(wasNative ? t(`已重置 ${deletedName}`, `Reset ${deletedName}`) : t(`已删除 ${deletedName}`, `Deleted ${deletedName}`));
     } catch (err) {
-      setConfirmDeleteProviderOpen(false);
-      setDrawerError(errorMessage(err, t('删除服务商失败', 'Failed to delete provider')));
+      setConfirmError(
+        errorMessage(err, t('删除服务商失败，请重试', 'Failed to delete provider. Please try again.')),
+      );
     } finally {
       setSavingProvider(false);
     }
   };
 
-  // OAuth Login flow polling
+  // OAuth login flow polling
   const pollLoginFlow = useCallback(
     (providerId: string, nextFlowId: string) => {
       stopFlowPoll();
+      const pollGen = flowGenRef.current;
       const tick = async () => {
         try {
           const state = await api.providerLoginStatus(providerId, nextFlowId);
+          if (pollGen !== flowGenRef.current) return;
           setFlow(state);
           if (state.status === 'pending') {
             flowTimerRef.current = window.setTimeout(() => void tick(), 1200);
           } else if (state.status === 'complete') {
-            setDrawerNotice(t('OAuth 授权已完成', 'OAuth authorization completed'));
+            setDetailNotice(t('OAuth 授权已完成', 'OAuth authorization completed'));
             const updatedProvider = await api.getProvider(providerId);
+            if (pollGen !== flowGenRef.current) return;
             setEdit(updatedProvider);
             await refreshPageData();
             await loadProviderDetails(updatedProvider);
           } else if (state.error) {
-            setDrawerError(state.error);
+            setDetailError(state.error);
           }
         } catch (err) {
-          setDrawerError(errorMessage(err, t('获取授权进度失败', 'Failed to check authorization status')));
+          if (pollGen !== flowGenRef.current) return;
+          setDetailError(
+            errorMessage(err, t('获取授权进度失败，请重新发起 OAuth 登录', 'Failed to check authorization progress. Restart OAuth sign-in to retry.')),
+          );
         }
       };
       void tick();
@@ -755,15 +842,15 @@ export function ProvidersTab({
   const handleStartOAuth = async () => {
     if (!edit) return;
     setAuthBusy(true);
-    setDrawerError('');
-    setDrawerNotice('');
+    setDetailError('');
+    setDetailNotice('');
     try {
       const { flowId: nextId } = await api.providerLogin(edit.id);
       setFlowId(nextId);
       setFlow({ status: 'pending', events: [], prompt: null, error: null });
       pollLoginFlow(edit.id, nextId);
     } catch (err) {
-      setDrawerError(errorMessage(err, t('启动 OAuth 登录失败', 'Failed to start OAuth login')));
+      setDetailError(errorMessage(err, t('启动 OAuth 登录失败，请重试', 'Failed to start OAuth login. Please try again.')));
     } finally {
       setAuthBusy(false);
     }
@@ -772,13 +859,13 @@ export function ProvidersTab({
   const handleSubmitPrompt = async (answer: string) => {
     if (!edit || !flowId || !answer.trim()) return;
     setAuthBusy(true);
-    setDrawerError('');
+    setDetailError('');
     try {
       await api.providerLoginAnswer(edit.id, flowId, answer.trim());
       setPromptInput('');
       pollLoginFlow(edit.id, flowId);
     } catch (err) {
-      setDrawerError(errorMessage(err, t('提交授权输入失败', 'Failed to submit authorization input')));
+      setDetailError(errorMessage(err, t('提交授权码失败，请核对内容后重试', 'Failed to submit authorization code. Verify the input and retry.')));
     } finally {
       setAuthBusy(false);
     }
@@ -799,29 +886,30 @@ export function ProvidersTab({
   const handleOAuthLogout = async () => {
     if (!edit) return;
     setAuthBusy(true);
-    setDrawerError('');
-    setDrawerNotice('');
+    setDetailError('');
+    setDetailNotice('');
     try {
       const next = await api.providerLogout(edit.id);
       setAuthStatus(next);
       setAuthByProvider(prev => ({ ...prev, [edit.id]: next }));
       if (next.method === 'oauth') {
-        setDrawerError(t('退出 OAuth 授权未生效，请重试', 'OAuth sign-out did not take effect, please try again'));
+        setDetailError(t('退出 OAuth 授权未生效，请重试', 'OAuth sign-out did not take effect. Please try again.'));
       } else {
-        setDrawerNotice(t('已退出 OAuth 授权', 'Signed out of OAuth'));
+        setDetailNotice(t('已退出 OAuth 授权', 'Signed out of OAuth'));
         void refreshPageData().catch(() => {});
       }
     } catch (err) {
-      setDrawerError(errorMessage(err, t('退出授权失败', 'Failed to sign out')));
+      setDetailError(errorMessage(err, t('退出授权失败，请重试', 'Failed to sign out. Please try again.')));
     } finally {
       setAuthBusy(false);
     }
   };
 
-  // Single Model Management
+  // Single model management
   const handleToggleModelEnabled = async (model: Model, nextEnabled: boolean) => {
     if (!edit) return;
-    setDrawerError('');
+    setTogglingModelId(model.id);
+    setDetailError('');
     try {
       const updated = await api.putModel(edit.id, model.id, {
         expectedRevision: model.revision,
@@ -830,13 +918,15 @@ export function ProvidersTab({
       setModels(prev => prev.map(m => (m.id === updated.id ? updated : m)));
       const pickerRes = await api.getModelPicker();
       setPicker(pickerRes);
+      setModelCountByProvider(countModelsByProvider(pickerRes));
     } catch (err) {
-      setDrawerError(errorMessage(err, t('切换模型状态失败', 'Failed to toggle model status')));
+      setDetailError(errorMessage(err, t('切换模型状态失败，请重试', 'Failed to update model status. Please retry.')));
+    } finally {
+      setTogglingModelId(null);
     }
   };
 
   const openAddModelModal = () => {
-    setModelCreating(true);
     setModelDraft({
       id: '',
       name: '',
@@ -848,25 +938,27 @@ export function ProvidersTab({
       revision: 0,
     });
     setModelExtraJson('{}');
-    setModelError('');
-    setModelModalOpen(true);
+    setModelFormError('');
+    setConfirmError('');
+    setActiveModal({ kind: 'edit-model', creating: true });
   };
 
   const openEditModelModal = (model: Model) => {
     const { base, extraJson } = splitModelExtra(model);
-    setModelCreating(false);
     setModelDraft({ ...base });
     setModelExtraJson(extraJson);
-    setModelError('');
-    setModelModalOpen(true);
+    setModelFormError('');
+    setConfirmError('');
+    setActiveModal({ kind: 'edit-model', creating: false });
   };
 
   const handleSaveModel = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!edit || !modelDraft) return;
+    if (!edit || !modelDraft || activeModal?.kind !== 'edit-model') return;
+    const isCreatingModel = activeModal.creating;
     const trimmedId = modelDraft.id.trim();
     if (!trimmedId) {
-      setModelError(t('请填写模型 ID', 'Please enter a model ID'));
+      setModelFormError(t('请填写模型 ID（例如 gpt-4.1），再点击保存。', 'Enter a model ID (e.g. gpt-4.1), then save again.'));
       return;
     }
 
@@ -874,12 +966,13 @@ export function ProvidersTab({
     try {
       const parsed = JSON.parse(modelExtraJson || '{}') as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setModelError(t('高级协议覆盖必须是 JSON 对象', 'Advanced protocol overrides must be a JSON object'));
+        setModelFormError(t('高级协议覆盖必须是 JSON 对象（例如 {}），请修正后再保存。', 'Advanced protocol overrides must be a JSON object (e.g. {}). Fix the value and save again.'));
         return;
       }
       extra = parsed as Record<string, unknown>;
     } catch (err) {
-      setModelError(err instanceof Error ? err.message : t('高级覆盖 JSON 解析失败', 'Failed to parse advanced overrides JSON'));
+      const reason = err instanceof Error ? err.message : t('JSON 语法无效', 'Invalid JSON syntax');
+      setModelFormError(t(`高级覆盖 JSON 解析失败（${reason}），请修正语法或恢复为 {}。`, `Invalid advanced overrides JSON (${reason}). Fix the syntax or reset to {}.`));
       return;
     }
 
@@ -900,9 +993,9 @@ export function ProvidersTab({
     }
 
     setModelSaving(true);
-    setModelError('');
+    setModelFormError('');
     try {
-      if (modelCreating) {
+      if (isCreatingModel) {
         await api.createModel(edit.id, payload);
       } else {
         await api.putModel(edit.id, payload.id, {
@@ -910,47 +1003,46 @@ export function ProvidersTab({
           value: payload,
         });
       }
-      setModelModalOpen(false);
+      setActiveModal(null);
       await loadProviderDetails(edit);
       await refreshPageData();
-      setDrawerNotice(
-        modelCreating
+      setDetailNotice(
+        isCreatingModel
           ? t(`已添加模型 ${payload.name}`, `Added model ${payload.name}`)
           : t(`已更新模型 ${payload.name}`, `Updated model ${payload.name}`),
       );
     } catch (err) {
-      setModelError(errorMessage(err, t('保存模型失败', 'Failed to save model')));
+      setModelFormError(
+        errorMessage(err, t('保存模型失败，请检查模型参数后重试', 'Failed to save model. Check the model fields and try again.')),
+      );
     } finally {
       setModelSaving(false);
     }
   };
 
-  const handleDeleteModel = async (model: Model, fromModal = false) => {
+  const handleDeleteModel = async (model: Model) => {
     if (!edit) return;
-    setDrawerError('');
-    if (fromModal) setModelError('');
-    if (fromModal) setModelSaving(true);
+    setModelSaving(true);
+    setConfirmError('');
     try {
       await api.deleteModel(edit.id, model.id);
-      setModelToDelete(null);
-      if (fromModal) setModelModalOpen(false);
+      setActiveModal(null);
       await loadProviderDetails(edit);
       await refreshPageData();
-      setDrawerNotice(t(`已移除模型 ${model.name || model.id}`, `Removed model ${model.name || model.id}`));
+      setDetailNotice(t(`已移除模型 ${model.name || model.id}`, `Removed model ${model.name || model.id}`));
     } catch (err) {
-      setModelToDelete(null);
-      const msg = errorMessage(err, t('移除模型失败', 'Failed to remove model'));
-      if (fromModal) setModelError(msg);
-      else setDrawerError(msg);
+      setConfirmError(
+        errorMessage(err, t('移除模型失败，请稍后重试', 'Failed to remove model. Please try again.')),
+      );
     } finally {
-      if (fromModal) setModelSaving(false);
+      setModelSaving(false);
     }
   };
 
-  // Discover / Restore
+  // Discover / Restore models
   const runDiscoverFetch = async (provider: Provider, deviceId: string) => {
-    setDiscoverBusy(true);
-    setDiscoverError('');
+    setDiscoverFetching(true);
+    setDiscoverFormError('');
     try {
       const res = await api.discoverModels(provider.id, {
         ...(deviceId ? { deviceId } : {}),
@@ -961,39 +1053,43 @@ export function ProvidersTab({
       setDiscovered(candidates);
       setSelectedIds(new Set(candidates.map(m => m.id)));
     } catch (err) {
-      setDiscoverError(errorMessage(err, t('从接口拉取模型列表失败', 'Failed to fetch models from API')));
+      setDiscoverFormError(
+        errorMessage(
+          err,
+          t('从接口拉取模型列表失败，请确认 API 密钥与接口地址有效后重试', 'Failed to fetch models from API. Verify the API key and URL, then try again.'),
+        ),
+      );
     } finally {
-      setDiscoverBusy(false);
+      setDiscoverFetching(false);
     }
   };
 
   const openDiscoverModal = () => {
     if (!edit) return;
-    setDiscoverMode('remote');
     setDiscovered([]);
     setSelectedIds(new Set());
     setDiscoverQuery('');
     setDiscoverDeviceId('');
-    setDiscoverError('');
-    setDiscoverOpen(true);
+    setDiscoverFormError('');
+    setActiveModal({ kind: 'discover', mode: 'remote' });
     void api.listDevices().then(setDevices).catch(() => {});
     void runDiscoverFetch(edit, '');
   };
 
   const openRestoreModal = () => {
-    setDiscoverMode('restore');
     const candidates = removedModels.map(m => ({ ...m, removed: false, enabled: true }));
     setDiscovered(candidates);
     setSelectedIds(new Set(candidates.map(m => m.id)));
     setDiscoverQuery('');
-    setDiscoverError('');
-    setDiscoverOpen(true);
+    setDiscoverFormError('');
+    setActiveModal({ kind: 'discover', mode: 'restore' });
   };
 
   const confirmBatchModels = async () => {
-    if (!edit || selectedIds.size === 0) return;
-    setDiscoverBusy(true);
-    setDiscoverError('');
+    if (!edit || selectedIds.size === 0 || activeModal?.kind !== 'discover') return;
+    const mode = activeModal.mode;
+    setDiscoverSaving(true);
+    setDiscoverFormError('');
     try {
       const chosen = discovered
         .filter(m => selectedIds.has(m.id))
@@ -1006,26 +1102,31 @@ export function ProvidersTab({
         });
         setEdit(updated);
       }
-      setDiscoverOpen(false);
+      setActiveModal(null);
       await loadProviderDetails(edit);
       await refreshPageData();
-      setDrawerNotice(
-        discoverMode === 'restore'
+      setDetailNotice(
+        mode === 'restore'
           ? t(`已恢复 ${chosen.length} 个模型`, `Restored ${chosen.length} models`)
           : t(`已添加 ${chosen.length} 个模型`, `Added ${chosen.length} models`),
       );
     } catch (err) {
-      setDiscoverError(errorMessage(err, t('批量保存模型失败', 'Failed to save models')));
+      setDiscoverFormError(
+        errorMessage(err, t('批量保存模型失败，请检查所选模型后重试', 'Failed to save selected models. Please try again.')),
+      );
     } finally {
-      setDiscoverBusy(false);
+      setDiscoverSaving(false);
     }
   };
 
   const sortedProviders = useMemo(() => {
     const q = providerQuery.trim().toLowerCase();
     return providers
-      .filter(p => (providerFilter === 'all' || p.enabled) &&
-        (!q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)))
+      .filter(
+        p =>
+          (providerFilter === 'all' || p.enabled) &&
+          (!q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)),
+      )
       .sort((a, b) => {
         const ra = providerSortRank(a);
         const rb = providerSortRank(b);
@@ -1034,7 +1135,7 @@ export function ProvidersTab({
       });
   }, [providerFilter, providerQuery, providers]);
 
-  const filteredDrawerModels = useMemo(() => {
+  const filteredDetailModels = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();
     if (!q) return models;
     return models.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q));
@@ -1047,27 +1148,40 @@ export function ProvidersTab({
   }, [discoverQuery, discovered]);
 
   const currentThinking: ThinkingChoice = (modelConfig?.global.thinkingLevel as ThinkingChoice | undefined) ?? '';
+  const currentThinkingLabel =
+    thinkingOptions.find(opt => opt.value === currentThinking)?.label ?? t('默认', 'Default');
   const currentCodeMode: CodeModeChoice = modelConfig?.global.codemodeOnly
     ? 'only'
     : modelConfig?.global.codemode
       ? 'on'
       : 'off';
 
+  const isProviderReady = (p: Provider): boolean => {
+    if (!p.enabled) return false;
+    const auth = authByProvider[p.id];
+    if (auth?.method === 'oauth') return true;
+    if (p.id === ANTIGRAVITY_PROVIDER_ID) return false;
+    return Boolean(p.configured || p.credentialRef);
+  };
+
   const providerStatusSummary = (p: Provider): string => {
     const count = modelCountByProvider[p.id] ?? 0;
     const auth = authByProvider[p.id];
     const parts: string[] = [];
     if (auth?.method === 'oauth') {
-      parts.push(t('OAuth 已授权', 'OAuth authorized'));
+      parts.push(t('OAuth 已授权', 'OAuth connected'));
     } else if (p.id === ANTIGRAVITY_PROVIDER_ID && auth && auth.method === 'none') {
       parts.push(t('未授权', 'Not authorized'));
     } else if (p.configured || p.credentialRef) {
-      parts.push(t('已配置', 'Configured'));
+      parts.push(t('已配置凭据', 'Credentials set'));
     } else {
       parts.push(t('未配置凭据', 'No credentials'));
     }
-    if (count > 0) parts.push(t(`${count} 个模型可用`, `${count} models available`));
-    else if (!p.enabled) parts.push(t('已停用', 'Disabled'));
+    if (p.enabled) {
+      parts.push(t(`${count} 个已启用模型`, `${count} enabled ${count === 1 ? 'model' : 'models'}`));
+    } else {
+      parts.push(t('已停用', 'Disabled'));
+    }
     return parts.join(' · ');
   };
 
@@ -1100,28 +1214,617 @@ export function ProvidersTab({
     );
   }
 
-  return (
-    <div>
-      <CaRefreshBar active={refreshing} />
+  const renderProviderDetail = () => {
+    if (!edit) return null;
 
-      {/* 1. Top single-row global default model card */}
+    const supportsOAuth = Boolean(
+      !creating && (authStatus?.oauth || edit.id === ANTIGRAVITY_PROVIDER_ID),
+    );
+    const supportsApiKey =
+      edit.id === ANTIGRAVITY_PROVIDER_ID
+        ? false
+        : !authStatus || authStatus.apiKey !== false;
+    const collapseForOAuth = Boolean(!creating && edit.native && supportsOAuth);
+    const hasCustomOverride = Boolean(
+      edit.baseUrl.trim() || (customJson.trim() && customJson.trim() !== '{}'),
+    );
+    const enabledCount = models.filter(m => m.enabled).length;
+    const providerReady = !creating && isProviderReady(edit);
+
+    const baseUrlField = (
+      <div className="ca-field">
+        <label className="ca-field-label">{t('API 地址 (Base URL)', 'API URL (Base URL)')}</label>
+        <input
+          type="url"
+          className="ca-input"
+          disabled={savingProvider}
+          placeholder={edit.native ? t('留空保持内置默认地址', 'Leave empty for built-in default URL') : 'https://api.example.com/v1'}
+          value={edit.baseUrl}
+          onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
+        />
+      </div>
+    );
+
+    const apiKeyField = supportsApiKey ? (
+      <div className="ca-field">
+        <div className="ca-field-head">
+          <label className="ca-field-label">API Key</label>
+          <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
+            {credential?.configured ? t('已保存密钥（不回显）', 'Key saved (hidden)') : t('未配置密钥', 'No key set')}
+          </span>
+        </div>
+        <input
+          type="password"
+          className="ca-input"
+          autoComplete="new-password"
+          disabled={savingProvider}
+          placeholder={credential?.configured ? t('输入新密钥以替换现有密钥', 'Enter a new key to replace the existing one') : t('粘贴 API Key', 'Paste API Key')}
+          value={keyValue}
+          onChange={e => setKeyValue(e.target.value)}
+        />
+      </div>
+    ) : null;
+
+    const customJsonField = (
+      <div className="ca-field">
+        <label className="ca-field-label">{t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}</label>
+        <textarea
+          rows={4}
+          className="ca-textarea ca-mono"
+          disabled={savingProvider}
+          value={customJson}
+          onChange={e => setCustomJson(e.target.value)}
+        />
+        <p className="ca-field-help">
+          {t('对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {} 即可。', 'Maps to Pi models.json provider-level extra fields (e.g. headers, compat); leave as {} if unused.')}
+        </p>
+      </div>
+    );
+
+    const saveActionLabel = creating ? t('创建并验证', 'Create & verify') : t('保存并验证', 'Save & verify');
+    const savingActionLabel = creating ? t('创建中…', 'Creating…') : t('保存中…', 'Saving…');
+
+    const providerActionRow = (
+      <div className="ca-inline-between ca-provider-form-actions">
+        <div>
+          {!creating && (
+            <button
+              type="button"
+              className="ca-btn ca-btn-danger ca-btn-sm"
+              disabled={savingProvider || validatingProvider}
+              onClick={() => {
+                setConfirmError('');
+                setActiveModal({ kind: 'confirm-delete-provider' });
+              }}
+            >
+              <Trash2 size={13} aria-hidden="true" />
+              <span>{edit.native ? t('重置配置', 'Reset settings') : t('删除服务商', 'Delete provider')}</span>
+            </button>
+          )}
+        </div>
+        <div className="ca-inline-row">
+          {!creating && (
+            <button
+              type="button"
+              className="ca-btn ca-btn-sm"
+              disabled={savingProvider || validatingProvider}
+              onClick={() => void handleValidateOnly()}
+            >
+              <LabelStack
+                active={validatingProvider ? t('验证中…', 'Verifying…') : t('验证连接', 'Verify connection')}
+                labels={[t('验证连接', 'Verify connection'), t('验证中…', 'Verifying…')]}
+              />
+            </button>
+          )}
+          <button
+            type="button"
+            className="ca-btn ca-btn-primary ca-btn-sm"
+            disabled={savingProvider || validatingProvider}
+            onClick={() => void persistProvider(true)}
+          >
+            <LabelStack
+              active={savingProvider ? savingActionLabel : saveActionLabel}
+              labels={[saveActionLabel, savingActionLabel]}
+            />
+          </button>
+        </div>
+      </div>
+    );
+
+    const connectionSection = collapseForOAuth ? (
+      <details
+        key={edit.id}
+        className="ca-section ca-advanced-collapse"
+        open={advancedOpen}
+        onToggle={e => setAdvancedOpen(e.currentTarget.open)}
+      >
+        <summary className="ca-advanced-summary">{t('高级连接与协议覆盖', 'Advanced connection & protocol overrides')}</summary>
+        <div className="ca-advanced-body ca-form-stack">
+          {baseUrlField}
+          {apiKeyField}
+          {customJsonField}
+          {providerActionRow}
+        </div>
+      </details>
+    ) : (
+      <section className="ca-section">
+        <div className="ca-section-head">
+          <h3 className="ca-section-title">
+            {creating ? t('服务商配置', 'Provider configuration') : t('连接与凭据', 'Connection & credentials')}
+          </h3>
+        </div>
+        <div className="ca-section-body ca-form-stack">
+          {!edit.native && (
+            <>
+              <div className="ca-grid-2">
+                <div className="ca-field">
+                  <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
+                  <input
+                    type="text"
+                    className="ca-input"
+                    disabled={savingProvider}
+                    placeholder={t('如 SiliconFlow / 本地 Ollama', 'e.g. SiliconFlow / Local Ollama')}
+                    value={edit.name}
+                    onChange={e => setEdit({ ...edit, name: e.target.value })}
+                  />
+                </div>
+                <div className="ca-field">
+                  <label className="ca-field-label">{t('API 协议', 'API protocol')}</label>
+                  <select
+                    className="ca-select"
+                    disabled={savingProvider}
+                    value={edit.api}
+                    onChange={e => setEdit({ ...edit, api: e.target.value })}
+                  >
+                    {API_PROTOCOLS.map(p => (
+                      <option key={p.value} value={p.value}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              {creating && (
+                <div className="ca-field">
+                  <label className="ca-field-label">{t('服务商 ID（可选）', 'Provider ID (optional)')}</label>
+                  <input
+                    type="text"
+                    className="ca-input ca-mono"
+                    disabled={savingProvider}
+                    placeholder={t('留空则按名称自动生成', 'Leave blank to generate from name')}
+                    value={edit.id}
+                    onChange={e => {
+                      setCustomIdEdited(true);
+                      setEdit({ ...edit, id: e.target.value });
+                    }}
+                  />
+                </div>
+              )}
+              {baseUrlField}
+            </>
+          )}
+
+          {apiKeyField}
+
+          {edit.native ? (
+            <CaDisclosure
+              key={`${edit.id}-adv`}
+              title={t('自定义接口地址与协议覆盖', 'Custom API URL & protocol overrides')}
+              defaultOpen={hasCustomOverride}
+            >
+              <div className="ca-form-stack">
+                {baseUrlField}
+                {customJsonField}
+              </div>
+            </CaDisclosure>
+          ) : (
+            <CaDisclosure
+              key={`${edit.id}-json`}
+              title={t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}
+              defaultOpen={Boolean(customJson.trim() && customJson.trim() !== '{}')}
+            >
+              {customJsonField}
+            </CaDisclosure>
+          )}
+
+          {providerActionRow}
+        </div>
+      </section>
+    );
+
+    const modelsSection = !creating ? (
+      <section className="ca-section">
+        <div className="ca-section-head ca-models-head">
+          <div className="ca-models-head-top ca-models-toolbar">
+            <h3 className="ca-section-title">
+              {t(`模型列表 (${enabledCount}/${models.length})`, `Models (${enabledCount}/${models.length})`)}
+            </h3>
+            <div className="ca-inline-row ca-models-actions">
+              <button type="button" className="ca-btn ca-btn-sm" onClick={openDiscoverModal}>
+                {t('拉取模型', 'Discover models')}
+              </button>
+              {removedModels.length > 0 && (
+                <button type="button" className="ca-btn ca-btn-sm" onClick={openRestoreModal}>
+                  <RotateCcw size={13} aria-hidden="true" />
+                  <span>{t(`恢复 (${removedModels.length})`, `Restore (${removedModels.length})`)}</span>
+                </button>
+              )}
+              <button type="button" className="ca-btn ca-btn-sm" onClick={openAddModelModal}>
+                <Plus size={13} aria-hidden="true" />
+                <span>{t('新增模型', 'Add model')}</span>
+              </button>
+            </div>
+          </div>
+          {(models.length > 0 || Boolean(modelQuery)) && (
+            <div className="ca-models-search">
+              <Search size={14} className="ca-models-search-icon" aria-hidden="true" />
+              <input
+                type="search"
+                className="ca-input"
+                placeholder={t('筛选模型名称或 ID…', 'Filter model name or ID…')}
+                value={modelQuery}
+                onChange={e => setModelQuery(e.target.value)}
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="ca-list">
+          {detailLoading && models.length === 0 ? (
+            <div className="ca-empty">{t('正在加载模型列表…', 'Loading models…')}</div>
+          ) : filteredDetailModels.length === 0 ? (
+            <div className="ca-empty">
+              {models.length === 0
+                ? t('暂无模型，点击「拉取模型」或「新增模型」添加', 'No models yet. Click "Discover models" or "Add model" to add some.')
+                : t('没有匹配的模型', 'No matching models')}
+            </div>
+          ) : (
+            filteredDetailModels.map(m => {
+              const ref = `${edit.id}/${m.id}`;
+              const isStarred = starredSet.has(ref);
+              return (
+                <div key={m.id} className="ca-row ca-row-split ca-model-row">
+                  <button
+                    type="button"
+                    className="ca-row-main ca-row-trigger"
+                    onClick={() => openEditModelModal(m)}
+                  >
+                    <span className="ca-row-title ca-model-row-title">
+                      <span className={`ca-dot ${m.enabled ? 'is-online' : ''}`} aria-hidden="true" />
+                      <span className="ca-model-row-name">{m.name || m.id}</span>
+                      {m.reasoning && <span className="ca-pill ca-pill-info">{t('推理', 'Reasoning')}</span>}
+                    </span>
+                    <span className="ca-row-sub ca-mono ca-num">
+                      {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
+                    </span>
+                  </button>
+                  <div className="ca-row-actions">
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-ghost ca-btn-icon"
+                      aria-label={isStarred ? t('取消收藏', 'Unstar') : t('收藏', 'Star')}
+                      onClick={() => void handleToggleStar(ref, !isStarred)}
+                    >
+                      <Star
+                        size={14}
+                        className={isStarred ? 'ca-star-icon is-starred' : 'ca-star-icon'}
+                        fill={isStarred ? 'currentColor' : 'none'}
+                      />
+                    </button>
+                    <CaSwitch
+                      checked={m.enabled}
+                      disabled={togglingModelId === m.id}
+                      label={t(`启用模型 ${m.name || m.id}`, `Enable model ${m.name || m.id}`)}
+                      onChange={next => void handleToggleModelEnabled(m, next)}
+                    />
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </section>
+    ) : null;
+
+    return (
+      <div className="ca-form-stack">
+        {/* In-page detail header bar */}
+        <div className="ca-toolbar">
+          <button
+            type="button"
+            className="ca-btn ca-btn-ghost ca-btn-sm"
+            onClick={closeProviderDetail}
+          >
+            <ArrowLeft size={14} aria-hidden="true" />
+            <span>{t('返回服务商列表', 'Back to Providers')}</span>
+          </button>
+          {!creating && (
+            <div className="ca-inline-row">
+              <span className="ca-muted">{edit.enabled ? t('已启用', 'Enabled') : t('已停用', 'Disabled')}</span>
+              <CaSwitch
+                checked={edit.enabled}
+                disabled={togglingProviderId === edit.id || savingProvider}
+                label={t(`启用 ${edit.name || edit.id}`, `Enable ${edit.name || edit.id}`)}
+                onChange={next => void handleToggleProviderRow(edit, next)}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Provider identity summary */}
+        <section className="ca-section">
+          <div className="ca-default-card">
+            <div className="ca-row-main">
+              <div className="ca-row-title">
+                {!creating && <span className={`ca-dot ${providerReady ? 'is-online' : ''}`} aria-hidden="true" />}
+                <span>
+                  {creating
+                    ? t('添加自定义服务商', 'Add custom provider')
+                    : edit.name || edit.id}
+                </span>
+                {!creating && !edit.native && (
+                  <span className="ca-pill ca-pill-muted">{t('自定义', 'Custom')}</span>
+                )}
+                {!creating && edit.id === ANTIGRAVITY_PROVIDER_ID && (
+                  <span className="ca-pill ca-pill-info">Antigravity</span>
+                )}
+              </div>
+              <div className="ca-row-sub ca-num">
+                {creating
+                  ? t('填写兼容接口地址与密钥后，即可保存并拉取可用模型', 'Enter a compatible API URL and key to save and discover available models')
+                  : `${edit.id} · ${providerStatusSummary(edit)}`}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {detailError && <CaNotice tone="danger">{detailError}</CaNotice>}
+        {detailNotice && <CaNotice tone="ok">{detailNotice}</CaNotice>}
+
+        {/* OAuth / Antigravity authorization */}
+        {supportsOAuth && (
+          <section className="ca-section ca-oauth-card">
+            <div className="ca-oauth-head">
+              <div className="ca-oauth-head-main">
+                <div className="ca-field-label">{t('OAuth 账号授权', 'OAuth account authorization')}</div>
+                <div className="ca-muted">
+                  {flow?.status === 'pending'
+                    ? t('正在等待浏览器完成登录授权…', 'Waiting for browser authorization…')
+                    : authStatus?.method === 'oauth'
+                      ? t('已通过 OAuth 授权登录', 'Authorized via OAuth')
+                      : authStatus?.label
+                        ? t(`未授权 · 可${authStatus.label}`, `Not authorized · ${authStatus.label}`)
+                        : t('尚未登录', 'Not signed in')}
+                </div>
+              </div>
+              <div className="ca-inline-row">
+                {flow?.status === 'pending' ? (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-sm"
+                    onClick={() => void handleCancelOAuth()}
+                  >
+                    {t('取消授权', 'Cancel authorization')}
+                  </button>
+                ) : authStatus?.method === 'oauth' ? (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-sm"
+                    disabled={authBusy}
+                    onClick={() => void handleOAuthLogout()}
+                  >
+                    {t('退出授权', 'Sign out')}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-primary ca-btn-sm"
+                    disabled={authBusy}
+                    onClick={() => void handleStartOAuth()}
+                  >
+                    {t('登录 OAuth 授权', 'Sign in with OAuth')}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {flow && flow.status === 'pending' && (
+              <div className="ca-oauth-flow">
+                {flow.events.length === 0 && !flow.prompt && (
+                  <div className="ca-muted">{t('正在获取授权链接…', 'Fetching authorization link…')}</div>
+                )}
+
+                {flow.events.map((ev, idx) => {
+                  const targetUrl = ev.url || ev.verificationUri;
+                  if (targetUrl) {
+                    return (
+                      <div key={idx} className="ca-oauth-step">
+                        <div className="ca-oauth-step-label">
+                          {ev.instructions || ev.message || t('1. 点击下方链接在系统默认浏览器中完成登录：', '1. Open the link below in your browser to sign in:')}
+                        </div>
+                        {ev.userCode && (
+                          <div className="ca-inline-row ca-wrap">
+                            <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
+                            <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
+                            <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
+                          </div>
+                        )}
+                        <div className="ca-oauth-url-row">
+                          <a
+                            href={targetUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ca-oauth-link"
+                            onClick={e => {
+                              e.preventDefault();
+                              void openExternalUrl(targetUrl, onOpenExternalUrl).catch(err =>
+                                setDetailError(
+                                  errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open browser; please copy and open the link manually')),
+                                ),
+                              );
+                            }}
+                          >
+                            {targetUrl}
+                          </a>
+                          <CopyButton value={targetUrl} />
+                        </div>
+                        {ev.links?.map((lk, lIdx) => (
+                          <div key={lIdx}>
+                            <a
+                              href={lk.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="ca-oauth-inline-link"
+                              onClick={e => {
+                                e.preventDefault();
+                                void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
+                                  setDetailError(errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open system browser; copy and open manually'))),
+                                );
+                              }}
+                            >
+                              {lk.label || lk.url}
+                            </a>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={idx} className="ca-oauth-step">
+                      {ev.message && <div className="ca-oauth-msg">{ev.message}</div>}
+                      {ev.instructions && <div className="ca-oauth-hint">{ev.instructions}</div>}
+                      {ev.userCode && (
+                        <div className="ca-inline-row ca-wrap">
+                          <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
+                          <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
+                          <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
+                        </div>
+                      )}
+                      {ev.links?.map((lk, lIdx) => (
+                        <div key={lIdx}>
+                          <a
+                            href={lk.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="ca-oauth-inline-link"
+                            onClick={e => {
+                              e.preventDefault();
+                              void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
+                                setDetailError(errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open system browser; copy and open manually'))),
+                              );
+                            }}
+                          >
+                            {lk.label || lk.url}
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+
+                {flow.prompt && (
+                  <div className="ca-oauth-step ca-oauth-prompt">
+                    {flow.prompt.options && flow.prompt.options.length > 0 ? (
+                      <>
+                        <div className="ca-oauth-step-label">
+                          {flow.prompt.message || t('请选择登录授权方式：', 'Choose an authorization method:')}
+                        </div>
+                        <div className="ca-inline-row ca-wrap">
+                          {flow.prompt.options.map(opt => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              className="ca-btn ca-btn-sm"
+                              disabled={authBusy}
+                              onClick={() => void handleSubmitPrompt(opt.id)}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="ca-oauth-step-label">
+                          {flow.prompt.message
+                            ? flow.prompt.message.startsWith('2.')
+                              ? flow.prompt.message
+                              : `2. ${flow.prompt.message}`
+                            : t('2. 粘贴授权码或跳转后的完整回调地址：', '2. Paste the authorization code or full callback URL:')}
+                        </div>
+                        <form
+                          className="ca-oauth-input-row"
+                          onSubmit={e => {
+                            e.preventDefault();
+                            if (!authBusy && promptInput.trim()) {
+                              void handleSubmitPrompt(promptInput);
+                            }
+                          }}
+                        >
+                          <input
+                            type="text"
+                            className="ca-input"
+                            placeholder={flow.prompt.placeholder || t('粘贴授权码或回调 URL', 'Paste authorization code or callback URL')}
+                            value={promptInput}
+                            onChange={e => setPromptInput(e.target.value)}
+                          />
+                          <button
+                            type="submit"
+                            className="ca-btn ca-btn-primary ca-btn-sm"
+                            disabled={authBusy || !promptInput.trim()}
+                          >
+                            {t('提交授权码', 'Submit code')}
+                          </button>
+                        </form>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {collapseForOAuth ? (
+          <>
+            {modelsSection}
+            {connectionSection}
+          </>
+        ) : (
+          <>
+            {connectionSection}
+            {modelsSection}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderOverview = () => (
+    <>
+      {/* 1. Top Live Readiness card: global default model + thinking level */}
       <section className="ca-section">
         <div className="ca-default-card">
           <div className="ca-row-main">
             <div className="ca-row-title">
+              <span className={`ca-dot ${currentDefaultItem ? 'is-online' : ''}`} aria-hidden="true" />
               <span>{t('全局默认模型', 'Global default model')}</span>
               {currentDefaultItem ? (
                 <span className="ca-pill ca-pill-ok">{currentDefaultItem.name}</span>
               ) : currentGlobalModelRef ? (
                 <span className="ca-pill ca-pill-muted">{currentGlobalModelRef}</span>
               ) : (
-                <span className="ca-pill ca-pill-warn">{t('尚未设置默认模型', 'No default model set')}</span>
+                <span className="ca-pill ca-pill-warn">{t('未设置', 'Not set')}</span>
               )}
             </div>
-            <div className="ca-row-sub">
+            <div className="ca-row-sub ca-num">
               {currentDefaultItem
-                ? t(`${currentDefaultItem.modelRef} · 上下文 ${Math.round(currentDefaultItem.contextWindow / 1000)}k`, `${currentDefaultItem.modelRef} · Context ${Math.round(currentDefaultItem.contextWindow / 1000)}k`)
-                : t('未单独指定模型的 Bot 将默认使用此模型', 'Bots without a dedicated model will use this default')}
+                ? currentDefaultItem.reasoning
+                  ? t(`${currentDefaultItem.modelRef} · 上下文 ${Math.round(currentDefaultItem.contextWindow / 1000)}k · 思考强度 ${currentThinkingLabel}`, `${currentDefaultItem.modelRef} · ${Math.round(currentDefaultItem.contextWindow / 1000)}k context · Thinking: ${currentThinkingLabel}`)
+                  : t(`${currentDefaultItem.modelRef} · 上下文 ${Math.round(currentDefaultItem.contextWindow / 1000)}k`, `${currentDefaultItem.modelRef} · ${Math.round(currentDefaultItem.contextWindow / 1000)}k context`)
+                : currentGlobalModelRef
+                  ? t(`${currentGlobalModelRef} · 当前未启用，请重新选择默认模型`, `${currentGlobalModelRef} · Currently unavailable; select another default model`)
+                  : t('未单独指定模型的 Bot 将默认使用此模型', 'Bots without a dedicated model will use this default')}
             </div>
           </div>
           <div className="ca-row-actions">
@@ -1131,33 +1834,34 @@ export function ProvidersTab({
               onClick={() => {
                 setPickerFilter('all');
                 setPickerQuery('');
-                setPickerOpen(true);
+                setPickerError('');
+                setActiveModal({ kind: 'default-picker' });
               }}
             >
-              <LabelStack
-                active={currentGlobalModelRef ? t('更换默认模型', 'Change default model') : t('选择默认模型', 'Select default model')}
-                labels={[t('选择默认模型', 'Select default model'), t('更换默认模型', 'Change default model')]}
-              />
+              {t('切换默认模型', 'Change default')}
             </button>
           </div>
         </div>
 
-        {/* Show thinking effort chips only when current default model supports reasoning */}
+        {/* Thinking level chips when current default model supports reasoning */}
         {currentDefaultItem?.reasoning && (
           <div className="ca-default-subbar">
-            <span className="ca-field-label">{t('思考强度', 'Thinking effort')}</span>
+            <span className="ca-field-label">{t('思考强度', 'Thinking level')}</span>
             <CaChips
               value={currentThinking}
               options={thinkingOptions}
-              ariaLabel={t('思考强度', 'Thinking effort')}
-              onChange={val => void saveGlobalSelection({ thinkingLevel: val || null }, t('思考强度已保存', 'Thinking effort saved'))}
+              ariaLabel={t('思考强度', 'Thinking level')}
+              onChange={val => {
+                if (pickerBusy) return;
+                void saveGlobalSelection({ thinkingLevel: val || null }, t('思考强度已保存', 'Thinking level saved'));
+              }}
             />
           </div>
         )}
 
-        {/* Advanced tool calling & model catalog sync disclosure */}
+        {/* Quiet disclosure for tool calling mode & catalog sync */}
         <div className="ca-default-disclosure-wrap">
-          <CaDisclosure title={t('高级设置（工具调用方式 / 模型目录同步）', 'Advanced (Tool calling / Model catalog sync)')}>
+          <CaDisclosure title={t('工具调用与模型目录同步', 'Tool calling & catalog sync')}>
             <div className="ca-form-stack">
               <div className="ca-inline-between ca-wrap">
                 <div>
@@ -1168,15 +1872,16 @@ export function ProvidersTab({
                   value={currentCodeMode}
                   options={codeModeOptions}
                   ariaLabel={t('工具调用模式', 'Tool calling mode')}
-                  onChange={val =>
+                  onChange={val => {
+                    if (pickerBusy) return;
                     void saveGlobalSelection(
                       {
                         codemode: val === 'on' || val === 'only',
                         codemodeOnly: val === 'only',
                       },
                       t('工具调用模式已更新', 'Tool calling mode updated'),
-                    )
-                  }
+                    );
+                  }}
                 />
               </div>
 
@@ -1207,7 +1912,7 @@ export function ProvidersTab({
         </div>
       </section>
 
-      {/* 2. 服务商极简列表 */}
+      {/* 2. Scannable Providers list */}
       <section className="ca-section">
         <div className="ca-section-head">
           <div className="ca-inline-row">
@@ -1234,8 +1939,8 @@ export function ProvidersTab({
               />
             </div>
             <button type="button" className="ca-btn ca-btn-sm" onClick={openCreateProvider}>
-              <Plus size={14} />
-              <span>{t('自定义服务商', 'Custom provider')}</span>
+              <Plus size={14} aria-hidden="true" />
+              <span>{t('添加自定义服务商', 'Add custom provider')}</span>
             </button>
           </div>
         </div>
@@ -1248,45 +1953,76 @@ export function ProvidersTab({
                 : t('没有匹配的服务商', 'No matching providers')}
             </div>
           ) : (
-            sortedProviders.map(provider => (
-              <div key={provider.id} className="ca-row ca-row-split">
-                <button
-                  type="button"
-                  className="ca-row-main ca-row-trigger"
-                  onClick={() => openExistingProvider(provider)}
-                >
-                  <span className="ca-row-title">
-                    <span>{provider.name || provider.id}</span>
-                    {!provider.native && <span className="ca-pill ca-pill-muted">{t('自定义', 'Custom')}</span>}
-                    {provider.id === ANTIGRAVITY_PROVIDER_ID && (
-                      <span className="ca-pill ca-pill-info">Antigravity</span>
-                    )}
-                  </span>
-                  <span className="ca-row-sub ca-num">{providerStatusSummary(provider)}</span>
-                </button>
-                <div className="ca-row-actions">
-                  <CaSwitch
-                    checked={provider.enabled}
-                    disabled={togglingProviderId === provider.id}
-                    label={t(`启用 ${provider.name || provider.id}`, `Enable ${provider.name || provider.id}`)}
-                    onChange={next => void handleToggleProviderRow(provider, next)}
-                  />
+            sortedProviders.map(provider => {
+              const ready = isProviderReady(provider);
+              return (
+                <div key={provider.id} className="ca-row ca-row-split">
+                  <button
+                    type="button"
+                    className="ca-row-main ca-row-trigger"
+                    onClick={() => openExistingProvider(provider)}
+                  >
+                    <span className="ca-row-title">
+                      <span className={`ca-dot ${ready ? 'is-online' : ''}`} aria-hidden="true" />
+                      <span>{provider.name || provider.id}</span>
+                      {!provider.native && <span className="ca-pill ca-pill-muted">{t('自定义', 'Custom')}</span>}
+                      {provider.id === ANTIGRAVITY_PROVIDER_ID && (
+                        <span className="ca-pill ca-pill-info">Antigravity</span>
+                      )}
+                    </span>
+                    <span className="ca-row-sub ca-num">{providerStatusSummary(provider)}</span>
+                  </button>
+                  <div className="ca-row-actions">
+                    <CaSwitch
+                      checked={provider.enabled}
+                      disabled={togglingProviderId === provider.id}
+                      label={t(`启用 ${provider.name || provider.id}`, `Enable ${provider.name || provider.id}`)}
+                      onChange={next => void handleToggleProviderRow(provider, next)}
+                    />
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-sm"
+                      onClick={() => openExistingProvider(provider)}
+                    >
+                      {t('配置', 'Manage')}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </section>
+    </>
+  );
 
-      {/* 全局默认模型选择器 Modal */}
+  const editModelModalOpen = activeModal?.kind === 'edit-model';
+  const editModelCreating = activeModal?.kind === 'edit-model' ? activeModal.creating : false;
+  const discoverModalOpen = activeModal?.kind === 'discover';
+  const discoverMode = activeModal?.kind === 'discover' ? activeModal.mode : 'remote';
+  const deleteModelTarget = activeModal?.kind === 'confirm-delete-model' ? activeModal : null;
+
+  return (
+    <div>
+      <CaRefreshBar active={refreshing} />
+
+      {inDetailView ? renderProviderDetail() : renderOverview()}
+
+      {/* Single top-level modal slot: Global Default Model Picker */}
       <CaModal
-        open={pickerOpen}
-        onOpenChange={setPickerOpen}
+        open={activeModal?.kind === 'default-picker'}
+        onOpenChange={open => {
+          if (!open && !pickerBusy) {
+            setPickerError('');
+            setActiveModal(null);
+          }
+        }}
         title={t('选择全局默认模型', 'Select global default model')}
         description={t('默认显示全部可用模型，收藏模型自动置顶', 'Shows all available models by default with starred models pinned at the top')}
         variant="modal"
       >
         <div className="ca-form-stack">
+          {pickerError && <CaNotice tone="danger">{pickerError}</CaNotice>}
           <div className="ca-inline-between ca-wrap ca-picker-bar">
             <CaSegmented
               value={pickerFilter}
@@ -1310,7 +2046,7 @@ export function ProvidersTab({
             {sortedPickerModels.length === 0 ? (
               <div className="ca-empty">
                 {pickerFilter === 'starred'
-                  ? t('暂无收藏模型，可切回“全部”查看', 'No starred models yet. Switch back to "All" to browse.')
+                  ? t('暂无收藏模型，可切回「全部」查看', 'No starred models yet. Switch back to "All" to browse.')
                   : t('暂无可用模型，请先配置并启用服务商', 'No available models. Configure and enable a provider first.')}
               </div>
             ) : (
@@ -1331,13 +2067,16 @@ export function ProvidersTab({
                         void saveGlobalSelection(
                           { modelRef: item.modelRef },
                           t(`默认模型已切换为 ${item.name}`, `Default model switched to ${item.name}`),
-                        ).then(() => setPickerOpen(false));
+                          { reportInlinePicker: true },
+                        ).then(ok => {
+                          if (ok) setActiveModal(null);
+                        });
                       }}
                     >
                       <span className="ca-inline-row">
                         <span>{item.name}</span>
                         {item.reasoning && <span className="ca-pill ca-pill-info">{t('推理', 'Reasoning')}</span>}
-                        {isSelected && <Check size={14} />}
+                        {isSelected && <Check size={14} aria-hidden="true" />}
                       </span>
                       <span className="ca-muted ca-mono">{item.modelRef}</span>
                     </button>
@@ -1361,540 +2100,17 @@ export function ProvidersTab({
         </div>
       </CaModal>
 
-      {/* 统一服务商详情与凭据抽屉 */}
+      {/* Single top-level modal slot: Add / Edit Model */}
       <CaModal
-        open={drawerOpen}
+        open={editModelModalOpen}
         onOpenChange={open => {
-          if (!open) {
-            stopFlowPoll();
-            setDrawerError('');
-            setDrawerNotice('');
+          if (!open && !modelSaving) {
+            setModelFormError('');
+            setActiveModal(null);
           }
-          setDrawerOpen(open);
-        }}
-        title={creating ? t('添加自定义服务商', 'Add custom provider') : edit?.name || edit?.id || t('服务商设置', 'Provider settings')}
-        description={
-          creating
-            ? t('填写兼容接口地址与密钥后即可拉取模型', 'Enter a compatible API URL and key to fetch models')
-            : t(`服务商 ID：${edit?.id ?? ''}`, `Provider ID: ${edit?.id ?? ''}`)
-        }
-        variant="drawer"
-        wide
-      >
-        {edit && (() => {
-          const supportsOAuth = Boolean(
-            !creating && (authStatus?.oauth || edit.id === ANTIGRAVITY_PROVIDER_ID),
-          );
-          const supportsApiKey =
-            edit.id === ANTIGRAVITY_PROVIDER_ID
-              ? false
-              : !authStatus || authStatus.apiKey !== false;
-          const collapseForOAuth = Boolean(!creating && edit.native && supportsOAuth);
-          const hasCustomOverride = Boolean(
-            edit.baseUrl.trim() || (customJson.trim() && customJson.trim() !== '{}'),
-          );
-
-          const baseUrlField = (
-            <div className="ca-field">
-              <label className="ca-field-label">{t('API 地址 (Base URL)', 'API URL (Base URL)')}</label>
-              <input
-                type="url"
-                className="ca-input"
-                placeholder={edit.native ? t('留空保持内置默认地址', 'Leave empty for built-in default URL') : 'https://api.example.com/v1'}
-                value={edit.baseUrl}
-                onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
-              />
-            </div>
-          );
-
-          const apiKeyField = supportsApiKey ? (
-            <div className="ca-field">
-              <div className="ca-field-head">
-                <label className="ca-field-label">API Key</label>
-                <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
-                  {credential?.configured ? t('已保存密钥（不回显）', 'Key saved (hidden)') : t('未配置密钥', 'No key set')}
-                </span>
-              </div>
-              <input
-                type="password"
-                className="ca-input"
-                autoComplete="new-password"
-                placeholder={credential?.configured ? t('输入新密钥以替换现有密钥', 'Enter a new key to replace the existing one') : t('粘贴 API Key', 'Paste API Key')}
-                value={keyValue}
-                onChange={e => setKeyValue(e.target.value)}
-              />
-            </div>
-          ) : null;
-
-          const customJsonField = (
-            <div className="ca-field">
-              <label className="ca-field-label">{t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}</label>
-              <textarea
-                rows={4}
-                className="ca-textarea ca-mono"
-                value={customJson}
-                onChange={e => setCustomJson(e.target.value)}
-              />
-              <p className="ca-field-help">
-                {t('对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {} 即可。', 'Maps to Pi models.json provider-level extra fields (e.g. headers, compat); leave as {} if unused.')}
-              </p>
-            </div>
-          );
-
-          const providerActionRow = (
-            <div className="ca-inline-between ca-provider-form-actions">
-              <div>
-                {!creating && (
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-danger ca-btn-sm"
-                    disabled={savingProvider}
-                    onClick={() => setConfirmDeleteProviderOpen(true)}
-                  >
-                    <Trash2 size={13} />
-                    <span>{edit.native ? t('重置配置', 'Reset settings') : t('删除服务商', 'Delete provider')}</span>
-                  </button>
-                )}
-              </div>
-              <div className="ca-inline-row">
-                {!creating && (
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-sm"
-                    disabled={savingProvider || validatingProvider}
-                    onClick={() => void handleValidateOnly()}
-                  >
-                    <LabelStack
-                      active={validatingProvider ? t('验证中…', 'Verifying…') : t('验证连接', 'Verify connection')}
-                      labels={[t('验证连接', 'Verify connection'), t('验证中…', 'Verifying…')]}
-                    />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-primary ca-btn-sm"
-                  disabled={savingProvider || validatingProvider}
-                  onClick={() => void persistProvider(true)}
-                >
-                  <LabelStack
-                    active={savingProvider ? t('保存中…', 'Saving…') : t('保存并验证', 'Save & verify')}
-                    labels={[t('保存并验证', 'Save & verify'), t('保存中…', 'Saving…')]}
-                  />
-                </button>
-              </div>
-            </div>
-          );
-
-          const connectionSection = collapseForOAuth ? (
-            <details
-              key={edit.id}
-              className="ca-section ca-advanced-collapse"
-              open={advancedOpen}
-              onToggle={e => setAdvancedOpen(e.currentTarget.open)}
-            >
-              <summary className="ca-advanced-summary">{t('高级连接与协议覆盖', 'Advanced connection & protocol overrides')}</summary>
-              <div className="ca-advanced-body ca-form-stack">
-                {baseUrlField}
-                {apiKeyField}
-                {customJsonField}
-                {providerActionRow}
-              </div>
-            </details>
-          ) : (
-            <div className="ca-section ca-section-body ca-form-stack">
-              {!edit.native && (
-                <>
-                  <div className="ca-grid-2">
-                    <div className="ca-field">
-                      <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
-                      <input
-                        type="text"
-                        className="ca-input"
-                        placeholder={t('如 SiliconFlow / 本地 Ollama', 'e.g. SiliconFlow / Local Ollama')}
-                        value={edit.name}
-                        onChange={e => setEdit({ ...edit, name: e.target.value })}
-                      />
-                    </div>
-                    <div className="ca-field">
-                      <label className="ca-field-label">{t('API 协议', 'API protocol')}</label>
-                      <select
-                        className="ca-select"
-                        value={edit.api}
-                        onChange={e => setEdit({ ...edit, api: e.target.value })}
-                      >
-                        {API_PROTOCOLS.map(p => (
-                          <option key={p.value} value={p.value}>
-                            {p.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {creating && (
-                    <div className="ca-field">
-                      <label className="ca-field-label">{t('服务商 ID（可选）', 'Provider ID (optional)')}</label>
-                      <input
-                        type="text"
-                        className="ca-input ca-mono"
-                        placeholder={t('留空则按名称自动生成', 'Leave blank to generate from name')}
-                        value={edit.id}
-                        onChange={e => {
-                          setCustomIdEdited(true);
-                          setEdit({ ...edit, id: e.target.value });
-                        }}
-                      />
-                    </div>
-                  )}
-                  {baseUrlField}
-                </>
-              )}
-
-              {apiKeyField}
-
-              {edit.native ? (
-                <CaDisclosure
-                  key={`${edit.id}-adv`}
-                  title={t('自定义接口地址与协议覆盖', 'Custom API URL & protocol overrides')}
-                  defaultOpen={hasCustomOverride}
-                >
-                  <div className="ca-form-stack">
-                    {baseUrlField}
-                    {customJsonField}
-                  </div>
-                </CaDisclosure>
-              ) : (
-                <CaDisclosure
-                  key={`${edit.id}-json`}
-                  title={t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}
-                  defaultOpen={Boolean(customJson.trim() && customJson.trim() !== '{}')}
-                >
-                  {customJsonField}
-                </CaDisclosure>
-              )}
-
-              {providerActionRow}
-            </div>
-          );
-
-          const modelsSection = !creating ? (
-            <div className="ca-section">
-              <div className="ca-section-head ca-models-head">
-                <div className="ca-models-head-top ca-models-toolbar">
-                  <span className="ca-section-title">{t(`模型列表 (${models.length})`, `Models (${models.length})`)}</span>
-                  <div className="ca-inline-row ca-models-actions">
-                    <button type="button" className="ca-btn ca-btn-sm" onClick={openDiscoverModal}>
-                      {t('拉取目录', 'Fetch models')}
-                    </button>
-                    {removedModels.length > 0 && (
-                      <button type="button" className="ca-btn ca-btn-sm" onClick={openRestoreModal}>
-                        <RotateCcw size={13} />
-                        <span>{t(`恢复 (${removedModels.length})`, `Restore (${removedModels.length})`)}</span>
-                      </button>
-                    )}
-                    <button type="button" className="ca-btn ca-btn-sm" onClick={openAddModelModal}>
-                      <Plus size={13} />
-                      <span>{t('新增模型', 'Add model')}</span>
-                    </button>
-                  </div>
-                </div>
-                {(models.length > 0 || Boolean(modelQuery)) && (
-                  <div className="ca-models-search">
-                    <Search size={14} className="ca-models-search-icon" aria-hidden="true" />
-                    <input
-                      type="search"
-                      className="ca-input"
-                      placeholder={t('筛选模型名称或 ID…', 'Filter model name or ID…')}
-                      value={modelQuery}
-                      onChange={e => setModelQuery(e.target.value)}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <div className="ca-list">
-                {filteredDrawerModels.length === 0 ? (
-                  <div className="ca-empty">
-                    {models.length === 0
-                      ? t('暂无模型，点击「拉取目录」或「新增模型」添加', 'No models yet. Click "Fetch models" or "Add model" to add some.')
-                      : t('没有匹配的模型', 'No matching models')}
-                  </div>
-                ) : (
-                  filteredDrawerModels.map(m => {
-                    const ref = `${edit.id}/${m.id}`;
-                    const isStarred = starredSet.has(ref);
-                    return (
-                      <div key={m.id} className="ca-row ca-row-split ca-model-row">
-                        <button
-                          type="button"
-                          className="ca-row-main ca-row-trigger"
-                          onClick={() => openEditModelModal(m)}
-                        >
-                          <span className="ca-row-title ca-model-row-title">
-                            <span className="ca-model-row-name">{m.name || m.id}</span>
-                            {m.reasoning && <span className="ca-pill ca-pill-info">{t('推理', 'Reasoning')}</span>}
-                          </span>
-                          <span className="ca-row-sub ca-mono ca-num">
-                            {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
-                          </span>
-                        </button>
-                        <div className="ca-row-actions">
-                          <button
-                            type="button"
-                            className="ca-btn ca-btn-ghost ca-btn-icon"
-                            aria-label={isStarred ? t('取消收藏', 'Unstar') : t('收藏', 'Star')}
-                            onClick={() => void handleToggleStar(ref, !isStarred)}
-                          >
-                            <Star
-                              size={14}
-                              className={isStarred ? 'ca-star-icon is-starred' : 'ca-star-icon'}
-                              fill={isStarred ? 'currentColor' : 'none'}
-                            />
-                          </button>
-                          <CaSwitch
-                            checked={m.enabled}
-                            label={t(`启用模型 ${m.name || m.id}`, `Enable model ${m.name || m.id}`)}
-                            onChange={next => void handleToggleModelEnabled(m, next)}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          ) : null;
-
-          return (
-            <div className="ca-form-stack">
-              {/* OAuth / Antigravity authorization flow */}
-              {supportsOAuth && (
-                <div className="ca-section ca-oauth-card">
-                  <div className="ca-oauth-head">
-                    <div className="ca-oauth-head-main">
-                      <div className="ca-field-label">{t('OAuth 账号授权', 'OAuth account authorization')}</div>
-                      <div className="ca-muted">
-                        {flow?.status === 'pending'
-                          ? t('正在等待浏览器完成登录授权…', 'Waiting for browser authorization…')
-                          : authStatus?.method === 'oauth'
-                            ? t('已通过 OAuth 授权登录', 'Authorized via OAuth')
-                            : authStatus?.label
-                              ? t(`未授权 · 可${authStatus.label}`, `Not authorized · ${authStatus.label}`)
-                              : t('尚未登录', 'Not signed in')}
-                      </div>
-                    </div>
-                    <div className="ca-inline-row">
-                      {flow?.status === 'pending' ? (
-                        <button
-                          type="button"
-                          className="ca-btn ca-btn-sm"
-                          onClick={() => void handleCancelOAuth()}
-                        >
-                          {t('取消授权', 'Cancel')}
-                        </button>
-                      ) : authStatus?.method === 'oauth' ? (
-                        <button
-                          type="button"
-                          className="ca-btn ca-btn-sm"
-                          disabled={authBusy}
-                          onClick={() => void handleOAuthLogout()}
-                        >
-                          {t('退出授权', 'Sign out')}
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="ca-btn ca-btn-primary ca-btn-sm"
-                          disabled={authBusy}
-                          onClick={() => void handleStartOAuth()}
-                        >
-                          {t('登录 OAuth 授权', 'Sign in with OAuth')}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {flow && flow.status === 'pending' && (
-                    <div className="ca-oauth-flow">
-                      {flow.events.length === 0 && !flow.prompt && (
-                        <div className="ca-muted">{t('正在获取授权链接…', 'Fetching authorization link…')}</div>
-                      )}
-
-                      {flow.events.map((ev, idx) => {
-                        const targetUrl = ev.url || ev.verificationUri;
-                        if (targetUrl) {
-                          return (
-                            <div key={idx} className="ca-oauth-step">
-                              <div className="ca-oauth-step-label">
-                                {ev.instructions || ev.message || t('1. 点击下方链接在系统默认浏览器中完成登录：', '1. Open the link below in your browser to sign in:')}
-                              </div>
-                              {ev.userCode && (
-                                <div className="ca-inline-row ca-wrap">
-                                  <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
-                                  <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
-                                  <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
-                                </div>
-                              )}
-                              <div className="ca-oauth-url-row">
-                                <a
-                                  href={targetUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="ca-oauth-link"
-                                  onClick={e => {
-                                    e.preventDefault();
-                                    void openExternalUrl(targetUrl, onOpenExternalUrl).catch(err =>
-                                      setDrawerError(
-                                        errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open browser; please copy and open the link manually')),
-                                      ),
-                                    );
-                                  }}
-                                >
-                                  {targetUrl}
-                                </a>
-                                <CopyButton value={targetUrl} />
-                              </div>
-                              {ev.links?.map((lk, lIdx) => (
-                                <div key={lIdx}>
-                                  <a
-                                    href={lk.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="ca-oauth-inline-link"
-                                    onClick={e => {
-                                      e.preventDefault();
-                                      void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
-                                        setDrawerError(errorMessage(err, t('无法打开系统默认浏览器', 'Could not open system browser'))),
-                                      );
-                                    }}
-                                  >
-                                    {lk.label || lk.url}
-                                  </a>
-                                </div>
-                              ))}
-                            </div>
-                          );
-                        }
-                        return (
-                          <div key={idx} className="ca-oauth-step">
-                            {ev.message && <div className="ca-oauth-msg">{ev.message}</div>}
-                            {ev.instructions && <div className="ca-oauth-hint">{ev.instructions}</div>}
-                            {ev.userCode && (
-                              <div className="ca-inline-row ca-wrap">
-                                <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
-                                <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
-                                <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
-                              </div>
-                            )}
-                            {ev.links?.map((lk, lIdx) => (
-                              <div key={lIdx}>
-                                <a
-                                  href={lk.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="ca-oauth-inline-link"
-                                  onClick={e => {
-                                    e.preventDefault();
-                                    void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
-                                      setDrawerError(errorMessage(err, t('无法打开系统默认浏览器', 'Could not open system browser'))),
-                                    );
-                                  }}
-                                >
-                                  {lk.label || lk.url}
-                                </a>
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })}
-
-                      {flow.prompt && (
-                        <div className="ca-oauth-step ca-oauth-prompt">
-                          {flow.prompt.options && flow.prompt.options.length > 0 ? (
-                            <>
-                              <div className="ca-oauth-step-label">
-                                {flow.prompt.message || t('请选择登录授权方式：', 'Choose an authorization method:')}
-                              </div>
-                              <div className="ca-inline-row ca-wrap">
-                                {flow.prompt.options.map(opt => (
-                                  <button
-                                    key={opt.id}
-                                    type="button"
-                                    className="ca-btn ca-btn-sm"
-                                    disabled={authBusy}
-                                    onClick={() => void handleSubmitPrompt(opt.id)}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="ca-oauth-step-label">
-                                {flow.prompt.message
-                                  ? flow.prompt.message.startsWith('2.')
-                                    ? flow.prompt.message
-                                    : `2. ${flow.prompt.message}`
-                                  : t('2. 粘贴授权码或跳转后的完整回调地址：', '2. Paste the authorization code or full callback URL:')}
-                              </div>
-                              <form
-                                className="ca-oauth-input-row"
-                                onSubmit={e => {
-                                  e.preventDefault();
-                                  if (!authBusy && promptInput.trim()) {
-                                    void handleSubmitPrompt(promptInput);
-                                  }
-                                }}
-                              >
-                                <input
-                                  type="text"
-                                  className="ca-input"
-                                  placeholder={flow.prompt.placeholder || t('粘贴授权码或回调 URL', 'Paste authorization code or callback URL')}
-                                  value={promptInput}
-                                  onChange={e => setPromptInput(e.target.value)}
-                                />
-                                <button
-                                  type="submit"
-                                  className="ca-btn ca-btn-primary ca-btn-sm"
-                                  disabled={authBusy || !promptInput.trim()}
-                                >
-                                  {t('提交', 'Submit')}
-                                </button>
-                              </form>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {collapseForOAuth ? (
-                <>
-                  {modelsSection}
-                  {connectionSection}
-                </>
-              ) : (
-                <>
-                  {connectionSection}
-                  {modelsSection}
-                </>
-              )}
-            </div>
-          );
-        })()}
-      </CaModal>
-
-      {/* 新增 / 编辑自定义模型弹窗（极简直观字段 + 折叠高级项） */}
-      <CaModal
-        open={modelModalOpen}
-        onOpenChange={open => {
-          if (!open) setModelError('');
-          setModelModalOpen(open);
         }}
         title={
-          modelCreating
+          editModelCreating
             ? t('新增模型', 'Add model')
             : t(`编辑模型 · ${modelDraft?.name || modelDraft?.id || ''}`, `Edit model · ${modelDraft?.name || modelDraft?.id || ''}`)
         }
@@ -1902,6 +2118,8 @@ export function ProvidersTab({
       >
         {modelDraft && (
           <form className="ca-form-stack" onSubmit={e => void handleSaveModel(e)}>
+            {modelFormError && <CaNotice tone="danger">{modelFormError}</CaNotice>}
+
             <div className="ca-field">
               <label className="ca-field-label">
                 {t('模型 ID', 'Model ID')} <span className="ca-req">*</span>
@@ -1909,7 +2127,7 @@ export function ProvidersTab({
               <input
                 type="text"
                 className="ca-input ca-mono"
-                disabled={!modelCreating}
+                disabled={!editModelCreating || modelSaving}
                 required
                 placeholder={t('如 gpt-4.1 / claude-sonnet-4', 'e.g. gpt-4.1 / claude-sonnet-4')}
                 value={modelDraft.id}
@@ -1922,6 +2140,7 @@ export function ProvidersTab({
               <input
                 type="text"
                 className="ca-input"
+                disabled={modelSaving}
                 placeholder={t('留空默认使用模型 ID', 'Leave empty to use model ID')}
                 value={modelDraft.name}
                 onChange={e => setModelDraft({ ...modelDraft, name: e.target.value })}
@@ -1932,6 +2151,7 @@ export function ProvidersTab({
               <span className="ca-field-label">{t('支持深度推理 (Reasoning)', 'Supports reasoning')}</span>
               <CaSwitch
                 checked={modelDraft.reasoning}
+                disabled={modelSaving}
                 label={t('支持深度推理 (Reasoning)', 'Supports reasoning')}
                 onChange={next => setModelDraft({ ...modelDraft, reasoning: next })}
               />
@@ -1948,6 +2168,7 @@ export function ProvidersTab({
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={modelSaving}
                         onChange={ev => {
                           const next = new Set(modelDraft.input);
                           if (ev.target.checked) next.add(mod);
@@ -1962,13 +2183,14 @@ export function ProvidersTab({
               </div>
             </div>
 
-            <CaDisclosure title={t('Token 上限（默认 128k / 16k）', 'Token limits (default 128k / 16k)')}>
+            <CaDisclosure title={t('Token 上限（默认 256k / 16k）', 'Token limits (default 256k / 16k)')}>
               <div className="ca-grid-2">
                 <div className="ca-field">
                   <label className="ca-field-label">{t('上下文窗口', 'Context window')}</label>
                   <input
                     type="number"
                     className="ca-input ca-num"
+                    disabled={modelSaving}
                     value={modelDraft.contextWindow}
                     onChange={e =>
                       setModelDraft({ ...modelDraft, contextWindow: Number(e.target.value) || 0 })
@@ -1980,6 +2202,7 @@ export function ProvidersTab({
                   <input
                     type="number"
                     className="ca-input ca-num"
+                    disabled={modelSaving}
                     value={modelDraft.maxTokens}
                     onChange={e =>
                       setModelDraft({ ...modelDraft, maxTokens: Number(e.target.value) || 0 })
@@ -1993,6 +2216,7 @@ export function ProvidersTab({
               <textarea
                 rows={4}
                 className="ca-textarea ca-mono"
+                disabled={modelSaving}
                 value={modelExtraJson}
                 onChange={e => setModelExtraJson(e.target.value)}
               />
@@ -2000,15 +2224,18 @@ export function ProvidersTab({
 
             <div className="ca-form-actions ca-form-actions-between">
               <div>
-                {!modelCreating && (
+                {!editModelCreating && (
                   <button
                     type="button"
                     className="ca-btn ca-btn-danger ca-btn-sm"
                     disabled={modelSaving}
-                    onClick={() => setModelToDelete({ model: modelDraft, fromModal: true })}
+                    onClick={() => {
+                      setConfirmError('');
+                      setActiveModal({ kind: 'confirm-delete-model', model: modelDraft, returnToEdit: true });
+                    }}
                   >
-                    <Trash2 size={13} />
-                    <span>{t('移除该模型', 'Remove model')}</span>
+                    <Trash2 size={13} aria-hidden="true" />
+                    <span>{t('移除模型', 'Remove model')}</span>
                   </button>
                 )}
               </div>
@@ -2016,7 +2243,11 @@ export function ProvidersTab({
                 <button
                   type="button"
                   className="ca-btn"
-                  onClick={() => setModelModalOpen(false)}
+                  disabled={modelSaving}
+                  onClick={() => {
+                    setModelFormError('');
+                    setActiveModal(null);
+                  }}
                 >
                   {t('取消', 'Cancel')}
                 </button>
@@ -2032,17 +2263,21 @@ export function ProvidersTab({
         )}
       </CaModal>
 
-      {/* Fetch / Restore models modal */}
+      {/* Single top-level modal slot: Discover / Restore Models */}
       <CaModal
-        open={discoverOpen}
+        open={discoverModalOpen}
         onOpenChange={open => {
-          if (!open) setDiscoverError('');
-          setDiscoverOpen(open);
+          if (!open && !discoverSaving) {
+            setDiscoverFormError('');
+            setActiveModal(null);
+          }
         }}
-        title={discoverMode === 'restore' ? t('恢复已移除的模型', 'Restore removed models') : t('从 /v1/models 拉取模型', 'Fetch models from /v1/models')}
+        title={discoverMode === 'restore' ? t('恢复已移除的模型', 'Restore removed models') : t('从 /v1/models 拉取模型', 'Discover models from /v1/models')}
         variant="modal"
       >
         <div className="ca-form-stack">
+          {discoverFormError && <CaNotice tone="danger">{discoverFormError}</CaNotice>}
+
           <div className="ca-inline-row ca-wrap ca-discover-bar">
             <input
               type="search"
@@ -2055,6 +2290,7 @@ export function ProvidersTab({
               <>
                 <select
                   className="ca-select ca-discover-device"
+                  disabled={discoverFetching || discoverSaving}
                   value={discoverDeviceId}
                   onChange={e => {
                     const nextDev = e.target.value;
@@ -2074,11 +2310,11 @@ export function ProvidersTab({
                 <button
                   type="button"
                   className="ca-btn ca-btn-sm"
-                  disabled={discoverBusy || !edit}
+                  disabled={discoverFetching || discoverSaving || !edit}
                   onClick={() => edit && void runDiscoverFetch(edit, discoverDeviceId)}
                 >
                   <LabelStack
-                    active={discoverBusy ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
+                    active={discoverFetching ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
                     labels={[t('重新拉取', 'Refetch'), t('拉取中…', 'Fetching…')]}
                   />
                 </button>
@@ -2087,7 +2323,7 @@ export function ProvidersTab({
           </div>
 
           <div className="ca-model-list">
-            {discoverBusy && discovered.length === 0 ? (
+            {discoverFetching && discovered.length === 0 ? (
               <div className="ca-empty">{t('正在读取可用模型…', 'Loading available models…')}</div>
             ) : filteredDiscovered.length === 0 ? (
               <div className="ca-empty">{t('暂无可添加的新模型', 'No new models to add')}</div>
@@ -2100,6 +2336,7 @@ export function ProvidersTab({
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={discoverSaving}
                         onChange={e => {
                           const next = new Set(selectedIds);
                           if (e.target.checked) next.add(item.id);
@@ -2119,60 +2356,108 @@ export function ProvidersTab({
           </div>
 
           <div className="ca-form-actions">
-            <button type="button" className="ca-btn" onClick={() => setDiscoverOpen(false)}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={discoverSaving}
+              onClick={() => {
+                setDiscoverFormError('');
+                setActiveModal(null);
+              }}
+            >
               {t('取消', 'Cancel')}
             </button>
             <button
               type="button"
               className="ca-btn ca-btn-primary"
-              disabled={discoverBusy || selectedIds.size === 0}
+              disabled={discoverFetching || discoverSaving || selectedIds.size === 0}
               onClick={() => void confirmBatchModels()}
             >
-              {discoverMode === 'restore'
-                ? t(`恢复所选 (${selectedIds.size})`, `Restore selected (${selectedIds.size})`)
-                : t(`添加所选 (${selectedIds.size})`, `Add selected (${selectedIds.size})`)}
+              {discoverSaving
+                ? t('保存中…', 'Saving…')
+                : discoverMode === 'restore'
+                  ? t(`恢复所选 (${selectedIds.size})`, `Restore selected (${selectedIds.size})`)
+                  : t(`添加所选 (${selectedIds.size})`, `Add selected (${selectedIds.size})`)}
             </button>
           </div>
         </div>
       </CaModal>
 
+      {/* Single top-level modal slot: Confirm Reset / Delete Provider */}
       <CaConfirmDialog
-        open={confirmDeleteProviderOpen && Boolean(edit) && !creating}
+        open={activeModal?.kind === 'confirm-delete-provider' && Boolean(edit) && !creating}
         title={edit?.native ? t('重置内置服务商', 'Reset Built-in Provider') : t('删除自定义服务商', 'Delete Custom Provider')}
         description={
-          edit
-            ? edit.native
-              ? t(`重置内置服务商「${edit.name}」将清除已保存的凭据与自定义配置，并恢复默认状态。`, `Resetting built-in provider "${edit.name}" clears saved credentials and custom settings, restoring its default state.`)
-              : t(`删除自定义服务商「${edit.name}」将一并移除其下所有模型，且无法恢复。`, `Deleting custom provider "${edit.name}" removes all of its models and cannot be undone.`)
-            : ''
+          edit ? (
+            <>
+              <span>
+                {edit.native
+                  ? t(`重置内置服务商「${edit.name || edit.id}」将清除已保存的凭据与自定义配置，并恢复默认状态。`, `Resetting built-in provider "${edit.name || edit.id}" clears saved credentials and custom settings, restoring its default state.`)
+                  : t(`删除自定义服务商「${edit.name || edit.id}」将一并移除其下所有模型，且无法恢复。`, `Deleting custom provider "${edit.name || edit.id}" removes all of its models and cannot be undone.`)}
+              </span>
+              {confirmError ? (
+                <>
+                  <br />
+                  <span className="ca-error-text">{confirmError}</span>
+                </>
+              ) : null}
+            </>
+          ) : ''
         }
-        confirmLabel={edit?.native ? t('重置服务商', 'Reset Provider') : t('删除服务商', 'Delete Provider')}
+        confirmLabel={
+          savingProvider
+            ? t('处理中…', 'Working…')
+            : edit?.native
+              ? t('重置服务商', 'Reset Provider')
+              : t('删除服务商', 'Delete Provider')
+        }
         cancelLabel={t('取消', 'Cancel')}
         danger
         busy={savingProvider}
         onCancel={() => {
-          if (!savingProvider) setConfirmDeleteProviderOpen(false);
+          if (!savingProvider) {
+            setConfirmError('');
+            setActiveModal(null);
+          }
         }}
         onConfirm={() => void handleDeleteProvider()}
       />
 
+      {/* Single top-level modal slot: Confirm Remove Model */}
       <CaConfirmDialog
-        open={Boolean(modelToDelete) && Boolean(edit)}
+        open={Boolean(deleteModelTarget) && Boolean(edit)}
         title={t('移除模型', 'Remove Model')}
         description={
-          modelToDelete
-            ? t(`移除模型「${modelToDelete.model.name || modelToDelete.model.id}」后，该模型将不再出现在当前服务商的可用列表中。`, `Removing model "${modelToDelete.model.name || modelToDelete.model.id}" removes it from this provider's available model list.`)
-            : ''
+          deleteModelTarget ? (
+            <>
+              <span>
+                {t(`移除模型「${deleteModelTarget.model.name || deleteModelTarget.model.id}」后，该模型将不再出现在当前服务商的可用列表中。`, `Removing model "${deleteModelTarget.model.name || deleteModelTarget.model.id}" removes it from this provider's available model list.`)}
+              </span>
+              {confirmError ? (
+                <>
+                  <br />
+                  <span className="ca-error-text">{confirmError}</span>
+                </>
+              ) : null}
+            </>
+          ) : ''
         }
-        confirmLabel={t('移除模型', 'Remove Model')}
+        confirmLabel={modelSaving ? t('移除中…', 'Removing…') : t('移除模型', 'Remove Model')}
         cancelLabel={t('取消', 'Cancel')}
         danger
         busy={modelSaving}
         onCancel={() => {
-          if (!modelSaving) setModelToDelete(null);
+          if (!modelSaving) {
+            setConfirmError('');
+            if (deleteModelTarget?.returnToEdit) {
+              setActiveModal({ kind: 'edit-model', creating: false });
+            } else {
+              setActiveModal(null);
+            }
+          }
         }}
         onConfirm={() => {
-          if (modelToDelete) void handleDeleteModel(modelToDelete.model, modelToDelete.fromModal);
+          if (deleteModelTarget) void handleDeleteModel(deleteModelTarget.model);
         }}
       />
     </div>

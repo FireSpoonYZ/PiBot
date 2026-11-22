@@ -18,6 +18,7 @@ import {
   type UnifiedBotItem,
 } from '../hub/shared';
 import { PendingInbox } from '../hub/PendingInbox';
+import { ActionBar, Button } from '../components/ui';
 import { HubArchivedRow } from './HubParts';
 import type { ActionController, HubContextMenuState, MobileBotItem } from './types';
 
@@ -95,7 +96,7 @@ export function ScopesSubpageScreen({
             <ArrowLeft size={20} />
           </button>
           <h2 className="grok-subpage-header-title">{t('待发消息', 'Pending messages')}</h2>
-          <span className="shell-topbar-spacer" />
+          <span className="shell-topbar-spacer" aria-hidden="true" />
         </header>
       )}
       {/* conversation/dm 页面头由 Scopes 会话头承担：宿主不再叠一层标题栏，
@@ -320,13 +321,12 @@ export function ArchivedBotsScreen({
         <h2 className="grok-subpage-header-title">
           {t(`已归档 Bot (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}
         </h2>
-        <span className="grok-topbar-spacer" />
+        <span className="grok-topbar-spacer" aria-hidden="true" />
       </header>
 
       <div className="grok-subpage-scroll">
         <p className="grok-card-footnote grok-footnote-mt-2">
-          {t('已归档的 Bot 保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。',
-            'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.')}
+          {t('已归档的 Bot 保留 14 天，到期后自动清理。点击条目可查看只读历史。', 'Archived bots are kept for 14 days before auto-deletion. Tap a bot to view read-only history.')}
         </p>
         <ReservedSlot minHeight={48} align="start">
           <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
@@ -334,73 +334,100 @@ export function ArchivedBotsScreen({
 
         {archivedBots.length === 0 ? (
           <section className="grok-card-group grok-schedule-empty">
-            <Archive size={28} className="grok-row-icon" />
+            <Archive size={28} className="grok-row-icon" aria-hidden="true" />
             <h4>{t('暂无已归档 Bot', 'No Archived Bots')}</h4>
             <p>
-              {t('归档后的 Bot 会收纳在此处并保留 14 天，不会继续显示在主页列表中。',
-                'Archived bots are kept here for 14 days and hidden from the main Hub list.')}
+              {t('归档后的 Bot 会收纳在此处并保留 14 天，不会继续显示在主页列表中。', 'Archived bots are kept here for 14 days and hidden from the main Hub list.')}
             </p>
           </section>
         ) : (
           <section className="grok-card-group grok-archived-list-group">
-            {archivedBots.map(item => {
+            {archivedBots.map((item, index) => {
               const daysLeft = formatArchivedRemainingDays(item.archivedAt);
               const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, false);
               return (
-                <HubArchivedRow
+                <div
                   key={item.key}
-                  onOpen={() => onOpenBotChat(item)}
-                  onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
+                  style={index > 0 ? { borderTop: '1px solid var(--color-line)' } : undefined}
                 >
-                  <div className="hub-bot-avatar-col">
-                    <GrokBotAvatar
-                      preset={preset}
-                      platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
-                      size={46}
-                    />
-                  </div>
-                  <div className="hub-bot-content-col">
-                    <div className="hub-bot-title-line">
-                      <span className="hub-bot-title">{item.role}</span>
-                      {hasRemoteConfigured && (
-                        <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
-                          <PlatformLogoIcon platform={item.platform} size={11} />
-                          <span className="hub-bot-host-text">{item.hostLabel}</span>
-                        </span>
-                      )}
-                      <span className="hub-bot-time grok-archived-ttl-pill">
-                        {t(`剩余 ${daysLeft} 天（共 14 天）`, `${daysLeft}d / 14d left`)}
-                      </span>
-                    </div>
-                    <div className="hub-bot-subtitle-line grok-archived-subtitle-gap">
-                      <span className="hub-bot-snippet">
-                        {item.lastPreview || item.description || t('点击查看只读历史 · 14 天后自动清理', 'Tap for read-only history · 14d auto-delete')}
-                      </span>
-                      <button
-                        type="button"
-                        className="hub-outline-btn grok-archived-btn-sm"
-                        disabled={action.busy}
-                        onClick={e => {
-                          e.stopPropagation();
-                          onUnarchive(item);
+                  <HubArchivedRow
+                    onOpen={() => onOpenBotChat(item)}
+                    onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
+                  >
+                    <div
+                      className="hub-bot-content-col"
+                      style={{ padding: 'var(--space-1) var(--space-2)', gap: 'var(--space-2)' }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', minWidth: 0 }}>
+                        <div className="hub-bot-avatar-col" style={{ width: 42, height: 42 }}>
+                          <GrokBotAvatar
+                            preset={preset}
+                            platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
+                            size={42}
+                          />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          <div className="hub-bot-title-line">
+                            <span className="hub-bot-title">{item.role}</span>
+                            <span className="hub-bot-time grok-archived-ttl-pill">
+                              {t(`剩余 ${daysLeft} 天`, `${daysLeft}d left`)}
+                            </span>
+                          </div>
+                          {hasRemoteConfigured && (
+                            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+                              <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
+                                <PlatformLogoIcon platform={item.platform} size={11} />
+                                <span className="hub-bot-host-text">{item.hostLabel}</span>
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <p
+                        className="hub-bot-snippet"
+                        style={{
+                          whiteSpace: 'normal',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
                         }}
                       >
-                        {t('恢复', 'Restore')}
-                      </button>
-                      <button
-                        type="button"
-                        className="hub-outline-btn danger grok-archived-btn-sm"
-                        disabled={action.busy}
-                        onClick={e => {
-                          e.stopPropagation();
-                          onRequestDelete(item);
-                        }}
-                      >
-                        {t('永久删除 Bot', 'Permanently Delete')}
-                      </button>
+                        {item.lastPreview || item.description || t('点击查看只读历史', 'Tap to view read-only history')}
+                      </p>
+                      <ActionBar align="end">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={action.busy}
+                          onKeyDown={e => e.stopPropagation()}
+                          onClick={e => {
+                            e.stopPropagation();
+                            onUnarchive(item);
+                          }}
+                        >
+                          {t('恢复', 'Restore')}
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={action.busy}
+                          style={{
+                            color: 'var(--color-danger)',
+                            borderColor: 'color-mix(in srgb, var(--color-danger) 28%, var(--color-line))',
+                          }}
+                          onKeyDown={e => e.stopPropagation()}
+                          onClick={e => {
+                            e.stopPropagation();
+                            onRequestDelete(item);
+                          }}
+                        >
+                          {t('永久删除', 'Delete permanently')}
+                        </Button>
+                      </ActionBar>
                     </div>
-                  </div>
-                </HubArchivedRow>
+                  </HubArchivedRow>
+                </div>
               );
             })}
           </section>

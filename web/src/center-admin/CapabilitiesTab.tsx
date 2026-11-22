@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
-import { FileCode2, Plus, RefreshCw, Sparkles, Trash2, Upload, Wrench } from 'lucide-react';
-import { LabelStack } from '../layout';
+import {
+  ArrowLeft,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  Upload,
+} from 'lucide-react';
+import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
 import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
@@ -10,7 +18,6 @@ import {
   BotTreeSelector,
   CaChips,
   CaConfirmDialog,
-  CaDisclosure,
   CaExternalUrlBox,
   CaModal,
   CaNotice,
@@ -47,6 +54,29 @@ interface CapabilitiesCacheData {
   installations: Installation[];
   devices: CenterDevice[];
   bots: CenterBotRef[];
+  enabledBotCounts?: Record<string, number>;
+}
+
+type CapabilitySegment = 'all' | 'skills' | 'tools';
+
+type CapabilityModal =
+  | null
+  | { kind: 'install'; defaultKind: CapabilityKind }
+  | { kind: 'create-skill' }
+  | { kind: 'rename'; inst: Installation }
+  | { kind: 'bot-override'; bot: CenterBotRef }
+  | { kind: 'confirm'; inst: Installation };
+
+function StatusDot({ tone }: { tone: 'ok' | 'warn' | 'danger' | 'muted' }): React.JSX.Element {
+  const bg =
+    tone === 'ok'
+      ? 'var(--ca-ok)'
+      : tone === 'warn'
+        ? 'var(--ca-warn)'
+        : tone === 'danger'
+          ? 'var(--ca-danger)'
+          : 'var(--ca-text-subtle)';
+  return <span className="ca-dot" style={{ background: bg }} aria-hidden="true" />;
 }
 
 function activationLabel(item: Installation, t: TranslateFn): { text: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {
@@ -56,6 +86,12 @@ function activationLabel(item: Installation, t: TranslateFn): { text: string; to
   if (st === 'failed') return { text: t('启用失败', 'Failed'), tone: 'danger' };
   if (item.enabled) return { text: t('已开启', 'On'), tone: 'ok' };
   return { text: t('已停用', 'Disabled'), tone: 'muted' };
+}
+
+function kindLabel(kind: CapabilityKind, t: TranslateFn): string {
+  if (kind === 'skill') return t('技能', 'Skill');
+  if (kind === 'mcp') return 'MCP';
+  return t('插件', 'Plugin');
 }
 
 function scopeLabel(scope: SkillVisibilityScope | undefined, t: TranslateFn): string {
@@ -86,6 +122,18 @@ function normalizeInlineSkillMarkdown(name: string, body: string): string {
   return `---\nname: "${safeName}"\ndescription: "${safeName}"\n---\n\n${body}`;
 }
 
+function countEnabledBots(
+  bindingsRec: Record<string, BotCapabilityConfig>,
+  activeBots: readonly CenterBotRef[],
+): number {
+  let count = 0;
+  for (const b of activeBots) {
+    const cfg = bindingsRec[botKey(b.deviceId, b.botId)] ?? bindingsRec[`${b.deviceId}:${b.botId}`];
+    if (cfg?.enabled) count += 1;
+  }
+  return count;
+}
+
 export function CapabilitiesTab({
   api,
   active = true,
@@ -106,7 +154,7 @@ export function CapabilitiesTab({
     () => readTabCache<CapabilitiesCacheData>(cacheKey, 'capabilities')?.data ?? null,
     [cacheKey],
   );
-  const [segment, setSegment] = useState<'skills' | 'tools'>('skills');
+  const [segment, setSegment] = useState<CapabilitySegment>('all');
   const [skillFilter, setSkillFilter] = useState<'all' | 'shared' | 'learned'>('all');
   const [query, setQuery] = useState('');
 
@@ -117,7 +165,13 @@ export function CapabilitiesTab({
   const [installations, setInstallations] = useState<Installation[]>(() => initialCache?.installations ?? []);
   const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
   const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
+  const [enabledBotCounts, setEnabledBotCounts] = useState<Record<string, number>>(
+    () => initialCache?.enabledBotCounts ?? {},
+  );
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  // Mutually exclusive modal state (never stacked)
+  const [modal, setModal] = useState<CapabilityModal>(null);
 
   const hasLoadedRef = useRef(hasLoaded);
   const cacheKeyRef = useRef(cacheKey);
@@ -146,8 +200,7 @@ export function CapabilitiesTab({
     [clearNotice, showNotice],
   );
 
-  // Create inline skill modal
-  const [createSkillOpen, setCreateSkillOpen] = useState(false);
+  // Create inline skill form state
   const [newSkillName, setNewSkillName] = useState('');
   const [newSkillScope, setNewSkillScope] = useState<SkillVisibilityScope>('global');
   const [newSkillFiles, setNewSkillFiles] = useState<Record<string, string>>(() => ({
@@ -156,17 +209,9 @@ export function CapabilitiesTab({
   const [newSkillActiveFile, setNewSkillActiveFile] = useState('SKILL.md');
   const [newSkillAddPath, setNewSkillAddPath] = useState('');
   const [createSkillBusy, setCreateSkillBusy] = useState(false);
+  const [createSkillError, setCreateSkillError] = useState('');
 
-  const setCreateSkillError = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('create-error', msg, { tone: 'danger' });
-      else clearNotice('create-error');
-    },
-    [clearNotice, showNotice],
-  );
-
-  // Import package modal (skill archive / URL / npm OR MCP/plugin install)
-  const [importOpen, setImportOpen] = useState(false);
+  // Install / import capability form state
   const [importKind, setImportKind] = useState<CapabilityKind>('skill');
   const [importSource, setImportSource] = useState<'artifact' | 'npm' | 'http'>('artifact');
   const [importName, setImportName] = useState('');
@@ -176,30 +221,21 @@ export function CapabilitiesTab({
   const [importTarget, setImportTarget] = useState<'center' | 'host'>('host');
   const [importAutoEnable, setImportAutoEnable] = useState(true);
   const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [importNeedsBrowser, setImportNeedsBrowser] = useState(false);
 
-  const setImportError = useCallback(
-    (msg: string, withBrowserAction = false) => {
-      if (msg) {
-        const t = tRef.current;
-        showNotice('import-error', msg, {
-          tone: 'danger',
-          action:
-            withBrowserAction && onOpenExternal
-              ? { label: t('在浏览器打开', 'Open in browser'), onClick: onOpenExternal }
-              : undefined,
-        });
-      } else {
-        clearNotice('import-error');
-      }
-    },
-    [clearNotice, onOpenExternal, showNotice],
-  );
+  // Rename modal form state
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState('');
 
-  // Unified Detail Drawer (Skill editor OR MCP/Plugin configurator)
-  const [detailOpen, setDetailOpen] = useState(false);
+  // In-page Capability Detail view state
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+
   const [detailInst, setDetailInst] = useState<Installation | null>(null);
-  const [detailNameDraft, setDetailNameDraft] = useState('');
+  const [detailLoading, setDetailLoading] = useState(false);
   const [detailScopeDraft, setDetailScopeDraft] = useState<SkillVisibilityScope>('global');
   const [detailConfig, setDetailConfig] = useState<InstallationConfig | null>(null);
   const [detailGlobalDraft, setDetailGlobalDraft] = useState<JsonObject>({});
@@ -208,9 +244,9 @@ export function CapabilitiesTab({
   const [activeSkillPath, setActiveSkillPath] = useState('SKILL.md');
   const [newSubfilePath, setNewSubfilePath] = useState('');
   const [botBindings, setBotBindings] = useState<Map<string, BotCapabilityConfig>>(new Map());
+  const detailBindingsLoadedForRef = useRef<string | null>(null);
   const [bindingBusyKeys, setBindingBusyKeys] = useState<Set<string>>(new Set());
   const [detailBusy, setDetailBusy] = useState(false);
-  const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
   const [oauthHintNeeded, setOauthHintNeeded] = useState(false);
 
   const setDetailError = useCallback(
@@ -240,19 +276,19 @@ export function CapabilitiesTab({
     [clearNotice, showNotice],
   );
 
-  // Per-Bot Override Modal (for MCP/Plugin)
-  const [overrideBot, setOverrideBot] = useState<CenterBotRef | null>(null);
+  // Per-Bot Override modal form state (opens over in-page detail view, never stacked)
   const [overrideDraft, setOverrideDraft] = useState<JsonObject>({});
   const [overrideRevision, setOverrideRevision] = useState(0);
   const [overrideEnabled, setOverrideEnabled] = useState(true);
   const [overrideSaving, setOverrideSaving] = useState(false);
+  const [overrideError, setOverrideError] = useState('');
 
-  // OAuth & Probe/Tools check inside detail drawer
+  // OAuth & Probe/Tools check inside detail view
   const [selectedValidationBotKey, setSelectedValidationBotKey] = useState('');
   const [oauthFlow, setOauthFlow] = useState<McpOAuthStart | null>(null);
   const [oauthStatus, setOauthStatus] = useState('');
   const [probeBusy, setProbeBusy] = useState(false);
-  const [probeResult, setProbeResult] = useState<string>('');
+  const [probeResult, setProbeResult] = useState('');
   const [toolsResult, setToolsResult] = useState<CapabilityTool[] | null>(null);
   const [deployments, setDeployments] = useState<DeploymentReceipt[]>([]);
   const [updates, setUpdates] = useState<PackageVersion[] | null>(null);
@@ -277,7 +313,7 @@ export function CapabilitiesTab({
   useEffect(() => () => stopTimers(), [stopTimers]);
 
   useEffect(() => {
-    if (detailOpen && operation?.phase === 'failed' && operation.error?.message) {
+    if (selectedId && operation?.phase === 'failed' && operation.error?.message) {
       const msg = operation.error.code
         ? `${operation.error.code}: ${operation.error.message}`
         : operation.error.message;
@@ -285,18 +321,47 @@ export function CapabilitiesTab({
     } else {
       clearNotice('op-error');
     }
-  }, [clearNotice, detailOpen, operation, showNotice]);
+  }, [clearNotice, operation, selectedId, showNotice]);
 
   const loadAll = useCallback(async () => {
     const [caps, sync] = await Promise.all([api.listCapabilities(), api.getBotSync()]);
+    const nextDevices = sync.devices;
+    const nextBots = sync.bots ?? [];
+    const activeBotList = nextBots.filter(b => !b.archivedAt);
+
     setInstallations(caps);
-    setDevices(sync.devices);
-    setBots(sync.bots ?? []);
+    setDevices(nextDevices);
+    setBots(nextBots);
     hasLoadedRef.current = true;
     cacheKeyRef.current = cacheKey;
     setHasLoaded(true);
     setInitialError('');
     clearNotice('load-error');
+
+    // Fetch per-installation Bot binding counts without N*M fallback fanout
+    if (caps.length > 0 && activeBotList.length > 0) {
+      const countEntries = await Promise.all(
+        caps.map(async inst => {
+          try {
+            const rec = await api.getInstallationBotBindings(inst.installationId, []);
+            return [inst.installationId, countEnabledBots(rec, activeBotList)] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setEnabledBotCounts(prev => {
+        const next: Record<string, number> = { ...prev };
+        for (const entry of countEntries) {
+          if (entry) next[entry[0]] = entry[1];
+        }
+        return next;
+      });
+    } else if (activeBotList.length === 0) {
+      const zeroed: Record<string, number> = {};
+      for (const inst of caps) zeroed[inst.installationId] = 0;
+      setEnabledBotCounts(zeroed);
+    }
   }, [api, cacheKey, clearNotice]);
 
   const runLoad = useCallback(async () => {
@@ -307,7 +372,7 @@ export function CapabilitiesTab({
     } catch (err) {
       if (gen !== loadGenRef.current) return;
       const t = tRef.current;
-      const msg = errorMessage(err, t('加载技能与扩展失败', 'Failed to load skills and extensions'));
+      const msg = errorMessage(err, t('加载能力列表失败，请检查中心连接后重试', 'Failed to load capabilities. Check center connectivity and retry.'));
       if (hasLoadedRef.current) {
         if (activeRef.current) {
           showNotice('load-error', msg, {
@@ -350,8 +415,9 @@ export function CapabilitiesTab({
       installations,
       devices,
       bots,
+      enabledBotCounts,
     });
-  }, [bots, cacheKey, devices, hasLoaded, installations]);
+  }, [bots, cacheKey, devices, enabledBotCounts, hasLoaded, installations]);
 
   const activeBots = useMemo(() => bots.filter(b => !b.archivedAt), [bots]);
   const onlineBots = useMemo(
@@ -376,11 +442,12 @@ export function CapabilitiesTab({
 
   const loadDetail = useCallback(
     async (instId: string) => {
+      setDetailLoading(true);
       setDetailError('');
       try {
         const inst = await api.getInstallation(instId);
+        if (selectedIdRef.current !== instId) return;
         setDetailInst(inst);
-        setDetailNameDraft(inst.displayName);
         setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
 
         const cfgPromise =
@@ -402,14 +469,21 @@ export function CapabilitiesTab({
           depsPromise,
           bindingsPromise,
         ]);
+        if (selectedIdRef.current !== instId) return;
 
         const bindingMap = new Map<string, BotCapabilityConfig>();
+        let enabledCount = 0;
         for (const b of activeBots) {
           const key = botKey(b.deviceId, b.botId);
-          const bc = bindingsRec[key];
-          if (bc) bindingMap.set(key, bc);
+          const bc = bindingsRec[key] ?? bindingsRec[`${b.deviceId}:${b.botId}`];
+          if (bc) {
+            bindingMap.set(key, bc);
+            if (bc.enabled) enabledCount += 1;
+          }
         }
         setBotBindings(bindingMap);
+        detailBindingsLoadedForRef.current = instId;
+        setEnabledBotCounts(prev => ({ ...prev, [instId]: enabledCount }));
         setDetailConfig(cfg);
         setDetailGlobalDraft(cfg?.globalConfig ?? {});
         setSkillFilesRes(sFiles);
@@ -420,32 +494,60 @@ export function CapabilitiesTab({
         }
         setDeployments(deps);
       } catch (err) {
-        setDetailError(errorMessage(err, t('加载扩展详情失败', 'Failed to load extension details')));
+        if (selectedIdRef.current === instId) {
+          setDetailError(errorMessage(err, t('加载能力详情失败，请返回列表后重试', 'Failed to load capability details. Return to the list and try again.')));
+        }
+      } finally {
+        if (selectedIdRef.current === instId) {
+          setDetailLoading(false);
+        }
       }
     },
-    [activeBots, api, t],
+    [activeBots, api, setDetailError, t],
   );
 
-  const openDetailDrawer = (inst: Installation) => {
+  const openDetailView = useCallback(
+    (inst: Installation) => {
+      stopTimers();
+      setModal(null);
+      setSelectedId(inst.installationId);
+      selectedIdRef.current = inst.installationId;
+      setDetailInst(inst);
+      setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
+      setDetailConfig(null);
+      setDetailGlobalDraft({});
+      setSkillFilesRes(null);
+      setSkillFilesDraft({});
+      setBotBindings(new Map());
+      detailBindingsLoadedForRef.current = null;
+      setDetailNotice('');
+      setDetailError('');
+      setOauthHintNeeded(false);
+      setOauthFlow(null);
+      setOauthStatus('');
+      setProbeResult('');
+      setToolsResult(null);
+      setDeployments([]);
+      setUpdates(null);
+      setUpdateArtifactFile(null);
+      setUpdateArtifactInputKey(k => k + 1);
+      setOperation(null);
+      void loadDetail(inst.installationId);
+    },
+    [loadDetail, setDetailError, setDetailNotice, stopTimers],
+  );
+
+  const closeDetailView = useCallback(() => {
     stopTimers();
-    setSelectedId(inst.installationId);
-    setDetailInst(inst);
-    setDetailNameDraft(inst.displayName);
-    setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
-    setDetailNotice('');
+    setModal(null);
+    setSelectedId(null);
+    selectedIdRef.current = null;
+    detailBindingsLoadedForRef.current = null;
+    setDetailInst(null);
     setDetailError('');
-    setOauthHintNeeded(false);
-    setOauthFlow(null);
-    setOauthStatus('');
-    setProbeResult('');
-    setToolsResult(null);
-    setUpdates(null);
-    setUpdateArtifactFile(null);
-    setUpdateArtifactInputKey(k => k + 1);
-    setOperation(null);
-    setDetailOpen(true);
-    void loadDetail(inst.installationId);
-  };
+    setDetailNotice('');
+    clearNotice('op-error');
+  }, [clearNotice, setDetailError, setDetailNotice, stopTimers]);
 
   const watchOperation = useCallback(
     (operationId: string, onDone?: () => void) => {
@@ -458,7 +560,7 @@ export function CapabilitiesTab({
           setOperation(op);
           if (op.phase === 'applied' || op.phase === 'failed' || op.phase === 'removed' || attempts > 30) {
             await loadAll();
-            if (selectedId) await loadDetail(selectedId);
+            if (selectedIdRef.current) await loadDetail(selectedIdRef.current);
             onDone?.();
             return;
           }
@@ -469,7 +571,7 @@ export function CapabilitiesTab({
       };
       opTimerRef.current = window.setTimeout(() => void tick(), 900);
     },
-    [api, loadAll, loadDetail, selectedId],
+    [api, loadAll, loadDetail],
   );
 
   const handleToggleGlobalRow = async (inst: Installation, nextEnabled: boolean) => {
@@ -491,11 +593,11 @@ export function CapabilitiesTab({
       }
       await loadAll();
     } catch (err) {
-      // If OAuth / validationBot needed, open drawer smoothly so user can complete OAuth right inside drawer
-      const msg = errorMessage(err, t('操作失败', 'Operation failed'));
+      const msg = errorMessage(err, t('切换启用状态失败', 'Failed to toggle status'));
       if (msg.toLowerCase().includes('oauth') || msg.includes('validationBot') || msg.includes('授权')) { // i18n-ok
-        openDetailDrawer(inst);
-        setDetailError(t('此 MCP 需要先完成 OAuth Bot 授权后才能全局启用，请在下方选择 Bot 一键授权。', 'This MCP requires OAuth authorization with a Bot before enabling globally. Choose a Bot below to authorize.'));
+        openDetailView(inst);
+        setOauthHintNeeded(true);
+        setDetailError(t('此 MCP 需要先完成 OAuth Bot 授权后才能全局启用，请在下方选择 Bot 发起授权。', 'This MCP requires OAuth authorization with a Bot before enabling globally. Select a Bot below to authorize.'));
       } else {
         setError(msg);
       }
@@ -504,17 +606,27 @@ export function CapabilitiesTab({
     }
   };
 
-  // Create inline skill
+  const openCreateSkillModal = () => {
+    setNewSkillName('');
+    setNewSkillScope('global');
+    setNewSkillFiles({ 'SKILL.md': defaultSkillMarkdown });
+    setNewSkillActiveFile('SKILL.md');
+    setNewSkillAddPath('');
+    setCreateSkillError('');
+    setModal({ kind: 'create-skill' });
+  };
+
   const handleCreateInlineSkill = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createSkillBusy) return;
     const title = newSkillName.trim();
     if (!title) {
-      setCreateSkillError(t('请填写技能名称', 'Please enter a skill name'));
+      setCreateSkillError(t('请填写技能名称后再创建', 'Enter a skill name before creating.'));
       return;
     }
     const md = newSkillFiles['SKILL.md'] ?? '';
     if (!md.trim()) {
-      setCreateSkillError(t('请填写 SKILL.md 内容', 'Please enter SKILL.md content'));
+      setCreateSkillError(t('请填写 SKILL.md 内容后再创建', 'Enter SKILL.md content before creating.'));
       return;
     }
     const preparedFiles: Record<string, string> = {
@@ -534,25 +646,25 @@ export function CapabilitiesTab({
         source: { type: 'inline', files: preparedFiles },
       });
       const op = await api.getOperation(accepted.operationId).catch(() => null);
-      setCreateSkillOpen(false);
+      setModal(null);
       setNewSkillName('');
       setNewSkillFiles({ 'SKILL.md': defaultSkillMarkdown });
       setNewSkillActiveFile('SKILL.md');
       await loadAll();
       if (op?.installationId) {
         const created = await api.getInstallation(op.installationId).catch(() => null);
-        if (created) openDetailDrawer(created);
+        if (created) openDetailView(created);
       }
       setNotice(t(`技能「${title}」已创建并启用`, `Skill "${title}" created and enabled`));
     } catch (err) {
-      setCreateSkillError(errorMessage(err, t('创建技能失败', 'Failed to create skill')));
+      const detail = errorMessage(err, t('中心未能创建技能', 'Center could not create the skill'));
+      setCreateSkillError(t(`创建技能失败：${detail}。请检查名称和文件内容后重试。`, `Failed to create skill: ${detail}. Check the name and files, then try again.`));
     } finally {
       setCreateSkillBusy(false);
     }
   };
 
-  // Import skill package / install MCP or plugin
-  const openImportModal = (defaultKind: CapabilityKind) => {
+  const openInstallModal = (defaultKind: CapabilityKind) => {
     setImportKind(defaultKind);
     setImportSource(defaultKind === 'skill' ? 'artifact' : 'npm');
     setImportName('');
@@ -562,29 +674,32 @@ export function CapabilitiesTab({
     setImportTarget(defaultKind === 'mcp' ? 'center' : 'host');
     setImportAutoEnable(true);
     setImportError('');
-    setImportOpen(true);
+    setImportNeedsBrowser(false);
+    setModal({ kind: 'install', defaultKind });
   };
 
   const handleSubmitImport = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (importBusy) return;
     const name = importName.trim();
     if (!name) {
-      setImportError(t('请填写名称', 'Please enter a name'));
+      setImportError(t('请填写显示名称后再安装', 'Enter a display name before installing.'));
       return;
     }
     setImportBusy(true);
     setImportError('');
+    setImportNeedsBrowser(false);
     try {
       let source: Parameters<CenterApi['install']>[0]['source'];
       if (importSource === 'artifact') {
-        if (!importFile) throw new Error(t('请选择要上传的压缩包文件', 'Please select an archive file to upload'));
+        if (!importFile) throw new Error(t('请选择要上传的压缩包文件', 'Select an archive file to upload.'));
         const uploaded = await api.uploadArtifact(importFile);
         source = { type: 'artifact', artifactRef: uploaded.artifactRef };
       } else if (importSource === 'npm') {
-        if (!importSpec.trim()) throw new Error(t('请填写 npm 包名', 'Please enter an npm package spec'));
+        if (!importSpec.trim()) throw new Error(t('请填写 npm 包标识', 'Enter an npm package spec.'));
         source = { type: 'npm', spec: importSpec.trim() };
       } else {
-        if (!importUrl.trim()) throw new Error(t('请填写 URL 地址', 'Please enter a URL'));
+        if (!importUrl.trim()) throw new Error(t('请填写 HTTP URL 地址', 'Enter an HTTP URL.'));
         source = { type: 'http', url: importUrl.trim() };
       }
 
@@ -596,7 +711,7 @@ export function CapabilitiesTab({
         autoEnable: importAutoEnable,
         source,
       });
-      setImportOpen(false);
+      setModal(null);
       await loadAll();
       watchOperation(accepted.operationId);
       setNotice(
@@ -605,36 +720,75 @@ export function CapabilitiesTab({
           : t(`已提交「${name}」安装任务`, `Submitted install task for "${name}"`),
       );
     } catch (err) {
-      setImportError(errorMessage(err, t('安装失败', 'Installation failed')), importSource === 'artifact');
+      const needsBrowser =
+        importSource === 'artifact' &&
+        err instanceof CenterApiError &&
+        err.code === 'UNSUPPORTED_FORM_DATA';
+      setImportNeedsBrowser(needsBrowser);
+      const detail = errorMessage(err, t('安装请求被拒绝', 'Install request failed'));
+      setImportError(
+        t(`安装失败：${detail}。请检查来源配置后重试。`, `Installation failed: ${detail}. Verify the source settings and try again.`),
+      );
     } finally {
       setImportBusy(false);
     }
   };
 
-  // Detail Drawer actions
-  const handleSaveDetailMeta = async () => {
-    if (!detailInst) return;
+  const openRenameModal = (inst: Installation) => {
+    setRenameDraft(inst.displayName);
+    setRenameError('');
+    setModal({ kind: 'rename', inst });
+  };
+
+  const handleSubmitRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (modal?.kind !== 'rename' || renameBusy) return;
+    const nextName = renameDraft.trim();
+    if (!nextName) {
+      setRenameError(t('显示名称不能为空', 'Display name cannot be empty.'));
+      return;
+    }
+    setRenameBusy(true);
+    setRenameError('');
+    try {
+      const updated = await api.patchInstallation(modal.inst.installationId, {
+        expectedRevision: modal.inst.revision,
+        displayName: nextName,
+      });
+      setDetailInst(prev => (prev?.installationId === updated.installationId ? updated : prev));
+      setInstallations(prev => prev.map(x => (x.installationId === updated.installationId ? updated : x)));
+      setModal(null);
+      setDetailNotice(t(`已重命名为「${updated.displayName}」`, `Renamed to "${updated.displayName}"`));
+    } catch (err) {
+      const detail = errorMessage(err, t('重命名请求失败', 'Rename request failed'));
+      setRenameError(t(`保存名称失败：${detail}。请刷新后重试。`, `Failed to rename: ${detail}. Refresh and try again.`));
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
+  const handleSaveSkillVisibility = async () => {
+    if (!detailInst || detailInst.kind !== 'skill' || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
     try {
       const updated = await api.patchInstallation(detailInst.installationId, {
         expectedRevision: detailInst.revision,
-        ...(detailNameDraft.trim() ? { displayName: detailNameDraft.trim() } : {}),
-        ...(detailInst.kind === 'skill' ? { visibilityScope: detailScopeDraft } : {}),
+        visibilityScope: detailScopeDraft,
       });
       setDetailInst(updated);
       setInstallations(prev => prev.map(x => (x.installationId === updated.installationId ? updated : x)));
-      setDetailNotice(t('名称与共享范围已更新', 'Name and visibility updated'));
+      setDetailNotice(t('共享范围已更新', 'Visibility scope updated'));
     } catch (err) {
-      setDetailError(errorMessage(err, t('保存信息失败', 'Failed to save details')));
+      setDetailError(errorMessage(err, t('保存共享范围失败，请刷新后重试', 'Failed to save visibility scope. Refresh and retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleSaveSkillFiles = async () => {
-    if (!detailInst || !skillFilesRes) return;
+    if (!detailInst || !skillFilesRes || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -652,16 +806,16 @@ export function CapabilitiesTab({
       });
       setSkillFilesRes(updated);
       setSkillFilesDraft({ ...updated.files });
-      setDetailNotice(t('技能文件已保存并下发至关联设备', 'Skill files saved and synced to connected devices'));
+      setDetailNotice(t('技能文件已保存并同步到关联设备', 'Skill files saved and synced to connected devices'));
     } catch (err) {
-      setDetailError(errorMessage(err, t('保存技能文件失败', 'Failed to save skill files')));
+      setDetailError(errorMessage(err, t('保存技能文件失败，请检查内容后重试', 'Failed to save skill files. Check content and retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleCloneToEditable = async () => {
-    if (!detailInst || !skillFilesRes) return;
+    if (!detailInst || !skillFilesRes || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     try {
@@ -679,20 +833,21 @@ export function CapabilitiesTab({
       await loadAll();
       if (op?.installationId) {
         setSelectedId(op.installationId);
+        selectedIdRef.current = op.installationId;
         await loadDetail(op.installationId);
         setDetailNotice(t(`已创建可编辑副本「${copyName}」`, `Created editable copy "${copyName}"`));
       } else {
-        setDetailNotice(t(`已创建可编辑副本「${copyName}」，请在列表中打开编辑`, `Created editable copy "${copyName}". Open it from the list to edit.`));
+        setDetailNotice(t(`已创建可编辑副本「${copyName}」，请返回列表打开编辑`, `Created editable copy "${copyName}". Open it from the list to edit.`));
       }
     } catch (err) {
-      setDetailError(errorMessage(err, t('转为可编辑副本失败', 'Failed to create editable copy')));
+      setDetailError(errorMessage(err, t('转为可编辑副本失败，请重试', 'Failed to create editable copy. Please retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleSaveGlobalToolConfig = async () => {
-    if (!detailInst || !detailConfig) return;
+    if (!detailInst || !detailConfig || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -703,9 +858,9 @@ export function CapabilitiesTab({
       });
       setDetailConfig(updated);
       setDetailGlobalDraft(updated.globalConfig);
-      setDetailNotice(t('全局参数已保存', 'Global settings saved'));
+      setDetailNotice(t('全局配置已保存', 'Global settings saved'));
     } catch (err) {
-      setDetailError(errorMessage(err, t('保存配置失败', 'Failed to save settings')));
+      setDetailError(errorMessage(err, t('保存全局配置失败，请检查字段值后重试', 'Failed to save global settings. Verify fields and retry.')));
     } finally {
       setDetailBusy(false);
     }
@@ -729,7 +884,7 @@ export function CapabilitiesTab({
         return next;
       });
     } catch (err) {
-      setDetailError(errorMessage(err, t('更新 Bot 授权失败', 'Failed to update Bot access')));
+      setDetailError(errorMessage(err, t('更新 Bot 启用状态失败，请重试', 'Failed to update Bot access. Please retry.')));
     } finally {
       setBindingBusyKeys(prev => {
         const next = new Set(prev);
@@ -742,20 +897,22 @@ export function CapabilitiesTab({
   const openBotOverrideModal = (bot: CenterBotRef) => {
     const bc = botBindings.get(botKey(bot.deviceId, bot.botId));
     if (!bc) return;
-    setOverrideBot(bot);
     setOverrideDraft({ ...(bc.overrides ?? {}) });
     setOverrideRevision(bc.revision);
     setOverrideEnabled(bc.enabled);
+    setOverrideError('');
+    setModal({ kind: 'bot-override', bot });
   };
 
   const handleSaveBotOverride = async () => {
-    if (!detailInst || !overrideBot) return;
+    if (!detailInst || modal?.kind !== 'bot-override' || overrideSaving) return;
+    const targetBot = modal.bot;
     setOverrideSaving(true);
-    setDetailError('');
+    setOverrideError('');
     try {
       const updated = await api.putBotCapability(
-        overrideBot.deviceId,
-        overrideBot.botId,
+        targetBot.deviceId,
+        targetBot.botId,
         detailInst.installationId,
         {
           expectedRevision: overrideRevision,
@@ -765,19 +922,19 @@ export function CapabilitiesTab({
       );
       setBotBindings(prev => {
         const next = new Map(prev);
-        next.set(botKey(overrideBot.deviceId, overrideBot.botId), updated);
+        next.set(botKey(targetBot.deviceId, targetBot.botId), updated);
         return next;
       });
-      setOverrideBot(null);
-      setDetailNotice(t(`已保存 ${overrideBot.name} 的独立覆盖参数`, `Saved override settings for ${overrideBot.name}`));
+      setModal(null);
+      setDetailNotice(t(`已保存 ${targetBot.name} 的独立覆盖参数`, `Saved override settings for ${targetBot.name}`));
     } catch (err) {
-      setDetailError(errorMessage(err, t('保存 Bot 覆盖参数失败', 'Failed to save Bot override settings')));
+      const detail = errorMessage(err, t('中心拒绝了覆盖配置', 'Center rejected override settings'));
+      setOverrideError(t(`保存覆盖参数失败：${detail}。请检查字段后重试。`, `Failed to save overrides: ${detail}. Verify fields and try again.`));
     } finally {
       setOverrideSaving(false);
     }
   };
 
-  // OAuth & Enable in detail drawer
   const parseBotKey = (key: string): { deviceId: string; botId: string } | null => {
     const idx = key.indexOf('::');
     if (idx <= 0) return null;
@@ -789,8 +946,8 @@ export function CapabilitiesTab({
     detailInst.target === 'center' &&
     Boolean(detailConfig?.globalConfig?.oauth === true);
 
-  const handleEnableInDrawer = async () => {
-    if (!detailInst) return;
+  const handleEnableInDetail = async () => {
+    if (!detailInst || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -803,14 +960,14 @@ export function CapabilitiesTab({
       setDetailNotice(t('已受理全局启用请求', 'Global enable request accepted'));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, t('全局启用失败', 'Failed to enable globally')));
+      setDetailError(errorMessage(err, t('全局启用失败，请检查配置与授权状态后重试', 'Failed to enable globally. Verify settings and authorization, then retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
-  const handleDisableInDrawer = async () => {
-    if (!detailInst) return;
+  const handleDisableInDetail = async () => {
+    if (!detailInst || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -821,17 +978,17 @@ export function CapabilitiesTab({
       setDetailNotice(t('已受理全局停用请求', 'Global disable request accepted'));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, t('全局停用失败', 'Failed to disable globally')));
+      setDetailError(errorMessage(err, t('全局停用失败，请重试', 'Failed to disable globally. Please retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleStartMcpOAuth = async () => {
-    if (!detailInst) return;
+    if (!detailInst || detailBusy) return;
     const targetBot = parseBotKey(selectedValidationBotKey);
     if (!targetBot) {
-      setDetailError(t('请先选择一个在线或可用 Bot 作为 OAuth 校验身份', 'Select an available Bot to authorize OAuth'));
+      setDetailError(t('请先选择一个可用 Bot 作为 OAuth 授权身份', 'Select an available Bot to authorize OAuth.'));
       return;
     }
     setDetailBusy(true);
@@ -847,7 +1004,11 @@ export function CapabilitiesTab({
           setOauthStatus(st.error ? `${st.status}: ${st.error}` : st.status);
           if (st.status === 'complete') {
             setDetailNotice(t('OAuth 授权已完成，正在自动启用…', 'OAuth authorized, enabling automatically…'));
-            await handleEnableInDrawer();
+            const accepted = await api.enableInstallation(detailInst.installationId, {
+              requestId: newRequestId(),
+              validationBot: targetBot,
+            });
+            watchOperation(accepted.operationId);
             return;
           }
           if (st.status === 'pending') {
@@ -859,17 +1020,17 @@ export function CapabilitiesTab({
       };
       oauthTimerRef.current = window.setTimeout(() => void poll(), 1500);
     } catch (err) {
-      setDetailError(errorMessage(err, t('启动 OAuth 授权失败', 'Failed to start OAuth authorization')));
+      setDetailError(errorMessage(err, t('启动 OAuth 授权失败，请重试', 'Failed to start OAuth authorization. Please retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleCheckAndListTools = async () => {
-    if (!detailInst) return;
+    if (!detailInst || probeBusy) return;
     const targetBot = parseBotKey(selectedValidationBotKey);
     if (!targetBot) {
-      setDetailError(t('暂无可用的设备与 Bot 执行连接探测', 'No available device and Bot to run connection check'));
+      setDetailError(t('暂无可用的设备与 Bot 执行连接探测', 'No available device and Bot to run connection check.'));
       return;
     }
     setProbeBusy(true);
@@ -886,14 +1047,14 @@ export function CapabilitiesTab({
       const tools = await api.listInstallationTools(detailInst.installationId, targetBot).catch(() => null);
       if (tools) setToolsResult(tools.tools);
     } catch (err) {
-      setDetailError(errorMessage(err, t('探测连接与工具列表失败', 'Failed to check connection and tools')));
+      setDetailError(errorMessage(err, t('探测连接与工具列表失败，请确认设备在线后重试', 'Failed to check connection and tools. Confirm the device is online and retry.')));
     } finally {
       setProbeBusy(false);
     }
   };
 
   const handleCheckUpdates = async () => {
-    if (!detailInst) return;
+    if (!detailInst || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -902,14 +1063,14 @@ export function CapabilitiesTab({
       setUpdates(list);
       if (list.length === 0) setDetailNotice(t('当前已是最新版本', 'Already up to date'));
     } catch (err) {
-      setDetailError(errorMessage(err, t('检查更新失败', 'Failed to check updates')));
+      setDetailError(errorMessage(err, t('检查更新失败，请稍后重试', 'Failed to check updates. Try again later.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleApplyUpdate = async (targetVersion: string) => {
-    if (!detailInst) return;
+    if (!detailInst || detailBusy) return;
     setDetailBusy(true);
     setDetailError('');
     setDetailNotice('');
@@ -919,19 +1080,19 @@ export function CapabilitiesTab({
         requestId: newRequestId(),
         targetVersion,
       });
-      setDetailNotice(t(`已发起更新到 ${targetVersion}`, `Started update to ${targetVersion}`));
+      setDetailNotice(t(`已发起更新到 v${targetVersion}`, `Started update to v${targetVersion}`));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, t('更新失败', 'Update failed')));
+      setDetailError(errorMessage(err, t('更新失败，请重试', 'Update failed. Please retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleApplyArtifactUpdate = async () => {
-    if (!detailInst || detailInst.source.type !== 'artifact') return;
+    if (!detailInst || detailInst.source.type !== 'artifact' || detailBusy) return;
     if (!updateArtifactFile) {
-      setDetailError(t('请选择新版制品压缩包 (.tgz / .tar.gz / .zip)', 'Please select a new package archive (.tgz / .tar.gz / .zip)'));
+      setDetailError(t('请先选择新版制品压缩包 (.tgz / .tar.gz / .zip)', 'Select a new package archive (.tgz / .tar.gz / .zip) first.'));
       return;
     }
     setDetailBusy(true);
@@ -950,49 +1111,53 @@ export function CapabilitiesTab({
       watchOperation(accepted.operationId);
     } catch (err) {
       const needsBrowser = err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA';
-      setDetailError(errorMessage(err, t('制品更新失败', 'Artifact update failed')), needsBrowser);
+      setDetailError(errorMessage(err, t('制品更新失败，请检查压缩包格式后重试', 'Artifact update failed. Verify the archive format and retry.')), needsBrowser);
     } finally {
       setDetailBusy(false);
     }
   };
 
   const handleUninstall = async () => {
-    if (!detailInst) return;
+    if (modal?.kind !== 'confirm' || detailBusy) return;
+    const targetInst = modal.inst;
     setDetailBusy(true);
     setDetailError('');
     try {
-      await api.uninstallInstallation(detailInst.installationId, { requestId: newRequestId() });
-      setConfirmUninstallOpen(false);
-      setDetailOpen(false);
+      await api.uninstallInstallation(targetInst.installationId, { requestId: newRequestId() });
+      setModal(null);
+      closeDetailView();
       await loadAll();
-      setNotice(t(`已卸载 ${detailInst.displayName}`, `Uninstalled ${detailInst.displayName}`));
+      setNotice(t(`已卸载 ${targetInst.displayName}`, `Uninstalled ${targetInst.displayName}`));
     } catch (err) {
-      setConfirmUninstallOpen(false);
-      setDetailError(errorMessage(err, t('卸载失败', 'Uninstall failed')));
+      setModal(null);
+      setDetailError(errorMessage(err, t('卸载失败，请重试', 'Uninstall failed. Please retry.')));
     } finally {
       setDetailBusy(false);
     }
   };
 
-  // Filtered lists
-  const skillItems = useMemo(() => {
+  const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
     return installations
-      .filter(inst => inst.kind === 'skill')
       .filter(inst => {
-        if (skillFilter === 'shared') return !inst.ownerBot;
-        if (skillFilter === 'learned') return Boolean(inst.ownerBot);
+        if (segment === 'skills') {
+          if (inst.kind !== 'skill') return false;
+          if (skillFilter === 'shared') return !inst.ownerBot;
+          if (skillFilter === 'learned') return Boolean(inst.ownerBot);
+          return true;
+        }
+        if (segment === 'tools') {
+          return inst.kind === 'mcp' || inst.kind === 'plugin';
+        }
         return true;
       })
-      .filter(inst => !q || inst.displayName.toLowerCase().includes(q) || inst.packageId.toLowerCase().includes(q));
-  }, [installations, query, skillFilter]);
-
-  const toolItems = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return installations
-      .filter(inst => inst.kind === 'mcp' || inst.kind === 'plugin')
-      .filter(inst => !q || inst.displayName.toLowerCase().includes(q) || inst.packageId.toLowerCase().includes(q));
-  }, [installations, query]);
+      .filter(
+        inst =>
+          !q ||
+          inst.displayName.toLowerCase().includes(q) ||
+          inst.packageId.toLowerCase().includes(q),
+      );
+  }, [installations, query, segment, skillFilter]);
 
   const selectedBotKeys = useMemo(() => {
     const set = new Set<string>();
@@ -1002,11 +1167,17 @@ export function CapabilitiesTab({
     return set;
   }, [botBindings]);
 
+  useEffect(() => {
+    if (!selectedId || detailBindingsLoadedForRef.current !== selectedId) return;
+    const count = selectedBotKeys.size;
+    setEnabledBotCounts(prev => (prev[selectedId] === count ? prev : { ...prev, [selectedId]: count }));
+  }, [selectedBotKeys, selectedId]);
+
   if (!hasLoaded && !initialError) {
     return (
       <div className="ca-form-stack">
         <CaToolbarSkeleton leftWidth={210} rightWidth={172} />
-        <CaSectionSkeleton rows={5} headWidth={176} trailingWidth={48} label={t('正在加载技能与扩展…', 'Loading skills and extensions…')} />
+        <CaSectionSkeleton rows={5} headWidth={176} trailingWidth={48} label={t('正在加载能力列表…', 'Loading capabilities…')} />
       </div>
     );
   }
@@ -1031,228 +1202,693 @@ export function CapabilitiesTab({
     );
   }
 
+  const activeDetail =
+    selectedId !== null
+      ? detailInst ?? installations.find(inst => inst.installationId === selectedId) ?? null
+      : null;
+
   return (
     <div>
       <CaRefreshBar active={refreshing} />
 
-      <div className="ca-toolbar">
-        <CaSegmented
-          value={segment}
-          ariaLabel={t('能力分类', 'Capability category')}
-          options={[
-            { value: 'skills', label: t('技能 (Skills)', 'Skills') },
-            { value: 'tools', label: t('工具扩展 (MCP & 插件)', 'Extensions (MCP & Plugins)') },
-          ]}
-          onChange={next => {
-            setSegment(next);
-            setQuery('');
-          }}
-        />
-
-        <div className="ca-toolbar-group">
-          <input
-            type="search"
-            className="ca-input ca-toolbar-search"
-            placeholder={segment === 'skills' ? t('搜索技能…', 'Search skills…') : t('搜索扩展…', 'Search extensions…')}
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
-          {segment === 'skills' ? (
-            <>
-              <button
-                type="button"
-                className="ca-btn ca-btn-primary ca-btn-sm"
-                onClick={() => {
-                  setCreateSkillError('');
-                  setCreateSkillOpen(true);
-                }}
-              >
-                <Plus size={14} />
-                <span>{t('新建技能', 'New skill')}</span>
-              </button>
+      {activeDetail ? (
+        /* In-page Capability Detail View (eliminates modal-on-modal stacking) */
+        <div className="ca-form-stack">
+          <div className="ca-toolbar" style={{ marginBottom: 0 }}>
+            <button
+              type="button"
+              className="ca-btn ca-btn-ghost ca-btn-sm"
+              onClick={closeDetailView}
+            >
+              <ArrowLeft size={14} aria-hidden="true" />
+              <span>{t('返回能力列表', 'Back to Capabilities')}</span>
+            </button>
+            <div className="ca-toolbar-group">
               <button
                 type="button"
                 className="ca-btn ca-btn-sm"
-                onClick={() => openImportModal('skill')}
+                disabled={detailBusy}
+                onClick={() => openRenameModal(activeDetail)}
               >
-                <Upload size={14} />
-                <span>{t('导入技能包', 'Import skill')}</span>
+                <Pencil size={13} aria-hidden="true" />
+                <span>{t('重命名', 'Rename')}</span>
               </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="ca-btn ca-btn-primary ca-btn-sm"
-              onClick={() => openImportModal('mcp')}
-            >
-              <Plus size={14} />
-              <span>{t('安装扩展', 'Install extension')}</span>
-            </button>
-          )}
+              <CaSwitch
+                checked={activeDetail.enabled}
+                disabled={detailBusy}
+                label={t(`全局启用 ${activeDetail.displayName}`, `Enable ${activeDetail.displayName} globally`)}
+                onChange={next => (next ? void handleEnableInDetail() : void handleDisableInDetail())}
+              />
+            </div>
+          </div>
+
+          {/* Section 1: Overview & Config */}
+          <section className="ca-section" aria-labelledby="ca-cap-overview-heading">
+            <div className="ca-section-head">
+              <div className="ca-row-main">
+                <div className="ca-row-title">
+                  <StatusDot tone={activationLabel(activeDetail, t).tone} />
+                  <h3 id="ca-cap-overview-heading" className="ca-section-title">
+                    {activeDetail.displayName}
+                  </h3>
+                  <span className="ca-pill ca-pill-muted">{kindLabel(activeDetail.kind, t)}</span>
+                  {activeDetail.kind !== 'skill' && (
+                    <span className="ca-pill ca-pill-muted">
+                      {activeDetail.target === 'center' ? t('中心托管', 'Center-hosted') : t('设备运行', 'On-device')}
+                    </span>
+                  )}
+                </div>
+                <span className="ca-row-sub">
+                  {t('概览与配置', 'Overview & Config')}
+                  {' · '}
+                  {activationLabel(activeDetail, t).text}
+                  {operation ? t(` · 任务进度 ${operation.phase}`, ` · Task ${operation.phase}`) : ''}
+                  {activeDetail.source.type === 'inline'
+                    ? t(' · 在线技能', ' · Inline skill')
+                    : ` · ${activeDetail.packageId} · v${activeDetail.targetVersion}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="ca-section-body ca-form-stack">
+              {activeDetail.activation?.error?.message && (
+                <CaNotice tone="danger">
+                  {activeDetail.activation.error.message}
+                </CaNotice>
+              )}
+
+              {/* OAuth authorization for center-hosted OAuth MCP */}
+              {(needsOAuth || activeDetail.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded) && (
+                <div className="ca-cred-box ca-form-stack">
+                  <div className="ca-field-label">
+                    {t('OAuth 身份授权（选择可用 Bot 完成授权即可启用）', 'OAuth authorization (choose an available Bot to authorize and enable)')}
+                  </div>
+                  <div className="ca-inline-row ca-wrap">
+                    <select
+                      className="ca-select ca-oauth-bot-select"
+                      value={selectedValidationBotKey}
+                      onChange={e => setSelectedValidationBotKey(e.target.value)}
+                    >
+                      {activeBots.length === 0 && <option value="">{t('暂无可用 Bot', 'No available Bots')}</option>}
+                      {activeBots.map(b => (
+                        <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
+                          {b.deviceName || b.deviceId} / {b.name || b.botId}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-primary ca-btn-sm"
+                      disabled={detailBusy || !selectedValidationBotKey}
+                      onClick={() => void handleStartMcpOAuth()}
+                    >
+                      {t('发起 OAuth 授权', 'Start OAuth')}
+                    </button>
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-sm"
+                      disabled={detailBusy || !selectedValidationBotKey}
+                      onClick={() => void handleEnableInDetail()}
+                    >
+                      {t('重试全局启用', 'Retry enable')}
+                    </button>
+                  </div>
+                  {oauthFlow && (
+                    <div className="ca-form-stack">
+                      <CaExternalUrlBox
+                        url={oauthFlow.authorizationUrl}
+                        onOpenUrl={onOpenExternalUrl}
+                        onError={err =>
+                          setDetailError(
+                            errorMessage(err, t('无法打开系统浏览器，请复制链接手动打开', 'Could not open browser; copy and open the link manually')),
+                          )
+                        }
+                        copyLabel={t('复制链接', 'Copy link')}
+                      />
+                      <span className="ca-muted">
+                        {t('授权状态：', 'Authorization status: ')}
+                        {oauthStatus || t('等待授权…', 'Waiting for authorization…')}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Skill visibility & multi-file editor */}
+              {activeDetail.kind === 'skill' && (
+                <>
+                  <div className="ca-field">
+                    <label className="ca-field-label" htmlFor="ca-cap-skill-scope">
+                      {t('可用范围', 'Visibility scope')}
+                    </label>
+                    <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+                      <select
+                        id="ca-cap-skill-scope"
+                        className="ca-select"
+                        style={{ flex: 1 }}
+                        disabled={detailBusy}
+                        value={detailScopeDraft}
+                        onChange={e => setDetailScopeDraft(e.target.value as SkillVisibilityScope)}
+                      >
+                        {activeDetail.ownerBot && <option value="private">{t('仅源 Bot 私有', 'Source Bot only')}</option>}
+                        <option value="assigned">{t('仅指定 Bot 共享', 'Assigned Bots only')}</option>
+                        <option value="global">{t('全局默认可用', 'Global default')}</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-sm"
+                        disabled={detailBusy || detailScopeDraft === (activeDetail.visibilityScope ?? (activeDetail.ownerBot ? 'private' : 'global'))}
+                        onClick={() => void handleSaveSkillVisibility()}
+                      >
+                        <LabelStack
+                          active={detailBusy ? t('保存中…', 'Saving…') : t('保存范围', 'Save scope')}
+                          labels={[t('保存范围', 'Save scope'), t('保存中…', 'Saving…')]}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  {detailLoading && !skillFilesRes ? (
+                    <div className="ca-muted">{t('正在加载技能文件…', 'Loading skill files…')}</div>
+                  ) : skillFilesRes ? (
+                    <div className="ca-form-stack">
+                      <div className="ca-inline-between ca-wrap">
+                        <span className="ca-field-label">{t('技能文件', 'Skill files')}</span>
+                        {!skillFilesRes.editable && (
+                          <button
+                            type="button"
+                            className="ca-btn ca-btn-primary ca-btn-sm"
+                            disabled={detailBusy}
+                            onClick={() => void handleCloneToEditable()}
+                          >
+                            {t('转为可编辑副本', 'Clone to editable copy')}
+                          </button>
+                        )}
+                      </div>
+
+                      {!skillFilesRes.editable && (
+                        <CaNotice tone="info">
+                          {t('当前技能来自只读安装包；如需在线编辑内容，请点击「转为可编辑副本」。', 'This skill comes from a read-only package. Click "Clone to editable copy" to edit inline.')}
+                        </CaNotice>
+                      )}
+
+                      <div className="ca-file-tabs">
+                        {sortSkillPaths(Object.keys(skillFilesDraft)).map(path => (
+                          <button
+                            key={path}
+                            type="button"
+                            className={`ca-file-tab ${activeSkillPath === path ? 'is-active' : ''}`}
+                            onClick={() => setActiveSkillPath(path)}
+                          >
+                            <span>{path}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {skillFilesRes.editable && (
+                        <div className="ca-inline-row ca-skill-subfile-row">
+                          <input
+                            type="text"
+                            className="ca-input ca-mono"
+                            style={{ flex: 1 }}
+                            placeholder={t('新增文件（如 scripts/tool.sh、references/spec.md）', 'Add file (e.g. scripts/tool.sh, references/spec.md)')}
+                            value={newSubfilePath}
+                            onChange={e => setNewSubfilePath(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="ca-btn ca-btn-sm"
+                            disabled={!newSubfilePath.trim()}
+                            onClick={() => {
+                              const p = newSubfilePath.trim().replace(/^\/+/, '');
+                              if (!p) return;
+                              setSkillFilesDraft(prev => ({ ...prev, [p]: prev[p] ?? '' }));
+                              setActiveSkillPath(p);
+                              setNewSubfilePath('');
+                            }}
+                          >
+                            {t('新增文件', 'Add file')}
+                          </button>
+                          {activeSkillPath !== 'SKILL.md' && (
+                            <button
+                              type="button"
+                              className="ca-btn ca-btn-danger ca-btn-sm"
+                              onClick={() => {
+                                const target = activeSkillPath;
+                                setSkillFilesDraft(prev => {
+                                  const copy = { ...prev };
+                                  delete copy[target];
+                                  return copy;
+                                });
+                                setActiveSkillPath('SKILL.md');
+                              }}
+                            >
+                              {t('删除文件', 'Delete file')}
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <textarea
+                        rows={12}
+                        className="ca-textarea ca-mono"
+                        readOnly={!skillFilesRes.editable}
+                        disabled={detailBusy}
+                        value={skillFilesDraft[activeSkillPath] ?? ''}
+                        onChange={e => {
+                          const v = e.target.value;
+                          setSkillFilesDraft(prev => ({ ...prev, [activeSkillPath]: v }));
+                        }}
+                      />
+
+                      {skillFilesRes.editable && (
+                        <div className="ca-form-actions" style={{ flexWrap: 'nowrap', marginTop: 0 }}>
+                          <button
+                            type="button"
+                            className="ca-btn ca-btn-primary ca-btn-sm"
+                            disabled={detailBusy}
+                            aria-busy={detailBusy}
+                            onClick={() => void handleSaveSkillFiles()}
+                          >
+                            <LabelStack
+                              active={detailBusy ? t('保存中…', 'Saving…') : t('保存技能文件', 'Save skill files')}
+                              labels={[t('保存技能文件', 'Save skill files'), t('保存中…', 'Saving…')]}
+                            />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </>
+              )}
+
+              {/* MCP / Plugin global settings & connection probe */}
+              {activeDetail.kind !== 'skill' && (
+                <>
+                  {detailLoading && !detailConfig ? (
+                    <div className="ca-muted">{t('正在加载全局参数配置…', 'Loading global settings…')}</div>
+                  ) : detailConfig ? (
+                    <SchemaConfigForm
+                      schema={detailConfig.configSchema}
+                      uiSchema={detailConfig.uiSchema}
+                      formData={detailGlobalDraft}
+                      onChange={setDetailGlobalDraft}
+                      api={api}
+                      submitLabel={t('保存全局参数', 'Save global settings')}
+                      submitBusy={detailBusy}
+                      onSubmit={() => void handleSaveGlobalToolConfig()}
+                    />
+                  ) : null}
+
+                  <div className="ca-disclosure" style={{ marginTop: 4 }}>
+                    <div className="ca-inline-between ca-wrap">
+                      <div>
+                        <div className="ca-field-label">{t('连接与工具探测', 'Connection & tool check')}</div>
+                        <div className="ca-muted">
+                          {t('选用在线 Bot 验证扩展连接并拉取可用工具列表', 'Verify connectivity and inspect exposed tools using an available Bot')}
+                        </div>
+                      </div>
+                      <div className="ca-inline-row ca-probe-actions">
+                        {activeBots.length > 1 && (
+                          <select
+                            className="ca-select ca-probe-select"
+                            value={selectedValidationBotKey}
+                            onChange={e => setSelectedValidationBotKey(e.target.value)}
+                          >
+                            {activeBots.map(b => (
+                              <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
+                                {b.deviceName || b.deviceId} / {b.name}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          disabled={probeBusy || !selectedValidationBotKey}
+                          onClick={() => void handleCheckAndListTools()}
+                        >
+                          <LabelStack
+                            active={probeBusy ? t('探测中…', 'Probing…') : t('检查连接与工具', 'Check connection & tools')}
+                            labels={[t('检查连接与工具', 'Check connection & tools'), t('探测中…', 'Probing…')]}
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {probeResult && <div className="ca-muted ca-mt-2">{probeResult}</div>}
+
+                    {toolsResult && (
+                      <div className="ca-list ca-tools-list">
+                        {toolsResult.length === 0 ? (
+                          <div className="ca-empty">{t('未暴露可用工具', 'No tools exposed')}</div>
+                        ) : (
+                          toolsResult.map(tool => (
+                            <div key={tool.name} className="ca-row ca-row-compact">
+                              <div className="ca-row-main">
+                                <div className="ca-row-title ca-mono">{tool.name}</div>
+                                {tool.description && <div className="ca-row-sub">{tool.description}</div>}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+
+          {/* Section 2: Bot Access & Overrides */}
+          <section className="ca-section" aria-labelledby="ca-cap-bots-heading">
+            <div className="ca-section-head">
+              <h3 id="ca-cap-bots-heading" className="ca-section-title">
+                {t('Bot 启用与覆盖', 'Bot Access & Overrides')}
+              </h3>
+              <span className="ca-muted ca-num">
+                {t(`已启用 ${selectedBotKeys.size} / ${activeBots.length} 个 Bot`, `${selectedBotKeys.size} / ${activeBots.length} enabled`)}
+              </span>
+            </div>
+            <div className="ca-section-body">
+              <BotTreeSelector
+                devices={devices}
+                bots={bots}
+                selectedKeys={selectedBotKeys}
+                busyKeys={bindingBusyKeys}
+                onToggleBot={(devId, bId, checked) => void handleToggleBotBinding(devId, bId, checked)}
+                renderBotExtra={
+                  activeDetail.kind !== 'skill' && detailConfig
+                    ? bot => {
+                        const bc = botBindings.get(botKey(bot.deviceId, bot.botId));
+                        if (!bc?.enabled) return null;
+                        const overrideCount = Object.keys(bc.overrides ?? {}).length;
+                        return (
+                          <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+                            {overrideCount > 0 && (
+                              <span className="ca-pill ca-pill-info ca-num">
+                                {t(`${overrideCount} 项覆盖`, `${overrideCount} overridden`)}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              className="ca-btn ca-btn-sm"
+                              onClick={() => openBotOverrideModal(bot)}
+                            >
+                              {t('配置覆盖', 'Overrides')}
+                            </button>
+                          </div>
+                        );
+                      }
+                    : undefined
+                }
+              />
+            </div>
+          </section>
+
+          {/* Section 3: Maintenance (Updates, Deployments, Uninstall) */}
+          <section className="ca-section" aria-labelledby="ca-cap-maint-heading">
+            <div className="ca-section-head">
+              <h3 id="ca-cap-maint-heading" className="ca-section-title">
+                {t('更新与卸载', 'Maintenance')}
+              </h3>
+              <span className="ca-muted ca-mono">
+                {activeDetail.source.type === 'inline'
+                  ? t('在线技能', 'Inline')
+                  : `v${activeDetail.targetVersion}`}
+              </span>
+            </div>
+            <div className="ca-section-body ca-form-stack">
+              {deployments.length > 0 && (
+                <div className="ca-cred-box">
+                  <div className="ca-field-label ca-mb-1">
+                    {t('节点同步状态', 'Node sync status')}
+                  </div>
+                  {deployments.map((d, idx) => (
+                    <div key={idx} className="ca-muted ca-num">
+                      {d.deviceId ?? t('中心节点', 'Center node')} · {d.phase} · {d.health}
+                      {d.error ? t(`（${d.error.message}）`, ` (${d.error.message})`) : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {activeDetail.source.type === 'npm' && (
+                <div className="ca-form-stack">
+                  <div className="ca-inline-between ca-wrap">
+                    <span className="ca-muted">
+                      {t(`npm 包版本：v${activeDetail.targetVersion}`, `npm version: v${activeDetail.targetVersion}`)}
+                    </span>
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-sm"
+                      disabled={detailBusy}
+                      onClick={() => void handleCheckUpdates()}
+                    >
+                      <RefreshCw size={13} aria-hidden="true" />
+                      <span>{t('检查更新', 'Check updates')}</span>
+                    </button>
+                  </div>
+                  {updates && updates.length > 0 && (
+                    <div className="ca-inline-row ca-wrap">
+                      {updates.map(v => (
+                        <button
+                          key={v.version}
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          disabled={detailBusy}
+                          onClick={() => void handleApplyUpdate(v.version)}
+                        >
+                          {t(`更新到 v${v.version}`, `Update to v${v.version}`)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeDetail.source.type === 'artifact' && (
+                <div className="ca-form-stack">
+                  <div className="ca-field">
+                    <label className="ca-field-label" htmlFor="ca-cap-artifact-update">
+                      {t('上传新版制品包 (.tgz / .tar.gz / .zip)', 'Upload new package archive (.tgz / .tar.gz / .zip)')}
+                    </label>
+                    <input
+                      id="ca-cap-artifact-update"
+                      key={updateArtifactInputKey}
+                      type="file"
+                      className="ca-input"
+                      accept=".tgz,.tar.gz,.zip,.tar"
+                      disabled={detailBusy}
+                      onChange={e => setUpdateArtifactFile(e.target.files?.[0] ?? null)}
+                    />
+                    <span className="ca-field-help">
+                      {t(`包 ID 须为 ${activeDetail.packageId}；原地更新保留原实例、启用状态与 Bot 绑定。`, `Package ID must match ${activeDetail.packageId}; in-place update preserves the installation ID, enable state, and Bot bindings.`)}
+                    </span>
+                  </div>
+                  <div className="ca-inline-row">
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-primary ca-btn-sm"
+                      disabled={detailBusy || !updateArtifactFile}
+                      onClick={() => void handleApplyArtifactUpdate()}
+                    >
+                      <Upload size={13} aria-hidden="true" />
+                      <span>{t('上传并原地更新', 'Upload & update in place')}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {activeDetail.source.type === 'http' && (
+                <span className="ca-muted">
+                  {t('远程 HTTP MCP 直接连接远端服务，无需包更新。', 'Remote HTTP MCP connects directly to the remote endpoint; no package update is required.')}
+                </span>
+              )}
+
+              {activeDetail.source.type === 'inline' && (
+                <span className="ca-muted">
+                  {t('在线技能可直接在上方「概览与配置」中修改文件并实时同步。', 'Inline skills are edited directly in Overview & Config above and sync automatically.')}
+                </span>
+              )}
+
+              <div className="ca-form-actions ca-form-actions-between" style={{ marginTop: 4 }}>
+                <span className="ca-muted">
+                  {t('卸载后将从中心目录与所有已同步设备移除，现有 Bot 绑定一并失效。', 'Uninstalling removes this capability from the center and all synced devices, revoking Bot bindings.')}
+                </span>
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-danger ca-btn-sm"
+                  disabled={detailBusy}
+                  onClick={() => setModal({ kind: 'confirm', inst: activeDetail })}
+                >
+                  <Trash2 size={13} aria-hidden="true" />
+                  <span>{activeDetail.kind === 'skill' ? t('卸载技能', 'Uninstall skill') : t('卸载扩展', 'Uninstall extension')}</span>
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
-      </div>
-
-      {segment === 'skills' ? (
-        <section className="ca-section">
-          <div className="ca-section-head">
-            <CaChips
-              value={skillFilter}
-              ariaLabel={t('技能筛选', 'Filter skills')}
-              options={[
-                { value: 'all', label: t('全部', 'All') },
-                { value: 'shared', label: t('全局共享', 'Shared') },
-                { value: 'learned', label: t('✨ Bot 习得', '✨ Learned by Bot') },
-              ]}
-              onChange={setSkillFilter}
-            />
-            <span className="ca-muted ca-num">{t(`${skillItems.length} 项`, `${skillItems.length} items`)}</span>
-          </div>
-
-          <div className="ca-list">
-            {skillItems.length === 0 ? (
-              <div className="ca-empty">{t('暂无技能，点击右上角「+ 新建技能」或「导入技能包」', 'No skills yet. Click "+ New skill" or "Import skill" above.')}</div>
-            ) : (
-              skillItems.map(inst => {
-                const badge = activationLabel(inst, t);
-                const ownerLabel = inst.ownerBot
-                  ? botNameByKey.get(botKey(inst.ownerBot.deviceId, inst.ownerBot.botId)) ||
-                    inst.ownerBot.botId
-                  : null;
-                return (
-                  <div key={inst.installationId} className="ca-row ca-row-split">
-                    <button
-                      type="button"
-                      className="ca-row-main ca-row-trigger"
-                      onClick={() => openDetailDrawer(inst)}
-                    >
-                      <span className="ca-row-title">
-                        <span>{inst.displayName}</span>
-                        <span
-                          className={`ca-pill ${
-                            badge.tone === 'ok'
-                              ? 'ca-pill-ok'
-                              : badge.tone === 'warn'
-                                ? 'ca-pill-warn'
-                                : badge.tone === 'danger'
-                                  ? 'ca-pill-danger'
-                                  : 'ca-pill-muted'
-                          }`}
-                        >
-                          {badge.text}
-                        </span>
-                        {inst.ownerBot && (
-                          <span className="ca-pill ca-pill-info">
-                            <Sparkles size={11} />
-                            <span>{t(`来自 ${ownerLabel}`, `From ${ownerLabel}`)}</span>
-                          </span>
-                        )}
-                        {inst.visibilityScope && (
-                          <span className="ca-pill ca-pill-muted">{scopeLabel(inst.visibilityScope, t)}</span>
-                        )}
-                      </span>
-                      <span className="ca-row-sub">
-                        {inst.source.type === 'inline'
-                          ? t('在线 Markdown 技能', 'Inline Markdown skill')
-                          : `${inst.packageId} · v${inst.targetVersion}`}
-                      </span>
-                    </button>
-                    <div className="ca-row-actions">
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-sm"
-                        onClick={() => openDetailDrawer(inst)}
-                      >
-                        <FileCode2 size={13} />
-                        <span>{t('编辑', 'Edit')}</span>
-                      </button>
-                      <CaSwitch
-                        checked={inst.enabled}
-                        disabled={togglingId === inst.installationId}
-                        label={t(`启用 ${inst.displayName}`, `Enable ${inst.displayName}`)}
-                        onChange={next => void handleToggleGlobalRow(inst, next)}
-                      />
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </section>
       ) : (
-        <section className="ca-section">
-          <div className="ca-section-head">
-            <h3 className="ca-section-title">{t('MCP 服务与插件', 'MCP servers & plugins')}</h3>
-            <span className="ca-muted ca-num">{t(`${toolItems.length} 项`, `${toolItems.length} items`)}</span>
+        /* Main Capabilities List View */
+        <>
+          <div className="ca-toolbar">
+            <CaSegmented<CapabilitySegment>
+              value={segment}
+              ariaLabel={t('能力分类', 'Capability filter')}
+              options={[
+                { value: 'all', label: t('全部能力', 'All') },
+                { value: 'skills', label: t('技能', 'Skills') },
+                { value: 'tools', label: t('MCP 与插件', 'MCP & Plugins') },
+              ]}
+              onChange={next => {
+                setSegment(next);
+                setQuery('');
+              }}
+            />
+
+            <div className="ca-toolbar-group">
+              <input
+                type="search"
+                className="ca-input ca-toolbar-search"
+                placeholder={t('搜索能力名称或包 ID…', 'Search by name or package ID…')}
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+              />
+              {segment !== 'tools' && (
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-primary ca-btn-sm"
+                  onClick={openCreateSkillModal}
+                >
+                  <Plus size={14} aria-hidden="true" />
+                  <span>{t('新建技能', 'New skill')}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className={`ca-btn ca-btn-sm${segment === 'tools' ? ' ca-btn-primary' : ''}`}
+                onClick={() => openInstallModal(segment === 'skills' ? 'skill' : 'mcp')}
+              >
+                {segment === 'skills' ? (
+                  <>
+                    <Upload size={14} aria-hidden="true" />
+                    <span>{t('导入技能包', 'Import skill')}</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus size={14} aria-hidden="true" />
+                    <span>{t('安装扩展', 'Install extension')}</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
 
-          <div className="ca-list">
-            {toolItems.length === 0 ? (
-              <div className="ca-empty">{t('尚未安装 MCP 服务或插件，点击右上角「安装扩展」', 'No MCP servers or plugins installed. Click "Install extension" above.')}</div>
-            ) : (
-              toolItems.map(inst => {
-                const badge = activationLabel(inst, t);
-                return (
-                  <div key={inst.installationId} className="ca-row ca-row-split">
-                    <button
-                      type="button"
-                      className="ca-row-main ca-row-trigger"
-                      onClick={() => openDetailDrawer(inst)}
-                    >
-                      <span className="ca-row-title">
-                        <span>{inst.displayName}</span>
-                        <span className="ca-pill ca-pill-muted">{inst.kind === 'mcp' ? 'MCP' : t('插件', 'Plugin')}</span>
-                        <span className="ca-pill ca-pill-muted">
-                          {inst.target === 'center' ? t('中心托管', 'Center-hosted') : t('设备运行', 'On-device')}
-                        </span>
-                        <span
-                          className={`ca-pill ${
-                            badge.tone === 'ok'
-                              ? 'ca-pill-ok'
-                              : badge.tone === 'warn'
-                                ? 'ca-pill-warn'
-                                : badge.tone === 'danger'
-                                  ? 'ca-pill-danger'
-                                  : 'ca-pill-muted'
-                          }`}
-                        >
-                          {badge.text}
-                        </span>
-                      </span>
-                      <span className="ca-row-sub">
-                        {inst.packageId} · v{inst.targetVersion}
-                        {inst.activation?.error?.message ? ` · ${inst.activation.error.message}` : ''}
-                      </span>
-                    </button>
-                    <div className="ca-row-actions">
+          <section className="ca-section">
+            <div className="ca-section-head">
+              {segment === 'skills' ? (
+                <CaChips
+                  value={skillFilter}
+                  ariaLabel={t('技能来源筛选', 'Filter skills')}
+                  options={[
+                    { value: 'all', label: t('全部技能', 'All skills') },
+                    { value: 'shared', label: t('共享技能', 'Shared') },
+                    { value: 'learned', label: t('Bot 习得', 'Learned by Bot') },
+                  ]}
+                  onChange={setSkillFilter}
+                />
+              ) : (
+                <h3 className="ca-section-title">
+                  {segment === 'tools'
+                    ? t('MCP 服务与插件', 'MCP Servers & Plugins')
+                    : t('全部已安装能力', 'Installed Capabilities')}
+                </h3>
+              )}
+              <span className="ca-muted ca-num">{t(`${filteredItems.length} 项`, `${filteredItems.length} items`)}</span>
+            </div>
+
+            <div className="ca-list">
+              {filteredItems.length === 0 ? (
+                <div className="ca-empty">
+                  {query.trim()
+                    ? t('没有匹配的能力条目', 'No matching capabilities')
+                    : segment === 'tools'
+                      ? t('尚未安装 MCP 服务或插件，点击上方「安装扩展」添加。', 'No MCP servers or plugins installed. Click "Install extension" above.')
+                      : t('暂无已安装能力，点击上方「新建技能」或「安装扩展」。', 'No capabilities yet. Click "New skill" or "Install extension" above.')}
+                </div>
+              ) : (
+                filteredItems.map(inst => {
+                  const badge = activationLabel(inst, t);
+                  const enabledCount = enabledBotCounts[inst.installationId];
+                  const ownerLabel = inst.ownerBot
+                    ? botNameByKey.get(botKey(inst.ownerBot.deviceId, inst.ownerBot.botId)) ||
+                      inst.ownerBot.botId
+                    : null;
+
+                  return (
+                    <div key={inst.installationId} className="ca-row ca-row-split">
                       <button
                         type="button"
-                        className="ca-btn ca-btn-sm"
-                        onClick={() => openDetailDrawer(inst)}
+                        className="ca-row-main ca-row-trigger"
+                        onClick={() => openDetailView(inst)}
                       >
-                        <Wrench size={13} />
-                        <span>{t('配置', 'Configure')}</span>
+                        <span className="ca-row-title">
+                          <StatusDot tone={badge.tone} />
+                          <span>{inst.displayName}</span>
+                          <span className="ca-pill ca-pill-muted">{kindLabel(inst.kind, t)}</span>
+                          {inst.ownerBot && (
+                            <span className="ca-pill ca-pill-info">
+                              <Sparkles size={11} aria-hidden="true" />
+                              <span>{t(`来自 ${ownerLabel}`, `From ${ownerLabel}`)}</span>
+                            </span>
+                          )}
+                        </span>
+                        <span className="ca-row-sub">
+                          {badge.text}
+                          {typeof enabledCount === 'number'
+                            ? t(` · ${enabledCount} 个 Bot 已启用`, ` · ${enabledCount} ${enabledCount === 1 ? 'Bot' : 'Bots'} enabled`)
+                            : ''}
+                          {inst.kind === 'skill' && inst.visibilityScope
+                            ? ` · ${scopeLabel(inst.visibilityScope, t)}`
+                            : inst.kind !== 'skill'
+                              ? ` · ${inst.target === 'center' ? t('中心托管', 'Center-hosted') : t('设备运行', 'On-device')} · v${inst.targetVersion}`
+                              : ''}
+                          {inst.activation?.error?.message ? ` · ${inst.activation.error.message}` : ''}
+                        </span>
                       </button>
-                      <CaSwitch
-                        checked={inst.enabled}
-                        disabled={togglingId === inst.installationId}
-                        label={t(`启用 ${inst.displayName}`, `Enable ${inst.displayName}`)}
-                        onChange={next => void handleToggleGlobalRow(inst, next)}
-                      />
+                      <div className="ca-row-actions">
+                        <CaSwitch
+                          checked={inst.enabled}
+                          disabled={togglingId === inst.installationId}
+                          label={t(`启用 ${inst.displayName}`, `Enable ${inst.displayName}`)}
+                          onChange={next => void handleToggleGlobalRow(inst, next)}
+                        />
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          onClick={() => openDetailView(inst)}
+                        >
+                          {t('管理', 'Manage')}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </section>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        </>
       )}
 
-      {/* Create inline skill drawer */}
+      {/* Mutually Exclusive Modal 1: Create Inline Skill */}
       <CaModal
-        open={createSkillOpen}
+        open={modal?.kind === 'create-skill'}
         onOpenChange={open => {
-          if (!open) setCreateSkillError('');
-          setCreateSkillOpen(open);
+          if (!open && !createSkillBusy) {
+            setCreateSkillError('');
+            setModal(null);
+          }
         }}
         title={t('新建技能', 'New skill')}
         description={t('支持多文件 Markdown 与脚本目录，创建后默认立即可用', 'Supports multi-file Markdown and scripts; enabled immediately on creation')}
@@ -1262,22 +1898,28 @@ export function CapabilitiesTab({
         <form className="ca-form-stack" onSubmit={e => void handleCreateInlineSkill(e)}>
           <div className="ca-grid-2">
             <div className="ca-field">
-              <label className="ca-field-label">
+              <label className="ca-field-label" htmlFor="ca-new-skill-name">
                 {t('技能名称', 'Skill name')} <span className="ca-req">*</span>
               </label>
               <input
+                id="ca-new-skill-name"
                 type="text"
                 className="ca-input"
                 required
+                disabled={createSkillBusy}
                 placeholder={t('例如：代码审查规范 / 日报整理', 'e.g. Code review checklist / Daily report')}
                 value={newSkillName}
                 onChange={e => setNewSkillName(e.target.value)}
               />
             </div>
             <div className="ca-field">
-              <label className="ca-field-label">{t('可见范围', 'Visibility')}</label>
+              <label className="ca-field-label" htmlFor="ca-new-skill-scope">
+                {t('可见范围', 'Visibility')}
+              </label>
               <select
+                id="ca-new-skill-scope"
                 className="ca-select"
+                disabled={createSkillBusy}
                 value={newSkillScope}
                 onChange={e => setNewSkillScope(e.target.value as SkillVisibilityScope)}
               >
@@ -1304,6 +1946,8 @@ export function CapabilitiesTab({
             <input
               type="text"
               className="ca-input ca-mono"
+              style={{ flex: 1 }}
+              disabled={createSkillBusy}
               placeholder={t('新增附属文件路径（如 scripts/run.py 或 references/guide.md）', 'Add file path (e.g. scripts/run.py or references/guide.md)')}
               value={newSkillAddPath}
               onChange={e => setNewSkillAddPath(e.target.value)}
@@ -1311,7 +1955,7 @@ export function CapabilitiesTab({
             <button
               type="button"
               className="ca-btn ca-btn-sm"
-              disabled={!newSkillAddPath.trim()}
+              disabled={createSkillBusy || !newSkillAddPath.trim()}
               onClick={() => {
                 const p = newSkillAddPath.trim().replace(/^\/+/, '');
                 if (!p) return;
@@ -1326,6 +1970,7 @@ export function CapabilitiesTab({
               <button
                 type="button"
                 className="ca-btn ca-btn-danger ca-btn-sm"
+                disabled={createSkillBusy}
                 onClick={() => {
                   const target = newSkillActiveFile;
                   setNewSkillFiles(prev => {
@@ -1342,8 +1987,9 @@ export function CapabilitiesTab({
           </div>
 
           <textarea
-            rows={14}
+            rows={12}
             className="ca-textarea ca-mono"
+            disabled={createSkillBusy}
             value={newSkillFiles[newSkillActiveFile] ?? ''}
             onChange={e => {
               const val = e.target.value;
@@ -1351,11 +1997,29 @@ export function CapabilitiesTab({
             }}
           />
 
-          <div className="ca-form-actions">
-            <button type="button" className="ca-btn" onClick={() => setCreateSkillOpen(false)}>
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {createSkillError ? (
+              <p className="ca-error-text" role="alert">
+                {createSkillError}
+              </p>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={createSkillBusy}
+              onClick={() => setModal(null)}
+            >
               {t('取消', 'Cancel')}
             </button>
-            <button type="submit" className="ca-btn ca-btn-primary" disabled={createSkillBusy}>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={createSkillBusy}
+              aria-busy={createSkillBusy}
+            >
               <LabelStack
                 active={createSkillBusy ? t('创建中…', 'Creating…') : t('创建并启用', 'Create & enable')}
                 labels={[t('创建并启用', 'Create & enable'), t('创建中…', 'Creating…')]}
@@ -1365,39 +2029,51 @@ export function CapabilitiesTab({
         </form>
       </CaModal>
 
-      {/* Import skill package / install MCP or plugin modal */}
+      {/* Mutually Exclusive Modal 2: Install / Import Capability */}
       <CaModal
-        open={importOpen}
+        open={modal?.kind === 'install'}
         onOpenChange={open => {
-          if (!open) setImportError('');
-          setImportOpen(open);
+          if (!open && !importBusy) {
+            setImportError('');
+            setImportNeedsBrowser(false);
+            setModal(null);
+          }
         }}
         title={importKind === 'skill' ? t('导入技能包', 'Import skill package') : t('安装工具扩展', 'Install extension')}
         variant="modal"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSubmitImport(e)}>
-          {importKind !== 'skill' && (
-            <div className="ca-grid-2">
+          <div className="ca-grid-2">
+            <div className="ca-field">
+              <label className="ca-field-label" htmlFor="ca-install-kind">
+                {t('能力类型', 'Capability type')}
+              </label>
+              <select
+                id="ca-install-kind"
+                className="ca-select"
+                disabled={importBusy}
+                value={importKind}
+                onChange={e => {
+                  const next = e.target.value as CapabilityKind;
+                  setImportKind(next);
+                  setImportTarget(next === 'mcp' ? 'center' : 'host');
+                  if (next === 'plugin' && importSource === 'http') setImportSource('npm');
+                }}
+              >
+                <option value="mcp">{t('MCP 服务', 'MCP server')}</option>
+                <option value="plugin">{t('原生插件', 'Native plugin')}</option>
+                <option value="skill">{t('技能包', 'Skill package')}</option>
+              </select>
+            </div>
+            {importKind !== 'skill' && (
               <div className="ca-field">
-                <label className="ca-field-label">{t('扩展类型', 'Extension type')}</label>
+                <label className="ca-field-label" htmlFor="ca-install-target">
+                  {t('运行位置', 'Runtime target')}
+                </label>
                 <select
+                  id="ca-install-target"
                   className="ca-select"
-                  value={importKind}
-                  onChange={e => {
-                    const next = e.target.value as CapabilityKind;
-                    setImportKind(next);
-                    setImportTarget(next === 'mcp' ? 'center' : 'host');
-                    if (next === 'plugin' && importSource === 'http') setImportSource('npm');
-                  }}
-                >
-                  <option value="mcp">{t('MCP 服务', 'MCP server')}</option>
-                  <option value="plugin">{t('原生插件', 'Native plugin')}</option>
-                </select>
-              </div>
-              <div className="ca-field">
-                <label className="ca-field-label">{t('运行位置', 'Runtime target')}</label>
-                <select
-                  className="ca-select"
+                  disabled={importBusy}
                   value={importTarget}
                   onChange={e => setImportTarget(e.target.value as 'center' | 'host')}
                 >
@@ -1405,17 +2081,19 @@ export function CapabilitiesTab({
                   <option value="host">{t('设备 Host', 'Device Host')}</option>
                 </select>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">
+            <label className="ca-field-label" htmlFor="ca-install-name">
               {t('显示名称', 'Display name')} <span className="ca-req">*</span>
             </label>
             <input
+              id="ca-install-name"
               type="text"
               className="ca-input"
               required
+              disabled={importBusy}
               placeholder={importKind === 'skill' ? t('例如：团队规范技能包', 'e.g. Team guidelines skill') : t('例如：GitHub MCP', 'e.g. GitHub MCP')}
               value={importName}
               onChange={e => setImportName(e.target.value)}
@@ -1445,10 +2123,14 @@ export function CapabilitiesTab({
 
           {importSource === 'artifact' && (
             <div className="ca-field">
-              <label className="ca-field-label">{t('选择包文件 (.zip / .tar.gz / .tgz)', 'Select package archive (.zip / .tar.gz / .tgz)')}</label>
+              <label className="ca-field-label" htmlFor="ca-install-file">
+                {t('选择包文件 (.zip / .tar.gz / .tgz)', 'Select package archive (.zip / .tar.gz / .tgz)')}
+              </label>
               <input
+                id="ca-install-file"
                 type="file"
                 className="ca-input"
+                disabled={importBusy}
                 accept=".zip,.tar.gz,.tgz,.tar"
                 onChange={e => setImportFile(e.target.files?.[0] ?? null)}
               />
@@ -1457,10 +2139,14 @@ export function CapabilitiesTab({
 
           {importSource === 'npm' && (
             <div className="ca-field">
-              <label className="ca-field-label">{t('npm 包标识', 'npm package spec')}</label>
+              <label className="ca-field-label" htmlFor="ca-install-npm">
+                {t('npm 包标识', 'npm package spec')}
+              </label>
               <input
+                id="ca-install-npm"
                 type="text"
                 className="ca-input ca-mono"
+                disabled={importBusy}
                 placeholder="@scope/package@latest"
                 value={importSpec}
                 onChange={e => setImportSpec(e.target.value)}
@@ -1470,10 +2156,14 @@ export function CapabilitiesTab({
 
           {importSource === 'http' && (
             <div className="ca-field">
-              <label className="ca-field-label">{t('URL 地址', 'URL')}</label>
+              <label className="ca-field-label" htmlFor="ca-install-http">
+                {t('URL 地址', 'URL')}
+              </label>
               <input
+                id="ca-install-http"
                 type="url"
                 className="ca-input"
+                disabled={importBusy}
                 placeholder="https://example.com/..."
                 value={importUrl}
                 onChange={e => setImportUrl(e.target.value)}
@@ -1484,17 +2174,47 @@ export function CapabilitiesTab({
           <label className="ca-check-label">
             <input
               type="checkbox"
+              disabled={importBusy}
               checked={importAutoEnable}
               onChange={e => setImportAutoEnable(e.target.checked)}
             />
             <span>{t('安装后立即全局启用', 'Enable globally right after install')}</span>
           </label>
 
-          <div className="ca-form-actions">
-            <button type="button" className="ca-btn" onClick={() => setImportOpen(false)}>
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {importError ? (
+              <div className="ca-inline-between ca-wrap" style={{ width: '100%' }}>
+                <p className="ca-error-text" role="alert">
+                  {importError}
+                </p>
+                {importNeedsBrowser && onOpenExternal && (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-sm"
+                    onClick={onOpenExternal}
+                  >
+                    {t('在浏览器打开', 'Open in browser')}
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={importBusy}
+              onClick={() => setModal(null)}
+            >
               {t('取消', 'Cancel')}
             </button>
-            <button type="submit" className="ca-btn ca-btn-primary" disabled={importBusy}>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={importBusy}
+              aria-busy={importBusy}
+            >
               <LabelStack
                 active={importBusy ? t('安装中…', 'Installing…') : t('开始安装', 'Install')}
                 labels={[t('开始安装', 'Install'), t('安装中…', 'Installing…')]}
@@ -1504,490 +2224,89 @@ export function CapabilitiesTab({
         </form>
       </CaModal>
 
-      {/* Unified detail drawer for skills & extensions */}
+      {/* Mutually Exclusive Modal 3: Rename Capability */}
       <CaModal
-        open={detailOpen}
+        open={modal?.kind === 'rename'}
         onOpenChange={open => {
-          if (!open) {
-            stopTimers();
-            setDetailError('');
-            setDetailNotice('');
-            clearNotice('op-error');
+          if (!open && !renameBusy) {
+            setRenameError('');
+            setModal(null);
           }
-          setDetailOpen(open);
         }}
-        title={detailInst?.displayName || t('扩展配置', 'Extension settings')}
-        description={
-          detailInst
-            ? `${detailInst.kind === 'skill' ? t('技能', 'Skill') : detailInst.kind === 'mcp' ? t('MCP 服务', 'MCP server') : t('原生插件', 'Native plugin')} · ${
-                detailInst.packageId
-              }`
-            : ''
-        }
-        variant="drawer"
-        wide
+        title={t('重命名能力', 'Rename Capability')}
+        description={modal?.kind === 'rename' ? modal.inst.packageId : undefined}
+        variant="modal"
       >
-        {detailInst && (
-          <div className="ca-form-stack">
-            {/* Global enable/disable status card */}
-            <div className="ca-section ca-section-pad">
-              <div className="ca-inline-between">
-                <div>
-                  <div className="ca-field-label">{t('全局启用状态', 'Global status')}</div>
-                  <div className="ca-muted">
-                    {activationLabel(detailInst, t).text}
-                    {operation ? t(` · 任务进度：${operation.phase}`, ` · Task: ${operation.phase}`) : ''}
-                    {detailInst.activation?.error?.message
-                      ? ` · ${detailInst.activation.error.message}`
-                      : ''}
-                  </div>
-                </div>
-                <CaSwitch
-                  checked={detailInst.enabled}
-                  disabled={detailBusy}
-                  label={t(`启用 ${detailInst.displayName}`, `Enable ${detailInst.displayName}`)}
-                  onChange={next => (next ? void handleEnableInDrawer() : void handleDisableInDrawer())}
-                />
-              </div>
-            </div>
-
-            {/* OAuth MCP one-click unlock & authorization */}
-            {(needsOAuth || detailInst.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded) && (
-              <div className="ca-section ca-section-pad">
-                <div className="ca-field-label ca-mb-2">
-                  {t('OAuth 身份授权（选择任意可用 Bot 完成授权即可启用）', 'OAuth authorization (choose any available Bot to authorize and enable)')}
-                </div>
-                <div className="ca-inline-row ca-wrap">
-                  <select
-                    className="ca-select ca-oauth-bot-select"
-                    value={selectedValidationBotKey}
-                    onChange={e => setSelectedValidationBotKey(e.target.value)}
-                  >
-                    {activeBots.length === 0 && <option value="">{t('暂无可用 Bot', 'No available Bots')}</option>}
-                    {activeBots.map(b => (
-                      <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
-                        {b.deviceName || b.deviceId} / {b.name || b.botId}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-primary ca-btn-sm"
-                    disabled={detailBusy || !selectedValidationBotKey}
-                    onClick={() => void handleStartMcpOAuth()}
-                  >
-                    {t('发起 OAuth 授权', 'Start OAuth')}
-                  </button>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-sm"
-                    disabled={detailBusy || !selectedValidationBotKey}
-                    onClick={() => void handleEnableInDrawer()}
-                  >
-                    {t('带此身份重试启用', 'Retry enable with Bot')}
-                  </button>
-                </div>
-                {oauthFlow && (
-                  <div className="ca-form-stack ca-oauth-status-box">
-                    <CaExternalUrlBox
-                      url={oauthFlow.authorizationUrl}
-                      onOpenUrl={onOpenExternalUrl}
-                      onError={err =>
-                        setDetailError(
-                          errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open browser; please copy and open the link manually')),
-                        )
-                      }
-                      copyLabel={t('复制链接', 'Copy link')}
-                    />
-                    <span className="ca-muted">
-                      {t('当前状态：', 'Status: ')}
-                      {oauthStatus || t('等待授权…', 'Waiting for authorization…')}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 名称与可见范围设置 */}
-            <div className="ca-section ca-section-pad">
-              <div className={detailInst.kind === 'skill' ? 'ca-grid-2' : 'ca-field'}>
-                <div className="ca-field">
-                  <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
-                  <input
-                    type="text"
-                    className="ca-input"
-                    value={detailNameDraft}
-                    onChange={e => setDetailNameDraft(e.target.value)}
-                  />
-                </div>
-                {detailInst.kind === 'skill' && (
-                  <div className="ca-field">
-                    <label className="ca-field-label">{t('可用范围', 'Visibility')}</label>
-                    <select
-                      className="ca-select"
-                      value={detailScopeDraft}
-                      onChange={e => setDetailScopeDraft(e.target.value as SkillVisibilityScope)}
-                    >
-                      {detailInst.ownerBot && <option value="private">{t('仅源 Bot 私有', 'Source Bot only')}</option>}
-                      <option value="assigned">{t('仅指定 Bot 共享', 'Assigned Bots only')}</option>
-                      <option value="global">{t('全局默认可用', 'Global default')}</option>
-                    </select>
-                  </div>
-                )}
-              </div>
-              <div className="ca-inline-end ca-mt-3">
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  disabled={detailBusy}
-                  onClick={() => void handleSaveDetailMeta()}
-                >
-                  {t('保存基础信息', 'Save info')}
-                </button>
-              </div>
-            </div>
-
-            {/* Skill 多文件在线编辑器 */}
-            {detailInst.kind === 'skill' && skillFilesRes && (
-              <div className="ca-section ca-section-pad">
-                <div className="ca-inline-between ca-wrap ca-mb-2">
-                  <span className="ca-field-label">{t('技能文件', 'Skill files')}</span>
-                  {!skillFilesRes.editable && (
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-primary ca-btn-sm"
-                      disabled={detailBusy}
-                      onClick={() => void handleCloneToEditable()}
-                    >
-                      {t('转为可编辑副本', 'Clone to editable copy')}
-                    </button>
-                  )}
-                </div>
-
-                {!skillFilesRes.editable && (
-                  <CaNotice tone="info">
-                    {t('当前技能来自只读安装包；如需在线修改文件内容，可点击上方「转为可编辑副本」。', 'This skill comes from a read-only package. Click "Clone to editable copy" above to edit files inline.')}
-                  </CaNotice>
-                )}
-
-                <div className="ca-file-tabs">
-                  {sortSkillPaths(Object.keys(skillFilesDraft)).map(path => (
-                    <button
-                      key={path}
-                      type="button"
-                      className={`ca-file-tab ${activeSkillPath === path ? 'is-active' : ''}`}
-                      onClick={() => setActiveSkillPath(path)}
-                    >
-                      <span>{path}</span>
-                    </button>
-                  ))}
-                </div>
-
-                {skillFilesRes.editable && (
-                  <div className="ca-inline-row ca-mb-2 ca-skill-subfile-row">
-                    <input
-                      type="text"
-                      className="ca-input ca-mono"
-                      placeholder={t('新增文件（如 scripts/tool.sh、references/spec.md）', 'Add file (e.g. scripts/tool.sh, references/spec.md)')}
-                      value={newSubfilePath}
-                      onChange={e => setNewSubfilePath(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-sm"
-                      disabled={!newSubfilePath.trim()}
-                      onClick={() => {
-                        const p = newSubfilePath.trim().replace(/^\/+/, '');
-                        if (!p) return;
-                        setSkillFilesDraft(prev => ({ ...prev, [p]: prev[p] ?? '' }));
-                        setActiveSkillPath(p);
-                        setNewSubfilePath('');
-                      }}
-                    >
-                      {t('新增', 'Add')}
-                    </button>
-                    {activeSkillPath !== 'SKILL.md' && (
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-danger ca-btn-sm"
-                        onClick={() => {
-                          const target = activeSkillPath;
-                          setSkillFilesDraft(prev => {
-                            const copy = { ...prev };
-                            delete copy[target];
-                            return copy;
-                          });
-                          setActiveSkillPath('SKILL.md');
-                        }}
-                      >
-                        {t('删除文件', 'Delete file')}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <textarea
-                  rows={12}
-                  className="ca-textarea ca-mono"
-                  readOnly={!skillFilesRes.editable}
-                  value={skillFilesDraft[activeSkillPath] ?? ''}
-                  onChange={e => {
-                    const v = e.target.value;
-                    setSkillFilesDraft(prev => ({ ...prev, [activeSkillPath]: v }));
-                  }}
-                />
-
-                {skillFilesRes.editable && (
-                  <div className="ca-inline-end ca-mt-2">
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-primary ca-btn-sm"
-                      disabled={detailBusy}
-                      onClick={() => void handleSaveSkillFiles()}
-                    >
-                      {t('保存技能文件', 'Save skill files')}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* MCP / Plugin 全局参数配置 */}
-            {detailInst.kind !== 'skill' && detailConfig && (
-              <div className="ca-section ca-section-pad">
-                <div className="ca-field-label ca-mb-2">
-                  {t('全局默认参数', 'Global default settings')}
-                </div>
-                <SchemaConfigForm
-                  schema={detailConfig.configSchema}
-                  uiSchema={detailConfig.uiSchema}
-                  formData={detailGlobalDraft}
-                  onChange={setDetailGlobalDraft}
-                  api={api}
-                  submitLabel={t('保存全局参数', 'Save global settings')}
-                  submitBusy={detailBusy}
-                  onSubmit={() => void handleSaveGlobalToolConfig()}
-                />
-              </div>
-            )}
-
-            {/* 跨设备树形多选框直接勾选分配 Bot */}
-            <div className="ca-section ca-section-pad">
-              <div className="ca-field-label ca-mb-2">
-                {t('跨设备 Bot 授权分配', 'Cross-device Bot access')}
-              </div>
-              <BotTreeSelector
-                devices={devices}
-                bots={bots}
-                selectedKeys={selectedBotKeys}
-                busyKeys={bindingBusyKeys}
-                onToggleBot={(devId, bId, checked) => void handleToggleBotBinding(devId, bId, checked)}
-                renderBotExtra={
-                  detailInst.kind !== 'skill' && detailConfig
-                    ? bot =>
-                        botBindings.get(botKey(bot.deviceId, bot.botId))?.enabled ? (
-                          <button
-                            type="button"
-                            className="ca-btn ca-btn-sm"
-                            onClick={() => openBotOverrideModal(bot)}
-                          >
-                            {t('独立参数', 'Overrides')}
-                          </button>
-                        ) : null
-                    : undefined
-                }
-              />
-            </div>
-
-            {/* MCP / Plugin 连接与工具列表检查 */}
-            {detailInst.kind !== 'skill' && (
-              <div className="ca-section ca-section-pad">
-                <div className="ca-inline-between ca-wrap">
-                  <div>
-                    <div className="ca-field-label">{t('连接与工具列表', 'Connection & tools')}</div>
-                    <div className="ca-muted">{t('自动选用在线设备的 Bot 验证连接并读取工具定义', 'Automatically uses an online Bot to verify connectivity and inspect tools')}</div>
-                  </div>
-                  <div className="ca-inline-row ca-probe-actions">
-                    {activeBots.length > 1 && (
-                      <select
-                        className="ca-select ca-probe-select"
-                        value={selectedValidationBotKey}
-                        onChange={e => setSelectedValidationBotKey(e.target.value)}
-                      >
-                        {activeBots.map(b => (
-                          <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
-                            {b.deviceName || b.deviceId} / {b.name}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-sm"
-                      disabled={probeBusy || !selectedValidationBotKey}
-                      onClick={() => void handleCheckAndListTools()}
-                    >
-                      <LabelStack
-                        active={probeBusy ? t('探测中…', 'Probing…') : t('检查连接与工具列表', 'Check connection & tools')}
-                        labels={[t('检查连接与工具列表', 'Check connection & tools'), t('探测中…', 'Probing…')]}
-                      />
-                    </button>
-                  </div>
-                </div>
-                {probeResult && (
-                  <div className="ca-muted ca-mt-2">
-                    {probeResult}
-                  </div>
-                )}
-                {toolsResult && (
-                  <div className="ca-list ca-tools-list">
-                    {toolsResult.length === 0 ? (
-                      <div className="ca-empty">{t('未暴露可用工具', 'No tools exposed')}</div>
-                    ) : (
-                      toolsResult.map(tool => (
-                        <div key={tool.name} className="ca-row ca-row-compact">
-                          <div className="ca-row-main">
-                            <div className="ca-row-title ca-mono">{tool.name}</div>
-                            {tool.description && <div className="ca-row-sub">{tool.description}</div>}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 更新、部署回执与卸载折叠区 */}
-            <CaDisclosure title={t('更新、部署状态与卸载', 'Updates, deployment & uninstall')}>
-              <div className="ca-form-stack">
-                {deployments.length > 0 && (
-                  <div className="ca-cred-box">
-                    <div className="ca-field-label ca-mb-1">
-                      {t('各节点同步状态', 'Node sync status')}
-                    </div>
-                    {deployments.map((d, idx) => (
-                      <div key={idx} className="ca-muted ca-num">
-                        {d.deviceId ?? t('中心节点', 'Center node')} · {d.phase} · {d.health}
-                        {d.error ? t(`（${d.error.message}）`, ` (${d.error.message})`) : ''}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {detailInst.source.type === 'npm' && (
-                  <>
-                    <div className="ca-inline-between ca-wrap">
-                      <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-sm"
-                        disabled={detailBusy}
-                        onClick={() => void handleCheckUpdates()}
-                      >
-                        <RefreshCw size={13} />
-                        <span>{t('检查更新', 'Check updates')}</span>
-                      </button>
-                    </div>
-
-                    {updates && updates.length > 0 && (
-                      <div className="ca-inline-row ca-wrap">
-                        {updates.map(v => (
-                          <button
-                            key={v.version}
-                            type="button"
-                            className="ca-btn ca-btn-sm"
-                            onClick={() => void handleApplyUpdate(v.version)}
-                          >
-                            {t(`更新到 v${v.version}`, `Update to v${v.version}`)}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {detailInst.source.type === 'artifact' && (
-                  <div className="ca-form-stack">
-                    {detailInst.kind !== 'skill' && (
-                      <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
-                    )}
-                    <div className="ca-field">
-                      <label className="ca-field-label">{t('上传新版制品包 (.tgz / .tar.gz / .zip)', 'Upload new package archive (.tgz / .tar.gz / .zip)')}</label>
-                      <input
-                        key={updateArtifactInputKey}
-                        type="file"
-                        className="ca-input"
-                        accept=".tgz,.tar.gz,.zip,.tar"
-                        disabled={detailBusy}
-                        onChange={e => setUpdateArtifactFile(e.target.files?.[0] ?? null)}
-                      />
-                      <span className="ca-field-help">{t(`包 ID 须为 ${detailInst.packageId}；原地更新不会修改实例 ID、全局启停意图或 Bot 绑定。`, `Package ID must match ${detailInst.packageId}; in-place update preserves the installation ID, enable state, and Bot bindings.`)}</span>
-                    </div>
-                    <div className="ca-inline-row">
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-primary ca-btn-sm"
-                        disabled={detailBusy || !updateArtifactFile}
-                        onClick={() => void handleApplyArtifactUpdate()}
-                      >
-                        <Upload size={13} />
-                        <span>{t('上传并原地更新', 'Upload & update in place')}</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {detailInst.source.type === 'http' && (
-                  <span className="ca-muted">{t('远程 HTTP MCP 直接连接远端服务，无需包更新。', 'Remote HTTP MCP connects directly to the remote endpoint; no package update is required.')}</span>
-                )}
-
-                <div className="ca-inline-end">
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-danger ca-btn-sm"
-                    disabled={detailBusy}
-                    onClick={() => setConfirmUninstallOpen(true)}
-                  >
-                    <Trash2 size={13} />
-                    <span>{detailInst.kind === 'skill' ? t('卸载技能', 'Uninstall skill') : t('卸载扩展', 'Uninstall extension')}</span>
-                  </button>
-                </div>
-              </div>
-            </CaDisclosure>
+        <form className="ca-form-stack" onSubmit={e => void handleSubmitRename(e)}>
+          <div className="ca-field">
+            <label className="ca-field-label" htmlFor="ca-cap-rename-input">
+              {t('显示名称', 'Display name')} <span className="ca-req">*</span>
+            </label>
+            <input
+              id="ca-cap-rename-input"
+              type="text"
+              className="ca-input"
+              required
+              autoFocus
+              disabled={renameBusy}
+              value={renameDraft}
+              onChange={e => {
+                setRenameDraft(e.target.value);
+                if (renameError) setRenameError('');
+              }}
+            />
           </div>
-        )}
+
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {renameError ? (
+              <p className="ca-error-text" role="alert">
+                {renameError}
+              </p>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={renameBusy}
+              onClick={() => setModal(null)}
+            >
+              {t('取消', 'Cancel')}
+            </button>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={renameBusy || !renameDraft.trim()}
+              aria-busy={renameBusy}
+            >
+              <LabelStack
+                active={renameBusy ? t('保存中…', 'Saving…') : t('保存名称', 'Save name')}
+                labels={[t('保存名称', 'Save name'), t('保存中…', 'Saving…')]}
+              />
+            </button>
+          </div>
+        </form>
       </CaModal>
 
-      <CaConfirmDialog
-        open={confirmUninstallOpen && Boolean(detailInst)}
-        title={detailInst?.kind === 'skill' ? t('卸载技能', 'Uninstall Skill') : t('卸载扩展', 'Uninstall Extension')}
-        description={
-          detailInst
-            ? t(`卸载「${detailInst.displayName}」后，该能力将从中心目录与所有已同步设备中移除，现有 Bot 绑定也会一并失效。`, `Uninstalling "${detailInst.displayName}" removes it from the center catalog and all synced devices, and revokes existing Bot bindings.`)
-            : ''
-        }
-        confirmLabel={detailInst?.kind === 'skill' ? t('卸载技能', 'Uninstall Skill') : t('卸载扩展', 'Uninstall Extension')}
-        cancelLabel={t('取消', 'Cancel')}
-        danger
-        busy={detailBusy}
-        onCancel={() => {
-          if (!detailBusy) setConfirmUninstallOpen(false);
-        }}
-        onConfirm={() => void handleUninstall()}
-      />
-
-      {/* 单 Bot 独立参数覆盖子弹窗 */}
+      {/* Mutually Exclusive Modal 4: Per-Bot Parameter Override (single modal over in-page detail) */}
       <CaModal
-        open={Boolean(overrideBot)}
+        open={modal?.kind === 'bot-override' && Boolean(detailConfig)}
         onOpenChange={open => {
-          if (!open) setOverrideBot(null);
+          if (!open && !overrideSaving) {
+            setOverrideError('');
+            setModal(null);
+          }
         }}
-        title={t(`独立参数覆盖 · ${overrideBot?.name ?? ''}`, `Override settings · ${overrideBot?.name ?? ''}`)}
+        title={
+          modal?.kind === 'bot-override'
+            ? t(`独立参数覆盖 · ${modal.bot.name}`, `Override settings · ${modal.bot.name}`)
+            : t('独立参数覆盖', 'Override settings')
+        }
         description={t('未勾选覆盖的字段自动继承全局配置', 'Unchecked fields automatically inherit global settings')}
         variant="modal"
       >
-        {overrideBot && detailConfig && (
+        {modal?.kind === 'bot-override' && detailConfig && (
           <SchemaConfigForm
             schema={detailConfig.configSchema}
             uiSchema={detailConfig.uiSchema}
@@ -1997,10 +2316,42 @@ export function CapabilitiesTab({
             api={api}
             submitLabel={t('保存覆盖参数', 'Save overrides')}
             submitBusy={overrideSaving}
+            cancelLabel={t('取消', 'Cancel')}
+            onCancel={() => {
+              if (!overrideSaving) setModal(null);
+            }}
+            error={overrideError}
             onSubmit={() => void handleSaveBotOverride()}
           />
         )}
       </CaModal>
+
+      {/* Mutually Exclusive Modal 5: Confirm Uninstall */}
+      <CaConfirmDialog
+        open={modal?.kind === 'confirm'}
+        title={
+          modal?.kind === 'confirm' && modal.inst.kind === 'skill'
+            ? t('卸载技能', 'Uninstall Skill')
+            : t('卸载扩展', 'Uninstall Extension')
+        }
+        description={
+          modal?.kind === 'confirm'
+            ? t(`卸载「${modal.inst.displayName}」后，该能力将从中心目录与所有已同步设备中移除，现有 Bot 绑定也会一并失效。`, `Uninstalling "${modal.inst.displayName}" removes it from the center catalog and all synced devices, and revokes existing Bot bindings.`)
+            : ''
+        }
+        confirmLabel={
+          modal?.kind === 'confirm' && modal.inst.kind === 'skill'
+            ? t('卸载技能', 'Uninstall Skill')
+            : t('卸载扩展', 'Uninstall Extension')
+        }
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={detailBusy}
+        onCancel={() => {
+          if (!detailBusy) setModal(null);
+        }}
+        onConfirm={() => void handleUninstall()}
+      />
     </div>
   );
 }

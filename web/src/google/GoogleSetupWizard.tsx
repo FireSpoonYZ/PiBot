@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { ActionBar } from '../components/ui';
+import { useNotice } from '../notice';
 import { useText } from '../ui';
 import {
   automaticGoogleClientSetup,
@@ -374,6 +376,7 @@ export function GoogleSetupWizard({
   onClose,
 }: GoogleSetupWizardProps) {
   const t = useText();
+  const { notify } = useNotice();
   const effectiveScopeKey = scopeKey || botId;
   const mountedRef = useRef(true);
   const autoStartedRef = useRef(false);
@@ -409,7 +412,6 @@ export function GoogleSetupWizard({
   const [busy, setBusy] = useState(false);
   const [unavailableReason, setUnavailableReason] = useState('');
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [resumeRetry, setResumeRetry] = useState<{ scope: string; runId: string; step?: string | null } | null>(null);
   const [showDirectConfig, setShowDirectConfig] = useState(false);
   const [failedAutoClient, setFailedAutoClient] = useState<{ scope: string; runId: string }>();
@@ -485,7 +487,6 @@ export function GoogleSetupWizard({
         !isStaleGoogleSetupResult(next) && typeof next.resumeQueued === 'boolean';
       if (hasResumeResult) {
         setError('');
-        setNotice('');
       }
       setResumeRetry(retry => {
         if (hasResumeResult) {
@@ -599,8 +600,8 @@ export function GoogleSetupWizard({
         if (isMutation && isStaleGoogleSetupResult(next)) {
           if (!opts?.silentError) {
             setError(
-              t('向导进度已更新，已刷新为最新状态，未执行过期操作，请确认后再试。',
-                'Setup state changed and has been refreshed. The outdated action was not applied — please review and try again.',
+              t('操作未执行：向导状态已更新并自动刷新，请核对当前步骤后重试。',
+                'Action not applied: setup state changed and has been refreshed. Review the current step and try again.',
               ),
             );
           }
@@ -623,8 +624,8 @@ export function GoogleSetupWizard({
           await refreshLatestAfterConflict(reqScope);
           if (mountedRef.current && reqScope === activeScopeRef.current && !opts?.silentError) {
             setError(
-              t('向导进度已更新，已自动刷新为最新状态，未重试过期操作，请确认后再试。',
-                'Setup state changed and has been refreshed. The outdated action was not retried — please confirm and try again.',
+              t('操作未执行：向导状态已更新并自动刷新，请核对当前步骤后重试。',
+                'Action not applied: setup state changed and has been refreshed. Review the current step and try again.',
               ),
             );
           }
@@ -639,8 +640,8 @@ export function GoogleSetupWizard({
         } else if (info.offline) {
           if (!opts?.silentError) {
             setError(
-              t('目标 Host 当前离线，请恢复在线后继续。',
-                'Target Host is offline. Reconnect to continue.',
+              t('操作失败：目标 Host 当前离线。请恢复 Host 在线后重试当前步骤。',
+                'Action failed: target Host is offline. Bring the Host back online and retry this step.',
               ),
             );
           }
@@ -691,8 +692,8 @@ export function GoogleSetupWizard({
         if (!accepted) return null;
         if (isStaleGoogleSetupResult(next)) {
           setError(
-            t('向导进度已更新，已刷新为最新状态，未执行过期操作，请确认后再试。',
-              'Setup state changed and has been refreshed. The outdated action was not applied — please review and try again.',
+            t('操作未执行：向导状态已更新并自动刷新，请核对当前步骤后重试。',
+              'Action not applied: setup state changed and has been refreshed. Review the current step and try again.',
             ),
           );
           return null;
@@ -714,8 +715,8 @@ export function GoogleSetupWizard({
           await refreshLatestAfterConflict(reqScope);
           if (mountedRef.current && reqScope === activeScopeRef.current) {
             setError(
-              t('向导进度已更新，已自动刷新为最新状态，未重试过期操作，请确认后再试。',
-                'Setup state changed and has been refreshed. The outdated action was not retried — please confirm and try again.',
+              t('操作未执行：向导状态已更新并自动刷新，请核对当前步骤后重试。',
+                'Action not applied: setup state changed and has been refreshed. Review the current step and try again.',
               ),
             );
           }
@@ -949,7 +950,6 @@ export function GoogleSetupWizard({
   const handleBlockerAction = async (action: GoogleSetupAction) => {
     if (effectiveReadOnly || submittingRef.current) return;
     const snapshot = setup;
-    setNotice('');
     setError('');
     switch (action.id) {
       case 'done':
@@ -991,11 +991,11 @@ export function GoogleSetupWizard({
           if (onOpenCapabilities) onOpenCapabilities();
           else if (onOpenCenterAdmin) onOpenCenterAdmin();
           else {
-            setNotice(
-              t('请前往独立能力设置或中心管理录入 Web OAuth 凭据。',
-                'Open Capabilities or Center Admin to save Web OAuth credentials.',
-              ),
-            );
+            notify({
+              id: 'google-setup-status',
+              tone: 'info',
+              title: t('请前往独立能力设置或中心管理录入 Web OAuth 凭据。', 'Open Capabilities or Center Admin to save Web OAuth credentials.'),
+            });
           }
           return;
         }
@@ -1040,9 +1040,9 @@ export function GoogleSetupWizard({
         const text = googleAdminTrustRequestText(effectiveCenterClient?.clientId, t);
         try {
           await navigator.clipboard.writeText(text);
-          setNotice(t('已复制管理员申请说明，请发送给 Workspace 或 Center 管理员。', 'Copied administrator instructions to clipboard.'));
+          notify({ id: 'google-setup-status', tone: 'success', title: t('已复制管理员配置指引', 'Copied administrator instructions to clipboard') });
         } catch {
-          setError(t('无法复制到剪贴板。', 'Could not copy to clipboard.'));
+          setError(t('复制管理员说明失败：当前环境限制访问剪贴板，请将应用切回前台后重试。', 'Could not copy admin guide: clipboard access was blocked. Return to the foreground and retry.'));
         }
         return;
       }
@@ -1142,7 +1142,6 @@ export function GoogleSetupWizard({
   const canAnswerKind = Boolean(callGoogleSetup && setup?.id && !effectiveReadOnly && !setup.unavailable);
   const handleChooseKind = async (kind: 'personal' | 'work') => {
     if (!kindPending || !canAnswerKind || submittingRef.current) return;
-    setNotice('');
     await sendCardAnswer('kind', [kind]);
   };
   const kindSelection = kindPending && !nonAdminBlocked && !unavailableReason ? (
@@ -1154,14 +1153,14 @@ export function GoogleSetupWizard({
         {t('只有项目属于对应的 Google Workspace 组织，且应用仅供该组织成员使用时，才选择「内部」。',
           'Choose Internal only when the project belongs to the Google Workspace organization and the app is for its members only.')}
       </p>
-      <div className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
+      <ActionBar align="start" className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
         <button type="button" className="gws-btn is-sm" disabled={busy || !canAnswerKind} onClick={() => void handleChooseKind('personal')}>
           {t('个人账号或组织外用户（外部）', 'Personal account or outside users (External)')}
         </button>
         <button type="button" className="gws-btn is-sm" disabled={busy || !canAnswerKind} onClick={() => void handleChooseKind('work')}>
           {t('公司或学校组织内成员（内部）', 'Company or school members (Internal)')}
         </button>
-      </div>
+      </ActionBar>
     </div>
   ) : null;
   const activeBlockerActions =
@@ -1172,15 +1171,15 @@ export function GoogleSetupWizard({
     resumeRetry.step === setup?.step && setup?.state === 'running' ? (
       <div className={compactChat ? 'gws-compact-body' : 'gws-section-block'}>
         <p className={compactChat ? 'gws-compact-notice' : 'gws-notice'} role="status">
-          {t('向导进度已保存。Bot 续跑请求提交失败。', 'Setup progress is saved. The request to resume the bot failed.')}
+          {t('向导进度已保存，但未能自动通知 Bot 继续。请点击下方「继续配置」重试。', 'Setup progress is saved, but resuming the Bot failed. Select Continue below to retry.')}
         </p>
         {!setup.blocker && !setup.unavailable && !effectiveReadOnly && callGoogleSetup ? (
-          <div className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
+          <ActionBar align="start" className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
             <button type="button" className="gws-btn is-primary is-sm" disabled={busy}
               onClick={() => void handleBlockerAction({ id: 'continue' })}>
               {compactBlockerLabel({ id: 'continue' }, t)}
             </button>
-          </div>
+          </ActionBar>
         ) : null}
       </div>
     ) : null;
@@ -1290,9 +1289,9 @@ export function GoogleSetupWizard({
       if (!redirectUri) return;
       try {
         await navigator.clipboard.writeText(redirectUri);
-        setNotice(t('已复制回调地址。', 'Copied redirect URI.'));
+        notify({ id: 'google-setup-status', tone: 'success', title: t('已复制回调地址', 'Copied redirect URI') });
       } catch {
-        setError(t('无法复制到剪贴板。', 'Could not copy to clipboard.'));
+        setError(t('复制回调地址失败：当前环境限制访问剪贴板，请手动选中并复制上方地址。', 'Could not copy redirect URI: clipboard access was blocked. Select and copy the address manually.'));
       }
     };
 
@@ -1494,7 +1493,7 @@ export function GoogleSetupWizard({
               {t('当前账号不是 Center 管理员，请先请管理员配置 Google OAuth 应用。', 'Ask your Center administrator to configure the Google OAuth app first.')}
             </p>
             {!effectiveReadOnly ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 <button
                   type="button"
                   className="gws-btn is-primary is-sm"
@@ -1512,7 +1511,7 @@ export function GoogleSetupWizard({
                 >
                   <span>{t('重新检查', 'Check again')}</span>
                 </button>
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1522,9 +1521,9 @@ export function GoogleSetupWizard({
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{t('等待 Center 确认连接结果', 'Waiting for Center verification')}</div>
             <p className="gws-compact-step-hint">
-              {t('尚未在 Center 核验到已连接的 Google 账号，连接状态以 Center 实际结果为准。', 'Center has not verified a connected Google account yet.')}
+              {t('Center 尚未核验到已连接的 Google 账号。请完成系统浏览器登录后点击「重新检查」。', 'Center has not verified a connected Google account yet. Finish sign-in in your system browser, then select Check again.')}
             </p>
-            <div className="gws-compact-actions">
+            <ActionBar align="start" className="gws-compact-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
@@ -1542,7 +1541,7 @@ export function GoogleSetupWizard({
                   <span>{t('前往能力设置', 'Open capabilities')}</span>
                 </button>
               ) : null}
-            </div>
+            </ActionBar>
           </div>
         ) : null}
 
@@ -1551,11 +1550,11 @@ export function GoogleSetupWizard({
           <div className="gws-compact-body">
             <p className="gws-compact-step-hint">{unavailableReason}</p>
             {settingsEntryAction ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 <button type="button" className="gws-btn is-primary is-sm" onClick={settingsEntryAction}>
                   <span>{settingsEntryLabel}</span>
                 </button>
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1564,7 +1563,7 @@ export function GoogleSetupWizard({
         {isPathSelection && !unavailableReason ? (
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{t('选择操作方式', 'Choose how to set up')}</div>
-            <div className="gws-compact-actions">
+            <ActionBar align="start" className="gws-compact-actions">
               {ALL_MODES.filter(mode =>
                 mode === 'guide-browser'
                   ? true
@@ -1582,7 +1581,7 @@ export function GoogleSetupWizard({
                   {compactModeLabel(mode, t)}
                 </button>
               ))}
-            </div>
+            </ActionBar>
             {!embeddedSupported ? (
               <p className="gws-compact-step-hint">
                 {humanizeEmbeddedReason(embeddedUnavailableDetail, isLocalAndroid, t)}
@@ -1617,7 +1616,7 @@ export function GoogleSetupWizard({
                 );
               })}
             </div>
-            <div className="gws-compact-actions">
+            <ActionBar align="start" className="gws-compact-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
@@ -1626,7 +1625,7 @@ export function GoogleSetupWizard({
               >
                 {t('确认并继续', 'Confirm & continue')}
               </button>
-            </div>
+            </ActionBar>
           </div>
         ) : null}
 
@@ -1634,7 +1633,7 @@ export function GoogleSetupWizard({
         {isAccountSelection && !unavailableReason ? (
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{t('选择 Google Cloud 账号', 'Choose Google Cloud account')}</div>
-            <div className="gws-compact-actions">
+            <ActionBar align="start" className="gws-compact-actions">
               {setup!.accounts!.map(email => (
                 <button
                   key={email}
@@ -1650,7 +1649,7 @@ export function GoogleSetupWizard({
                   {email}
                 </button>
               ))}
-            </div>
+            </ActionBar>
           </div>
         ) : null}
 
@@ -1664,7 +1663,7 @@ export function GoogleSetupWizard({
               <span>{browserLockHint}</span>
             </div>
             {!effectiveReadOnly ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
                   <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
                     <Globe size={13} aria-hidden="true" />
@@ -1691,7 +1690,7 @@ export function GoogleSetupWizard({
                     {t('改用外部浏览器', 'Use system browser')}
                   </button>
                 ) : null}
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1730,7 +1729,7 @@ export function GoogleSetupWizard({
             ) : null}
 
             {!effectiveReadOnly ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 {stepExternalUrl ? (
                   <button
                     type="button"
@@ -1795,7 +1794,7 @@ export function GoogleSetupWizard({
                     {stepCopy.continueLabel}
                   </button>
                 ) : null}
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1812,7 +1811,7 @@ export function GoogleSetupWizard({
                   : stepHint}
             </p>
             {!effectiveReadOnly ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 {clientManualAction}
                 {onOpenBrowser && embeddedSupported && !browserLocked && currentStep !== 'client' ? (
                   <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
@@ -1831,7 +1830,7 @@ export function GoogleSetupWizard({
                     <span>{settingsEntryLabel}</span>
                   </button>
                 ) : null}
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1870,7 +1869,7 @@ export function GoogleSetupWizard({
               <span>{describeCompactBlocker(setup!.blocker!, t)}</span>
             </div>
             {extraBlockerActions.length > 0 && !effectiveReadOnly ? (
-              <div className="gws-compact-actions">
+              <ActionBar align="start" className="gws-compact-actions">
                 {extraBlockerActions.map((action, idx) => (
                   <button
                     key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
@@ -1884,7 +1883,7 @@ export function GoogleSetupWizard({
                     <span>{compactBlockerLabel(action, t)}</span>
                   </button>
                 ))}
-              </div>
+              </ActionBar>
             ) : null}
           </div>
         ) : null}
@@ -1895,7 +1894,7 @@ export function GoogleSetupWizard({
             <p className="gws-compact-step-hint">
               {t('尚未同步到当前向导状态，请刷新后继续。', 'Setup status not synced yet. Refresh to continue.')}
             </p>
-            <div className="gws-compact-actions">
+            <ActionBar align="start" className="gws-compact-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
@@ -1908,12 +1907,11 @@ export function GoogleSetupWizard({
                 <RefreshCw size={13} aria-hidden="true" />
                 <span>{t('重新检查', 'Refresh')}</span>
               </button>
-            </div>
+            </ActionBar>
           </div>
         ) : null}
 
         {resumeRetryNotice}
-        {notice ? <p className="gws-compact-notice" role="status">{notice}</p> : null}
         {error ? (
           <div className="gws-compact-error" role="alert">
             <ShieldAlert size={14} aria-hidden="true" />
@@ -1974,13 +1972,13 @@ export function GoogleSetupWizard({
         <div className="gws-warning" role="status">
           <ShieldAlert size={15} aria-hidden="true" />
           <div className="gws-error-body">
-            <span>{t('当前 Center 尚未配置 Google OAuth 应用，请联系 Center 管理员完成一次性配置后再连接你的账号。', 'Center does not have a Google OAuth app configured yet. Ask your Center administrator to configure it once before connecting your account.')}</span>
-            <div className="gws-actions">
+            <span>{t('当前账号不是 Center 管理员。请复制下方指引，联系 Center 管理员完成一次性 OAuth 应用配置。', 'Your account is not a Center admin. Copy the guide below and ask your Center admin to configure the OAuth app once.')}</span>
+            <ActionBar align="start" className="gws-actions">
               <button type="button" className="gws-btn is-ghost is-xs" onClick={() => void handleBlockerAction({ id: 'copy-for-admin' })}>
                 <Copy size={12} aria-hidden="true" />
                 <span>{t('复制管理员配置指引', 'Copy admin guide')}</span>
               </button>
-            </div>
+            </ActionBar>
           </div>
         </div>
       ) : null}
@@ -1988,7 +1986,7 @@ export function GoogleSetupWizard({
       {setupClaimsDoneWithoutCenter ? (
         <div className="gws-warning" role="status">
           <AlertTriangle size={15} aria-hidden="true" />
-          <span>{t('尚未在 Center 核验到已就绪的 Google 账号连接；授权完成以 Center 实际回调与探活结果为准，不采信聊天文本说明。', 'Center has not verified a connected Google account yet. Completion is determined strictly by Center status, never chat text.')}</span>
+          <span>{t('Center 尚未核验到已连接的 Google 账号；完成状态以 Center 核验结果为准。请完成授权后点击「核验最新状态」。', 'Center has not verified a connected Google account yet; completion is determined by Center status. Finish authorization, then select Verify status.')}</span>
         </div>
       ) : null}
 
@@ -2097,7 +2095,7 @@ export function GoogleSetupWizard({
               );
             })}
           </div>
-          <div className="gws-actions">
+          <ActionBar align="start" className="gws-actions">
             <button
               type="button"
               className="gws-btn is-primary is-sm"
@@ -2106,7 +2104,7 @@ export function GoogleSetupWizard({
             >
               {t('确认服务选择', 'Confirm services')}
             </button>
-          </div>
+          </ActionBar>
         </div>
       ) : null}
 
@@ -2118,7 +2116,7 @@ export function GoogleSetupWizard({
       setup.accounts.length > 0 ? (
         <div className="gws-section-block">
           <span className="gws-label-xs">{t('选择用于建项的 Google Cloud 账号', 'Choose the Google account for Cloud Console')}</span>
-          <div className="gws-actions">
+          <ActionBar align="start" className="gws-actions">
             {setup.accounts.map(email => (
               <button
                 key={email}
@@ -2134,7 +2132,7 @@ export function GoogleSetupWizard({
                 {email}
               </button>
             ))}
-          </div>
+          </ActionBar>
         </div>
       ) : null}
 
@@ -2147,7 +2145,7 @@ export function GoogleSetupWizard({
             <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
             <span>{browserLockHint}</span>
           </div>
-          <div className="gws-actions">
+          <ActionBar align="start" className="gws-actions">
             {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
               <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
                 <Globe size={14} aria-hidden="true" />
@@ -2162,7 +2160,7 @@ export function GoogleSetupWizard({
             >
               {t('改用外部浏览器指导', 'Switch to external browser')}
             </button>
-          </div>
+          </ActionBar>
         </div>
       ) : null}
 
@@ -2211,7 +2209,7 @@ export function GoogleSetupWizard({
               <li key={i}>{line}</li>
             ))}
           </ul>
-          {clientManualAction ? <div className="gws-actions">{clientManualAction}</div> : null}
+          {clientManualAction ? <ActionBar align="start" className="gws-actions">{clientManualAction}</ActionBar> : null}
           {stepInfo.sensitiveWarning && !autoClientPending ? (
             <p className="gws-sensitive-note">
               <ShieldAlert size={14} aria-hidden="true" />
@@ -2220,24 +2218,24 @@ export function GoogleSetupWizard({
           ) : null}
 
           {activeMode === 'guide-here' && onOpenBrowser && !browserLocked && !effectiveReadOnly ? (
-            <div className="gws-actions">
+            <ActionBar align="start" className="gws-actions">
               <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
                 <Globe size={14} aria-hidden="true" />
                 <span>{compactStepCopy(currentStep, t).openLabel}</span>
               </button>
-            </div>
+            </ActionBar>
           ) : null}
           {externalProjectUrl && !effectiveReadOnly ? (
-            <div className="gws-actions">
+            <ActionBar align="start" className="gws-actions">
               <button type="button" className="gws-btn is-ghost is-sm" onClick={() => void openExternalUrl(externalProjectUrl)}>
                 <ExternalLink size={14} aria-hidden="true" />
                 <span>{t('打开项目创建页', 'Open project creation page')}</span>
               </button>
-            </div>
+            </ActionBar>
           ) : null}
           {currentStep === 'project' && canCompleteCurrentStep && !effectiveReadOnly ? (
-            <div className={needsExternalProjectId ? 'gws-inline-input-row' : 'gws-actions'}>
-              {needsExternalProjectId ? (
+            needsExternalProjectId ? (
+              <div className="gws-inline-input-row">
                 <input
                   type="text"
                   className="gws-input"
@@ -2247,16 +2245,27 @@ export function GoogleSetupWizard({
                   aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
                   onChange={e => updateProjectIdDraft(e.target.value)}
                 />
-              ) : null}
-              <button
-                type="button"
-                className="gws-btn is-primary is-sm"
-                disabled={busy || waitingForExternalProjectId}
-                onClick={() => void handleCompleteStep()}
-              >
-                {t('已创建，继续', 'Created, continue')}
-              </button>
-            </div>
+                <button
+                  type="button"
+                  className="gws-btn is-primary is-sm"
+                  disabled={busy || waitingForExternalProjectId}
+                  onClick={() => void handleCompleteStep()}
+                >
+                  {t('已创建，继续', 'Created, continue')}
+                </button>
+              </div>
+            ) : (
+              <ActionBar align="start" className="gws-actions">
+                <button
+                  type="button"
+                  className="gws-btn is-primary is-sm"
+                  disabled={busy || waitingForExternalProjectId}
+                  onClick={() => void handleCompleteStep()}
+                >
+                  {t('已创建，继续', 'Created, continue')}
+                </button>
+              </ActionBar>
+            )
           ) : null}
 
           {currentStep !== 'project' &&
@@ -2264,16 +2273,16 @@ export function GoogleSetupWizard({
           currentStep !== 'connect' &&
           canCompleteCurrentStep &&
           !effectiveReadOnly ? (
-            <div className="gws-actions">
+            <ActionBar align="start" className="gws-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
                 disabled={busy}
                 onClick={() => void handleCompleteStep()}
               >
-                {t('已完成这一步 (Done)', 'Done — next step')}
+                {t('已完成此步骤，继续', 'Done, continue')}
               </button>
-            </div>
+            </ActionBar>
           ) : null}
         </div>
       ) : null}
@@ -2286,7 +2295,7 @@ export function GoogleSetupWizard({
             <span>{describeBlocker(setup.blocker, t)}</span>
           </div>
           {activeBlockerActions.length > 0 && !effectiveReadOnly ? (
-            <div className="gws-actions">
+            <ActionBar align="start" className="gws-actions">
               {activeBlockerActions.filter(action => action.id !== 'done' || !canCompleteCurrentStep || currentStep === 'client').map(action => (
                 <button
                   key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
@@ -2299,7 +2308,7 @@ export function GoogleSetupWizard({
                   <span>{action.label || action.id}</span>
                 </button>
               ))}
-            </div>
+            </ActionBar>
           ) : null}
         </div>
       ) : null}
@@ -2358,7 +2367,6 @@ export function GoogleSetupWizard({
       ) : null}
 
       {resumeRetryNotice}
-      {notice ? <p className="gws-notice" role="status">{notice}</p> : null}
       {error ? (
         <div className="gws-error" role="alert">
           <ShieldAlert size={15} aria-hidden="true" />
@@ -2368,7 +2376,7 @@ export function GoogleSetupWizard({
 
       {/* Footer actions */}
       {!effectiveReadOnly ? (
-        <div className="gws-footer-bar">
+        <ActionBar align="start" className="gws-footer-bar">
           {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser &&
             setup?.card?.card !== 'services' && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
             <button type="button" className="gws-btn is-ghost is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
@@ -2392,7 +2400,7 @@ export function GoogleSetupWizard({
               {t('中止向导', 'Cancel setup')}
             </button>
           ) : null}
-        </div>
+        </ActionBar>
       ) : null}
     </section>
   );

@@ -8,7 +8,9 @@ export type SettingsSubPage =
   | 'devices'
   | 'manual'
   | 'updates'
-  | 'permissions';
+  | 'permissions'
+  | 'clipboard'
+  | 'advanced';
 
 export interface NavEntry<S extends string = string> {
   screen: S;
@@ -43,8 +45,28 @@ function sameNavTarget<S extends string>(a: NavEntry<S>, b: NavEntry<S>): boolea
   if (a.screen === 'settings') {
     return (a.settingsPage ?? 'overview') === (b.settingsPage ?? 'overview');
   }
-  if (b.botKey !== undefined && a.botKey !== b.botKey) return false;
+  if (a.screen === 'tasks' && (a.taskId !== undefined || b.taskId !== undefined)) {
+    return (a.taskId ?? null) === (b.taskId ?? null);
+  }
+  if (a.botKey !== undefined && b.botKey !== undefined) {
+    return (a.botKey ?? null) === (b.botKey ?? null);
+  }
+  if (a.botKey === undefined && b.botKey !== undefined) {
+    return false;
+  }
   return true;
+}
+
+function mergeNavEntry<S extends string>(existing: NavEntry<S>, next: NavEntry<S>): NavEntry<S> {
+  return {
+    ...existing,
+    ...next,
+    ...(next.botKey === undefined && existing.botKey !== undefined ? { botKey: existing.botKey } : {}),
+    ...(next.taskId === undefined && existing.taskId !== undefined ? { taskId: existing.taskId } : {}),
+    ...(next.settingsPage === undefined && existing.settingsPage !== undefined
+      ? { settingsPage: existing.settingsPage }
+      : {}),
+  };
 }
 
 /**
@@ -60,12 +82,12 @@ export function pushNavEntry<S extends string>(
   if (stack.length === 0) return [next];
   const top = stack[stack.length - 1];
   if (sameNavTarget(top, next)) {
-    const merged: NavEntry<S> = { ...top, ...next };
+    const merged = mergeNavEntry(top, next);
     return [...stack.slice(0, -1), merged];
   }
   for (let i = stack.length - 2; i >= 0; i -= 1) {
     if (sameNavTarget(stack[i], next)) {
-      const merged: NavEntry<S> = { ...stack[i], ...next };
+      const merged = mergeNavEntry(stack[i], next);
       return [...stack.slice(0, i), merged];
     }
   }

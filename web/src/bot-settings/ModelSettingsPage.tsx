@@ -3,10 +3,11 @@
 import { ExternalLink } from 'lucide-react';
 import type { ModelCatalogEntry } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import { ActionBar } from '../components/ui';
 import { openCenterManagement } from '../native';
 import { ErrorNotice, errorText, useText } from '../ui';
 import { ModelPicker } from './ModelPicker';
-import { Chips, Disclosure, LoadingState, Row, Section, SettingsSheet, type ChoiceOption } from './primitives';
+import { Badge, Chips, Disclosure, LoadingState, Row, Section, SettingsSheet, StatusLine, type ChoiceOption } from './primitives';
 import { toolModeFromSelection, type BotModelConfigState, type ToolMode } from './useBotModelConfig';
 import './model-settings.css';
 
@@ -67,8 +68,15 @@ export function ModelSettingsPage({
       : (config?.global.modelRef ?? config?.effective.modelRef ?? null);
 
   const effectiveModelEntry = effectiveModelRef
-    ? models.find(model => model.modelRef === effectiveModelRef)
+    ? (models.find(model => model.modelRef === effectiveModelRef) as (ModelCatalogEntry & { providerName?: string; available?: boolean }) | undefined)
     : undefined;
+
+  const effectiveProvider = effectiveModelEntry?.providerName?.trim()
+    || (effectiveModelRef && effectiveModelRef.includes('/') ? effectiveModelRef.slice(0, effectiveModelRef.indexOf('/')) : '');
+  const effectiveModelName = effectiveModelEntry?.name
+    ?? (effectiveModelRef ? (effectiveModelRef.split('/').pop() ?? effectiveModelRef) : '');
+  const effectiveUnavailable = effectiveModelEntry?.available === false;
+  const isCustomModel = typeof draft.modelRef === 'string' && draft.modelRef.trim().length > 0;
 
   const showThinking = Boolean(
     config
@@ -109,14 +117,37 @@ export function ModelSettingsPage({
       ? `${t('跟随全局默认', 'Default')}（${toolModeLabel(resolvedGlobalToolMode)}）`
       : toolModeLabel(currentToolMode);
 
-  const renderStatusPill = () => {
-    if (state.saving) {
-      return <span className="bs-save-status">{t('保存中...', 'Saving...')}</span>;
-    }
-    if (state.notice) {
-      return <span className="bs-save-status">✓ {state.notice}</span>;
-    }
-    return null;
+  const renderReadinessSummary = () => {
+    if (!config) return null;
+    const tone = state.saving
+      ? 'accent'
+      : !effectiveModelRef || effectiveUnavailable
+        ? 'warning'
+        : 'success';
+    const summaryText = effectiveModelName
+      ? effectiveProvider
+        ? `${t('当前生效模型：', 'Active model: ')}${effectiveModelName} · ${effectiveProvider}`
+        : `${t('当前生效模型：', 'Active model: ')}${effectiveModelName}`
+      : t('尚未设置生效模型，请在下方选择或前往中心配置。', 'No active model configured. Select one below or configure in Center.');
+    const trailing = state.saving ? (
+      <span className="bs-save-status" aria-live="polite">{t('保存中...', 'Saving...')}</span>
+    ) : state.notice ? (
+      <span className="bs-save-status" aria-live="polite">✓ {state.notice}</span>
+    ) : effectiveUnavailable ? (
+      <Badge tone="warning">{t('不可用', 'Unavailable')}</Badge>
+    ) : effectiveModelRef ? (
+      <Badge tone={isCustomModel ? 'accent' : 'neutral'}>
+        {isCustomModel ? t('本 Bot 覆盖', 'Custom') : t('全局默认', 'Global default')}
+      </Badge>
+    ) : (
+      <Badge tone="warning">{t('未配置', 'Unconfigured')}</Badge>
+    );
+
+    return (
+      <StatusLine tone={tone} trailing={trailing}>
+        {summaryText}
+      </StatusLine>
+    );
   };
 
   const renderAuthGuidance = () => {
@@ -124,11 +155,11 @@ export function ModelSettingsPage({
       return (
         <div className="bs-auth-note">
           <span>{t('当前中心授权已失效，请在设备设置中重新扫码绑定中心后重试。', 'Center authorization expired. Please re-bind with the center QR code and retry.')}</span>
-          <div className="bs-auth-note-actions">
-            <button type="button" className="bs-btn is-small" onClick={() => void state.reload()}>
-              {t('重试读取', 'Retry')}
+          <ActionBar align="start" className="bs-auth-note-actions">
+            <button type="button" className="bs-btn is-small" disabled={busy} onClick={() => void state.reload()}>
+              {t('重新读取配置', 'Reload settings')}
             </button>
-          </div>
+          </ActionBar>
         </div>
       );
     }
@@ -152,11 +183,7 @@ export function ModelSettingsPage({
       : undefined;
 
     return (
-      <Section
-        title={t('模型选择', 'Model')}
-        bare
-        hint={renderStatusPill()}
-      >
+      <Section title={t('模型选择', 'Model')} bare>
         {catalog && api && identity ? (
           <ModelPicker
             catalog={catalog}
@@ -200,14 +227,16 @@ export function ModelSettingsPage({
         )}
 
         {models.length > 0 ? (
-          <button
-            type="button"
-            className="bs-link bs-model-link"
-            onClick={openCenterProviders}
-          >
-            {t('管理模型与服务商', 'Manage models & providers')}
-            <ExternalLink aria-hidden="true" />
-          </button>
+          <ActionBar align="start">
+            <button
+              type="button"
+              className="bs-link bs-model-link"
+              onClick={openCenterProviders}
+            >
+              {t('管理模型与服务商', 'Manage models & providers')}
+              <ExternalLink aria-hidden="true" />
+            </button>
+          </ActionBar>
         ) : null}
       </Section>
     );
@@ -285,6 +314,7 @@ export function ModelSettingsPage({
       {state.loading ? <LoadingState /> : null}
       {renderAuthGuidance()}
       <ErrorNotice error={state.error} onDismiss={state.dismissError} />
+      {renderReadinessSummary()}
       {renderModelSection()}
       {renderThinkingSection()}
       {renderToolModeSection()}

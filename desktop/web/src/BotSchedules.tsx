@@ -1,7 +1,8 @@
 // 使用 Host 的调度规则与时区预览执行时间。保存仍走 scheduleTask 的 CAS 协议。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plus, RefreshCw, Trash2, CalendarClock, ChevronLeft } from 'lucide-react';
+import { CalendarClock, ChevronLeft, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { getDefaultScheduleCalendar, ScheduleRule, type ScheduleCalendarDescription, type ScheduleRepeat } from '../../../host-core/schedule-calendar.js';
+import { ActionBar, ConfirmDialog, IconButton, Switch, useDirtyForm } from '../../../web/src/components/ui';
 import { toError } from './api';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import './BotSchedules.css';
@@ -169,6 +170,7 @@ export function BotSchedules({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<'new' | 'edit' | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ScheduleTaskItem | null>(null);
   /** 自定义星期选择展开态：repeat=weekly 且非周一~五/周末预设时为 true。 */
   const [customWeekdays, setCustomWeekdays] = useState(false);
   const [draft, setDraft] = useState<ScheduleDraft>({
@@ -183,6 +185,10 @@ export function BotSchedules({
     vibrate: false,
     deleteAfterRun: false,
   });
+  const initialDraftSnapshotRef = useRef<string>('');
+
+  const isDraftDirty = editing !== null && JSON.stringify(draft) !== initialDraftSnapshotRef.current;
+  useDirtyForm(isDraftDirty);
 
   const mountedRef = useRef(true);
   const seqRef = useRef(0);
@@ -236,7 +242,7 @@ export function BotSchedules({
   const showReminders = hostPlatform === 'android' && exactAlarmGranted !== null;
 
   function openCreate() {
-    setDraft({
+    const nextDraft: ScheduleDraft = {
       enabled: true,
       title: '',
       prompt: '',
@@ -247,7 +253,9 @@ export function BotSchedules({
       alarmMode: hostPlatform === 'android' ? 'alarmClock' : 'exact',
       vibrate: showReminders,
       deleteAfterRun: false,
-    });
+    };
+    initialDraftSnapshotRef.current = JSON.stringify(nextDraft);
+    setDraft(nextDraft);
     setCustomWeekdays(false);
     setEditing('new');
     setError(null);
@@ -260,7 +268,7 @@ export function BotSchedules({
         ? task.weekdays.slice().sort((a, b) => a - b)
         : [task.weekday ?? 1];
     const key = days.join(',');
-    setDraft({
+    const nextDraft: ScheduleDraft = {
       id: task.id,
       revision: task.revision,
       enabled: task.enabled !== false,
@@ -274,7 +282,9 @@ export function BotSchedules({
       alarmMode: task.alarmMode === 'exact' ? 'exact' : 'alarmClock',
       vibrate: Boolean(task.vibrate),
       deleteAfterRun: Boolean(task.deleteAfterRun),
-    });
+    };
+    initialDraftSnapshotRef.current = JSON.stringify(nextDraft);
+    setDraft(nextDraft);
     setCustomWeekdays(task.repeat === 'weekly' && key !== '1,2,3,4,5' && key !== '6,7');
     setEditing('edit');
     setError(null);
@@ -318,11 +328,15 @@ export function BotSchedules({
           revision: task.revision,
         },
       });
+      setPendingDelete(null);
       setEditing(null);
       setNotice(`已删除定时任务「${task.title}」。`);
       await loadSchedules();
     } catch (e) {
-      if (mountedRef.current) setError(`删除定时任务失败：${toError(e).message}`);
+      if (mountedRef.current) {
+        setPendingDelete(null);
+        setError(`删除定时任务失败：${toError(e).message}，请刷新后重试。`);
+      }
     } finally {
       if (mountedRef.current) setBusy(false);
     }
@@ -396,35 +410,63 @@ export function BotSchedules({
 
   return (
     <div className="bot-schedules-panel">
-      {/* 顶栏：任务统计 + 刷新/新建 */}
-      <div className="bot-sched-topbar metadata">
-        <span className="bot-sched-count">
-          <CalendarClock size={14} aria-hidden="true" />
-          定时任务{timeZone ? ` · ${timeZone}` : ''}
-        </span>
-        <div className="bot-sched-topbar-actions">
-          <button type="button" className="bot-sched-ghost-btn" onClick={() => void loadSchedules()} disabled={!online || loading || busy}>
-            <RefreshCw size={13} aria-hidden="true" className={loading ? 'spinning' : undefined} />
-            {loading ? '刷新中…' : '刷新'}
-          </button>
-          {!editing ? (
-            <button type="button" className="bot-sched-primary-btn" onClick={openCreate} disabled={!online || busy}>
-              <Plus size={14} aria-hidden="true" />
-              新建定时任务
-            </button>
-          ) : (
+      {/* 顶栏：时区元信息 + 刷新图标按钮 + 新建定时任务（编辑态切为返回列表头） */}
+      <div
+        className="bot-sched-topbar"
+        style={{
+          flexWrap: 'nowrap',
+          paddingBottom: 'var(--space-2)',
+          borderBottom: '1px solid var(--line-subtle)',
+        }}
+      >
+        {editing ? (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
             <button type="button" className="bot-sched-ghost-btn" onClick={() => setEditing(null)} disabled={busy}>
               <ChevronLeft size={14} aria-hidden="true" />
               返回列表
             </button>
-          )}
-        </div>
+            <h5
+              className="bot-sched-form-title"
+              style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              {editing === 'edit' ? '编辑定时任务' : '新建定时任务'}
+            </h5>
+          </div>
+        ) : (
+          <>
+            <span
+              className="bot-sched-count"
+              style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={timeZone ? `${tasks.length} 项定时任务 · ${timeZone}` : `${tasks.length} 项定时任务`}
+            >
+              <CalendarClock size={14} aria-hidden="true" style={{ flex: 'none' }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {timeZone ? `${tasks.length} 项 · ${timeZone}` : `${tasks.length} 项任务`}
+              </span>
+            </span>
+            <div className="bot-sched-topbar-actions" style={{ flexWrap: 'nowrap' }}>
+              <IconButton
+                label="刷新定时任务"
+                size="sm"
+                variant="ghost"
+                onClick={() => void loadSchedules()}
+                disabled={!online || loading || busy}
+              >
+                <RefreshCw size={15} aria-hidden="true" className={loading ? 'spinning' : undefined} />
+              </IconButton>
+              <button type="button" className="bot-sched-primary-btn" onClick={openCreate} disabled={!online || busy}>
+                <Plus size={14} aria-hidden="true" />
+                新建定时任务
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {error ? (
         <div className="bot-sched-banner bot-sched-banner-error" role="alert">
           <span>{error}</span>
-          <button type="button" onClick={() => setError(null)}>关闭</button>
+          <button type="button" onClick={() => setError(null)}>关闭提示</button>
         </div>
       ) : null}
       {schedulingError ? (
@@ -435,17 +477,35 @@ export function BotSchedules({
       {notice ? <div className="bot-sched-banner bot-sched-banner-ok" role="status">{notice}</div> : null}
 
       {editing ? (
-        /* ————— 新建 / 编辑表单（分组卡片 + 拨动开关） ————— */
+        /* ————— 新建 / 编辑单列表单 ————— */
         <div className="bot-sched-form">
-          <h5 className="bot-sched-form-title">
-            {editing === 'edit' ? '编辑定时任务' : '新建定时任务'}
-          </h5>
-
           <div className="bot-sched-section">
             <span className="bot-sched-section-label">做什么</span>
             <div className="bot-sched-group">
               <div className="bot-sched-textarea-wrap">
-                <label className="bot-sched-section-label" htmlFor="bot-sched-prompt">执行内容</label>
+                <label className="bot-sched-section-label" htmlFor="bot-sched-title" style={{ padding: 0 }}>任务名称</label>
+                <input
+                  id="bot-sched-title"
+                  type="text"
+                  maxLength={80}
+                  className="bot-sched-text-input"
+                  style={{
+                    width: '100%',
+                    border: 0,
+                    background: 'transparent',
+                    padding: 0,
+                    fontSize: '0.9rem',
+                    color: 'var(--text)',
+                    outline: 'none',
+                  }}
+                  value={draft.title}
+                  disabled={busy}
+                  placeholder="例如：每日早报汇总 / 定时代码巡检"
+                  onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))}
+                />
+              </div>
+              <div className="bot-sched-textarea-wrap">
+                <label className="bot-sched-section-label" htmlFor="bot-sched-prompt" style={{ padding: 0 }}>执行内容</label>
                 <textarea
                   id="bot-sched-prompt"
                   rows={4}
@@ -455,18 +515,6 @@ export function BotSchedules({
                   onChange={(e) => setDraft((prev) => ({ ...prev, prompt: e.target.value }))}
                 />
               </div>
-              <label className="bot-sched-row">
-                <span className="bot-sched-row-label">任务名称</span>
-                <input
-                  type="text"
-                  maxLength={80}
-                  className="bot-sched-text-input"
-                  value={draft.title}
-                  disabled={busy}
-                  placeholder="例如：每日早报汇总 / 定时代码巡检"
-                  onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))}
-                />
-              </label>
             </div>
           </div>
 
@@ -536,7 +584,7 @@ export function BotSchedules({
               ) : null}
 
               {draft.repeat === 'weekly' && customWeekdays ? (
-                <div className="bot-sched-row bot-sched-weekday-row">
+                <div className="bot-sched-row bot-sched-weekday-row" role="group" aria-label="选择重复星期">
                   {[1, 2, 3, 4, 5, 6, 7].map((day) => {
                     const active = draft.weekdays.includes(day);
                     return (
@@ -594,22 +642,17 @@ export function BotSchedules({
                   <>
                     <div className="bot-sched-row">
                       <span className="bot-sched-row-label">使用 Android 系统闹钟</span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={draft.alarmMode === 'alarmClock'}
+                      <Switch
+                        checked={draft.alarmMode === 'alarmClock'}
                         aria-label="使用 Android 系统闹钟"
-                        className={`bot-sched-toggle${draft.alarmMode === 'alarmClock' ? ' checked' : ''}`}
                         disabled={busy}
-                        onClick={() =>
+                        onCheckedChange={(checked) =>
                           setDraft((prev) => ({
                             ...prev,
-                            alarmMode: prev.alarmMode === 'alarmClock' ? 'exact' : 'alarmClock',
+                            alarmMode: checked ? 'alarmClock' : 'exact',
                           }))
                         }
-                      >
-                        <span className="bot-sched-toggle-knob" />
-                      </button>
+                      />
                     </div>
                     {draft.alarmMode === 'exact' && exactAlarmGranted === false ? (
                       <p className="hint bot-sched-preview">设备需要精确闹钟权限才能使用普通定时模式。</p>
@@ -617,17 +660,12 @@ export function BotSchedules({
                     {draft.alarmMode === 'alarmClock' ? (
                       <div className="bot-sched-row">
                         <span className="bot-sched-row-label">任务完成时震动（设备支持时）</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={draft.vibrate}
+                        <Switch
+                          checked={draft.vibrate}
                           aria-label="任务完成时震动（设备支持时）"
-                          className={`bot-sched-toggle${draft.vibrate ? ' checked' : ''}`}
                           disabled={busy}
-                          onClick={() => setDraft((prev) => ({ ...prev, vibrate: !prev.vibrate }))}
-                        >
-                          <span className="bot-sched-toggle-knob" />
-                        </button>
+                          onCheckedChange={(checked) => setDraft((prev) => ({ ...prev, vibrate: checked }))}
+                        />
                       </div>
                     ) : null}
                   </>
@@ -635,91 +673,115 @@ export function BotSchedules({
                 {draft.repeat === 'once' ? (
                   <div className="bot-sched-row">
                     <span className="bot-sched-row-label">触发后自动删除任务</span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={draft.deleteAfterRun}
+                    <Switch
+                      checked={draft.deleteAfterRun}
                       aria-label="触发后自动删除任务"
-                      className={`bot-sched-toggle${draft.deleteAfterRun ? ' checked' : ''}`}
                       disabled={busy}
-                      onClick={() => setDraft((prev) => ({ ...prev, deleteAfterRun: !prev.deleteAfterRun }))}
-                    >
-                      <span className="bot-sched-toggle-knob" />
-                    </button>
+                      onCheckedChange={(checked) => setDraft((prev) => ({ ...prev, deleteAfterRun: checked }))}
+                    />
                   </div>
                 ) : null}
               </div>
             </details>
           ) : null}
 
-          <div className="bot-sched-preview" role="status">
+          <div className="bot-sched-preview" role="status" style={{ fontVariantNumeric: 'tabular-nums' }}>
             {!draft.enabled ? '任务已暂停，恢复后会重新安排执行。'
               : preview ? <>按目标时区预计执行 · <strong>{preview.time}</strong> · {timeZone}</>
                 : targetNow === null || !timeZone ? '等待目标设备提供时间与时区。' : '请填写有效的执行时间与周期以预览。'}
             {preview?.calendarNotice ? <p className="hint">{preview.calendarNotice}{preview.calendarFallback ? '，' + preview.calendarFallback + '。' : '。'}</p> : null}
           </div>
-          <div className="bot-sched-form-actions">
-            <button type="button" className="bot-sched-primary-btn" onClick={() => void saveDraft()} disabled={busy || !online}>
-              {busy ? '保存中…' : '保存定时任务'}
-            </button>
+
+          <ActionBar align="end" className="bot-sched-form-actions" style={{ flexWrap: 'nowrap' }}>
             <button type="button" className="bot-sched-ghost-btn" onClick={() => setEditing(null)} disabled={busy}>
               取消
             </button>
-          </div>
+            <button type="button" className="bot-sched-primary-btn" onClick={() => void saveDraft()} disabled={busy || !online}>
+              {busy ? '保存中…' : '保存定时任务'}
+            </button>
+          </ActionBar>
         </div>
       ) : tasks.length === 0 ? (
         <div className="bot-sched-empty metadata">
           <CalendarClock size={26} aria-hidden="true" />
           {loading
             ? '正在读取定时任务…'
-            : '暂无定时任务。可以新建任务，或在对话中交给智能体。'}
+            : '暂无定时任务。可点击上方「新建定时任务」，或在对话中交给智能体安排。'}
         </div>
       ) : (
-        /* ————— 时钟卡片列表 ————— */
-        <div className="bot-sched-list">
+        /* ————— 扁平分割线任务列表 ————— */
+        <div className="bot-sched-list" style={{ gap: 0 }}>
           {tasks.map((task) => {
             const isEnabled = task.enabled !== false;
+            const taskTitle = task.title || '未命名定时任务';
             const nextRun = formatNextRun(task.nextRunAt, timeZone, Boolean(task.date));
             return (
-              <section key={task.id} className={`bot-sched-card${isEnabled ? '' : ' paused'}`}>
-                <div className="bot-sched-card-top">
+              <section
+                key={task.id}
+                className={`bot-sched-card${isEnabled ? '' : ' paused'}`}
+                style={{
+                  padding: '12px 0',
+                  border: 0,
+                  borderBottom: '1px solid var(--line-subtle)',
+                  borderRadius: 0,
+                  background: 'transparent',
+                }}
+              >
+                <div className="bot-sched-card-top" style={{ flexWrap: 'nowrap', alignItems: 'center' }}>
                   <button
                     type="button"
                     className="bot-sched-card-body"
+                    style={{ flex: 1, minWidth: 0 }}
                     disabled={!online || busy}
                     onClick={() => openEdit(task)}
                   >
-                    <strong className="bot-sched-title">{task.title || '未命名定时任务'}</strong>
-                    <span className="bot-sched-next">
-                      {isEnabled ? <>下次执行 · {nextRun ? nextRun + ' · ' + timeZone : '等待设备安排'}</> : '已暂停'}
+                    <strong className="bot-sched-title">{taskTitle}</strong>
+                    <span className="bot-sched-next" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {formatRepeatLabel(task)} {task.time} ·{' '}
+                      {isEnabled ? (nextRun ? `下次 ${nextRun}` : '等待设备安排') : '已暂停'}
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={isEnabled}
-                    aria-label={isEnabled ? '暂停该任务' : '启用该任务'}
-                    className={`bot-sched-toggle${isEnabled ? ' checked' : ''}`}
+                  <Switch
+                    checked={isEnabled}
+                    aria-label={isEnabled ? `暂停定时任务「${taskTitle}」` : `启用定时任务「${taskTitle}」`}
                     disabled={!online || busy}
-                    onClick={() => void toggleEnabled(task)}
-                  >
-                    <span className="bot-sched-toggle-knob" />
-                  </button>
+                    onCheckedChange={() => void toggleEnabled(task)}
+                  />
                 </div>
                 <details className="bot-studio-disclosure">
                   <summary>任务详情</summary>
                   <div className="bot-sched-detail">
-                    <p className="metadata">{formatRepeatLabel(task)} · {task.time}</p>
                     {task.prompt ? <p className="bot-sched-prompt">{task.prompt}</p> : null}
+                    {isEnabled && nextRun && timeZone ? (
+                      <p className="metadata" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        下次预计执行 · {nextRun}（{timeZone}）
+                      </p>
+                    ) : null}
                     {task.latestRun ? <p className="metadata">最近运行状态 · {task.latestRun.status}</p> : null}
-                    <button
-                      type="button"
-                      className="bot-sched-ghost-btn"
-                      disabled={!online || busy}
-                      onClick={() => void deleteTask(task)}
-                    >
-                      <Trash2 size={13} aria-hidden="true" /> 删除任务
-                    </button>
+                    <ActionBar align="start" style={{ flexWrap: 'nowrap', marginTop: 4 }}>
+                      <button
+                        type="button"
+                        className="bot-sched-ghost-btn"
+                        disabled={!online || busy}
+                        onClick={() => openEdit(task)}
+                      >
+                        <Pencil size={13} aria-hidden="true" />
+                        编辑任务
+                      </button>
+                      <button
+                        type="button"
+                        className="bot-sched-ghost-btn"
+                        style={{
+                          color: 'var(--danger)',
+                          borderColor: 'color-mix(in srgb, var(--danger) 35%, var(--line))',
+                        }}
+                        disabled={!online || busy}
+                        onClick={() => setPendingDelete(task)}
+                      >
+                        <Trash2 size={13} aria-hidden="true" />
+                        删除任务
+                      </button>
+                    </ActionBar>
                   </div>
                 </details>
               </section>
@@ -727,6 +789,26 @@ export function BotSchedules({
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="删除定时任务"
+        description={
+          pendingDelete
+            ? `确定删除定时任务「${pendingDelete.title || '未命名定时任务'}」？删除后将不再按计划执行，且无法撤销。`
+            : ''
+        }
+        danger
+        busy={busy}
+        cancelLabel="取消"
+        confirmLabel={busy ? '删除中…' : '删除任务'}
+        onCancel={() => {
+          if (!busy) setPendingDelete(null);
+        }}
+        onConfirm={() => {
+          if (pendingDelete) void deleteTask(pendingDelete);
+        }}
+      />
     </div>
   );
 }

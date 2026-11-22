@@ -37,7 +37,15 @@ export function useIsCoarsePointer(): boolean {
   return coarse;
 }
 
-export type HubSettingsPage = 'overview' | 'connection' | 'devices' | 'manual' | 'updates' | 'permissions';
+export type HubSettingsPage =
+  | 'overview'
+  | 'connection'
+  | 'devices'
+  | 'manual'
+  | 'updates'
+  | 'permissions'
+  | 'clipboard'
+  | 'advanced';
 export type MobileHubScreen = HubScreen | 'bot-skills' | 'settings-center-admin';
 export type { CenterAdminTab } from '../center-admin/types';
 

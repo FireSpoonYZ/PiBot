@@ -29,6 +29,8 @@ import {
   parseCalendarMinutesBefore,
 } from '../center-admin/googleHelpers';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { ActionBar, ConfirmDialog } from '../components/ui';
+import { useNotice } from '../notice';
 import { useText } from '../ui';
 import {
   checkGoogleAccount,
@@ -160,6 +162,7 @@ export function GoogleCapabilitySection({
   onOpenCenterAdmin,
 }: GoogleCapabilitySectionProps) {
   const t = useText();
+  const { notify } = useNotice();
   const fieldId = useId();
   const mountedRef = useRef(true);
 
@@ -169,7 +172,6 @@ export function GoogleCapabilitySection({
   const [tempError, setTempError] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
   const [checkingAccount, setCheckingAccount] = useState<string | null>(null);
-  const [notice, setNotice] = useState('');
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
 
   // Rules state
@@ -179,7 +181,7 @@ export function GoogleCapabilitySection({
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesError, setRulesError] = useState('');
   const [rulesBusyId, setRulesBusyId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingRule, setDeletingRule] = useState<GoogleRuleDto | null>(null);
 
   // New / edit rule draft
   const [ruleFormOpen, setRuleFormOpen] = useState(false);
@@ -214,14 +216,14 @@ export function GoogleCapabilitySection({
       const info = classifyGoogleError(cause);
       if (info.unavailable) {
         setUnavailable(true);
-        setStatusError(t('当前 Center 尚未开启 Google Workspace 共享服务接口。', 'Shared Google Workspace endpoints are not available on this Center.'));
+        setStatusError(t('无法读取 Google 状态：当前 Center 未启用共享 Google Workspace 接口。请升级 Center 或联系管理员开启。', 'Could not load Google status: shared Google Workspace endpoints are unavailable on this Center. Upgrade Center or ask an admin to enable them.'));
       } else if (info.tempError || info.offline) {
         // Keep last known snapshot intact — never downgrade connected accounts on transient errors!
         setTempError(true);
         setStatusError(
           info.offline
-            ? t('当前与 Center 断开连接，暂时无法刷新最新状态。', 'Disconnected from Center. Status could not be refreshed.')
-            : t('Center 暂时不可达，已保留先前状态，不会清除已授权令牌。', 'Center is temporarily unreachable. Existing tokens are kept.'),
+            ? t('无法刷新 Google 状态：当前与 Center 断开连接。请检查网络或重新连接 Center 后重试。', 'Could not refresh Google status: disconnected from Center. Check your connection and retry.')
+            : t('暂时无法连接 Center，已保留现有连接状态。请稍后点击「重试检查」。', 'Center is temporarily unreachable; existing connections are kept. Select Retry check shortly.'),
         );
       } else {
         setStatusError(info.message);
@@ -244,7 +246,7 @@ export function GoogleCapabilitySection({
       const info = classifyGoogleError(cause);
       setRulesError(
         info.unavailable
-          ? t('当前 Center 暂未启用 Google 自动触发规则接口。', 'Google trigger rules API is unavailable on this Center.')
+          ? t('无法读取触发规则：当前 Center 未启用 Google 自动触发规则接口。请升级 Center 后重试。', 'Could not load trigger rules: Google trigger rules API is unavailable on this Center. Upgrade Center and retry.')
           : info.message,
       );
     } finally {
@@ -281,13 +283,12 @@ export function GoogleCapabilitySection({
 
   const handleCheckAccount = async (email: string) => {
     setCheckingAccount(email);
-    setNotice('');
     setStatusError('');
     try {
       await checkGoogleAccount(api, identity, email);
       await loadStatus();
       if (mountedRef.current) {
-        setNotice(t(`已重新检查 ${email} 的各服务就绪状态。`, `Re-checked service readiness for ${email}.`));
+        notify({ id: 'google-cap-status', tone: 'success', title: t(`已重新检查 ${email} 的服务状态`, `Re-checked service readiness for ${email}`) });
       }
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -303,9 +304,9 @@ export function GoogleCapabilitySection({
     const text = googleAdminTrustRequestText(client?.clientId, t);
     try {
       await navigator.clipboard.writeText(text);
-      setNotice(t('已复制管理员配置/信任指引，可发给 Google Workspace 或 Center 管理员。', 'Copied administrator instructions to clipboard.'));
+      notify({ id: 'google-cap-status', tone: 'success', title: t('已复制管理员配置指引', 'Copied administrator instructions to clipboard') });
     } catch {
-      setStatusError(t('无法复制到剪贴板。', 'Could not copy to clipboard.'));
+      setStatusError(t('复制管理员指引失败：当前环境限制访问剪贴板。请将应用切回前台后重试。', 'Could not copy admin guide: clipboard access was blocked. Return to the foreground and retry.'));
     }
   };
 
@@ -343,12 +344,12 @@ export function GoogleCapabilitySection({
     event.preventDefault();
     if (ruleSaving) return;
     if (!ruleAccount) {
-      setRulesError(t('请选择这条规则使用的 Google 账号。', 'Select a Google account for this rule.'));
+      setRulesError(t('保存规则失败：尚未选择 Google 账号。请先选择一个已连接账号后重试。', 'Cannot save rule: no Google account selected. Select a connected account and try again.'));
       return;
     }
     const instruction = ruleInstruction.trim();
     if (!instruction) {
-      setRulesError(t('请填写触发后希望本 Bot 执行的指令。', 'Enter the instruction for this Bot when triggered.'));
+      setRulesError(t('保存规则失败：未填写触发指令。请输入触发后希望本 Bot 执行的操作后重试。', 'Cannot save rule: trigger instruction is empty. Describe what this Bot should do and try again.'));
       return;
     }
     setRuleSaving(true);
@@ -376,11 +377,13 @@ export function GoogleCapabilitySection({
       if (!mountedRef.current) return;
       setRuleFormOpen(false);
       setEditingRuleId(undefined);
-      setNotice(
-        ruleSource === 'gmail'
-          ? t('规则已保存，仅对开启后新到达的邮件生效。', 'Rule saved. Applies only to new emails arriving from now on.')
-          : t('会前提醒规则已保存。', 'Pre-meeting rule saved.'),
-      );
+      notify({
+        id: 'google-cap-status',
+        tone: 'success',
+        title: ruleSource === 'gmail'
+          ? t('邮件触发规则已保存，仅对新到达邮件生效', 'Email rule saved for new incoming mail')
+          : t('会前提醒规则已保存', 'Pre-meeting rule saved'),
+      });
       await loadRules();
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -413,6 +416,11 @@ export function GoogleCapabilitySection({
         instruction: rule.instruction,
       });
       if (!mountedRef.current) return;
+      notify({
+        id: 'google-cap-status',
+        tone: 'success',
+        title: rule.enabled ? t('已暂停触发规则', 'Trigger rule paused') : t('已启用触发规则', 'Trigger rule enabled'),
+      });
       await loadRules();
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -429,13 +437,16 @@ export function GoogleCapabilitySection({
     try {
       await removeGoogleRule(api, identity, { id: rule.id });
       if (!mountedRef.current) return;
-      setConfirmDeleteId(null);
+      notify({ id: 'google-cap-status', tone: 'success', title: t('已删除触发规则', 'Trigger rule deleted') });
       await loadRules();
     } catch (cause) {
       if (!mountedRef.current) return;
       setRulesError(classifyGoogleError(cause).message);
     } finally {
-      if (mountedRef.current) setRulesBusyId(null);
+      if (mountedRef.current) {
+        setDeletingRule(null);
+        setRulesBusyId(null);
+      }
     }
   };
 
@@ -477,7 +488,7 @@ export function GoogleCapabilitySection({
       </div>
 
       <p className="gws-muted">
-        {t('Gmail、日历、云盘/文档/表格与联系人工具默认对所有现有及新建 Bot 开放，无需逐 Bot 开关。', 'Gmail, Calendar, Drive/Docs/Sheets, and Contacts are shared across all Bots automatically — no per-Bot toggle needed.')}
+        {t('Gmail、日历、云盘与联系人工具默认共享给所有 Bot，无需逐个开启。', 'Gmail, Calendar, Drive, and Contacts are shared across all Bots automatically.')}
       </p>
 
       {/* Dimension A: Center OAuth App status */}
@@ -491,30 +502,30 @@ export function GoogleCapabilitySection({
           {tempError ? <AlertTriangle size={15} aria-hidden="true" /> : <ShieldAlert size={15} aria-hidden="true" />}
           <div className="gws-error-body">
             <span>{statusError}</span>
-            {tempError ? (
-              <button type="button" className="gws-link-btn" onClick={() => void loadStatus()}>
-                {t('重试检查', 'Retry check')}
-              </button>
+            {!unavailable ? (
+              <ActionBar align="start">
+                <button type="button" className="gws-link-btn" disabled={loadingStatus} onClick={() => void loadStatus()}>
+                  {t('重试检查', 'Retry check')}
+                </button>
+              </ActionBar>
             ) : null}
           </div>
         </div>
       ) : null}
 
-      {notice ? <p className="gws-notice" role="status">{notice}</p> : null}
-
       {/* Unconfigured Center App actions */}
       {!unavailable && snapshot && !client?.configured ? (
         <div className="gws-empty-box">
           <p className="gws-muted">
-            {t('配置一次 Center Web OAuth 应用后，所有主机上的 Bot 都可复用，无需在每台设备重复导入密钥文件。若你不是管理员，请联系 Center 管理员配置。', 'Configure Center’s Web OAuth app once and every Host & Bot shares it. If you are not an admin, contact your Center administrator.')}
+            {t('在 Center 配置一次 Web OAuth 应用即可全员复用；非管理员请联系 Center 管理员。', 'Configure one Center Web OAuth app for all Bots. Contact your Center admin if you lack permission.')}
           </p>
-          <div className="gws-actions">
+          <ActionBar align="start" className="gws-actions">
             <button
               type="button"
               className="gws-btn is-primary is-sm"
               onClick={() => setActivePanel(prev => (prev?.kind === 'wizard' ? null : { kind: 'wizard' }))}
             >
-              {t('引导我创建 Google 应用', 'Guide me to create Google app')}
+              {t('引导创建 Google 应用', 'Guide me to create Google app')}
             </button>
             <button
               type="button"
@@ -522,13 +533,13 @@ export function GoogleCapabilitySection({
               onClick={() => setActivePanel(prev => (prev?.kind === 'configure' ? null : { kind: 'configure' }))}
             >
               <Lock size={13} aria-hidden="true" />
-              <span>{t('我已有凭据，直接录入', 'Enter existing credentials')}</span>
+              <span>{t('录入已有凭据', 'Enter existing credentials')}</span>
             </button>
             <button type="button" className="gws-btn is-ghost is-sm" onClick={() => void handleCopyAdminGuide()}>
               <Copy size={13} aria-hidden="true" />
               <span>{t('复制管理员指引', 'Copy admin note')}</span>
             </button>
-          </div>
+          </ActionBar>
         </div>
       ) : null}
 
@@ -537,9 +548,9 @@ export function GoogleCapabilitySection({
         accounts.length === 0 ? (
           <div className="gws-empty-box">
             <p className="gws-muted">
-              {t('Center 应用已就绪，尚未连接 Google 账号。在系统浏览器登录授权后，所有 Bot 即可使用已批准的服务。', 'Center app is ready, but no Google account is connected yet. Sign in via system browser to enable approved services for all Bots.')}
+              {t('应用已就绪，在系统浏览器连接 Google 账号后即可使用。', 'App is ready. Connect a Google account in your system browser to start.')}
             </p>
-            <div className="gws-actions">
+            <ActionBar align="start" className="gws-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
@@ -548,7 +559,7 @@ export function GoogleCapabilitySection({
                 <ExternalLink size={14} aria-hidden="true" />
                 <span>{t('连接 Google 账号', 'Connect Google account')}</span>
               </button>
-            </div>
+            </ActionBar>
           </div>
         ) : (
           <div className="gws-accounts">
@@ -586,7 +597,7 @@ export function GoogleCapabilitySection({
                             : t('已连接', 'Connected')}
                       </span>
                     </div>
-                    <div className="gws-account-actions">
+                    <ActionBar align="end" className="gws-account-actions">
                       {needsReconnect ? (
                         <button
                           type="button"
@@ -617,7 +628,7 @@ export function GoogleCapabilitySection({
                             })
                           }
                         >
-                          {t('添加 / 管理服务', 'Manage services')}
+                          {t('管理服务', 'Manage services')}
                         </button>
                       )}
                       <button
@@ -628,7 +639,7 @@ export function GoogleCapabilitySection({
                       >
                         {busyCheck ? t('检查中…', 'Checking…') : t('重新检查', 'Check')}
                       </button>
-                    </div>
+                    </ActionBar>
                   </div>
 
                   {rows.length > 0 ? (
@@ -766,13 +777,20 @@ export function GoogleCapabilitySection({
           {rulesOpen ? (
             <div className="gws-rules-body">
               <p className="gws-muted">
-                {t('规则仅决定新邮件或会议开始前自动通知本 Bot，不是为本 Bot 开通 Google 授权。暂停单条规则不影响手动查询或其他规则。', 'Rules trigger this Bot on new mail or upcoming meetings (not per-Bot Google authorization). Pausing a rule never affects manual queries.')}
+                {t('仅用于新邮件或会前自动唤醒本 Bot；暂停规则不影响手动调用。', 'Triggers this Bot on new mail or upcoming meetings; pausing never affects manual use.')}
               </p>
 
               {rulesError ? (
                 <div className="gws-error" role="alert">
                   <ShieldAlert size={14} aria-hidden="true" />
-                  <span>{rulesError}</span>
+                  <div className="gws-error-body">
+                    <span>{rulesError}</span>
+                    <ActionBar align="start">
+                      <button type="button" className="gws-link-btn" disabled={rulesLoading} onClick={() => void loadRules()}>
+                        {t('重试读取', 'Retry')}
+                      </button>
+                    </ActionBar>
+                  </div>
                 </div>
               ) : null}
 
@@ -787,7 +805,6 @@ export function GoogleCapabilitySection({
                     const acc = accounts.find(a => a.email.toLowerCase() === rule.account.toLowerCase());
                     const status = ruleStatusDisplay(rule, acc, t);
                     const busy = rulesBusyId === key;
-                    const confirmingDelete = confirmDeleteId === rule.id;
                     const fromDisplay = formatRuleFrom(rule.from);
                     const lastChecked = rule.runtime?.lastCheckedAt ?? rule.lastCheckedAt;
                     const pendingCount = rule.runtime?.pendingCount ?? 0;
@@ -814,14 +831,14 @@ export function GoogleCapabilitySection({
                           {pendingCount > 0 ? <span>· {t(`待投递 ${pendingCount}`, `${pendingCount} pending`)}</span> : null}
                         </div>
                         <p className="gws-rule-instruction">{rule.instruction}</p>
-                        <div className="gws-rule-actions">
+                        <ActionBar align="start" className="gws-rule-actions">
                           <button
                             type="button"
                             className="gws-btn is-ghost is-xs"
                             disabled={busy}
                             onClick={() => void handleToggleRule(rule)}
                           >
-                            {rule.enabled ? t('暂停规则', 'Pause') : t('启用规则', 'Enable')}
+                            {rule.enabled ? t('暂停规则', 'Pause rule') : t('启用规则', 'Enable rule')}
                           </button>
                           <button
                             type="button"
@@ -832,38 +849,17 @@ export function GoogleCapabilitySection({
                             {t('编辑', 'Edit')}
                           </button>
                           {rule.id ? (
-                            confirmingDelete ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="gws-btn is-danger is-xs"
-                                  disabled={busy}
-                                  onClick={() => void handleDeleteRule(rule)}
-                                >
-                                  {t('确认删除', 'Confirm delete')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="gws-btn is-ghost is-xs"
-                                  disabled={busy}
-                                  onClick={() => setConfirmDeleteId(null)}
-                                >
-                                  {t('取消', 'Cancel')}
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                className="gws-btn is-ghost is-xs"
-                                disabled={busy}
-                                onClick={() => setConfirmDeleteId(rule.id!)}
-                              >
-                                <Trash2 size={12} aria-hidden="true" />
-                                <span>{t('删除', 'Delete')}</span>
-                              </button>
-                            )
+                            <button
+                              type="button"
+                              className="gws-btn is-ghost is-xs"
+                              disabled={busy}
+                              onClick={() => setDeletingRule(rule)}
+                            >
+                              <Trash2 size={12} aria-hidden="true" />
+                              <span>{t('删除', 'Delete')}</span>
+                            </button>
                           ) : null}
-                        </div>
+                        </ActionBar>
                       </div>
                     );
                   })}
@@ -873,7 +869,7 @@ export function GoogleCapabilitySection({
               ) : null}
 
               {!ruleFormOpen ? (
-                <div className="gws-actions">
+                <ActionBar align="start" className="gws-actions">
                   <button
                     type="button"
                     className="gws-btn is-ghost is-sm"
@@ -892,7 +888,7 @@ export function GoogleCapabilitySection({
                     <Calendar size={13} aria-hidden="true" />
                     <span>{t('新建会前提醒', 'Add meeting rule')}</span>
                   </button>
-                </div>
+                </ActionBar>
               ) : (
                 <form className="gws-rule-form" onSubmit={e => void handleSaveRule(e)}>
                   <div className="gws-row-between">
@@ -969,7 +965,7 @@ export function GoogleCapabilitySection({
                         />
                       </label>
                       <p className="gws-muted">
-                        {t('仅对开启后新到达的邮件生效，不回放历史收件箱。', 'Applies only to new mail arriving after activation; past inbox history is not replayed.')}
+                        {t('仅匹配开启后新到达的邮件，不回放历史收件箱。', 'Matches new incoming mail only; past inbox mail is not replayed.')}
                       </p>
                     </>
                   ) : (
@@ -1015,10 +1011,7 @@ export function GoogleCapabilitySection({
                     />
                   </label>
 
-                  <div className="gws-actions">
-                    <button type="submit" className="gws-btn is-primary is-sm" disabled={ruleSaving}>
-                      {ruleSaving ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
-                    </button>
+                  <ActionBar align="end" className="gws-actions">
                     <button
                       type="button"
                       className="gws-btn is-ghost is-sm"
@@ -1027,7 +1020,10 @@ export function GoogleCapabilitySection({
                     >
                       {t('取消', 'Cancel')}
                     </button>
-                  </div>
+                    <button type="submit" className="gws-btn is-primary is-sm" disabled={ruleSaving} aria-busy={ruleSaving || undefined}>
+                      {ruleSaving ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
+                    </button>
+                  </ActionBar>
                 </form>
               )}
             </div>
@@ -1038,9 +1034,9 @@ export function GoogleCapabilitySection({
       {/* Browser isolation note + quick actions */}
       <div className="gws-footer-bar">
         <span className="gws-isolation-note">
-          {t('Bot 浏览器网页登录 ≠ Google API 授权，两者严格隔离。', 'Bot browser web login is separate from Google API access.')}
+          {t('Bot 浏览器网页登录与 Google API 授权相互独立。', 'Bot browser web login is separate from Google API access.')}
         </span>
-        <div className="gws-actions">
+        <ActionBar align="end" className="gws-actions">
           {onOpenBrowser ? (
             <button type="button" className="gws-btn is-ghost is-xs" onClick={onOpenBrowser}>
               <Globe size={13} aria-hidden="true" />
@@ -1053,8 +1049,28 @@ export function GoogleCapabilitySection({
               <span>{t('中心管理账号与撤权', 'Manage & revoke in Center')}</span>
             </button>
           ) : null}
-        </div>
+        </ActionBar>
       </div>
+
+      <ConfirmDialog
+        open={deletingRule !== null}
+        danger
+        busy={Boolean(deletingRule?.id && rulesBusyId === deletingRule.id)}
+        title={
+          deletingRule
+            ? deletingRule.source === 'gmail'
+              ? t(`删除 ${deletingRule.account} 的邮件触发规则？`, `Delete email rule for ${deletingRule.account}?`)
+              : t(`删除 ${deletingRule.account} 的会前提醒规则？`, `Delete meeting rule for ${deletingRule.account}?`)
+            : ''
+        }
+        description={t('删除后本 Bot 将不再由该规则自动触发，不影响手动使用 Google 工具或其他规则。', 'This Bot will stop receiving automatic triggers from this rule. Manual Google tool use and other rules are unaffected.')}
+        confirmLabel={t('删除规则', 'Delete rule')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => setDeletingRule(null)}
+        onConfirm={() => {
+          if (deletingRule) void handleDeleteRule(deletingRule);
+        }}
+      />
     </section>
   );
 }

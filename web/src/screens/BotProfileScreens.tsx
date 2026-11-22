@@ -46,7 +46,7 @@ import {
   type BotScheduleTask,
   type UnifiedBotItem,
 } from '../hub/shared';
-import { Dialog, Switch } from '../components/ui';
+import { ActionBar, Button, Dialog, ListRow, Switch, useDirtyForm, type ListRowStatusTone } from '../components/ui';
 import type { ActionController, MobileBotItem } from './types';
 
 export interface BotProfileScreenProps {
@@ -64,6 +64,11 @@ export interface BotProfileScreenProps {
   scheduleCount: number;
   isBotBusy: boolean;
   profileManageTriggerRef: RefObject<HTMLButtonElement | null>;
+  soulConfigured?: boolean;
+  skillsCount?: number;
+  googleReady?: boolean;
+  toolsSummary?: string;
+  vaultCount?: number;
   onBack(): void;
   onSave(): void;
   onOpenAvatarPicker(preset: GrokAvatarPreset): void;
@@ -93,6 +98,11 @@ export function BotProfileScreen({
   scheduleCount,
   isBotBusy,
   profileManageTriggerRef,
+  soulConfigured,
+  skillsCount,
+  googleReady,
+  toolsSummary,
+  vaultCount,
   onBack,
   onSave,
   onOpenAvatarPicker,
@@ -107,7 +117,69 @@ export function BotProfileScreen({
   onOpenManage,
 }: BotProfileScreenProps) {
   const t = useText();
-  const modelSummary = activeBotModelSummary ?? formatBotModelSummary(activeBot, { connectedToCenter });
+  const modelSummary = activeBotModelSummary ?? formatBotModelSummary(activeBot, { connectedToCenter, t });
+  const modelValue = modelSummary.badgeText
+    ? `${modelSummary.primaryText} · ${modelSummary.badgeText}`
+    : modelSummary.primaryText;
+  const modelStatusTone: ListRowStatusTone =
+    modelSummary.tone === 'warn'
+      ? 'warn'
+      : modelSummary.tone === 'muted'
+        ? 'idle'
+        : 'ok';
+  const soulStatusTone: ListRowStatusTone | undefined =
+    soulConfigured === undefined ? undefined : soulConfigured ? 'ok' : 'idle';
+  const soulValue =
+    soulConfigured === undefined
+      ? 'SOUL.md'
+      : soulConfigured
+        ? t('已配置', 'Configured')
+        : t('默认人设', 'Default');
+  const skillsStatusTone: ListRowStatusTone =
+    typeof skillsCount === 'number'
+      ? (skillsCount > 0 ? 'ok' : 'idle')
+      : (canOpenRemoteBotConfig ? 'ok' : 'idle');
+  const skillsValue =
+    typeof skillsCount === 'number'
+      ? (skillsCount > 0 ? t(`${skillsCount} 项`, `${skillsCount} enabled`) : t('未启用', 'None'))
+      : (canOpenRemoteBotConfig ? t('中心目录', 'Catalog') : t('仅本机', 'Local only'));
+  const toolsStatusTone: ListRowStatusTone = !canOpenRemoteBotConfig
+    ? 'idle'
+    : googleReady === false
+      ? 'warn'
+      : 'ok';
+  const toolsValue = !canOpenRemoteBotConfig
+    ? t('未连接中心', 'Center offline')
+    : toolsSummary
+      ? toolsSummary
+      : googleReady === true
+        ? t('MCP · Google 已就绪', 'MCP · Google ready')
+        : googleReady === false
+          ? t('MCP · Google 待配置', 'MCP · Setup Google')
+          : t('MCP · Google', 'MCP & Google');
+  const schedulesStatusTone: ListRowStatusTone = scheduleCount > 0 ? 'ok' : 'idle';
+  const schedulesValue =
+    scheduleCount > 0
+      ? t(`${scheduleCount} 个已开启`, `${scheduleCount} active`)
+      : t('未设置', 'None');
+  const vaultStatusTone: ListRowStatusTone | undefined =
+    typeof vaultCount === 'number' ? (vaultCount > 0 ? 'ok' : 'idle') : undefined;
+  const vaultValue =
+    typeof vaultCount === 'number'
+      ? (vaultCount > 0 ? t(`${vaultCount} 项`, `${vaultCount} saved`) : t('空', 'Empty'))
+      : t('加密保存', 'Encrypted');
+  const manageStatusTone: ListRowStatusTone = activeBot.isPrimary
+    ? 'accent'
+    : activeBot.archivedAt
+      ? 'warn'
+      : activeBot.online === false
+        ? 'idle'
+        : 'ok';
+  const manageValue = activeBot.isPrimary
+    ? t('主 Bot', 'Primary')
+    : activeBot.archivedAt
+      ? t('已归档', 'Archived')
+      : activeBot.hostLabel;
   const avatarPreset = resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary);
 
   return (
@@ -151,7 +223,7 @@ export function BotProfileScreen({
               size={88}
             />
             <span className="grok-avatar-pencil-badge">
-              <Pencil size={16} />
+              <Pencil size={16} aria-hidden="true" />
             </span>
           </button>
           <input
@@ -176,111 +248,97 @@ export function BotProfileScreen({
         <section className="grok-field-section">
           <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
           <div className="grok-card-group">
-            <button
-              type="button"
-              className="grok-card-row"
+            <ListRow
+              leading={<Cpu />}
+              title={t('模型', 'Model')}
+              statusTone={modelStatusTone}
+              value={modelValue}
+              chevron
               onClick={onOpenModelSettings}
-            >
-              <Cpu size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('模型', 'Model')}</span>
-              <span
-                className={`grok-row-value grok-row-value-path${
-                  modelSummary.tone === 'warn'
-                    ? ' is-warn'
-                    : modelSummary.tone === 'muted'
-                      ? ' is-muted'
-                      : ''
-                }`}
-              >
-                {modelSummary.primaryText}
-                {modelSummary.badgeText ? ` · ${modelSummary.badgeText}` : ''}
-              </span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-            <button
-              type="button"
-              className="grok-card-row"
+            />
+            <ListRow
+              leading={<User />}
+              title={t('人设', 'Persona')}
+              statusTone={soulStatusTone}
+              value={soulValue}
+              chevron
               onClick={onOpenSoul}
-            >
-              <User size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('人设', 'Persona')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-            <button
-              type="button"
-              className="grok-card-row"
+            />
+            <ListRow
+              leading={<Sparkles />}
+              title={t('技能', 'Skills')}
+              statusTone={skillsStatusTone}
+              value={skillsValue}
+              chevron
               onClick={onOpenSkills}
-            >
-              <Sparkles size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('技能', 'Skills')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-            <button
-              type="button"
-              className="grok-card-row"
+            />
+            <ListRow
+              leading={<Puzzle />}
+              title={t('工具扩展', 'Tools & Extensions')}
+              statusTone={toolsStatusTone}
+              value={toolsValue}
+              chevron
               onClick={onOpenCapabilities}
-            >
-              <Puzzle size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('工具扩展', 'Tools & Extensions')}</span>
-              <span className="grok-row-value">
-                {canOpenRemoteBotConfig ? t('MCP & 插件', 'MCP & Plugins') : t('连接中心后可用', 'Connect center')}
-              </span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-            <button
-              type="button"
-              className="grok-card-row"
+            />
+            <ListRow
+              leading={<Clock />}
+              title={t('定时任务', 'Schedules')}
+              statusTone={schedulesStatusTone}
+              value={schedulesValue}
+              chevron
               onClick={onOpenSchedules}
-            >
-              <Clock size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('定时任务', 'Schedules')}</span>
-              <span className="grok-row-value">
-                {scheduleCount > 0 ? t(`${scheduleCount} 个已开启`, `${scheduleCount} active`) : ''}
-              </span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-            <button
-              type="button"
-              className="grok-card-row"
+            />
+            <ListRow
+              leading={<LockKeyhole />}
+              title={t('密码凭据', 'Password Vault')}
+              statusTone={vaultStatusTone}
+              value={vaultValue}
+              chevron
               onClick={onOpenVault}
-            >
-              <LockKeyhole size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('密码凭据', 'Password Vault')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
+            />
           </div>
         </section>
 
         <section className="grok-field-section">
           <h3 className="grok-section-label">{t('更多管理', 'More management')}</h3>
           <div className="grok-card-group">
-            <button
-              type="button"
-              className="grok-card-row"
+            <ListRow
+              leading={<Monitor />}
+              title={t('电脑', 'Computer')}
+              statusTone={isBotBusy ? 'accent' : 'idle'}
+              value={isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}
+              chevron
               onClick={onOpenComputer}
-            >
-              <Monitor size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('电脑', 'Computer')}</span>
-              <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
+            />
             {onOpenBrowser ? (
-              <button
-                type="button"
-                className="grok-card-row"
+              <ListRow
+                leading={<Globe />}
+                title={t('Bot 浏览器', 'Bot Browser')}
+                value={t('独立会话', 'Isolated')}
+                chevron
                 onClick={onOpenBrowser}
-              >
-                <Globe size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('Bot 浏览器', 'Bot Browser')}</span>
-                <span className="grok-row-value">{t('独立会话', 'Isolated')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
+              />
             ) : null}
-            <button ref={profileManageTriggerRef} type="button" className="grok-card-row" onClick={onOpenManage}>
-              <Settings size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('管理 Bot', 'Manage bot')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
+            <div className="ui-list-row">
+              <button
+                ref={profileManageTriggerRef}
+                type="button"
+                className="ui-list-row-main"
+                onClick={onOpenManage}
+              >
+                <span className="ui-list-row-leading" aria-hidden="true">
+                  <Settings />
+                </span>
+                <span className="ui-list-row-text">
+                  <span className="ui-list-row-title">{t('管理 Bot', 'Manage bot')}</span>
+                </span>
+                <span className="ui-row-value">
+                  <span className={`ui-status-dot is-${manageStatusTone}`} aria-hidden="true" />
+                  <span className="ui-row-value-text">{manageValue}</span>
+                </span>
+              </button>
+              <ChevronRight className="ui-list-row-chevron" aria-hidden="true" />
+            </div>
           </div>
         </section>
       </div>
@@ -333,6 +391,18 @@ export function BotProfileManageScreen({
 }: BotProfileManageScreenProps) {
   const t = useText();
   const localOfflineCwd = activeBot.hostKind === 'local' && !connectedToCenter;
+  const cwdTrimmed = editCwd.trim();
+  const cwdDirty = !localOfflineCwd && editCwdRevision !== null && cwdTrimmed !== editCwdBaseline.trim();
+  const cwdSaveDisabled = action.busy || editCwdRevision === null || !cwdTrimmed || !cwdDirty;
+  useDirtyForm(cwdDirty);
+
+  const cwdStatusKey = !editCwdError && editCwdRevision === null
+    ? 'loading'
+    : cwdDirty
+      ? 'dirty'
+      : editCwdSaved
+        ? 'saved'
+        : 'idle';
 
   return (
     <main className="grok-subpage grok-page-enter bot-profile-page">
@@ -368,33 +438,31 @@ export function BotProfileManageScreen({
             {localOfflineCwd ? (
               <>
                 <p className="secondary profile-card-hint">
-                  {t('当前未连接中心，展示本机工作目录；扫码连接中心后可在线修改。',
-                    'Showing the local working directory while offline; connect to the center to edit it.')}
+                  {t('当前未连接中心，展示本机工作目录；扫码连接中心后可在线修改。', 'Showing the local working directory while offline; connect to the center to edit it.')}
                 </p>
-                <div className="profile-directory-actions">
-                  <button type="button" className="hub-outline-btn" onClick={onOpenCenterSettings}>
+                <ActionBar align="end" className="profile-directory-actions">
+                  <Button variant="secondary" size="sm" onClick={onOpenCenterSettings}>
                     {t('去连接中心', 'Connect to center')}
-                  </button>
-                </div>
+                  </Button>
+                </ActionBar>
               </>
             ) : (
               <>
                 {editCwdError && (
                   <div className="grok-card-row no-active">
                     <span className="grok-row-label profile-inline-error">{editCwdError}</span>
-                    <button
-                      type="button"
-                      className="hub-outline-btn"
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       disabled={action.busy}
                       onClick={onReloadEditCwd}
                     >
                       {t('重新读取', 'Reload')}
-                    </button>
+                    </Button>
                   </div>
                 )}
                 <p className="secondary profile-card-hint">
-                  {t('保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。',
-                    'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.')}
+                  {t('保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。', 'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.')}
                 </p>
                 <ReservedSlot
                   minHeight={20}
@@ -402,24 +470,33 @@ export function BotProfileManageScreen({
                   className="profile-card-hint"
                   role="status"
                   aria-live="polite"
-                  contentKey={!editCwdError && editCwdRevision === null ? 'loading' : editCwdSaved ? 'saved' : 'idle'}
+                  contentKey={cwdStatusKey}
                 >
-                  {!editCwdError && editCwdRevision === null ? (
+                  {cwdStatusKey === 'loading' ? (
                     <Skeleton variant="text" width={120} height={12} inline label={t('正在读取目录…', 'Loading directory…')} />
-                  ) : editCwdSaved ? (
-                    <span className="secondary">{t('工作目录已保存', 'Working directory saved')}</span>
+                  ) : cwdStatusKey === 'dirty' ? (
+                    <span className="secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className="ui-status-dot is-warn" aria-hidden="true" />
+                      {t('有未保存修改', 'Unsaved changes')}
+                    </span>
+                  ) : cwdStatusKey === 'saved' ? (
+                    <span className="secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className="ui-status-dot is-ok" aria-hidden="true" />
+                      {t('工作目录已保存', 'Working directory saved')}
+                    </span>
                   ) : null}
                 </ReservedSlot>
-                <div className="profile-directory-actions">
-                  <button
-                    type="button"
-                    className="grok-done-pill-btn"
-                    disabled={action.busy || editCwdRevision === null || !editCwd.trim() || editCwd.trim() === editCwdBaseline}
+                <ActionBar align="end" className="profile-directory-actions">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={action.busy}
+                    disabled={cwdSaveDisabled}
                     onClick={onSaveEditCwd}
                   >
-                    {t('保存工作目录', 'Save working directory')}
-                  </button>
-                </div>
+                    {action.busy ? t('保存中…', 'Saving…') : t('保存工作目录', 'Save working directory')}
+                  </Button>
+                </ActionBar>
               </>
             )}
           </div>
@@ -432,70 +509,75 @@ export function BotProfileManageScreen({
           <h3 className="grok-section-label">{t('Bot 状态', 'Bot status')}</h3>
           <section className="grok-card-group">
             {activeBot.isPrimary ? (
-              <div className="grok-card-row no-active">
-                <Star size={19} className="grok-row-icon" />
-                <span className="grok-row-label profile-lifecycle-label">
-                  {t('主 Bot', 'Primary Bot')}
-                  <small className="profile-lifecycle-note">{t('切换主 Bot 后可归档或删除', 'Switch primary to archive/delete')}</small>
-                </span>
-              </div>
+              <ListRow
+                leading={<Star />}
+                title={t('主 Bot', 'Primary Bot')}
+                subtitle={t('切换其他 Bot 为主 Bot 后，方可归档或删除', 'Switch primary to another Bot before archiving or deleting')}
+                statusTone="accent"
+                value={t('当前主 Bot', 'Primary')}
+              />
             ) : (
               <>
                 {!activeBot.archivedAt && (
-                  <button
-                    type="button"
-                    className="grok-card-row"
+                  <ListRow
+                    leading={<Star />}
+                    title={t('设为主 Bot', 'Set as Primary Bot')}
+                    subtitle={t('设为当前节点默认对话 Bot', 'Use as the default Bot on this host')}
                     disabled={action.busy}
+                    chevron
                     onClick={() => onSetPrimary(activeBot)}
-                  >
-                    <Star size={19} className="grok-row-icon" />
-                    <span className="grok-row-label">{t('设为主 Bot', 'Set as Primary Bot')}</span>
-                    <ChevronRight size={18} className="grok-row-chevron" />
-                  </button>
+                  />
                 )}
                 {!activeBot.archivedAt ? (
-                  <button
-                    type="button"
-                    className="grok-card-row"
+                  <ListRow
+                    leading={<Archive />}
+                    title={t('归档 Bot', 'Archive Bot')}
+                    statusTone="idle"
+                    value={t('14 天后自动清理', '14d auto-delete')}
                     disabled={action.busy}
+                    chevron
                     onClick={() => onRequestArchive(activeBot)}
-                  >
-                    <Archive size={19} className="grok-row-icon" />
-                    <span className="grok-row-label">{t('归档 Bot', 'Archive Bot')}</span>
-                    <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
-                    <ChevronRight size={18} className="grok-row-chevron" />
-                  </button>
+                  />
                 ) : (
-                  <button
-                    type="button"
-                    className="grok-card-row"
+                  <ListRow
+                    leading={<RotateCcw />}
+                    title={t('恢复 Bot', 'Restore Bot')}
+                    subtitle={t('解除归档并回到主页列表', 'Unarchive and return to main list')}
+                    statusTone="warn"
+                    value={t(`剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天`, `${formatArchivedRemainingDays(activeBot.archivedAt)}d left`)}
                     disabled={action.busy}
+                    chevron
                     onClick={() => onUnarchive(activeBot)}
-                  >
-                    <RotateCcw size={19} className="grok-row-icon" />
-                    <span className="grok-row-label">{t('恢复 Bot（解除归档）', 'Unarchive Bot')}</span>
-                    <span className="grok-row-value">
-                      {t(`剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天`, `${formatArchivedRemainingDays(activeBot.archivedAt)}d left`)}
-                    </span>
-                    <ChevronRight size={18} className="grok-row-chevron" />
-                  </button>
+                  />
                 )}
-                <button
-                  type="button"
-                  className="grok-card-row danger-text"
-                  disabled={action.busy}
-                  onClick={() => onRequestDelete(activeBot)}
-                >
-                  <Trash2 size={19} />
-                  <span className="grok-row-label">{t('永久删除 Bot', 'Permanently Delete Bot')}</span>
-                </button>
               </>
             )}
           </section>
-          <ReservedSlot minHeight={52} align="start">
-            <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
-          </ReservedSlot>
         </section>
+
+        {!activeBot.isPrimary && (
+          <section className="grok-field-section">
+            <h3 className="grok-section-label">{t('危险操作', 'Danger zone')}</h3>
+            <div className="grok-card-group">
+              <button
+                type="button"
+                className="grok-card-row danger-text"
+                disabled={action.busy}
+                onClick={() => onRequestDelete(activeBot)}
+              >
+                <Trash2 size={19} aria-hidden="true" />
+                <span className="grok-row-label">{t('永久删除 Bot', 'Permanently Delete Bot')}</span>
+              </button>
+            </div>
+            <p className="grok-card-footnote">
+              {t('永久删除将移除该 Bot 及全部历史对话与人设文档，无法恢复。', 'Permanently removes this Bot, its conversation history, and its persona. This cannot be undone.')}
+            </p>
+          </section>
+        )}
+
+        <ReservedSlot minHeight={52} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
+        </ReservedSlot>
       </div>
     </main>
   );
@@ -703,7 +785,6 @@ export function BotSoulScreen({
   activeBot,
   soulDraft,
   setSoulDraft,
-  soulDirty,
   setSoulDirty,
   soulSaved,
   soulDraftBytes,
@@ -714,6 +795,10 @@ export function BotSoulScreen({
   onReload,
 }: BotSoulScreenProps) {
   const t = useText();
+  const isDirty = !soulSaved;
+  const isOverLimit = soulDraftBytes > SOUL_MAX_BYTES;
+  const canSave = !action.busy && !isOverLimit && isDirty;
+  useDirtyForm(isDirty);
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -727,17 +812,7 @@ export function BotSoulScreen({
           <ArrowLeft size={20} />
         </button>
         <h2 className="grok-subpage-header-title">{t('灵魂文档', 'Soul Document')}</h2>
-        <button
-          type="button"
-          className="grok-done-pill-btn"
-          disabled={action.busy || soulDraftBytes > SOUL_MAX_BYTES}
-          onClick={onSave}
-        >
-          <LabelStack
-            active={action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
-            labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
-          />
-        </button>
+        <span className="grok-topbar-spacer" aria-hidden="true" />
       </header>
 
       <div className="grok-subpage-scroll">
@@ -779,17 +854,29 @@ export function BotSoulScreen({
               setSoulDraft(e.target.value);
               setSoulDirty(true);
             }}
-            placeholder={t('# 核心人设\n在这里编写 Bot 的身份、说话语气、专业领域和行为边界…',
-              '# Core Persona\nWrite the Bot identity, tone, expertise, and boundaries here…')}
+            placeholder={t('# 核心人设\n在这里编写 Bot 的身份、说话语气、专业领域和行为边界…', '# Core Persona\nWrite the Bot identity, tone, expertise, and boundaries here…')}
           />
           <div className="soul-meta-row">
-            <span className="soul-meta-status">
-              {soulSaved ? t('已保存', 'Saved') : t('未保存修改', 'Unsaved changes')}
+            <span
+              className="soul-meta-status"
+              role="status"
+              aria-live="polite"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <span
+                className={`ui-status-dot ${isOverLimit ? 'is-error' : isDirty ? 'is-warn' : 'is-ok'}`}
+                aria-hidden="true"
+              />
+              {isOverLimit
+                ? t('超出 64 KiB 上限，请精简后再保存', 'Exceeds 64 KiB limit — shorten before saving')
+                : isDirty
+                  ? t('有未保存修改', 'Unsaved changes')
+                  : t('已保存', 'Saved')}
             </span>
             <span className="soul-meta-count">
               {soulByteRatio > 0.8 && (
-                <span className={`soul-meta-limit${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}>
-                  {soulDraftBytes > SOUL_MAX_BYTES
+                <span className={`soul-meta-limit${isOverLimit ? ' over' : ''}`}>
+                  {isOverLimit
                     ? t('超出上限', 'Over limit')
                     : t('接近上限', 'Near limit')}
                 </span>
@@ -801,7 +888,7 @@ export function BotSoulScreen({
             <div className="soul-byte-progress">
               <div className="soul-byte-bar">
                 <div
-                  className={`soul-byte-fill${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}
+                  className={`soul-byte-fill${isOverLimit ? ' over' : ''}`}
                   style={{ width: `${Math.min(100, Math.round(soulByteRatio * 100))}%` }}
                 />
               </div>
@@ -809,22 +896,29 @@ export function BotSoulScreen({
           )}
         </section>
         <p className="grok-card-footnote">
-          {t('定义该 Bot 的人设、语气风格与行动准则，每次对话会自动生效。',
-            'Defines the persona, tone, and principles automatically applied in every conversation.')}
+          {t('定义该 Bot 的人设、语气风格与行动准则，每次对话会自动生效。', 'Defines the persona, tone, and principles automatically applied in every conversation.')}
         </p>
 
-        {soulDirty && activeBot && (
-          <section className="grok-card-group">
-            <button
-              type="button"
-              className="grok-card-row"
+        <ActionBar align="end">
+          {activeBot && (
+            <Button
+              variant="secondary"
+              disabled={action.busy || !isDirty}
+              leadingIcon={<RefreshCw />}
               onClick={() => onReload(activeBot)}
             >
-              <RefreshCw size={18} className="grok-row-icon" />
-              <span className="grok-row-label">{t('放弃未保存修改', 'Discard unsaved changes')}</span>
-            </button>
-          </section>
-        )}
+              {t('放弃修改', 'Discard changes')}
+            </Button>
+          )}
+          <Button
+            variant="primary"
+            loading={action.busy}
+            disabled={!canSave}
+            onClick={onSave}
+          >
+            {action.busy ? t('保存中…', 'Saving…') : t('保存灵魂文档', 'Save soul')}
+          </Button>
+        </ActionBar>
 
         <ReservedSlot minHeight={52} align="start">
           <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
@@ -918,6 +1012,7 @@ export function BotSchedulesScreen({
           <button
             type="button"
             className="grok-done-pill-btn"
+            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
             disabled={action.busy || scheduleOffline || !scheduleDraft.prompt.trim()}
             onClick={onSaveSchedule}
           >
@@ -930,10 +1025,11 @@ export function BotSchedulesScreen({
           <button
             type="button"
             className="grok-done-pill-btn"
+            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
             disabled={action.busy || scheduleOffline}
             onClick={onOpenCreate}
           >
-            <Plus size={16} className="grok-icon-mr-4" />
+            <Plus size={16} className="grok-icon-mr-4" aria-hidden="true" />
             {t('新建', 'New')}
           </button>
         )}
@@ -954,6 +1050,7 @@ export function BotSchedulesScreen({
                   type="button"
                   aria-pressed={scheduleFilter === tab.id}
                   className={`grok-schedule-filter-tab${scheduleFilter === tab.id ? ' active' : ''}`}
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   onClick={() => onChangeScheduleFilter(tab.id)}
                 >
                   {tab.label}
@@ -971,16 +1068,16 @@ export function BotSchedulesScreen({
               <div className="grok-schedule-permission-text">
                 <strong>{t('精确闹钟权限未开启', 'Exact Alarm Permission Needed')}</strong>
                 <span>
-                  {t('开启后可保证定时任务在锁屏与后台状态下准点唤醒该 Bot 执行。',
-                    'Grant exact alarm permission for punctual background execution.')}
+                  {t('开启后可保证定时任务在锁屏与后台状态下准点唤醒该 Bot 执行。', 'Grant exact alarm permission for punctual background execution.')}
                 </span>
               </div>
               <button
                 type="button"
                 className="grok-done-pill-btn"
+                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                 onClick={onRequestExactAlarm}
               >
-                {t('去授权', 'Grant')}
+                {t('授予权限', 'Grant permission')}
               </button>
             </section>
           )}
@@ -1012,10 +1109,11 @@ export function BotSchedulesScreen({
                   <button
                     type="button"
                     className="grok-done-pill-btn grok-btn-mt-8"
+                    style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                     disabled={action.busy || scheduleOffline}
                     onClick={onOpenCreate}
                   >
-                    <Plus size={16} className="grok-icon-mr-4" />
+                    <Plus size={16} className="grok-icon-mr-4" aria-hidden="true" />
                     {t('新建定时任务', 'Create Schedule')}
                   </button>
                 </section>
@@ -1098,7 +1196,7 @@ export function BotSchedulesScreen({
 
               <div className="grok-card-row no-active">
                 <span className="grok-row-label">{t('重复周期', 'Repeat')}</span>
-                <label className="grok-select-wrap">
+                <label className="grok-select-wrap" style={{ minWidth: 0, maxWidth: '62%' }}>
                   <select
                     value={
                       scheduleDraft.repeat === 'weekly' && !scheduleCustomWeekdays
@@ -1157,13 +1255,13 @@ export function BotSchedulesScreen({
                     <option value="monthly">{t('每月固定日期', 'Monthly')}</option>
                     <option value="once">{t('仅一次', 'Once')}</option>
                   </select>
-                  <ChevronsUpDown size={15} />
+                  <ChevronsUpDown size={15} aria-hidden="true" />
                 </label>
               </div>
 
               {scheduleDraft.repeat === 'once' && (
                 <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('执行日期（可选）', 'Date (optional)')}</span>
+                  <span className="grok-input-label">{t('执行日期', 'Run date')}</span>
                   <input
                     type="date"
                     className="grok-inline-input grok-time-input"
@@ -1176,15 +1274,19 @@ export function BotSchedulesScreen({
               )}
 
               {scheduleDraft.repeat === 'weekly' && scheduleCustomWeekdays && (
-                <div className="grok-card-row grok-weekday-row">
+                <div
+                  className="grok-card-row no-active grok-weekday-row"
+                  role="group"
+                  aria-label={t('选择每周重复日期', 'Select weekdays')}
+                >
                   {[
-                    { day: 1, zh: '一', en: 'M', fullZh: '星期一', fullEn: 'Monday' }, // i18n-ok
-                    { day: 2, zh: '二', en: 'T', fullZh: '星期二', fullEn: 'Tuesday' }, // i18n-ok
-                    { day: 3, zh: '三', en: 'W', fullZh: '星期三', fullEn: 'Wednesday' }, // i18n-ok
-                    { day: 4, zh: '四', en: 'T', fullZh: '星期四', fullEn: 'Thursday' }, // i18n-ok
-                    { day: 5, zh: '五', en: 'F', fullZh: '星期五', fullEn: 'Friday' }, // i18n-ok
-                    { day: 6, zh: '六', en: 'S', fullZh: '星期六', fullEn: 'Saturday' }, // i18n-ok
-                    { day: 7, zh: '日', en: 'S', fullZh: '星期日', fullEn: 'Sunday' }, // i18n-ok
+                    { day: 1, label: t('一', 'M'), fullLabel: t('星期一', 'Monday') },
+                    { day: 2, label: t('二', 'T'), fullLabel: t('星期二', 'Tuesday') },
+                    { day: 3, label: t('三', 'W'), fullLabel: t('星期三', 'Wednesday') },
+                    { day: 4, label: t('四', 'T'), fullLabel: t('星期四', 'Thursday') },
+                    { day: 5, label: t('五', 'F'), fullLabel: t('星期五', 'Friday') },
+                    { day: 6, label: t('六', 'S'), fullLabel: t('星期六', 'Saturday') },
+                    { day: 7, label: t('日', 'S'), fullLabel: t('星期日', 'Sunday') },
                   ].map(item => {
                     const active = scheduleDraft.weekdays.includes(item.day);
                     return (
@@ -1193,7 +1295,7 @@ export function BotSchedulesScreen({
                         type="button"
                         className={`grok-weekday-chip${active ? ' active' : ''}`}
                         aria-pressed={active}
-                        aria-label={t(item.fullZh, item.fullEn)}
+                        aria-label={item.fullLabel}
                         onClick={() => {
                           setScheduleDraft(prev => {
                             const exists = prev.weekdays.includes(item.day);
@@ -1204,7 +1306,7 @@ export function BotSchedulesScreen({
                           });
                         }}
                       >
-                        {t(item.zh, item.en)}
+                        {item.label}
                       </button>
                     );
                   })}
@@ -1313,23 +1415,26 @@ export function BotSchedulesScreen({
           </div>
 
           {scheduleDraft.id && (
-            <section className="grok-card-group">
-              <button
-                type="button"
-                className="grok-card-row danger-text"
-                disabled={action.busy || scheduleOffline}
-                onClick={() => {
-                  const existing = scheduleTasks.find(task => task.id === scheduleDraft.id);
-                  if (existing) {
-                    action.setError('');
-                    setScheduleDeleteTarget(existing);
-                  }
-                }}
-              >
-                <Trash2 size={18} />
-                <span className="grok-row-label">{t('删除该定时任务', 'Delete Schedule')}</span>
-              </button>
-            </section>
+            <div className="grok-field-section">
+              <h3 className="grok-section-label">{t('危险操作', 'Danger zone')}</h3>
+              <section className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row danger-text"
+                  disabled={action.busy || scheduleOffline}
+                  onClick={() => {
+                    const existing = scheduleTasks.find(task => task.id === scheduleDraft.id);
+                    if (existing) {
+                      action.setError('');
+                      setScheduleDeleteTarget(existing);
+                    }
+                  }}
+                >
+                  <Trash2 size={18} aria-hidden="true" />
+                  <span className="grok-row-label">{t('删除该定时任务', 'Delete Schedule')}</span>
+                </button>
+              </section>
+            </div>
           )}
 
           <ReservedSlot minHeight={52} align="start">
@@ -1345,18 +1450,19 @@ export function BotSchedulesScreen({
         open={scheduleDeleteTarget !== null}
         onOpenChange={open => { if (!open && !action.busy) setScheduleDeleteTarget(null); }}
         title={t('删除定时任务', 'Delete schedule')}
+        closeDisabled={action.busy}
       >
-        <p className="secondary">{t('确定删除这个定时任务？', 'Delete this scheduled task?')}</p>
+        <p className="secondary">{t('确定删除这个定时任务？此操作不可撤销。', 'Delete this scheduled task? This cannot be undone.')}</p>
         <ReservedSlot minHeight={48} align="start">
           <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
         </ReservedSlot>
-        <div className="dialog-actions">
-          <button type="button" className="button secondary-button" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
+        <ActionBar align="end" className="ui-confirm-actions">
+          <Button variant="secondary" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
             {t('取消', 'Cancel')}
-          </button>
-          <button
-            type="button"
-            className="button danger-button"
+          </Button>
+          <Button
+            variant="danger"
+            loading={action.busy}
             disabled={action.busy || scheduleOffline}
             onClick={() => {
               if (scheduleDeleteTarget) {
@@ -1365,12 +1471,9 @@ export function BotSchedulesScreen({
               }
             }}
           >
-            <LabelStack
-              active={action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
-              labels={[t('删除中…', 'Deleting…'), t('确认删除', 'Delete schedule')]}
-            />
-          </button>
-        </div>
+            {action.busy ? t('删除中…', 'Deleting…') : t('删除定时任务', 'Delete schedule')}
+          </Button>
+        </ActionBar>
       </Dialog>
     </main>
   );

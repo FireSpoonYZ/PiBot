@@ -11,6 +11,8 @@ import type {
   VaultStatus,
 } from '../../../host-core/index.js';
 import { Badge, Disclosure, Switch } from '../bot-settings/primitives';
+import { ActionBar, ConfirmDialog } from '../components/ui';
+import { useNotice } from '../notice';
 import { ErrorNotice, useText } from '../ui';
 import './VaultPanel.css';
 
@@ -50,6 +52,7 @@ function VaultSession({
   onOpenGlobalVault,
 }: Props) {
   const t = useText();
+  const { notify } = useNotice();
   const desktop = variant === 'desktop';
 
   const [status, setStatus] = useState<VaultStatus | null>(null);
@@ -60,16 +63,14 @@ function VaultSession({
 
   const [editor, setEditor] = useState<VaultItemMeta | 'new' | null>(null);
   const [allowed, setAllowed] = useState(true);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deletingTarget, setDeletingTarget] = useState<VaultItemMeta | null>(null);
   const [changingPassword, setChangingPassword] = useState(false);
   const [configuring, setConfiguring] = useState(false);
   const [sourceChoice, setSourceChoice] = useState<'local' | 'vaultwarden'>('local');
-  const [checkNote, setCheckNote] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [togglingRef, setTogglingRef] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
 
   const active = useRef(true);
   const inFlight = useRef(false);
@@ -153,8 +154,6 @@ function VaultSession({
     inFlight.current = true;
     setBusy(true);
     setError('');
-    setNotice('');
-    setCheckNote('');
 
     const isLockOrLogout =
       input.action === 'lock'
@@ -166,9 +165,11 @@ function VaultSession({
         if (input.input.action === 'check') {
           const result = await callRef.current(input) as { reachable: boolean; status: ExternalVaultStatus };
           if (!active.current) return;
-          setCheckNote(result.reachable
-            ? t('Vaultwarden 服务连接正常。', 'Vaultwarden server is reachable.')
-            : t('无法连接到 Vaultwarden 服务。', 'Vaultwarden server is unreachable.'));
+          if (result.reachable) {
+            notify({ id: 'vault-check', tone: 'success', title: t('Vaultwarden 服务连接正常', 'Vaultwarden server is reachable') });
+          } else {
+            setError(t('无法连接到 Vaultwarden 服务，请检查服务地址与网络后重试。', 'Vaultwarden server is unreachable. Check the server URL and network, then retry.'));
+          }
           next = await callRef.current({ action: 'status' }) as VaultStatus;
         } else {
           await callRef.current(input);
@@ -208,15 +209,39 @@ function VaultSession({
       clearForms();
       setEditor(null);
       setChangingPassword(false);
-      setDeleting(null);
+      setDeletingTarget(null);
       setConfiguring(false);
       if (isLockOrLogout) {
         clearLocalItems();
         clearExternalItems();
-        setNotice(t('密码库已锁定', 'Vault locked'));
+        const isLogout = input.action === 'external' && input.input.action === 'logout';
+        notify({
+          id: 'vault-status',
+          tone: 'success',
+          title: isLogout ? t('已退出 Vaultwarden 登录', 'Signed out of Vaultwarden') : t('密码库已锁定', 'Vault locked'),
+        });
+      } else if (input.action === 'initialize') {
+        notify({ id: 'vault-status', tone: 'success', title: t('本地密码库已创建并解锁', 'Local vault created and unlocked') });
+      } else if (input.action === 'unlock') {
+        notify({ id: 'vault-status', tone: 'success', title: t('本地密码库已解锁', 'Local vault unlocked') });
+      } else if (input.action === 'save') {
+        notify({ id: 'vault-status', tone: 'success', title: t('凭据已保存', 'Credential saved') });
+      } else if (input.action === 'delete') {
+        notify({ id: 'vault-status', tone: 'success', title: t('凭据已删除', 'Credential deleted') });
+      } else if (input.action === 'changePassword') {
+        notify({ id: 'vault-status', tone: 'success', title: t('主密码已更新', 'Master password updated') });
+      } else if (input.action === 'external') {
+        if (input.input.action === 'unlock') {
+          notify({ id: 'vault-status', tone: 'success', title: t('Vaultwarden 已解锁', 'Vaultwarden unlocked') });
+        } else if (input.input.action === 'sync') {
+          notify({ id: 'vault-status', tone: 'success', title: t('Vaultwarden 条目已同步', 'Vaultwarden entries synced') });
+        } else if (input.input.action === 'configure') {
+          notify({ id: 'vault-status', tone: 'success', title: t('密码库来源设置已保存', 'Vault source saved') });
+        }
       }
     } catch (err) {
       if (!active.current) return;
+      setDeletingTarget(null);
       const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
       if (code === 'VAULT_LOCKED') {
         clearLocalItems();
@@ -246,7 +271,6 @@ function VaultSession({
 
     setTogglingRef(item.secretRef);
     setError('');
-    setNotice('');
     // 乐观更新单行，列表不清空不闪烁
     setItems(curr => curr.map(row => (row.secretRef === item.secretRef ? { ...row, allowedBotIds: nextBotIds } : row)));
 
@@ -270,6 +294,13 @@ function VaultSession({
       if (res?.item) {
         setItems(curr => curr.map(row => (row.secretRef === item.secretRef ? res.item! : row)));
       }
+      notify({
+        id: 'vault-grant',
+        tone: 'success',
+        title: nextAllowed
+          ? t(`已授权本 Bot 使用「${item.label}」`, `Authorized "${item.label}" for this Bot`)
+          : t(`已取消本 Bot 对「${item.label}」的使用授权`, `Revoked "${item.label}" for this Bot`),
+      });
     } catch (err) {
       if (!active.current) return;
       setItems(prevItems);
@@ -290,7 +321,6 @@ function VaultSession({
 
     setTogglingRef(item.secretRef);
     setError('');
-    setNotice('');
     setExtItems(curr => curr.map(row => (row.secretRef === item.secretRef ? { ...row, allowedBots: nextBots } : row)));
 
     try {
@@ -316,6 +346,13 @@ function VaultSession({
         setExtRevision(refreshed.revision);
         setExtItems(refreshed.items);
       }
+      notify({
+        id: 'vault-grant',
+        tone: 'success',
+        title: nextAllowed
+          ? t(`已授权本 Bot 使用「${item.label}」`, `Authorized "${item.label}" for this Bot`)
+          : t(`已取消本 Bot 对「${item.label}」的使用授权`, `Revoked "${item.label}" for this Bot`),
+      });
     } catch (err) {
       if (!active.current) return;
       setExtItems(prevExtItems);
@@ -354,7 +391,7 @@ function VaultSession({
         {t('以下操作会影响当前 Host 上的全部 Bot，请谨慎调整。', 'These settings affect all Bots on this Host.')}
       </p>
 
-      <div className="vault-actions">
+      <ActionBar align="start" className="vault-actions">
         {status?.source ? (
           <button
             className="bs-btn is-small"
@@ -392,14 +429,14 @@ function VaultSession({
             onClick={() => {
               clearForms();
               setEditor(null);
-              setDeleting(null);
+              setDeletingTarget(null);
               setChangingPassword(v => !v);
             }}
           >
             {t('更改主密码', 'Change master password')}
           </button>
         ) : null}
-      </div>
+      </ActionBar>
 
       {configuring && status?.source ? (
         <form
@@ -444,10 +481,10 @@ function VaultSession({
                 </label>
               </>
             ) : null}
-            <div className="vault-actions">
-              <button className="bs-btn is-primary is-small" type="submit">{t('保存来源设置', 'Save source')}</button>
+            <ActionBar align="end" className="vault-actions">
               <button className="bs-btn is-ghost is-small" type="button" onClick={() => setConfiguring(false)}>{t('取消', 'Cancel')}</button>
-            </div>
+              <button className="bs-btn is-primary is-small" type="submit">{t('保存来源设置', 'Save source')}</button>
+            </ActionBar>
           </fieldset>
         </form>
       ) : null}
@@ -474,10 +511,10 @@ function VaultSession({
             <label>{t('当前主密码', 'Current master password')}<input className="bs-input" name="masterPassword" type="password" autoComplete="off" required /></label>
             <label>{t('新主密码', 'New master password')}<input className="bs-input" name="newMasterPassword" type="password" autoComplete="off" required /></label>
             <label>{t('确认新主密码', 'Confirm new master password')}<input className="bs-input" name="confirmation" type="password" autoComplete="off" required /></label>
-            <div className="vault-actions">
-              <button className="bs-btn is-primary is-small" type="submit">{t('更新主密码', 'Update password')}</button>
+            <ActionBar align="end" className="vault-actions">
               <button className="bs-btn is-ghost is-small" type="button" onClick={() => setChangingPassword(false)}>{t('取消', 'Cancel')}</button>
-            </div>
+              <button className="bs-btn is-primary is-small" type="submit">{t('更新主密码', 'Update password')}</button>
+            </ActionBar>
           </fieldset>
         </form>
       ) : null}
@@ -506,7 +543,7 @@ function VaultSession({
           </div>
         </div>
 
-        <div className="vault-actions">
+        <ActionBar align="end" className="vault-actions">
           <button
             className="bs-btn is-small"
             type="button"
@@ -547,19 +584,17 @@ function VaultSession({
                 clearForms();
                 setEditor('new');
                 setAllowed(true);
-                setDeleting(null);
+                setDeletingTarget(null);
               }}
             >
               <Plus aria-hidden="true" />
               {t('新增凭据并授权', 'Add & authorize')}
             </button>
           ) : null}
-        </div>
+        </ActionBar>
       </header>
 
       <ErrorNotice error={error} onDismiss={() => setError('')} />
-      {notice ? <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')} /> : null}
-      {checkNote ? <ErrorNotice error={checkNote} tone="success" compact onDismiss={() => setCheckNote('')} /> : null}
 
       {/* 外部密码库解锁 */}
       {external && ext?.configured && (!ext.authenticated || ext.locked) ? (
@@ -583,9 +618,9 @@ function VaultSession({
               {t('主密码', 'Master password')}
               <input className="bs-input" name="masterPassword" type="password" autoComplete="off" required />
             </label>
-            <div className="vault-actions">
-              <button className="bs-btn is-primary" type="submit">{t('解锁密码库', 'Unlock')}</button>
-            </div>
+            <ActionBar align="start" className="vault-actions">
+              <button className="bs-btn is-primary" type="submit">{t('解锁密码库', 'Unlock vault')}</button>
+            </ActionBar>
           </fieldset>
         </form>
       ) : null}
@@ -667,11 +702,11 @@ function VaultSession({
                 <input className="bs-input" name="confirmation" type="password" autoComplete="off" required />
               </label>
             ) : null}
-            <div className="vault-actions">
+            <ActionBar align="start" className="vault-actions">
               <button className="bs-btn is-primary" type="submit">
-                {status.initialized ? t('解锁', 'Unlock') : t('创建密码库', 'Create vault')}
+                {status.initialized ? t('解锁密码库', 'Unlock vault') : t('创建密码库', 'Create vault')}
               </button>
-            </div>
+            </ActionBar>
           </fieldset>
         </form>
       ) : null}
@@ -721,49 +756,24 @@ function VaultSession({
               <Switch checked={allowed} label={t('允许本 Bot 使用', 'Allow this Bot to use')} disabled={disabled} onChange={setAllowed} />
             </div>
 
-            <div className="vault-actions">
-              <button className="bs-btn is-primary is-small" type="submit" disabled={disabled || revision === null}>
-                {editing ? t('保存修改', 'Save') : t('保存并授权', 'Save & authorize')}
-              </button>
-              <button className="bs-btn is-ghost is-small" type="button" onClick={() => setEditor(null)}>
-                {t('取消', 'Cancel')}
-              </button>
+            <ActionBar align="end" className="vault-actions">
               {editing ? (
                 <button
                   className="bs-btn is-danger is-small"
                   type="button"
                   disabled={disabled}
-                  onClick={() => setDeleting(editing.secretRef)}
+                  onClick={() => setDeletingTarget(editing)}
                 >
-                  {t('删除条目', 'Delete entry')}
+                  {t('删除凭据', 'Delete credential')}
                 </button>
               ) : null}
-            </div>
-
-            {editing && deleting === editing.secretRef ? (
-              <div className="vault-delete-confirm">
-                <p className="vault-hint">
-                  {t('删除后此 Host 上所有 Bot 都将无法再使用该凭据，确认删除？', 'Deleting removes this entry for all Bots on this Host. Confirm?')}
-                </p>
-                <div className="vault-actions">
-                  <button
-                    className="bs-btn is-danger is-small"
-                    type="button"
-                    disabled={disabled || revision === null}
-                    onClick={() => {
-                      if (revision !== null) {
-                        void execute({ action: 'delete', expectedRevision: revision, secretRef: editing.secretRef });
-                      }
-                    }}
-                  >
-                    {t('确认删除', 'Confirm delete')}
-                  </button>
-                  <button className="bs-btn is-ghost is-small" type="button" onClick={() => setDeleting(null)}>
-                    {t('取消', 'Cancel')}
-                  </button>
-                </div>
-              </div>
-            ) : null}
+              <button className="bs-btn is-ghost is-small" type="button" onClick={() => setEditor(null)}>
+                {t('取消', 'Cancel')}
+              </button>
+              <button className="bs-btn is-primary is-small" type="submit" disabled={disabled || revision === null}>
+                {editing ? t('保存修改', 'Save changes') : t('保存并授权', 'Save & authorize')}
+              </button>
+            </ActionBar>
           </fieldset>
         </form>
       ) : null}
@@ -794,7 +804,7 @@ function VaultSession({
                           clearForms();
                           setEditor(item);
                           setAllowed(isAllowed);
-                          setDeleting(null);
+                          setDeletingTarget(null);
                         }}
                       >
                         {t('编辑', 'Edit')}
@@ -827,6 +837,25 @@ function VaultSession({
           {renderGlobalManagementBody()}
         </Disclosure>
       ) : null}
+
+      <ConfirmDialog
+        open={deletingTarget !== null}
+        danger
+        busy={busy}
+        title={deletingTarget ? t(`删除凭据「${deletingTarget.label}」？`, `Delete credential "${deletingTarget.label}"?`) : ''}
+        description={
+          deletingTarget
+            ? t(`删除「${deletingTarget.label}」后无法恢复，此 Host 上所有 Bot 都将立即失去该凭据的使用权限。`, `Deleting "${deletingTarget.label}" cannot be undone. All Bots on this Host will immediately lose access to this credential.`)
+            : ''
+        }
+        confirmLabel={t('删除凭据', 'Delete credential')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => setDeletingTarget(null)}
+        onConfirm={() => {
+          if (!deletingTarget || revision === null) return;
+          void execute({ action: 'delete', expectedRevision: revision, secretRef: deletingTarget.secretRef });
+        }}
+      />
     </section>
   );
 }

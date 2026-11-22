@@ -23,13 +23,12 @@ function getInitialTheme(): ThemeMode {
 }
 
 function pathToTab(pathname: string): CenterAdminTab {
+  if (pathname.startsWith('/devices')) return 'devices';
   if (pathname.startsWith('/capabilities')) return 'capabilities';
   if (pathname.startsWith('/google')) return 'google';
-  if (pathname.startsWith('/devices')) return 'devices';
   if (pathname.startsWith('/vault')) return 'vault';
-  if (pathname.startsWith('/ops') || pathname.startsWith('/webhooks') || pathname.startsWith('/releases')) {
-    return 'ops';
-  }
+  if (pathname.startsWith('/webhooks') || pathname.startsWith('/ops')) return 'webhooks';
+  if (pathname.startsWith('/releases')) return 'releases';
   return 'providers';
 }
 
@@ -303,15 +302,15 @@ export default function App() {
           <Route path="/providers/:providerId/models" element={<Navigate to="/providers" replace />} />
           <Route path="/capabilities/:installationId" element={<Navigate to="/capabilities" replace />} />
           <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<Navigate to="/devices" replace />} />
-          <Route path="/webhooks" element={<Navigate to="/ops" replace />} />
-          <Route path="/releases" element={<Navigate to="/ops" replace />} />
+          <Route path="/ops" element={<Navigate to="/webhooks" replace />} />
           <Route path="/providers" element={readyElement} />
+          <Route path="/devices" element={readyElement} />
           <Route path="/capabilities" element={readyElement} />
           <Route path="/google" element={readyElement} />
           <Route path="/google/*" element={<Navigate to="/google" replace />} />
-          <Route path="/devices" element={readyElement} />
           <Route path="/vault" element={readyElement} />
-          <Route path="/ops" element={readyElement} />
+          <Route path="/webhooks" element={readyElement} />
+          <Route path="/releases" element={readyElement} />
           <Route path="*" element={<Navigate to="/providers" replace />} />
         </Routes>
       )}
