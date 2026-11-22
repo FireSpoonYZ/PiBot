@@ -2087,6 +2087,15 @@ a.ca-btn:focus {
     flex: 1 1 100%;
   }
 
+  .ca-section-head > .ca-inline-row {
+    width: 100%;
+  }
+
+  .ca-section-head > .ca-inline-row > .ca-select-compact {
+    flex: 1 1 160px;
+    width: auto;
+  }
+
   .ca-default-card {
     flex-direction: column;
     align-items: stretch;
@@ -2241,6 +2250,15 @@ a.ca-btn:focus {
     max-width: 100%;
     min-width: 0;
     flex: 1 1 100%;
+  }
+
+  .ca-section-head > .ca-inline-row {
+    width: 100%;
+  }
+
+  .ca-section-head > .ca-inline-row > .ca-select-compact {
+    flex: 1 1 160px;
+    width: auto;
   }
 
   .ca-default-card {

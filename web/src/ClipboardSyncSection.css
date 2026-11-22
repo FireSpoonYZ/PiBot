@@ -63,5 +63,5 @@
   color: var(--color-text, var(--text)); font-size: var(--text-sm, .86rem);
 }
 .cs-input:focus-visible { outline: 2px solid var(--color-primary, var(--brand)); outline-offset: 2px; }
-.cs-check { display: flex; align-items: flex-start; gap: 8px; font-size: var(--text-sm, .82rem); line-height: 1.45; cursor: pointer; }
+.cs-check { display: flex; align-items: flex-start; gap: 8px; font-size: var(--text-sm, .82rem); font-weight: var(--weight-regular, 400); line-height: 1.45; cursor: pointer; }
 .cs-check input { margin-top: 3px; flex: none; }

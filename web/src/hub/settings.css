@@ -190,7 +190,7 @@
 @media (pointer: coarse) {
   .hst-select-wrap select { min-height: var(--tap-min); }
 }
-.hst-select-wrap > svg { position: absolute; right: 8px; pointer-events: none; }
+.hst-select-wrap > svg { position: absolute; right: 8px; width: 14px; height: 14px; pointer-events: none; }
 
 /* 设备目录行（徽标 + 名称 + 状态 + 改名） */
 .hst-device-row {

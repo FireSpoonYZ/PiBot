@@ -12,8 +12,21 @@
 .cu-row {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2, 8px);
   padding: 10px 0 0;
+}
+
+.cu-desktop .cu-row {
+  padding-top: 0;
+}
+
+.cu-meta-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+}
+
+.cu-expand-inner {
+  padding-top: var(--space-2, 8px);
 }
 
 .cu-row + .cu-row {
@@ -102,11 +115,9 @@
   100% { transform: translateX(260%); }
 }
 
-/* 固定高度状态槽：承载进度明细、引导提示与紧凑错误，长错误不撑开布局。 */
-.cu-status-slot {
-  height: 58px;
-  min-height: 58px;
-  overflow: hidden;
+/* 状态明细文本容器（由 SmoothExpand 按需展开，空闲时不占空白高度）。 */
+.cu-status-wrap {
+  min-width: 0;
 }
 
 .cu-status-text {
@@ -135,6 +146,7 @@
   flex-wrap: wrap;
   gap: var(--space-2, 8px);
   align-items: center;
+  margin-top: var(--space-3, 12px);
   min-height: 40px;
 }
 
@@ -183,12 +195,7 @@
   to { opacity: 1; }
 }
 
-/* 更新说明开关常驻槽与用户主动展开面板。 */
-.cu-notes-slot {
-  height: 32px;
-  min-height: 32px;
-}
-
+/* 更新说明开关与用户主动展开面板（按需展开，无说明时不占空行）。 */
 .cu-notes-toggle {
   display: inline-flex;
   align-items: center;
@@ -230,11 +237,6 @@
 }
 
 @media (pointer: coarse) {
-  .cu-notes-slot {
-    height: var(--tap-min, 44px);
-    min-height: var(--tap-min, 44px);
-  }
-
   .cu-notes-toggle {
     min-height: var(--tap-min, 44px);
   }
