@@ -156,8 +156,7 @@ button:focus-visible { outline-color: var(--signal-primary); }
 .pill-button:active:not(:disabled),
 .icon-button:active:not(:disabled),
 .ui-btn:active:not(:disabled),
-.rail-item:active:not(:disabled),
-.hub-footer-action:active:not(:disabled) {
+.rail-item:active:not(:disabled) {
   transform: scale(0.97);
 }
 
@@ -1947,7 +1946,6 @@ details.raw-history > :not(summary) { margin: 0; }
   .icon-button:active:not(:disabled),
   .ui-btn:active:not(:disabled),
   .rail-item:active:not(:disabled),
-  .hub-footer-action:active:not(:disabled),
   .grok-profile-avatar-btn:active,
   .grok-edit-avatar-wrap:active,
   .grok-shape-cell:active,

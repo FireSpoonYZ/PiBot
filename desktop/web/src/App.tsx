@@ -418,10 +418,6 @@ class App extends Component<AppProps, AppState> {
     }));
   };
 
-  private openArchiveSettings = (): void => {
-    this.openSettingsView('advanced');
-  };
-
   private openCenterAdminSettings = (tab?: CenterAdminTab): void => {
     this.captureWorkspaceOpener(this.centerAdminOpenerRef.current);
     this.props.notice.dismiss('desktop-bot-deeplink');
@@ -1527,7 +1523,6 @@ class App extends Component<AppProps, AppState> {
             }}
             onArchiveBridge={this.handleArchiveBridge}
             onOpenSendRecords={this.openSendRecords}
-            onOpenArchived={this.openArchiveSettings}
             onOpenCenterAdmin={this.openCenterAdminSettings}
           />
         </div>

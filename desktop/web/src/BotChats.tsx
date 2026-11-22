@@ -5622,7 +5622,6 @@ export function BotChats({
   onSwitchView,
   onTaskWaitingCountChange,
   onOpenSendRecords,
-  onOpenArchived,
   onOpenCenterAdmin,
 }: {
   api: DesktopPanelApi;
@@ -5641,7 +5640,6 @@ export function BotChats({
   onSwitchView?: (next: 'chat' | 'tasks' | 'board') => void;
   onTaskWaitingCountChange?: (count: number) => void;
   onOpenSendRecords?: (target?: SendRecordsTarget) => void;
-  onOpenArchived?: () => void;
   onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
 }) {
   const t = useText();
@@ -7669,50 +7667,6 @@ export function BotChats({
               {groupsLoading ? <div className="status">{t('群聊加载中…', 'Loading groups…')}</div> : null}
             </>
           )}
-        </div>
-
-        <div className="hub-bottom-bar">
-          <div className="hub-footer-links">
-            {onOpenSendRecords ? (
-              <button
-                type="button"
-                className="hub-footer-action"
-                onClick={() => onOpenSendRecords()}
-                title={t('查看发送记录', 'View send records')}
-              >
-                <History size={14} aria-hidden="true" />
-                <span>{t('发送记录', 'Outbox')}</span>
-              </button>
-            ) : null}
-            {onOpenArchived ? (
-              <button
-                type="button"
-                className="hub-footer-action"
-                onClick={() => onOpenArchived()}
-                title={
-                  allArchivedBots.length > 0
-                    ? t(`已归档 Bot（${allArchivedBots.length}）`, `Archived bots (${allArchivedBots.length})`)
-                    : t('查看已归档 Bot', 'View archived bots')
-                }
-              >
-                <Archive size={14} aria-hidden="true" />
-                <span>{t('已归档', 'Archived')}</span>
-              </button>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            className="icon-button hub-footer-refresh"
-            disabled={!online || loading}
-            aria-label={t('刷新列表', 'Refresh conversation list')}
-            title={t('刷新列表', 'Refresh conversation list')}
-            onClick={() => {
-              triggerLoadBots();
-              void refreshGroups();
-            }}
-          >
-            <RefreshCw size={14} className={loading ? 'grok-spin' : undefined} aria-hidden="true" />
-          </button>
         </div>
       </aside>
 
