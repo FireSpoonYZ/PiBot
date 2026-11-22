@@ -5,6 +5,8 @@ mod clipboard_linux;
 pub mod clipboard_runtime;
 #[cfg(windows)]
 mod clipboard_windows;
+#[cfg(any(windows, target_os = "linux"))]
+mod desktop_tray;
 pub mod host_service;
 pub mod image_picker;
 pub mod pairing_code;
@@ -158,21 +160,38 @@ async fn close_browser_window(app: &AppHandle, guest_ids: Vec<String>) {
   bridge.notify_browser_window_close().await;
 }
 
+fn show_main_window(app: &AppHandle) {
+  if let Some(window) = app.get_webview_window("main") {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+  }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn quit_from_tray(app: &AppHandle) {
+  let Some(guest_ids) = browser_guest::begin_window_close(app) else {
+    return;
+  };
+  app.state::<clipboard_runtime::ClipboardRuntime>().begin_explicit_quit();
+  desktop_tray::shutdown(app);
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    close_browser_window(&app, guest_ids).await;
+    app.exit(0);
+  });
+}
+
 pub fn run() {
   let bridge = DesktopBridge::new();
   let builder = tauri::Builder::default()
     // Register single-instance first so secondary launches exit before other plugins initialize.
-    .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-      if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-      }
-    }))
+    .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main_window(app)))
     .manage(bridge)
     .manage(browser_guest::BrowserGuests::default())
     .manage(updates::UpdateState::default())
     .manage(clipboard_runtime::ClipboardRuntime::new())
+    .manage(host_service::HostStartup::default())
     .on_window_event(|window, event| {
       if window.label() != "main" {
         return;
@@ -181,7 +200,7 @@ pub fn run() {
         let app = window.app_handle();
         #[cfg(any(windows, target_os = "linux"))]
         if !app.state::<updates::UpdateState>().blocks_close_to_tray()
-          && app.state::<clipboard_runtime::ClipboardRuntime>().can_close_to_tray(app)
+          && desktop_tray::can_close_to_tray(app)
           && window.hide().is_ok()
         {
           api.prevent_close();
@@ -216,6 +235,7 @@ pub fn run() {
     .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
       browser_guest::start_watchdog(app.handle().clone());
+      host_service::start_configured_host(app.handle());
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("Pi Bot");
         window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
@@ -232,15 +252,12 @@ pub fn run() {
           })?;
         }
       }
+      #[cfg(any(windows, target_os = "linux"))]
+      if let Err(error) = desktop_tray::install(app.handle()) {
+        eprintln!("Failed to create the PiBot system tray: {error}");
+      }
       Ok(())
     });
-
-  #[cfg(any(windows, target_os = "linux"))]
-  let builder = builder.on_menu_event(|app, event| {
-    app
-      .state::<clipboard_runtime::ClipboardRuntime>()
-      .handle_tray_menu_event(app, event);
-  });
 
   let app = builder
     .invoke_handler(tauri::generate_handler![
@@ -273,6 +290,8 @@ pub fn run() {
       app_handle
         .state::<clipboard_runtime::ClipboardRuntime>()
         .shutdown(app_handle);
+      #[cfg(any(windows, target_os = "linux"))]
+      desktop_tray::shutdown(app_handle);
       app_handle.state::<DesktopBridge>().shutdown();
     }
   });

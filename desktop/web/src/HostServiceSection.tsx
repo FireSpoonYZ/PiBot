@@ -136,7 +136,9 @@ function describeHostService(
     return {
       label: t('服务已停止', 'Service stopped'),
       tone: 'warn',
-      reason: t('后台服务未在运行，本机智能体与远程任务暂时不可用，请点击「启动服务」。', 'Background service is stopped; local agents and remote tasks are unavailable. Start the service to resume.'),
+      reason: host.startupError
+        ? `${t('自动启动失败。', 'Automatic startup failed.')} ${hostErrorText(host.startupError, t)} ${t('可点击「启动服务」重试。', 'Select Start service to retry.')}`
+        : t('后台服务未在运行，本机智能体与远程任务暂时不可用，请点击「启动服务」。', 'Background service is stopped; local agents and remote tasks are unavailable. Start the service to resume.'),
       repairAction: 'start',
     };
   }
