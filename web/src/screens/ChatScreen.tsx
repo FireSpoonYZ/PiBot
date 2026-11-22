@@ -7,7 +7,6 @@ import {
   MessageSquare,
   Mic,
   MoreHorizontal,
-  Plus,
   RefreshCw,
   RotateCcw,
   Search,
@@ -21,9 +20,16 @@ import {
 import type { HostSubmission, TurnDeliveryMode } from '../native';
 import { mobileHaptic } from '../native/tauri-host';
 import { useCenterConnection } from '../native/CenterGate';
-import type { ConnectionPhase } from '../connection';
+import { ConnectionStatusPopover, type ConnectionPhase } from '../connection';
 import { useNotice } from '../notice';
 import { SmoothExpand, useBottomChromeMeasure } from '../layout';
+import {
+  ConditionDock,
+  PopoverMenu,
+  type ConditionDockItem,
+  type PopoverMenuItem,
+} from '../components/ui';
+import { ComposerPlusMenu, ComposerSlashPopover } from '../components/ComposerPopovers';
 import type { DesktopDraftEntry, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotLiveState, ImageAttachment } from '../../../host-core/index.js';
 import { isWebhookAttribution, MessageAttribution } from '../MessageAttribution';
@@ -57,6 +63,7 @@ import type {
   VaultUnlockSubmitPayload,
 } from '../ToolPresentation';
 import { CurrentGoogleSetupCard } from '../google/CurrentGoogleSetupCard';
+import { isActiveGoogleSetupPresentation } from '../google/currentGoogleSetup';
 import type { GoogleSetupPresentation } from '../google/types';
 import {
   IMAGE_MAX_COUNT,
@@ -69,6 +76,7 @@ import { humanizeError, useText } from '../ui';
 import { SendButtonIcon } from '../SendButtonIcon';
 import {
   TaskChatPromptBanner,
+  isTaskWaitingForBot,
   type BotChatTaskContextResult,
   type TaskBotOption,
 } from '../tasks';
@@ -98,6 +106,7 @@ const CHAT_COMPOSER_ERROR_NOTICE_ID = 'chat-composer-error';
 const CHAT_IMAGE_ERROR_NOTICE_ID = 'chat-image-error';
 const CHAT_TASK_ACTION_ERROR_NOTICE_ID = 'chat-task-action-error';
 const CHAT_OFFLINE_NOTICE_ID = 'chat-offline-notice';
+const EMPTY_DOCK_ITEMS: readonly ConditionDockItem[] = [];
 
 export interface ChatScreenProps {
   visible: boolean;
@@ -211,8 +220,8 @@ export interface ChatScreenProps {
   onOpenTaskDetail(taskId: string, openEdit?: boolean): void;
   onConfirmTaskPlanFromTurn(taskId: string): Promise<void>;
   onAnswerTaskPromptFromTurn(taskId: string, answer: string): Promise<void>;
-  onConfirmTaskPlanFromBanner(taskId: string): Promise<void>;
-  onAnswerTaskPromptFromBanner(taskId: string, answer: string): Promise<void>;
+  onConfirmTaskPlanFromBanner(taskId: string, expectedRevision?: number): Promise<void>;
+  onAnswerTaskPromptFromBanner(taskId: string, answer: string, expectedRevision?: number): Promise<void>;
   onClearJumpedTaskQuote(): void;
   onCycleWaitingTask(): void;
 
@@ -239,7 +248,7 @@ export interface ChatScreenProps {
   onRemoteUnconfirmed(requestId: string): void;
   onRemoteNotSent(requestId: string): void;
   onForceScrollBottom(): void;
-  pendingRemoteQuote: { seq: number; text: string } | null;
+  pendingRemoteQuote: { seq: number; text: string; mode?: 'quote' | 'append' } | null;
   onConsumedRemoteQuote(): void;
   onTaskMessageSent(rawText: string, capturedContext?: RemoteTaskContext): void;
 
@@ -429,10 +438,29 @@ export function ChatScreen({
   const t = useText();
   const centerConn = useCenterConnection();
   const { notify, dismiss } = useNotice();
-  const [connPopoverOpen, setConnPopoverOpen] = useState(false);
-  const [remoteFloatingDockEl, setRemoteFloatingDockEl] = useState<HTMLDivElement | null>(null);
+  const [remoteDockState, setRemoteDockState] = useState<{ botKey: string; items: ConditionDockItem[] }>({
+    botKey: '',
+    items: [],
+  });
+  const [googleSetupVisibleScope, setGoogleSetupVisibleScope] = useState<string | null>(null);
+  const [googleSetupTakeoverScope, setGoogleSetupTakeoverScope] = useState<string | null>(null);
+
+  const onRemoteDockItemsChange = useCallback(
+    (items: ConditionDockItem[]) => {
+      const targetKey = activeBot.key;
+      setRemoteDockState(prev => {
+        if (items.length === 0 && prev.botKey && prev.botKey !== targetKey) {
+          return prev;
+        }
+        return { botKey: targetKey, items };
+      });
+    },
+    [activeBot.key],
+  );
 
   const composerAreaRef = useRef<HTMLElement | null>(null);
+  const localComposerRowRef = useRef<HTMLDivElement | null>(null);
+  const voiceTextRef = useRef<HTMLSpanElement | null>(null);
   useBottomChromeMeasure(composerAreaRef, visible);
 
   const tRef = useRef(t);
@@ -466,21 +494,6 @@ export function ChatScreen({
   useEffect(() => () => {
     cancelBubbleLongPress();
   }, [cancelBubbleLongPress]);
-
-  useEffect(() => {
-    if (!visible || connectionPhase === 'online' || chatSearchOpen || chatTopMenuOpen) {
-      setConnPopoverOpen(false);
-    }
-  }, [visible, connectionPhase, chatSearchOpen, chatTopMenuOpen]);
-
-  useEffect(() => {
-    if (!connPopoverOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConnPopoverOpen(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverOpen]);
 
   // C7: conn 系统提示走 F1 浮层通知，不插入消息流。
   useEffect(() => {
@@ -575,10 +588,19 @@ export function ChatScreen({
     });
   }, [activeImageError, activeBot.key, notify, dismiss]);
 
-  // C6: 任务联动动作失败走 F1 浮层，保留「仅重试任务动作」操作。
-  const taskFailureKey = `${taskScopeKey}|${activeBot.deviceId}:${activeBot.botId}`;
-  const taskFailure = visible ? taskActionFailures[taskFailureKey] : undefined;
-  const isRetryingTaskFailure = retryingTaskActionKey === taskFailureKey;
+  // C6: 任务联动动作失败走 F1 浮层，保留「仅重试任务动作」操作并支持同 Bot 多条未解失败队列。
+  const taskFailurePrefix = `${taskScopeKey}|${activeBot.deviceId}:${activeBot.botId}`;
+  const botTaskFailureEntries = useMemo(() => {
+    if (!visible || activeBot.archivedAt) return [] as Array<[string, PendingTaskChatAction]>;
+    return Object.entries(taskActionFailures).filter(
+      ([key]) => key === taskFailurePrefix || key.startsWith(`${taskFailurePrefix}|`),
+    );
+  }, [visible, activeBot.archivedAt, taskActionFailures, taskFailurePrefix]);
+  const activeTaskFailureEntry = botTaskFailureEntries[0];
+  const activeTaskFailureKey = activeTaskFailureEntry?.[0] ?? null;
+  const taskFailure = activeTaskFailureEntry?.[1];
+  const totalTaskFailures = botTaskFailureEntries.length;
+  const isRetryingTaskFailure = Boolean(activeTaskFailureKey && retryingTaskActionKey === activeTaskFailureKey);
   const taskFailureRef = useRef(taskFailure);
   taskFailureRef.current = taskFailure;
 
@@ -588,12 +610,13 @@ export function ChatScreen({
       return;
     }
     const t = tRef.current;
-    const title =
+    const baseTitle =
       taskFailure.kind === 'answer_prompt'
         ? t(`任务「${taskFailure.taskTitle}」澄清答复未同步`, `Clarification sync failed for "${taskFailure.taskTitle}"`)
         : taskFailure.kind === 'confirm_plan'
           ? t(`任务「${taskFailure.taskTitle}」确认计划失败`, `Plan confirmation failed for "${taskFailure.taskTitle}"`)
           : t(`任务「${taskFailure.taskTitle}」任务备注未同步`, `Task note sync failed for "${taskFailure.taskTitle}"`);
+    const title = totalTaskFailures > 1 ? `${baseTitle} (1/${totalTaskFailures})` : baseTitle;
     const detail =
       taskFailure.kind === 'confirm_plan'
         ? taskFailure.error
@@ -614,10 +637,12 @@ export function ChatScreen({
       },
     });
   }, [
+    activeTaskFailureKey,
     taskFailure?.kind,
     taskFailure?.taskId,
     taskFailure?.taskTitle,
     taskFailure?.error,
+    totalTaskFailures,
     isRetryingTaskFailure,
     activeBot.key,
     notify,
@@ -661,6 +686,13 @@ export function ChatScreen({
   const isVoiceActive = Boolean(voiceCapturing);
   const isLocalVoiceActive = Boolean(voiceCapturing && voiceCapturing.botId === activeBot.botId);
 
+  useEffect(() => {
+    if (!isLocalVoiceActive) return;
+    const el = voiceTextRef.current;
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth;
+  }, [isLocalVoiceActive, voicePartialText]);
+
   // D2 + C7: admission 失败与 clear 提示放进常驻 44px GrokBotWorkingSlot 槽内就地淡入淡出。
   const workingSlotNotice = useMemo<GrokWorkingSlotNotice | null>(() => {
     if (chatStatusKind === 'admission') {
@@ -668,10 +700,19 @@ export function ChatScreen({
       if (!text.trim()) return null;
       const actions: GrokWorkingSlotNoticeAction[] = [];
       if (chatTurnAdmission?.phase === 'failed') {
-        actions.push({
-          label: t('重试发送', 'Retry sending'),
-          onClick: activeBot.hostKind === 'local' ? onRetryAdmission : onRetryRemoteAdmission,
-        });
+        const canRetryAdmission = Boolean(
+          chatPending &&
+            chatPending.botKey === activeBot.key &&
+            chatPending.requestId &&
+            (!chatTurnAdmission.requestId || chatPending.requestId === chatTurnAdmission.requestId),
+        );
+        if (canRetryAdmission) {
+          actions.push({
+            label: action.busy ? t('重试中…', 'Retrying…') : t('重试发送', 'Retry sending'),
+            disabled: action.busy || isStoppingBot || queueActionBusy,
+            onClick: activeBot.hostKind === 'local' ? onRetryAdmission : onRetryRemoteAdmission,
+          });
+        }
         if (chatTurnAdmission.error?.code === 'MODEL_NO_VISION') {
           actions.push({
             label: t('模型设置', 'Model Settings'),
@@ -711,6 +752,8 @@ export function ChatScreen({
     chatStatusKind,
     chatAdmissionText,
     chatTurnAdmission,
+    chatPending,
+    action.busy,
     clearNotice,
     activeBot,
     onRetryAdmission,
@@ -742,39 +785,354 @@ export function ChatScreen({
         ? ' is-warn'
         : '';
 
-  const connStatusLabel =
-    connectionPhase === 'connecting'
-      ? t('连接中…', 'Connecting…')
-      : connectionPhase === 'offline'
-        ? t('离线', 'Offline')
-        : t('连接异常', 'Connection issue');
-
-  const connPopoverHeading =
-    connectionPhase === 'connecting'
-      ? (ipcReconnecting ? t('正在恢复本地服务…', 'Reconnecting local service…') : t('正在恢复连接…', 'Reconnecting…'))
-      : connectionPhase === 'offline'
-        ? t('与中心未连接', 'Disconnected from center')
-        : t('中心连接异常', 'Center connection issue');
-
-  const connPopoverDescription =
-    connectionDetail.trim() ||
-    (connectionPhase === 'connecting'
-      ? t('正在恢复中心与设备连接，请稍候。', 'Restoring center and device connection.')
-      : connectionPhase === 'offline'
-        ? t('当前与中心未连接，远端消息将在恢复后自动同步。', 'Disconnected from center; remote messages will sync once reconnected.')
-        : t('中心连接异常，请前往设置检查连接配置。', 'Center connection error; open Settings to check your configuration.'));
-
   const showSkeletonState = visibleTurns.length === 0 && chatHistoryLoading && !displayGeneratingText;
   const showSearchEmptyState = visibleTurns.length === 0 && !showSkeletonState && chatSearchActive;
   const showBotEmptyState = visibleTurns.length === 0 && !showSkeletonState && !chatSearchActive && !displayGeneratingText;
   const showEmptyOverlay = showSkeletonState || showSearchEmptyState || showBotEmptyState;
 
-  const showBrowserStrip = Boolean(browserTakeoverHint && onOpenBrowser);
+  const isArchived = Boolean(activeBot.archivedAt);
+  const activeRemoteDockItems =
+    !isArchived && isRemoteComposer && remoteDockState.botKey === activeBot.key
+      ? remoteDockState.items
+      : EMPTY_DOCK_ITEMS;
+  const hasActiveGoogleSetup = Boolean(
+    !isArchived && isActiveGoogleSetupPresentation(currentGoogleSetup) && googleContext,
+  );
+  const googleSetupKey = hasActiveGoogleSetup
+    ? `${activeBot.key}:${toolScopeKey}:${currentGoogleSetup?.runId ?? ''}`
+    : '';
+  const isGoogleSetupReady = Boolean(googleSetupKey && googleSetupVisibleScope === googleSetupKey);
+  const isGoogleSetupShowingTakeover = Boolean(
+    googleSetupKey && googleSetupTakeoverScope === googleSetupKey,
+  );
+  const showBrowserStrip = Boolean(
+    !isArchived &&
+      botPanelConnected &&
+      browserTakeoverHint &&
+      onOpenBrowser &&
+      !isGoogleSetupShowingTakeover,
+  );
   const showLocalQueueStrip =
-    !activeBot.archivedAt &&
+    !isArchived &&
     !isRemoteComposer &&
     !activeEditing &&
     localQueuedStripItems.length > 0;
+  const hasTaskPrompt = Boolean(
+    !isArchived &&
+      activeBotBannerTask &&
+      isTaskWaitingForBot(activeBotBannerTask, activeBot.deviceId, activeBot.botId) &&
+      activeBotBannerTask.pendingPrompt,
+  );
+  const hasTaskQuote = !isArchived && !hasTaskPrompt && Boolean(activeBotTaskContext.showQuoteStrip && activeBotBannerTask);
+
+  const chatTopMenuItems = useMemo<PopoverMenuItem[]>(() => {
+    const items: PopoverMenuItem[] = [
+      {
+        key: 'profile',
+        label: t('查看资料', 'View Profile'),
+        icon: <User size={18} aria-hidden="true" />,
+        onSelect: () => onOpenBotProfile(activeBot),
+      },
+      {
+        key: 'dms',
+        label: t('查看 Bot 私聊', 'View Bot DMs'),
+        icon: <MessageSquare size={18} aria-hidden="true" />,
+        onSelect: () => onOpenBotDmList(activeBot),
+      },
+    ];
+    if (onOpenBrowser) {
+      items.push({
+        key: 'browser',
+        label: t('Bot 浏览器', 'Bot Browser'),
+        icon: <Globe size={18} aria-hidden="true" />,
+        onSelect: () => onOpenBrowser(),
+      });
+    }
+    items.push({
+      key: 'search',
+      label: t('在聊天中查找', 'Search in Chat'),
+      icon: <Search size={18} aria-hidden="true" />,
+      onSelect: () => onToggleChatSearch(),
+    });
+    if (!activeBot.isPrimary && !activeBot.archivedAt) {
+      items.push({
+        key: 'primary',
+        label: t('设为主 Bot', 'Set as Primary Bot'),
+        icon: <Star size={18} aria-hidden="true" />,
+        onSelect: () => onSetPrimaryBot(activeBot),
+      });
+      items.push({
+        key: 'archive',
+        label: t('归档 Bot', 'Archive Bot'),
+        icon: <Archive size={18} aria-hidden="true" />,
+        onSelect: () => onRequestArchiveBot(activeBot),
+      });
+    }
+    if (Boolean(activeBot.archivedAt)) {
+      items.push({
+        key: 'unarchive',
+        label: t('恢复 Bot', 'Unarchive Bot'),
+        icon: <RotateCcw size={18} aria-hidden="true" />,
+        onSelect: () => onUnarchiveBot(activeBot),
+      });
+    }
+    if (!activeBot.isPrimary) {
+      items.push({
+        key: 'delete',
+        label: t('永久删除 Bot', 'Permanently Delete Bot'),
+        icon: <Trash2 size={18} aria-hidden="true" />,
+        danger: true,
+        onSelect: () => onRequestDeleteBot(activeBot),
+      });
+    }
+    if (!activeBot.archivedAt) {
+      items.push({
+        key: 'clear',
+        label: t('清空当前对话', 'Clear History'),
+        icon: <Trash2 size={18} aria-hidden="true" />,
+        danger: true,
+        separatorBefore: true,
+        onSelect: () => onOpenClearConfirm(),
+      });
+    }
+    return items;
+  }, [
+    activeBot,
+    onOpenBotProfile,
+    onOpenBotDmList,
+    onOpenBrowser,
+    onToggleChatSearch,
+    onSetPrimaryBot,
+    onRequestArchiveBot,
+    onUnarchiveBot,
+    onRequestDeleteBot,
+    onOpenClearConfirm,
+    t,
+  ]);
+
+  const dockItems = useMemo<ConditionDockItem[]>(() => {
+    if (isArchived) return [];
+    const items: ConditionDockItem[] = [];
+
+    if (activeRemoteDockItems.length > 0) {
+      items.push(...activeRemoteDockItems);
+    }
+
+    if (showBrowserStrip && onOpenBrowser && browserTakeoverHint) {
+      items.push({
+        id: 'browser-takeover',
+        priority: 85,
+        tone: 'attention',
+        label: t('浏览器接管', 'Browser takeover'),
+        defaultExpanded: true,
+        render: () => (
+          <button
+            type="button"
+            className="gws-browser-strip"
+            onClick={onOpenBrowser}
+            aria-label={t('打开 Bot 浏览器接管页面', 'Open Bot browser to take over')}
+          >
+            <span className="gws-browser-strip-left">
+              <Globe size={16} aria-hidden="true" />
+              <span>{browserTakeoverHint}</span>
+            </span>
+            <ChevronUp size={16} aria-hidden="true" />
+          </button>
+        ),
+      });
+    }
+
+    if (hasTaskPrompt && activeBotBannerTask?.pendingPrompt) {
+      const promptKind = activeBotBannerTask.pendingPrompt.kind;
+      items.push({
+        id: 'task-prompt',
+        priority: 80,
+        tone: 'attention',
+        label: promptKind === 'plan' ? t('待确认安排', 'Confirm plan') : t('待你回应', 'Awaiting reply'),
+        badge:
+          activeBotTaskContext.waitingTasks.length > 1
+            ? `${activeBotTaskContext.waitingIndex + 1}/${activeBotTaskContext.waitingTasks.length}`
+            : undefined,
+        defaultExpanded: true,
+        render: () => (
+          <TaskChatPromptBanner
+            variant="mobile"
+            embeddedInDock
+            botDeviceId={activeBot.deviceId}
+            botId={activeBot.botId}
+            task={activeBotBannerTask}
+            focusedStep={activeBotFocusedStep}
+            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
+            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
+            waitingTaskIndex={activeBotTaskContext.waitingIndex}
+            bots={taskBotOptions}
+            busy={taskBannerBusy}
+            onClearQuote={onClearJumpedTaskQuote}
+            onCycleWaitingTask={onCycleWaitingTask}
+            onConfirmPlan={onConfirmTaskPlanFromBanner}
+            onOpenTaskDetail={onOpenTaskDetail}
+            onAnswerPrompt={onAnswerTaskPromptFromBanner}
+          />
+        ),
+      });
+    }
+
+    if (hasActiveGoogleSetup) {
+      items.push({
+        id: 'google-setup',
+        priority: 60,
+        tone:
+          isGoogleSetupShowingTakeover || currentGoogleSetup?.state === 'failed'
+            ? 'attention'
+            : 'info',
+        label: t('Google 配置', 'Google setup'),
+        defaultExpanded: true,
+        hidden: !isGoogleSetupReady,
+        render: () => (
+          <CurrentGoogleSetupCard
+            active={visible}
+            embeddedInDock
+            hostRevision={effectiveChatLive?.googleSetupRevision}
+            scopeKey={toolScopeKey}
+            presentation={currentGoogleSetup}
+            googleContext={googleContext}
+            disabled={isArchived || !botPanelConnected}
+            onVisibleChange={nextVisible => {
+              setGoogleSetupVisibleScope(prev => {
+                if (nextVisible) return googleSetupKey;
+                return prev === googleSetupKey ? null : prev;
+              });
+            }}
+            onBrowserTakeoverActiveChange={nextTakeover => {
+              setGoogleSetupTakeoverScope(prev => {
+                if (nextTakeover) return googleSetupKey;
+                return prev === googleSetupKey ? null : prev;
+              });
+            }}
+          />
+        ),
+      });
+    }
+
+    if (activeEditing) {
+      items.push({
+        id: 'edit-turn',
+        priority: 45,
+        tone: 'info',
+        label: t('编辑消息', 'Editing'),
+        collapsible: false,
+        render: () => (
+          <ComposerEditBanner
+            disabled={editSubmitting || !activeEditing}
+            onCancel={onCancelEditTurn}
+            tr={t}
+          />
+        ),
+      });
+    }
+
+    if (showLocalQueueStrip) {
+      items.push({
+        id: 'local-queue',
+        priority: 30,
+        tone: 'neutral',
+        label: t('排队消息', 'Queue'),
+        badge: localQueuedStripItems.length,
+        defaultExpanded: true,
+        render: () => (
+          <PendingQueueStrip
+            items={localQueuedStripItems}
+            disabled={queueActionBusy || isStoppingBot}
+            canSteer={canSteerLocal}
+            onRecall={item => onRecallLocalQueuedItem(item, true)}
+            onRecallAll={onRecallAllLocalQueued}
+            onDiscard={item => onRecallLocalQueuedItem(item, false)}
+            onSteer={canSteerLocal ? onSteerLocalQueuedItem : undefined}
+            tr={t}
+          />
+        ),
+      });
+    }
+
+    if (hasTaskQuote && activeBotBannerTask) {
+      items.push({
+        id: 'task-quote',
+        priority: 10,
+        tone: 'neutral',
+        label: t('关联任务', 'Linked task'),
+        defaultExpanded: true,
+        render: () => (
+          <TaskChatPromptBanner
+            variant="mobile"
+            embeddedInDock
+            botDeviceId={activeBot.deviceId}
+            botId={activeBot.botId}
+            task={activeBotBannerTask}
+            focusedStep={activeBotFocusedStep}
+            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
+            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
+            waitingTaskIndex={activeBotTaskContext.waitingIndex}
+            bots={taskBotOptions}
+            busy={taskBannerBusy}
+            onClearQuote={onClearJumpedTaskQuote}
+            onCycleWaitingTask={onCycleWaitingTask}
+            onConfirmPlan={onConfirmTaskPlanFromBanner}
+            onOpenTaskDetail={onOpenTaskDetail}
+            onAnswerPrompt={onAnswerTaskPromptFromBanner}
+          />
+        ),
+      });
+    }
+
+    return items;
+  }, [
+    isArchived,
+    activeRemoteDockItems,
+    showBrowserStrip,
+    onOpenBrowser,
+    browserTakeoverHint,
+    hasTaskPrompt,
+    hasTaskQuote,
+    activeBot.deviceId,
+    activeBot.botId,
+    activeBotBannerTask,
+    activeBotFocusedStep,
+    activeBotTaskContext.showQuoteStrip,
+    activeBotTaskContext.waitingTasks.length,
+    activeBotTaskContext.waitingIndex,
+    taskBotOptions,
+    taskBannerBusy,
+    onClearJumpedTaskQuote,
+    onCycleWaitingTask,
+    onConfirmTaskPlanFromBanner,
+    onOpenTaskDetail,
+    onAnswerTaskPromptFromBanner,
+    hasActiveGoogleSetup,
+    googleSetupKey,
+    isGoogleSetupReady,
+    isGoogleSetupShowingTakeover,
+    visible,
+    effectiveChatLive?.googleSetupRevision,
+    toolScopeKey,
+    currentGoogleSetup,
+    googleContext,
+    botPanelConnected,
+    activeEditing,
+    editSubmitting,
+    onCancelEditTurn,
+    showLocalQueueStrip,
+    localQueuedStripItems,
+    queueActionBusy,
+    isStoppingBot,
+    canSteerLocal,
+    onRecallLocalQueuedItem,
+    onRecallAllLocalQueued,
+    onSteerLocalQueuedItem,
+    t,
+  ]);
+
+  const voiceOnlyMessage = t('语音输入仅支持本机 Bot', 'Voice input is only available for local Bots');
+  const remoteDisconnectedImageMessage = t('远端服务未连接，暂不可发送图片', 'Remote host disconnected; image upload unavailable');
 
   return (
     <main
@@ -782,7 +1140,7 @@ export function ChatScreen({
       aria-hidden={!visible || undefined}
       style={visible ? undefined : { display: 'none' }}
     >
-      {/* Floating Top Header Bar (D1 fixed-height status slot + C7 in-place search) */}
+      {/* Floating Top Header Bar: single 44px identity trigger + ConnectionStatusPopover + PopoverMenu */}
       <header className="grok-chat-floating-header">
         <button
           type="button"
@@ -790,7 +1148,7 @@ export function ChatScreen({
           aria-label={t('返回', 'Back')}
           onClick={onBack}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
 
         {chatSearchOpen ? (
@@ -805,7 +1163,7 @@ export function ChatScreen({
               autoFocus
             />
             {chatSearchActive ? (
-              <span className="grok-chat-header-search-count" aria-live="polite">
+              <span className="grok-chat-header-search-count tabular-nums" aria-live="polite">
                 {t(`${visibleTurns.length} 条`, `${visibleTurns.length}`)}
               </span>
             ) : null}
@@ -819,12 +1177,12 @@ export function ChatScreen({
             </button>
           </div>
         ) : (
-          <div className="grok-chat-center-pill">
+          <>
             <button
               type="button"
-              className="grok-chat-pill-avatar-btn"
+              className="grok-chat-center-pill grok-chat-identity-btn"
               onClick={() => onOpenBotProfile(activeBot)}
-              aria-label={t('查看 Bot 资料与设定', 'View Bot profile & settings')}
+              aria-label={t(`查看 ${activeBot.role} 资料与设定`, `View ${activeBot.role} profile & settings`)}
             >
               <GrokBotAvatar
                 preset={activeBotPreset}
@@ -834,214 +1192,53 @@ export function ChatScreen({
                 offline={activeBot.online === false}
                 size={28}
               />
-            </button>
-            <div className="grok-chat-pill-meta">
-              <button
-                type="button"
-                className="grok-chat-pill-name-btn"
-                onClick={() => onOpenBotProfile(activeBot)}
-                aria-label={t('查看 Bot 资料与设定', 'View Bot profile & settings')}
-              >
+              <span className="grok-chat-pill-meta">
                 <span className="grok-chat-pill-name">{activeBot.role}</span>
-              </button>
-              <div className="grok-chat-pill-sub-slot">
-                {connectionPhase !== 'online' ? (
-                  <button
-                    type="button"
-                    className={`grok-chat-pill-sub is-conn-trigger is-${connectionPhase}`}
-                    aria-haspopup="dialog"
-                    aria-expanded={connPopoverOpen}
-                    aria-label={`${connStatusLabel} - ${t('查看连接详情', 'View connection details')}`}
-                    onClick={() => {
-                      if (chatTopMenuOpen) onCloseChatTopMenu();
-                      setConnPopoverOpen(v => !v);
-                    }}
-                  >
-                    {connectionPhase === 'connecting' ? (
-                      <RefreshCw size={11} className="hub-top-status-spin" aria-hidden="true" />
-                    ) : (
-                      <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
-                    )}
-                    <span className="grok-chat-pill-sub-text">{connStatusLabel}</span>
-                  </button>
-                ) : normalSubtitle ? (
-                  <button
-                    type="button"
-                    className={`grok-chat-pill-sub${normalSubtitleToneClass}`}
-                    onClick={() => onOpenBotProfile(activeBot)}
-                  >
+                {normalSubtitle ? (
+                  <span className={`grok-chat-pill-sub${normalSubtitleToneClass}`}>
                     <span className="grok-chat-pill-sub-text">{normalSubtitle}</span>
-                  </button>
-                ) : (
-                  <span className="grok-chat-pill-sub is-empty" aria-hidden="true">&nbsp;</span>
-                )}
-              </div>
-            </div>
-          </div>
+                  </span>
+                ) : null}
+              </span>
+            </button>
+
+            <ConnectionStatusPopover
+              phase={connectionPhase}
+              reason={connectionDetail.trim() || centerConn.error.trim() || null}
+              compact
+              align="end"
+              side="bottom"
+              onRetry={onRetryConnection}
+              retrying={ipcReconnecting}
+              onOpenSettings={onOpenCenterSettings}
+            />
+          </>
         )}
 
-        <button
-          type="button"
-          className="grok-floating-circle-btn grok-chat-header-more"
-          aria-label={t('更多选项', 'More options')}
-          aria-expanded={chatTopMenuOpen}
-          onClick={() => {
-            setConnPopoverOpen(false);
-            onToggleChatTopMenu();
+        <PopoverMenu
+          open={chatTopMenuOpen}
+          onOpenChange={next => {
+            if (next) {
+              if (!chatTopMenuOpen) onToggleChatTopMenu();
+            } else if (chatTopMenuOpen) {
+              onCloseChatTopMenu();
+            }
           }}
-        >
-          <MoreHorizontal size={20} />
-        </button>
-
-        {connPopoverOpen && connectionPhase !== 'online' && !chatSearchOpen && (
-          <>
-            <div className="grok-menu-backdrop" onClick={() => setConnPopoverOpen(false)} />
-            <div
-              className="hub-conn-popover"
-              role="dialog"
-              aria-label={t('连接状态详情', 'Connection status details')}
+          align="end"
+          side="bottom"
+          ariaLabel={t('更多选项', 'More options')}
+          items={chatTopMenuItems}
+          trigger={({ triggerProps }) => (
+            <button
+              {...triggerProps}
+              type="button"
+              className="grok-floating-circle-btn grok-chat-header-more"
+              aria-label={t('更多选项', 'More options')}
             >
-              <div className={`hub-conn-popover-head is-${connectionPhase}`}>
-                {connectionPhase === 'connecting' ? (
-                  <RefreshCw size={15} className="hub-top-status-spin" aria-hidden="true" />
-                ) : (
-                  <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
-                )}
-                <span>{connPopoverHeading}</span>
-              </div>
-              <p className="hub-conn-popover-desc">{connPopoverDescription}</p>
-              <div className="hub-conn-popover-actions">
-                <button
-                  type="button"
-                  className="hub-conn-popover-btn"
-                  onClick={() => {
-                    setConnPopoverOpen(false);
-                    onRetryConnection();
-                  }}
-                >
-                  {t('立即重试', 'Retry now')}
-                </button>
-                <button
-                  type="button"
-                  className="hub-conn-popover-btn is-primary"
-                  onClick={() => {
-                    setConnPopoverOpen(false);
-                    onOpenCenterSettings();
-                  }}
-                >
-                  {t('去设置', 'Settings')}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Dropdown Menu Card */}
-        {chatTopMenuOpen && (
-          <>
-            <div className="grok-menu-backdrop" onClick={onCloseChatTopMenu} />
-            <div className="grok-floating-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => onOpenBotProfile(activeBot)}
-              >
-                <User size={19} />
-                <span>{t('查看资料', 'View Profile')}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => onOpenBotDmList(activeBot)}
-              >
-                <MessageSquare size={19} />
-                <span>{t('查看 Bot 私聊', 'View Bot DMs')}</span>
-              </button>
-              {onOpenBrowser ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseChatTopMenu();
-                    onOpenBrowser();
-                  }}
-                >
-                  <Globe size={19} />
-                  <span>{t('Bot 浏览器', 'Bot Browser')}</span>
-                </button>
-              ) : null}
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  onCloseChatTopMenu();
-                  onToggleChatSearch();
-                }}
-              >
-                <Search size={19} />
-                <span>{t('在聊天中查找', 'Search in Chat')}</span>
-              </button>
-              {!activeBot.isPrimary && !activeBot.archivedAt && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onSetPrimaryBot(activeBot)}
-                >
-                  <Star size={19} />
-                  <span>{t('设为主 Bot', 'Set as Primary Bot')}</span>
-                </button>
-              )}
-              {!activeBot.isPrimary && !activeBot.archivedAt && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onRequestArchiveBot(activeBot)}
-                >
-                  <Archive size={19} />
-                  <span>{t('归档 Bot', 'Archive Bot')}</span>
-                </button>
-              )}
-              {Boolean(activeBot.archivedAt) && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onUnarchiveBot(activeBot)}
-                >
-                  <RotateCcw size={19} />
-                  <span>{t('恢复 Bot', 'Unarchive Bot')}</span>
-                </button>
-              )}
-              {!activeBot.isPrimary && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="danger"
-                  onClick={() => onRequestDeleteBot(activeBot)}
-                >
-                  <Trash2 size={19} />
-                  <span>{t('永久删除 Bot', 'Permanently Delete Bot')}</span>
-                </button>
-              )}
-              {!activeBot.archivedAt && (
-                <>
-                  <div className="grok-menu-separator" role="separator" />
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="danger"
-                    onClick={() => {
-                      onCloseChatTopMenu();
-                      onOpenClearConfirm();
-                    }}
-                  >
-                    <Trash2 size={19} />
-                    <span>{t('清空当前对话', 'Clear History')}</span>
-                  </button>
-                </>
-              )}
-            </div>
-          </>
-        )}
+              <MoreHorizontal size={20} aria-hidden="true" />
+            </button>
+          )}
+        />
       </header>
 
       <section
@@ -1053,7 +1250,6 @@ export function ChatScreen({
         onClick={() => {
           if (composerMenuOpen) onCloseComposerMenu();
           if (chatTopMenuOpen) onCloseChatTopMenu();
-          if (connPopoverOpen) setConnPopoverOpen(false);
         }}
       >
         {/* C7: 骨架屏、搜索无结果与空态统一放在同一绝对定位层内交叉淡入淡出，零布局位移 */}
@@ -1197,7 +1393,7 @@ export function ChatScreen({
                                   collapseOutput={collapseToolOutput}
                                   presentationOnly={hideToolOutput}
                                   scopeKey={toolScopeKey}
-                                  active={isBotBusy}
+                                  active={isBotBusy && !activeBot.archivedAt}
                                   disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
                                   googleContext={googleContext}
                                   onSubmitQuestionnaire={onSubmitQuestionnaire}
@@ -1225,7 +1421,7 @@ export function ChatScreen({
                                   collapseOutput={collapseToolOutput}
                                   presentationOnly={hideToolOutput}
                                   scopeKey={toolScopeKey}
-                                  active={isBotBusy}
+                                  active={isBotBusy && !activeBot.archivedAt}
                                   disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
                                   googleContext={googleContext}
                                   onSubmitQuestionnaire={onSubmitQuestionnaire}
@@ -1299,7 +1495,7 @@ export function ChatScreen({
       </section>
 
       <footer ref={composerAreaRef} className="grok-chat-composer-area">
-        {/* C6 + C7: 统一浮层停靠栈（跳回最新、浏览器接管、远端草稿/冲突/排队、本机排队、任务提示），零流内位移且互不遮挡 */}
+        {/* Floating jump-to-latest pill when scrolled away from bottom */}
         <div className="grok-composer-floating-dock">
           {chatHasNewContent && !chatSearchOpen ? (
             <div className="bot-chat-jump-anchor">
@@ -1314,63 +1510,13 @@ export function ChatScreen({
               </button>
             </div>
           ) : null}
-          {showBrowserStrip && onOpenBrowser ? (
-            <button
-              type="button"
-              className="gws-browser-strip"
-              onClick={onOpenBrowser}
-              aria-label={t('打开 Bot 浏览器接管页面', 'Open Bot browser to take over')}
-            >
-              <span className="gws-browser-strip-left">
-                <Globe size={16} aria-hidden="true" />
-                <span>{browserTakeoverHint}</span>
-              </span>
-              <ChevronUp size={16} aria-hidden="true" />
-            </button>
-          ) : null}
-          <div ref={setRemoteFloatingDockEl} className="grok-composer-floating-slot" />
-          {showLocalQueueStrip ? (
-            <PendingQueueStrip
-              items={localQueuedStripItems}
-              disabled={queueActionBusy || isStoppingBot}
-              canSteer={canSteerLocal}
-              onRecall={item => onRecallLocalQueuedItem(item, true)}
-              onRecallAll={onRecallAllLocalQueued}
-              onDiscard={item => onRecallLocalQueuedItem(item, false)}
-              onSteer={canSteerLocal ? onSteerLocalQueuedItem : undefined}
-              tr={t}
-            />
-          ) : null}
-          <TaskChatPromptBanner
-            variant="mobile"
-            botDeviceId={activeBot.deviceId}
-            botId={activeBot.botId}
-            task={activeBotBannerTask}
-            focusedStep={activeBotFocusedStep}
-            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
-            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
-            waitingTaskIndex={activeBotTaskContext.waitingIndex}
-            bots={taskBotOptions}
-            busy={taskBannerBusy}
-            onClearQuote={onClearJumpedTaskQuote}
-            onCycleWaitingTask={onCycleWaitingTask}
-            onConfirmPlan={onConfirmTaskPlanFromBanner}
-            onOpenTaskDetail={onOpenTaskDetail}
-            onAnswerPrompt={onAnswerTaskPromptFromBanner}
-          />
         </div>
 
-        <CurrentGoogleSetupCard
-          active={visible}
-          hostRevision={effectiveChatLive?.googleSetupRevision}
-          scopeKey={toolScopeKey}
-          presentation={currentGoogleSetup}
-          googleContext={googleContext}
-          disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
-        />
+        {/* Unified priority-ordered ConditionDock above composer */}
+        <ConditionDock key={activeBot.key} items={dockItems} className="chat-condition-dock" />
 
         {activeBot.archivedAt ? (
-          <div className="grok-card-group composer-archived-banner">
+          <div className="grok-card-group composer-archived-banner" role="status">
             <span className="composer-archived-banner-text">
               {t(`该 Bot 已归档（14 天保留期剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天），当前为只读历史`, `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d left of 14d retention) · Read-only history`)}
             </span>
@@ -1442,97 +1588,21 @@ export function ChatScreen({
               prefix: activeBotTaskContext.taskPrefix,
             }}
             onTaskMessageSent={onTaskMessageSent}
-            floatingDockContainer={remoteFloatingDockEl}
+            onDockItemsChange={onRemoteDockItemsChange}
+            hideInlineEditBanner
           />
         ) : (
           <>
-            {slash.open && (
-              <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
-                {slash.matches.map((command, index) => (
-                  <div
-                    key={command.name}
-                    {...slash.optionProps(index)}
-                    className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
-                  >
-                    <code>{command.name}</code>
-                    <span>{t(command.zh, command.en)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {composerMenuOpen && (
-              <div className="bot-plus-popover" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
-                  aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
-                  disabled={activeBot.hostKind !== 'remote' && (!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading)}
-                  onClick={() => {
-                    onCloseComposerMenu();
-                    if (activeBot.hostKind === 'remote') {
-                      onShowOfflineNotice(t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'));
-                      return;
-                    }
-                    onPickLocalImages('photos');
-                  }}
-                >
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <rect x="3" y="5" width="18" height="14" rx="2" />
-                    <circle cx="8.5" cy="10.5" r="1.5" />
-                    <path d="m21 15-4.5-4.5L9 18" />
-                  </svg>
-                  <span>{t('选择图片', 'Choose image')}</span>
-                </button>
-                {inTauriUi && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
-                    aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
-                    disabled={activeBot.hostKind !== 'remote' && (!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading)}
-                    onClick={() => {
-                      onCloseComposerMenu();
-                      if (activeBot.hostKind === 'remote') {
-                        onShowOfflineNotice(t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'));
-                        return;
-                      }
-                      onPickLocalImages('camera');
-                    }}
-                  >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                      <circle cx="12" cy="13" r="4" />
-                    </svg>
-                    <span>{t('拍照', 'Camera')}</span>
-                  </button>
-                )}
-                <div className="composer-menu-separator" role="separator" aria-hidden="true" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="danger"
-                  disabled={Boolean(activeEditing)}
-                  onClick={() => {
-                    onCloseComposerMenu();
-                    onOpenClearConfirm();
-                  }}
-                >
-                  <Trash2 size={18} />
-                  <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
-                </button>
-              </div>
-            )}
-
-            {/* C6: 用户主动操作引起的条带保留在文档流内并包一层 SmoothExpand 做平滑高度过渡 */}
-            <SmoothExpand open={Boolean(activeEditing)}>
-              <ComposerEditBanner
-                disabled={editSubmitting || !activeEditing}
-                onCancel={onCancelEditTurn}
-                tr={t}
-              />
-            </SmoothExpand>
+            <ComposerSlashPopover
+              open={slash.open}
+              query={effectiveLocalDraft}
+              listboxId={slash.listboxId}
+              matches={slash.matches}
+              activeIndex={slash.activeIndex}
+              optionProps={slash.optionProps}
+              anchorRef={localComposerRowRef}
+              returnFocusRef={composerTextareaRef}
+            />
 
             <SmoothExpand open={effectiveLocalAttachments.length > 0}>
               {effectiveLocalAttachments.length > 0 ? (
@@ -1566,25 +1636,50 @@ export function ChatScreen({
                     <span className="composer-voice-bar-col" />
                     <span className="composer-voice-bar-col" />
                   </span>
-                  <span className={`composer-voice-text${voicePartialText ? '' : ' is-placeholder'}`}>
+                  <span
+                    ref={voiceTextRef}
+                    className={`composer-voice-text${voicePartialText ? '' : ' is-placeholder'}`}
+                  >
                     {voicePartialText || t('正在聆听…', 'Listening…')}
                   </span>
+                  <button
+                    type="button"
+                    className="composer-voice-stop-btn"
+                    aria-label={t('停止语音输入', 'Stop voice input')}
+                    onClick={onToggleVoiceCapture}
+                  >
+                    <Square size={14} aria-hidden="true" />
+                    <span>{t('停止', 'Stop')}</span>
+                  </button>
                 </div>
               ) : null}
             </SmoothExpand>
 
-            <div className="grok-composer-row">
-              <button
-                type="button"
-                className={`grok-composer-plus-circle${composerMenuOpen ? ' active' : ''}`}
-                aria-label={t('更多操作', 'More actions')}
-                aria-expanded={composerMenuOpen}
-                onClick={onToggleComposerMenu}
-              >
-                <Plus size={22} />
-              </button>
+            <div ref={localComposerRowRef} className="grok-composer-row">
+              <ComposerPlusMenu
+                open={composerMenuOpen}
+                onOpenChange={next => {
+                  if (next) {
+                    if (!composerMenuOpen) onToggleComposerMenu();
+                  } else if (composerMenuOpen) {
+                    onCloseComposerMenu();
+                  }
+                }}
+                inTauriUi={inTauriUi}
+                imageUnsupported={activeBot.hostKind === 'remote'}
+                imageDisabled={
+                  !activeChatScope ||
+                  effectiveLocalAttachments.length >= IMAGE_MAX_COUNT ||
+                  imageUploading
+                }
+                onPickPhotos={() => onPickLocalImages('photos')}
+                onPickCamera={() => onPickLocalImages('camera')}
+                onUnsupportedImage={() => onShowOfflineNotice(remoteDisconnectedImageMessage)}
+                clearDisabled={Boolean(activeEditing)}
+                onRequestClear={onOpenClearConfirm}
+              />
 
-              <div className="grok-composer-pill">
+              <div className={`grok-composer-pill${activeEditing ? ' is-editing' : ''}`}>
                 <textarea
                   ref={composerTextareaRef}
                   rows={1}
@@ -1650,25 +1745,35 @@ export function ChatScreen({
                       disabled={!isVoiceActive && (!activeChatScope || isPreLlmChat || isStoppingChat)}
                       onClick={onToggleVoiceCapture}
                     >
-                      <Mic size={19} />
+                      <Mic size={19} aria-hidden="true" />
                     </button>
                   ) : (
                     <button
                       type="button"
                       className="grok-composer-mic-inline is-unsupported"
                       aria-disabled="true"
-                      aria-label={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
-                      title={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
-                      onClick={() =>
-                        onShowOfflineNotice(t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'))
-                      }
+                      aria-label={voiceOnlyMessage}
+                      title={coarsePointer ? undefined : voiceOnlyMessage}
+                      onClick={() => onShowOfflineNotice(voiceOnlyMessage)}
                     >
-                      <Mic size={19} />
+                      <Mic size={19} aria-hidden="true" />
                     </button>
                   )
                 )}
 
                 <div className="grok-composer-actions">
+                  {activeEditing ? (
+                    <button
+                      type="button"
+                      className="grok-composer-edit-cancel-btn"
+                      aria-label={t('取消编辑 (Esc)', 'Cancel editing (Esc)')}
+                      title={t('取消编辑 (Esc)', 'Cancel editing (Esc)')}
+                      disabled={editSubmitting}
+                      onClick={onCancelEditTurn}
+                    >
+                      <X size={15} aria-hidden="true" />
+                    </button>
+                  ) : null}
                   {isStoppingChat ? (
                     <button
                       type="button"

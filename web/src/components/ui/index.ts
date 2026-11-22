@@ -12,4 +12,19 @@ export { ListRow, type ListRowProps } from './ListRow';
 export { Skeleton, type SkeletonProps } from './Skeleton';
 export { EmptyState, type EmptyStateProps } from './EmptyState';
 export { ErrorState, type ErrorStateProps } from './ErrorState';
-export { Dialog, ConfirmDialog } from './dialog';
+export { Dialog, ConfirmDialog, type ConfirmDialogProps, type DialogProps } from './dialog';
+export { InlineBanner, type InlineBannerProps, type InlineBannerTone } from './InlineBanner';
+export { ActionSlip, type ActionSlipProps, type ActionSlipTone } from './ActionSlip';
+export {
+  ConditionDock,
+  type ConditionDockItem,
+  type ConditionDockProps,
+  type ConditionDockTone,
+} from './ConditionDock';
+export {
+  PopoverMenu,
+  type PopoverMenuItem,
+  type PopoverMenuProps,
+  type PopoverMenuTriggerRenderProps,
+} from './PopoverMenu';
+export { Select, type SelectOption, type SelectProps } from './Select';

@@ -1,7 +1,14 @@
 // 使用 Host 的调度规则与时区预览执行时间。保存仍走 scheduleTask 的 CAS 协议。
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plus, RefreshCw, Trash2, CalendarClock, ChevronLeft } from 'lucide-react';
-import { getDefaultScheduleCalendar, ScheduleRule, type ScheduleCalendarDescription, type ScheduleRepeat } from '../../../host-core/schedule-calendar.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CalendarClock, ChevronLeft, ChevronRight, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import {
+  getDefaultScheduleCalendar,
+  ScheduleRule,
+  type ScheduleCalendarDescription,
+  type ScheduleRepeat,
+} from '../../../host-core/schedule-calendar.js';
+import { ConfirmDialog, InlineBanner, Select, type SelectOption } from '../../../web/src/components/ui';
+import { useText } from '../../../web/src/ui';
 import { toError } from './api';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import './BotSchedules.css';
@@ -46,47 +53,64 @@ interface ScheduleDraft {
   deleteAfterRun: boolean;
 }
 
-const WEEKDAY_NAMES: Record<number, string> = {
-  1: '一',
-  2: '二',
-  3: '三',
-  4: '四',
-  5: '五',
-  6: '六',
-  7: '日',
+type TextFn = (zh: string, en: string) => string;
+
+const WEEKDAY_SHORT: Record<number, { zh: string; en: string }> = {
+  1: { zh: '一', en: 'M' },
+  2: { zh: '二', en: 'T' },
+  3: { zh: '三', en: 'W' },
+  4: { zh: '四', en: 'T' },
+  5: { zh: '五', en: 'F' },
+  6: { zh: '六', en: 'S' },
+  7: { zh: '日', en: 'S' },
 };
 
-const WEEKDAY_FULL_NAMES: Record<number, string> = {
-  1: '周一',
-  2: '周二',
-  3: '周三',
-  4: '周四',
-  5: '周五',
-  6: '周六',
-  7: '周日',
+const WEEKDAY_FULL: Record<number, { zh: string; en: string }> = {
+  1: { zh: '周一', en: 'Monday' },
+  2: { zh: '周二', en: 'Tuesday' },
+  3: { zh: '周三', en: 'Wednesday' },
+  4: { zh: '周四', en: 'Thursday' },
+  5: { zh: '周五', en: 'Friday' },
+  6: { zh: '周六', en: 'Saturday' },
+  7: { zh: '周日', en: 'Sunday' },
 };
 
-function formatRepeatLabel(task: ScheduleTaskItem): string {
+const REPEAT_PRESETS: ReadonlyArray<{ value: string; zh: string; en: string; weekdays?: number[] }> = [
+  { value: 'daily', zh: '每天', en: 'Every day' },
+  { value: 'statutoryWorkday', zh: '法定工作日', en: 'Statutory workdays' },
+  { value: 'statutoryHoliday', zh: '法定节假日', en: 'Statutory holidays' },
+  { value: 'weekdays-mon-fri', zh: '每周一至周五', en: 'Mon – Fri', weekdays: [1, 2, 3, 4, 5] },
+  { value: 'weekends-sat-sun', zh: '每个周末（周六、周日）', en: 'Weekends (Sat & Sun)', weekdays: [6, 7] },
+  { value: 'weekly', zh: '自定义每周几…', en: 'Custom weekdays…' },
+  { value: 'monthly', zh: '每月固定日期', en: 'Monthly on day' },
+  { value: 'once', zh: '单次执行', en: 'Once' },
+];
+
+function formatRepeatLabel(task: ScheduleTaskItem, t: TextFn): string {
   switch (task.repeat) {
     case 'once':
-      return task.deleteAfterRun ? '单次执行后删除' : '单次执行';
+      return task.deleteAfterRun ? t('单次执行后删除', 'Once, then delete') : t('单次执行', 'Once');
     case 'daily':
-      return '每天';
+      return t('每天', 'Every day');
     case 'statutoryWorkday':
-      return '法定工作日';
+      return t('法定工作日', 'Statutory workdays');
     case 'statutoryHoliday':
-      return '法定节假日';
+      return t('法定节假日', 'Statutory holidays');
     case 'monthly':
-      return `每月 ${task.monthDay ?? 1} 日`;
+      return t(`每月 ${task.monthDay ?? 1} 日`, `Day ${task.monthDay ?? 1} monthly`);
     case 'weekly': {
       const days =
         Array.isArray(task.weekdays) && task.weekdays.length > 0
           ? task.weekdays.slice().sort((a, b) => a - b)
           : [task.weekday ?? 1];
       const key = days.join(',');
-      if (key === '1,2,3,4,5') return '每周一至周五';
-      if (key === '6,7') return '每周末';
-      return `每周 ${days.map((d) => WEEKDAY_FULL_NAMES[d] ?? d).join('、')}`;
+      if (key === '1,2,3,4,5') return t('每周一至周五', 'Mon – Fri');
+      if (key === '6,7') return t('每周末', 'Weekends');
+      const names = days.map((d) => {
+        const entry = WEEKDAY_FULL[d];
+        return entry ? t(entry.zh, entry.en) : String(d);
+      });
+      return t(`每周 ${names.join('、')}`, `Weekly: ${names.join(', ')}`);
     }
     default:
       return task.repeat;
@@ -135,17 +159,6 @@ function previewNextRun(draft: ScheduleDraft, now: number | null, timeZone: stri
   }
 }
 
-const REPEAT_OPTIONS: { value: string; label: string; weekdays?: number[] }[] = [
-  { value: 'daily', label: '每天' },
-  { value: 'statutoryWorkday', label: '法定工作日' },
-  { value: 'statutoryHoliday', label: '法定节假日' },
-  { value: 'weekdays-mon-fri', label: '每周一至周五', weekdays: [1, 2, 3, 4, 5] },
-  { value: 'weekends-sat-sun', label: '每个周末（周六、周日）', weekdays: [6, 7] },
-  { value: 'weekly', label: '自定义每周几…' },
-  { value: 'monthly', label: '每月固定日期' },
-  { value: 'once', label: '单次执行' },
-];
-
 export function BotSchedules({
   api,
   identity,
@@ -157,6 +170,7 @@ export function BotSchedules({
   botId: string;
   hostPlatform?: string;
 }) {
+  const t = useText();
   const online = api.transportConnected;
   const [tasks, setTasks] = useState<ScheduleTaskItem[]>([]);
   const [timeZone, setTimeZone] = useState<string>('');
@@ -169,6 +183,9 @@ export function BotSchedules({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<'new' | 'edit' | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ScheduleTaskItem | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   /** 自定义星期选择展开态：repeat=weekly 且非周一~五/周末预设时为 true。 */
   const [customWeekdays, setCustomWeekdays] = useState(false);
   const [draft, setDraft] = useState<ScheduleDraft>({
@@ -215,11 +232,11 @@ export function BotSchedules({
       setError(null);
     } catch (e) {
       if (!mountedRef.current || seq !== seqRef.current) return;
-      setError(`读取定时任务失败：${toError(e).message}`);
+      setError(t(`读取定时任务失败：${toError(e).message}`, `Failed to load schedules: ${toError(e).message}`));
     } finally {
       if (mountedRef.current && seq === seqRef.current) setLoading(false);
     }
-  }, [api, identity, botId, online]);
+  }, [api, identity, botId, online, t]);
 
   useEffect(() => {
     void loadSchedules();
@@ -234,6 +251,45 @@ export function BotSchedules({
 
   // 桌面 Host 也返回 exactAlarmGranted=true，但只有 Android 通过 AlarmManager 调度。
   const showReminders = hostPlatform === 'android' && exactAlarmGranted !== null;
+
+  const repeatSelectOptions = useMemo<SelectOption<string>[]>(
+    () => REPEAT_PRESETS.map((o) => ({ value: o.value, label: t(o.zh, o.en) })),
+    [t],
+  );
+
+  const repeatValue =
+    draft.repeat === 'weekly' && !customWeekdays
+      ? draft.weekdays.join(',') === '1,2,3,4,5'
+        ? 'weekdays-mon-fri'
+        : draft.weekdays.join(',') === '6,7'
+          ? 'weekends-sat-sun'
+          : 'weekly'
+      : draft.repeat === 'weekly'
+        ? 'weekly'
+        : draft.repeat;
+
+  function handleRepeatChange(val: string) {
+    const preset = REPEAT_PRESETS.find((o) => o.value === val);
+    if (preset?.weekdays) {
+      setCustomWeekdays(false);
+      setDraft((prev) => ({ ...prev, repeat: 'weekly', weekdays: preset.weekdays!, deleteAfterRun: false }));
+    } else if (val === 'weekly') {
+      setCustomWeekdays(true);
+      setDraft((prev) => ({
+        ...prev,
+        repeat: 'weekly',
+        weekdays: prev.weekdays.length > 0 ? prev.weekdays : [1],
+        deleteAfterRun: false,
+      }));
+    } else {
+      setCustomWeekdays(false);
+      setDraft((prev) => ({
+        ...prev,
+        repeat: val as ScheduleRepeat,
+        deleteAfterRun: val === 'once' ? prev.deleteAfterRun : false,
+      }));
+    }
+  }
 
   function openCreate() {
     setDraft({
@@ -298,7 +354,9 @@ export function BotSchedules({
       });
       await loadSchedules();
     } catch (e) {
-      if (mountedRef.current) setError(`切换任务状态失败：${toError(e).message}`);
+      if (mountedRef.current) {
+        setError(t(`切换任务状态失败：${toError(e).message}`, `Failed to toggle schedule: ${toError(e).message}`));
+      }
     } finally {
       if (mountedRef.current) setBusy(false);
     }
@@ -308,6 +366,7 @@ export function BotSchedules({
     if (!online || busy) return;
     setBusy(true);
     setError(null);
+    setDeleteError(null);
     setNotice(null);
     try {
       await api.call(identity, 'scheduleTask', {
@@ -318,11 +377,18 @@ export function BotSchedules({
           revision: task.revision,
         },
       });
+      if (!mountedRef.current) return;
+      setDeleteTarget(null);
+      setDeleteError(null);
       setEditing(null);
-      setNotice(`已删除定时任务「${task.title}」。`);
+      setNotice(t(`已删除定时任务「${task.title}」。`, `Deleted schedule "${task.title}".`));
       await loadSchedules();
     } catch (e) {
-      if (mountedRef.current) setError(`删除定时任务失败：${toError(e).message}`);
+      if (mountedRef.current) {
+        const msg = t(`删除定时任务失败：${toError(e).message}`, `Failed to delete schedule: ${toError(e).message}`);
+        setDeleteError(msg);
+        setError(msg);
+      }
     } finally {
       if (mountedRef.current) setBusy(false);
     }
@@ -333,15 +399,15 @@ export function BotSchedules({
     const title = draft.title.trim();
     const prompt = draft.prompt.trim();
     if (!title || !prompt) {
-      setError('请填写任务标题与执行指令（Prompt）。');
+      setError(t('请填写任务标题与执行指令（Prompt）。', 'Please fill in both the task name and instructions (Prompt).'));
       return;
     }
     if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(draft.time)) {
-      setError('触发时间格式须为 HH:mm（例如 08:30）。');
+      setError(t('触发时间格式须为 HH:mm（例如 08:30）。', 'Trigger time must be in HH:mm format (e.g. 08:30).'));
       return;
     }
     if (draft.repeat === 'weekly' && draft.weekdays.length === 0) {
-      setError('每周重复请至少选择一个星期。');
+      setError(t('每周重复请至少选择一个星期。', 'Select at least one weekday for weekly schedules.'));
       return;
     }
 
@@ -369,7 +435,7 @@ export function BotSchedules({
             ...(draft.repeat === 'once' && draft.date === '' ? { date: null } : {}),
           },
         });
-        setNotice(`已更新定时任务「${title}」。`);
+        setNotice(t(`已更新定时任务「${title}」。`, `Updated schedule "${title}".`));
       } else {
         await api.call(identity, 'scheduleTask', {
           botId,
@@ -378,12 +444,14 @@ export function BotSchedules({
             ...basePayload,
           },
         });
-        setNotice(`已创建定时任务「${title}」。`);
+        setNotice(t(`已创建定时任务「${title}」。`, `Created schedule "${title}".`));
       }
       setEditing(null);
       await loadSchedules();
     } catch (e) {
-      if (mountedRef.current) setError(`保存定时任务失败：${toError(e).message}`);
+      if (mountedRef.current) {
+        setError(t(`保存定时任务失败：${toError(e).message}`, `Failed to save schedule: ${toError(e).message}`));
+      }
     } finally {
       if (mountedRef.current) setBusy(false);
     }
@@ -396,74 +464,93 @@ export function BotSchedules({
 
   return (
     <div className="bot-schedules-panel">
-      {/* 顶栏：任务统计 + 刷新/新建 */}
-      <div className="bot-sched-topbar metadata">
+      {/* Top bar: timezone caption + refresh / create actions */}
+      <div className="bot-sched-topbar">
         <span className="bot-sched-count">
           <CalendarClock size={14} aria-hidden="true" />
-          定时任务{timeZone ? ` · ${timeZone}` : ''}
+          <span>{t('定时任务', 'Schedules')}{timeZone ? ` · ${timeZone}` : ''}</span>
         </span>
         <div className="bot-sched-topbar-actions">
-          <button type="button" className="bot-sched-ghost-btn" onClick={() => void loadSchedules()} disabled={!online || loading || busy}>
+          <button
+            type="button"
+            className="bot-sched-ghost-btn"
+            onClick={() => void loadSchedules()}
+            disabled={!online || loading || busy}
+          >
             <RefreshCw size={13} aria-hidden="true" className={loading ? 'spinning' : undefined} />
-            {loading ? '刷新中…' : '刷新'}
+            {loading ? t('刷新中…', 'Refreshing…') : t('刷新', 'Refresh')}
           </button>
           {!editing ? (
             <button type="button" className="bot-sched-primary-btn" onClick={openCreate} disabled={!online || busy}>
               <Plus size={14} aria-hidden="true" />
-              新建定时任务
+              {t('新建定时任务', 'New schedule')}
             </button>
           ) : (
             <button type="button" className="bot-sched-ghost-btn" onClick={() => setEditing(null)} disabled={busy}>
               <ChevronLeft size={14} aria-hidden="true" />
-              返回列表
+              {t('返回列表', 'Back')}
             </button>
           )}
         </div>
       </div>
 
       {error ? (
-        <div className="bot-sched-banner bot-sched-banner-error" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)}>关闭</button>
-        </div>
+        <InlineBanner
+          tone="danger"
+          role="alert"
+          compact
+          title={error}
+          onDismiss={() => setError(null)}
+        />
       ) : null}
       {schedulingError ? (
-        <div className="bot-sched-banner bot-sched-banner-warn" role="alert">
-          {`调度提示：${schedulingError}`}
-        </div>
+        <InlineBanner
+          tone="attention"
+          role="alert"
+          compact
+          title={t(`调度提示：${schedulingError}`, `Schedule notice: ${schedulingError}`)}
+        />
       ) : null}
-      {notice ? <div className="bot-sched-banner bot-sched-banner-ok" role="status">{notice}</div> : null}
+      {notice ? (
+        <InlineBanner
+          tone="live"
+          role="status"
+          compact
+          title={notice}
+          onDismiss={() => setNotice(null)}
+        />
+      ) : null}
 
       {editing ? (
-        /* ————— 新建 / 编辑表单（分组卡片 + 拨动开关） ————— */
+        /* ————— Create / Edit form (flat hairline sections) ————— */
         <div className="bot-sched-form">
           <h5 className="bot-sched-form-title">
-            {editing === 'edit' ? '编辑定时任务' : '新建定时任务'}
+            {editing === 'edit' ? t('编辑定时任务', 'Edit schedule') : t('新建定时任务', 'New schedule')}
           </h5>
 
           <div className="bot-sched-section">
-            <span className="bot-sched-section-label">做什么</span>
+            <span className="bot-sched-section-label">{t('做什么', 'What to run')}</span>
             <div className="bot-sched-group">
               <div className="bot-sched-textarea-wrap">
-                <label className="bot-sched-section-label" htmlFor="bot-sched-prompt">执行内容</label>
+                <label className="bot-sched-field-label" htmlFor="bot-sched-prompt">{t('执行内容', 'Instructions')}</label>
                 <textarea
                   id="bot-sched-prompt"
                   rows={4}
                   value={draft.prompt}
                   disabled={busy}
-                  placeholder="例如，汇总今天的日程与待办事项。"
+                  placeholder={t('例如，汇总今天的日程与待办事项。', 'e.g., Summarize today’s calendar and open to-dos.')}
                   onChange={(e) => setDraft((prev) => ({ ...prev, prompt: e.target.value }))}
                 />
               </div>
               <label className="bot-sched-row">
-                <span className="bot-sched-row-label">任务名称</span>
+                <span className="bot-sched-row-label">{t('任务名称', 'Task name')}</span>
                 <input
                   type="text"
                   maxLength={80}
                   className="bot-sched-text-input"
                   value={draft.title}
                   disabled={busy}
-                  placeholder="例如：每日早报汇总 / 定时代码巡检"
+                  placeholder={t('例如：每日早报汇总 / 定时代码巡检', 'e.g., Morning briefing / Scheduled audit')}
                   onChange={(e) => setDraft((prev) => ({ ...prev, title: e.target.value }))}
                 />
               </label>
@@ -471,10 +558,10 @@ export function BotSchedules({
           </div>
 
           <div className="bot-sched-section">
-            <span className="bot-sched-section-label">何时做</span>
+            <span className="bot-sched-section-label">{t('何时做', 'When to run')}</span>
             <div className="bot-sched-group">
               <label className="bot-sched-row">
-                <span className="bot-sched-row-label">触发时间</span>
+                <span className="bot-sched-row-label">{t('触发时间', 'Time')}</span>
                 <input
                   type="time"
                   className="bot-sched-time-input"
@@ -484,46 +571,22 @@ export function BotSchedules({
                 />
               </label>
               <div className="bot-sched-row">
-                <label className="bot-sched-row-label" htmlFor="bot-sched-repeat">重复周期</label>
-                <select
+                <label className="bot-sched-row-label" htmlFor="bot-sched-repeat">{t('重复周期', 'Repeat')}</label>
+                <Select
                   id="bot-sched-repeat"
                   className="bot-sched-select"
-                  value={
-                    draft.repeat === 'weekly' && !customWeekdays
-                      ? draft.weekdays.join(',') === '1,2,3,4,5'
-                        ? 'weekdays-mon-fri'
-                        : draft.weekdays.join(',') === '6,7'
-                          ? 'weekends-sat-sun'
-                          : 'weekly'
-                      : draft.repeat === 'weekly'
-                        ? 'weekly'
-                        : draft.repeat
-                  }
+                  size="sm"
+                  ariaLabel={t('重复周期', 'Repeat')}
+                  value={repeatValue}
                   disabled={busy}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const preset = REPEAT_OPTIONS.find((o) => o.value === val);
-                    if (preset?.weekdays) {
-                      setCustomWeekdays(false);
-                      setDraft((prev) => ({ ...prev, repeat: 'weekly', weekdays: preset.weekdays!, deleteAfterRun: false }));
-                    } else if (val === 'weekly') {
-                      setCustomWeekdays(true);
-                      setDraft((prev) => ({ ...prev, repeat: 'weekly', weekdays: prev.weekdays.length > 0 ? prev.weekdays : [1], deleteAfterRun: false }));
-                    } else {
-                      setCustomWeekdays(false);
-                      setDraft((prev) => ({ ...prev, repeat: val as ScheduleRepeat, deleteAfterRun: val === 'once' ? prev.deleteAfterRun : false }));
-                    }
-                  }}
-                >
-                  {REPEAT_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
+                  options={repeatSelectOptions}
+                  onChange={handleRepeatChange}
+                />
               </div>
 
               {draft.repeat === 'once' ? (
                 <label className="bot-sched-row">
-                  <span className="bot-sched-row-label">执行日期（可选）</span>
+                  <span className="bot-sched-row-label">{t('执行日期（可选）', 'Date (optional)')}</span>
                   <input
                     type="date"
                     className="bot-sched-time-input"
@@ -536,16 +599,18 @@ export function BotSchedules({
               ) : null}
 
               {draft.repeat === 'weekly' && customWeekdays ? (
-                <div className="bot-sched-row bot-sched-weekday-row">
+                <div className="bot-sched-row bot-sched-weekday-row" role="group" aria-label={t('选择星期', 'Select weekdays')}>
                   {[1, 2, 3, 4, 5, 6, 7].map((day) => {
                     const active = draft.weekdays.includes(day);
+                    const full = WEEKDAY_FULL[day];
+                    const short = WEEKDAY_SHORT[day];
                     return (
                       <button
                         key={day}
                         type="button"
                         className={`bot-sched-weekday-chip${active ? ' active' : ''}`}
                         aria-pressed={active}
-                        aria-label={WEEKDAY_FULL_NAMES[day]}
+                        aria-label={full ? t(full.zh, full.en) : String(day)}
                         disabled={busy}
                         onClick={() =>
                           setDraft((prev) => {
@@ -557,7 +622,7 @@ export function BotSchedules({
                           })
                         }
                       >
-                        {WEEKDAY_NAMES[day]}
+                        {short ? t(short.zh, short.en) : day}
                       </button>
                     );
                   })}
@@ -566,7 +631,7 @@ export function BotSchedules({
 
               {draft.repeat === 'monthly' ? (
                 <label className="bot-sched-row">
-                  <span className="bot-sched-row-label">每月几号</span>
+                  <span className="bot-sched-row-label">{t('每月几号', 'Day of month')}</span>
                   <input
                     type="number"
                     min={1}
@@ -587,18 +652,21 @@ export function BotSchedules({
           </div>
 
           {showReminders || draft.repeat === 'once' ? (
-            <details className="bot-studio-disclosure">
-              <summary>更多安排</summary>
-              <div className="bot-sched-group">
+            <details className="bot-sched-disclosure">
+              <summary>
+                <ChevronRight size={13} className="bot-sched-disclosure-chevron" aria-hidden="true" />
+                <span>{t('更多安排', 'More options')}</span>
+              </summary>
+              <div className="bot-sched-group bot-sched-disclosure-body">
                 {showReminders ? (
                   <>
                     <div className="bot-sched-row">
-                      <span className="bot-sched-row-label">使用 Android 系统闹钟</span>
+                      <span className="bot-sched-row-label">{t('使用 Android 系统闹钟', 'Use Android alarm clock')}</span>
                       <button
                         type="button"
                         role="switch"
                         aria-checked={draft.alarmMode === 'alarmClock'}
-                        aria-label="使用 Android 系统闹钟"
+                        aria-label={t('使用 Android 系统闹钟', 'Use Android alarm clock')}
                         className={`bot-sched-toggle${draft.alarmMode === 'alarmClock' ? ' checked' : ''}`}
                         disabled={busy}
                         onClick={() =>
@@ -612,16 +680,18 @@ export function BotSchedules({
                       </button>
                     </div>
                     {draft.alarmMode === 'exact' && exactAlarmGranted === false ? (
-                      <p className="hint bot-sched-preview">设备需要精确闹钟权限才能使用普通定时模式。</p>
+                      <p className="bot-sched-hint bot-sched-preview">
+                        {t('设备需要精确闹钟权限才能使用普通定时模式。', 'Exact alarm permission is required on this device for standard scheduling.')}
+                      </p>
                     ) : null}
                     {draft.alarmMode === 'alarmClock' ? (
                       <div className="bot-sched-row">
-                        <span className="bot-sched-row-label">任务完成时震动（设备支持时）</span>
+                        <span className="bot-sched-row-label">{t('任务完成时震动（设备支持时）', 'Vibrate when finished (if supported)')}</span>
                         <button
                           type="button"
                           role="switch"
                           aria-checked={draft.vibrate}
-                          aria-label="任务完成时震动（设备支持时）"
+                          aria-label={t('任务完成时震动（设备支持时）', 'Vibrate when finished (if supported)')}
                           className={`bot-sched-toggle${draft.vibrate ? ' checked' : ''}`}
                           disabled={busy}
                           onClick={() => setDraft((prev) => ({ ...prev, vibrate: !prev.vibrate }))}
@@ -634,12 +704,12 @@ export function BotSchedules({
                 ) : null}
                 {draft.repeat === 'once' ? (
                   <div className="bot-sched-row">
-                    <span className="bot-sched-row-label">触发后自动删除任务</span>
+                    <span className="bot-sched-row-label">{t('触发后自动删除任务', 'Delete automatically after running')}</span>
                     <button
                       type="button"
                       role="switch"
                       aria-checked={draft.deleteAfterRun}
-                      aria-label="触发后自动删除任务"
+                      aria-label={t('触发后自动删除任务', 'Delete automatically after running')}
                       className={`bot-sched-toggle${draft.deleteAfterRun ? ' checked' : ''}`}
                       disabled={busy}
                       onClick={() => setDraft((prev) => ({ ...prev, deleteAfterRun: !prev.deleteAfterRun }))}
@@ -653,29 +723,44 @@ export function BotSchedules({
           ) : null}
 
           <div className="bot-sched-preview" role="status">
-            {!draft.enabled ? '任务已暂停，恢复后会重新安排执行。'
-              : preview ? <>按目标时区预计执行 · <strong>{preview.time}</strong> · {timeZone}</>
-                : targetNow === null || !timeZone ? '等待目标设备提供时间与时区。' : '请填写有效的执行时间与周期以预览。'}
-            {preview?.calendarNotice ? <p className="hint">{preview.calendarNotice}{preview.calendarFallback ? '，' + preview.calendarFallback + '。' : '。'}</p> : null}
+            {!draft.enabled
+              ? t('任务已暂停，恢复后会重新安排执行。', 'Schedule is paused and will be rescheduled once enabled.')
+              : preview
+                ? (
+                  <>
+                    {t('按目标时区预计执行 · ', 'Next run in target timezone · ')}
+                    <strong className="tabular-nums">{preview.time}</strong> · {timeZone}
+                  </>
+                )
+                : targetNow === null || !timeZone
+                  ? t('等待目标设备提供时间与时区。', 'Waiting for target device clock and timezone.')
+                  : t('请填写有效的执行时间与周期以预览。', 'Enter a valid time and repeat rule to preview.')}
+            {preview?.calendarNotice ? (
+              <p className="bot-sched-hint">
+                {preview.calendarNotice}{preview.calendarFallback ? `，${preview.calendarFallback}。` : '。'}
+              </p>
+            ) : null}
           </div>
           <div className="bot-sched-form-actions">
             <button type="button" className="bot-sched-primary-btn" onClick={() => void saveDraft()} disabled={busy || !online}>
-              {busy ? '保存中…' : '保存定时任务'}
+              {busy ? t('保存中…', 'Saving…') : t('保存定时任务', 'Save schedule')}
             </button>
             <button type="button" className="bot-sched-ghost-btn" onClick={() => setEditing(null)} disabled={busy}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
           </div>
         </div>
       ) : tasks.length === 0 ? (
-        <div className="bot-sched-empty metadata">
-          <CalendarClock size={26} aria-hidden="true" />
-          {loading
-            ? '正在读取定时任务…'
-            : '暂无定时任务。可以新建任务，或在对话中交给智能体。'}
+        <div className="bot-sched-empty">
+          <CalendarClock size={24} aria-hidden="true" />
+          <span>
+            {loading
+              ? t('正在读取定时任务…', 'Loading schedules…')
+              : t('暂无定时任务。可以新建任务，或在对话中交给智能体。', 'No schedules yet. Create one here or ask the agent in chat.')}
+          </span>
         </div>
       ) : (
-        /* ————— 时钟卡片列表 ————— */
+        /* ————— Flat hairline task list ————— */
         <div className="bot-sched-list">
           {tasks.map((task) => {
             const isEnabled = task.enabled !== false;
@@ -689,16 +774,23 @@ export function BotSchedules({
                     disabled={!online || busy}
                     onClick={() => openEdit(task)}
                   >
-                    <strong className="bot-sched-title">{task.title || '未命名定时任务'}</strong>
+                    <strong className="bot-sched-title">{task.title || t('未命名定时任务', 'Untitled schedule')}</strong>
                     <span className="bot-sched-next">
-                      {isEnabled ? <>下次执行 · {nextRun ? nextRun + ' · ' + timeZone : '等待设备安排'}</> : '已暂停'}
+                      {isEnabled
+                        ? (
+                          <>
+                            {t('下次执行 · ', 'Next run · ')}
+                            {nextRun ? `${nextRun} · ${timeZone}` : t('等待设备安排', 'Pending device schedule')}
+                          </>
+                        )
+                        : t('已暂停', 'Paused')}
                     </span>
                   </button>
                   <button
                     type="button"
                     role="switch"
                     aria-checked={isEnabled}
-                    aria-label={isEnabled ? '暂停该任务' : '启用该任务'}
+                    aria-label={isEnabled ? t('暂停该任务', 'Pause schedule') : t('启用该任务', 'Enable schedule')}
                     className={`bot-sched-toggle${isEnabled ? ' checked' : ''}`}
                     disabled={!online || busy}
                     onClick={() => void toggleEnabled(task)}
@@ -706,19 +798,30 @@ export function BotSchedules({
                     <span className="bot-sched-toggle-knob" />
                   </button>
                 </div>
-                <details className="bot-studio-disclosure">
-                  <summary>任务详情</summary>
+                <details className="bot-sched-disclosure">
+                  <summary>
+                    <ChevronRight size={13} className="bot-sched-disclosure-chevron" aria-hidden="true" />
+                    <span>{t('任务详情', 'Details')}</span>
+                  </summary>
                   <div className="bot-sched-detail">
-                    <p className="metadata">{formatRepeatLabel(task)} · {task.time}</p>
+                    <p className="bot-sched-meta tabular-nums">{formatRepeatLabel(task, t)} · {task.time}</p>
                     {task.prompt ? <p className="bot-sched-prompt">{task.prompt}</p> : null}
-                    {task.latestRun ? <p className="metadata">最近运行状态 · {task.latestRun.status}</p> : null}
+                    {task.latestRun ? (
+                      <p className="bot-sched-meta">
+                        {t('最近运行状态 · ', 'Latest run · ')}{task.latestRun.status}
+                      </p>
+                    ) : null}
                     <button
                       type="button"
-                      className="bot-sched-ghost-btn"
+                      className="bot-sched-ghost-btn bot-sched-danger-btn"
                       disabled={!online || busy}
-                      onClick={() => void deleteTask(task)}
+                      onClick={(event) => {
+                        deleteTriggerRef.current = event.currentTarget;
+                        setDeleteError(null);
+                        setDeleteTarget(task);
+                      }}
                     >
-                      <Trash2 size={13} aria-hidden="true" /> 删除任务
+                      <Trash2 size={13} aria-hidden="true" /> {t('删除任务', 'Delete schedule')}
                     </button>
                   </div>
                 </details>
@@ -727,6 +830,41 @@ export function BotSchedules({
           })}
         </div>
       )}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={t('删除定时任务', 'Delete schedule')}
+        description={
+          deleteTarget
+            ? t(
+                `确定要删除定时任务「${deleteTarget.title || '未命名定时任务'}」吗？删除后将不再按计划触发，此操作不可撤销。`,
+                `Delete schedule "${deleteTarget.title || 'Untitled schedule'}"? It will no longer run and this action cannot be undone.`,
+              )
+            : ''
+        }
+        danger
+        busy={busy}
+        disabled={!online}
+        error={deleteError}
+        cancelLabel={t('取消', 'Cancel')}
+        confirmLabel={busy ? t('删除中…', 'Deleting…') : t('删除任务', 'Delete schedule')}
+        onCancel={() => {
+          if (!busy) {
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteTarget || !online || busy) return;
+          void deleteTask(deleteTarget);
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (deleteTriggerRef.current?.isConnected) {
+            deleteTriggerRef.current.focus();
+          }
+          deleteTriggerRef.current = null;
+        }}
+      />
     </div>
   );
 }

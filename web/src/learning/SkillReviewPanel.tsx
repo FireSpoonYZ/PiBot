@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Lock, Pin } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Archive, Lock, Pencil, Pin, PinOff, RotateCcw, Unlock } from 'lucide-react';
 import type { Installation, InstallationSkillFilesResponse } from '../../../center-contract/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotSkillReviewInput } from '../../../host-core/index.js';
 import { centerAdminRequest } from '../bot-settings/centerAdminBroker';
-import { ConfirmDialog } from '../components/ui/dialog';
+import { ConfirmDialog, InlineBanner } from '../components/ui';
 import { useText } from '../ui';
 import './SkillReviewPanel.css';
 
@@ -181,6 +181,8 @@ function LearnedSkillsSession({
   deviceId?: string;
   botId?: string;
 }) {
+  const idPrefix = useId();
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [items, setItems] = useState<LearnedSkillSummary[] | null>(null);
   const [filter, setFilter] = useState<StateFilter>('all');
   const [detail, setDetail] = useState<LearnedSkillDetail | null>(null);
@@ -395,6 +397,41 @@ function LearnedSkillsSession({
     return a.localeCompare(b);
   }), [detail?.files]);
 
+  const filterTabs = useMemo(
+    () =>
+      [
+        ['all', `${t('全部', 'All')} (${counts.all})`],
+        ['active', `${t('生效中', 'Active')} (${counts.active})`],
+        ['stale', `${t('待复审', 'Needs review')} (${counts.stale})`],
+        ['archived', `${t('已归档', 'Archived')} (${counts.archived})`],
+      ] as const,
+    [counts.active, counts.all, counts.archived, counts.stale, t],
+  );
+
+  const handleFilterKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    const move = (nextIndex: number) => {
+      const target = filterTabs[nextIndex];
+      if (!target) return;
+      setFilter(target[0]);
+      tabRefs.current[nextIndex]?.focus();
+    };
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      move((index + 1) % filterTabs.length);
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      move((index - 1 + filterTabs.length) % filterTabs.length);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      move(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      move(filterTabs.length - 1);
+    }
+  };
+
+  const tabPanelId = `${idPrefix}-tabpanel`;
+
   return (
     <section className="skill-review-panel" aria-busy={busy}>
       <header className="skill-review-header">
@@ -419,63 +456,86 @@ function LearnedSkillsSession({
       </header>
 
       {busy ? <p className="skill-review-muted" role="status">{t('正在同步技能数据…', 'Syncing skills…')}</p> : null}
-      {failure ? <p role="alert">{failureText(failure.error, t)}</p> : null}
-      {notice ? <p className="skill-review-notice" role="status">{notice}</p> : null}
+      {failure ? (
+        <InlineBanner
+          tone="danger"
+          role="alert"
+          compact
+          title={failureText(failure.error, t)}
+          onDismiss={() => setFailure(null)}
+        />
+      ) : null}
+      {notice ? (
+        <InlineBanner
+          tone="info"
+          role="status"
+          compact
+          title={notice}
+          onDismiss={() => setNotice(null)}
+        />
+      ) : null}
 
       {!detail ? (
         <>
           <div className="skill-review-filters" role="tablist" aria-label={t('按状态筛选', 'Filter by state')}>
-            {([
-              ['all', `${t('全部', 'All')} (${counts.all})`],
-              ['active', `${t('生效中', 'Active')} (${counts.active})`],
-              ['stale', `${t('待复审', 'Needs review')} (${counts.stale})`],
-              ['archived', `${t('已归档', 'Archived')} (${counts.archived})`],
-            ] as const).map(([key, label]) => (
+            {filterTabs.map(([key, label], index) => (
               <button
                 key={key}
+                ref={el => { tabRefs.current[index] = el; }}
+                id={`${idPrefix}-tab-${key}`}
                 type="button"
                 role="tab"
                 aria-selected={filter === key}
-                className={filter === key ? 'is-active' : ''}
+                aria-controls={tabPanelId}
+                tabIndex={filter === key ? 0 : -1}
+                className={`tabular-nums${filter === key ? ' is-active' : ''}`}
                 onClick={() => setFilter(key)}
+                onKeyDown={event => handleFilterKeyDown(event, index)}
               >
                 {label}
               </button>
             ))}
           </div>
 
-          {filteredItems.length === 0 && items !== null ? (
-            <p className="skill-review-muted">
-              {counts.all === 0
-                ? t('该 Bot 尚未沉淀自学习技能。完成复杂任务并在空闲静置后会自动提炼。', 'No learned skills yet. Complex workflows will be distilled automatically during idle windows.')
-                : t('当前筛选下没有技能。', 'No skills match this filter.')}
-            </p>
-          ) : null}
+          <div
+            id={tabPanelId}
+            role="tabpanel"
+            aria-labelledby={`${idPrefix}-tab-${filter}`}
+            className="skill-review-tabpanel"
+          >
+            {filteredItems.length === 0 && items !== null ? (
+              <p className="skill-review-muted">
+                {counts.all === 0
+                  ? t('该 Bot 尚未沉淀自学习技能。完成复杂任务并在空闲静置后会自动提炼。', 'No learned skills yet. Complex workflows will be distilled automatically during idle windows.')
+                  : t('当前筛选下没有技能。', 'No skills match this filter.')}
+              </p>
+            ) : null}
 
-          {filteredItems.length > 0 ? (
-            <ul className="skill-review-list">
-              {filteredItems.map(item => (
-                <li key={item.skillId}>
-                  <button type="button" className="skill-review-card" disabled={busy} onClick={() => openSkill(item)}>
-                    <span className="skill-review-card-top">
-                      <strong>{item.name}</strong>
-                      <span className="skill-review-badges">
-                        <span className={`skill-badge is-${item.state}`}>{stateLabel(item.state, t)}</span>
-                        <span className="skill-badge">{scopeLabel(item.visibilityScope, t)}</span>
-                        {item.pinned ? <span className="skill-badge is-accent"><Pin size={12} aria-hidden="true" />{t('已固定', 'Pinned')}</span> : null}
-                        {item.locked ? <span className="skill-badge"><Lock size={12} aria-hidden="true" />{t('已锁定', 'Locked')}</span> : null}
+            {filteredItems.length > 0 ? (
+              <ul className="skill-review-list">
+                {filteredItems.map(item => (
+                  <li key={item.skillId}>
+                    <button type="button" className="skill-review-card" disabled={busy} onClick={() => openSkill(item)}>
+                      <span className="skill-review-card-top">
+                        <strong>{item.name}</strong>
+                        <span className="skill-review-badges">
+                          <span className={`skill-badge is-${item.state}`}>{stateLabel(item.state, t)}</span>
+                          <span className="skill-badge">{scopeLabel(item.visibilityScope, t)}</span>
+                          {item.pinned ? <span className="skill-badge is-accent"><Pin size={12} aria-hidden="true" />{t('已固定', 'Pinned')}</span> : null}
+                          {item.locked ? <span className="skill-badge"><Lock size={12} aria-hidden="true" />{t('已锁定', 'Locked')}</span> : null}
+                        </span>
                       </span>
-                    </span>
-                    {item.description ? <span className="skill-review-desc">{item.description}</span> : null}
-                    <span className="skill-review-card-meta">
-                      <span>{sourceTitle(item.source, t)}</span>
-                      <span>{t(`使用 ${item.useCount ?? 0} 次`, `${item.useCount ?? 0} uses`)}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+                      {item.description ? <span className="skill-review-desc">{item.description}</span> : null}
+                      <span className="skill-review-card-meta">
+                        <span>{sourceTitle(item.source, t)}</span>
+                        <span className="tabular-nums">{t(`使用 ${item.useCount ?? 0} 次`, `${item.useCount ?? 0} uses`)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
         </>
       ) : (
         <>
@@ -487,8 +547,8 @@ function LearnedSkillsSession({
               {deploymentLabel(detail.deployment?.status, t) ? (
                 <span className="skill-badge">{deploymentLabel(detail.deployment?.status, t)}</span>
               ) : null}
-              <span className="skill-badge">{t(`已用 ${detail.useCount ?? 0} 次`, `${detail.useCount ?? 0} uses`)}</span>
-              <span className="skill-badge">{t(`修订 ${detail.patchCount ?? 0} 次`, `${detail.patchCount ?? 0} edits`)}</span>
+              <span className="skill-badge tabular-nums">{t(`已用 ${detail.useCount ?? 0} 次`, `${detail.useCount ?? 0} uses`)}</span>
+              <span className="skill-badge tabular-nums">{t(`修订 ${detail.patchCount ?? 0} 次`, `${detail.patchCount ?? 0} edits`)}</span>
             </div>
             <p className="skill-review-muted">
               {sourceTitle(detail.source, t)}
@@ -528,16 +588,19 @@ function LearnedSkillsSession({
                   setEditing(true);
                 }}
               >
-                {t('✎ 编辑内容', 'Edit')}
+                <Pencil size={14} aria-hidden="true" />
+                <span>{t('编辑内容', 'Edit')}</span>
               </button>
             )}
             {detail.state !== 'archived' ? (
               <button type="button" disabled={busy} onClick={() => togglePin(detail)}>
-                {detail.pinned ? t('📌 取消固定', '📌 Unpin') : t('📌 固定不过期', '📌 Pin')}
+                {detail.pinned ? <PinOff size={14} aria-hidden="true" /> : <Pin size={14} aria-hidden="true" />}
+                <span>{detail.pinned ? t('取消固定', 'Unpin') : t('固定不过期', 'Pin')}</span>
               </button>
             ) : null}
             <button type="button" disabled={busy} onClick={() => toggleLock(detail)}>
-              {detail.locked ? t('🔓 解除锁定', '🔓 Unlock') : t('🔒 锁定防改写', '🔒 Lock')}
+              {detail.locked ? <Unlock size={14} aria-hidden="true" /> : <Lock size={14} aria-hidden="true" />}
+              <span>{detail.locked ? t('解除锁定', 'Unlock') : t('锁定防改写', 'Lock')}</span>
             </button>
             <button
               type="button"
@@ -548,7 +611,8 @@ function LearnedSkillsSession({
                 else setConfirmArchive(detail);
               }}
             >
-              {detail.state === 'archived' ? t('恢复启用', 'Restore') : t('归档停用', 'Archive')}
+              {detail.state === 'archived' ? <RotateCcw size={14} aria-hidden="true" /> : <Archive size={14} aria-hidden="true" />}
+              <span>{detail.state === 'archived' ? t('恢复启用', 'Restore') : t('归档停用', 'Archive')}</span>
             </button>
           </div>
 

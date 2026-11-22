@@ -1,18 +1,102 @@
-/* schedules lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+/* schedules & archived lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
-/* Inline style extractions from Host.tsx schedule & archived screens. */
 .grok-icon-mr-4 { margin-right: var(--space-1); }
 .grok-btn-mt-8 { margin-top: var(--space-2); }
 .grok-topbar-spacer { width: var(--tap-min); flex: none; }
 .grok-footnote-mt-2 { margin-top: 2px; }
 .grok-archived-subtitle-gap { gap: var(--space-2); }
-.grok-archived-btn-sm { position: relative; padding: 3px 10px; font-size: var(--text-xs); }
-.grok-archived-btn-sm::before { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: max(100%, var(--tap-min)); height: max(100%, var(--tap-min)); }
 
+.grok-archived-btn-sm {
+  position: relative;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  flex: none;
+}
+.grok-archived-btn-sm::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min));
+  height: max(100%, var(--tap-min));
+}
+
+/* ArchivedBotsScreen clean 2-line layout. */
+.archived-bot-row {
+  gap: var(--space-3);
+  padding: 10px var(--space-3);
+}
+.archived-bot-avatar {
+  flex: none;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.archived-bot-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.archived-bot-line-1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.archived-bot-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archived-bot-ttl {
+  margin-left: auto;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.archived-bot-line-2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.archived-bot-snippet {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archived-bot-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.archived-skeleton-list {
+  padding: var(--space-4);
+  gap: var(--space-3);
+}
+
+/* Schedules list rows. */
 .grok-card-group.grok-schedule-list { gap: 0; }
 .grok-schedule-row { display: flex; align-items: center; }
 .grok-schedule-row + .grok-schedule-row {
-  border-top: 1px solid color-mix(in srgb, var(--color-line) 65%, transparent);
+  border-top: 1px solid var(--border-subtle);
 }
 .grok-schedule-entry {
   display: flex;
@@ -30,7 +114,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.grok-schedule-run-notice { color: var(--color-danger); }
+.grok-schedule-entry .grok-schedule-next {
+  font-variant-numeric: tabular-nums;
+}
+.grok-schedule-run-notice {
+  color: var(--state-danger);
+}
 .grok-schedule-toggle {
   display: inline-flex;
   flex: none;
@@ -43,6 +132,6 @@
 .grok-schedule-prompt-hint {
   margin-top: 6px;
   font-size: var(--text-xs);
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
   line-height: 1.4;
 }

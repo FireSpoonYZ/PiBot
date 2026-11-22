@@ -1,14 +1,17 @@
-import { useId } from 'react';
+import { useEffect, useId } from 'react';
 import { ArrowLeft, Check, ChevronRight, Pencil, Search, X } from 'lucide-react';
 import type { CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem, MessageMember } from '../../../host-core/index.js';
 import { GrokBotAvatar, resolveBotAvatarPreset, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
-import { ErrorNotice, FloatingPillToast, useText } from '../ui';
+import { ErrorNotice, useText } from '../ui';
+import { useNotice } from '../notice';
 import { LabelStack, ReservedSlot } from '../layout';
 import { PlatformLogoIcon, type GroupCreateAttempt, type UnifiedBotItem } from '../hub/shared';
-import { Switch } from '../components/ui';
+import { Button, InlineBanner, Switch } from '../components/ui';
 import type { ActionController, CreateBotAttempt } from './types';
+
+const CREATE_PRIMARY_BACK_NOTICE_ID = 'create-primary-back-notice';
 
 export interface CreateBotScreenProps {
   mustCreatePrimaryBot: boolean;
@@ -74,11 +77,28 @@ export function CreateBotScreen({
   onOpenAvatarPicker,
 }: CreateBotScreenProps) {
   const t = useText();
+  const { notify, dismiss } = useNotice();
   const createNameId = useId();
   const createSubtitleId = useId();
   const createCwdId = useId();
   const createHostId = useId();
   const createModelId = useId();
+
+  void onDismissPrimaryBackNotice;
+
+  useEffect(() => {
+    if (!primaryBackNotice?.text) return;
+    notify({
+      id: CREATE_PRIMARY_BACK_NOTICE_ID,
+      tone: 'warning',
+      title: primaryBackNotice.text,
+      durationMs: 3000,
+    });
+  }, [primaryBackNotice, notify]);
+
+  useEffect(() => () => {
+    dismiss(CREATE_PRIMARY_BACK_NOTICE_ID);
+  }, [dismiss]);
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -107,8 +127,8 @@ export function CreateBotScreen({
           onClick={onSave}
         >
           <LabelStack
-            active={action.busy ? t('保存中', 'Saving') : t('完成', 'Done')}
-            labels={[t('保存中', 'Saving'), t('完成', 'Done')]}
+            active={action.busy ? t('保存中…', 'Saving…') : t('完成', 'Done')}
+            labels={[t('保存中…', 'Saving…'), t('完成', 'Done')]}
           />
         </button>
       </header>
@@ -116,13 +136,11 @@ export function CreateBotScreen({
       <div className="grok-subpage-scroll">
         {mustCreatePrimaryBot && (
           <div className="grok-field-section">
-            <section className="grok-card-group bot-profile-primary-notice">
-              <strong>{t('当前设备尚未创建主 Bot', 'Primary Bot Required')}</strong>
-              <span>
-                {t('每台设备至少需要一个主 Bot。请先创建本机主 Bot 后再进入主页。',
-                  'Every device requires at least one primary bot. Create one to enter the hub.')}
-              </span>
-            </section>
+            <InlineBanner
+              tone="info"
+              title={t('当前设备尚未创建主 Bot', 'Primary Bot Required')}
+              detail={t('每台设备至少需要一个主 Bot。请先创建本机主 Bot 后再进入主页。', 'Every device requires at least one primary bot. Create one to enter the hub.')}
+            />
           </div>
         )}
         {createAttempt && (
@@ -211,7 +229,7 @@ export function CreateBotScreen({
         </div>
 
         <div className="grok-field-section">
-          <label className="grok-section-label">{t('外观', 'Appearance')}</label>
+          <h3 className="grok-section-label">{t('外观', 'Appearance')}</h3>
           <div className="grok-card-group">
             <button
               type="button"
@@ -240,7 +258,7 @@ export function CreateBotScreen({
                   <option value="local">{t('本机', 'Local')}</option>
                   {remoteDevices.filter(device => device.deviceId !== localDeviceId).map(device => (
                     <option key={device.deviceId} value={device.deviceId} disabled={!device.online}>
-                      {device.displayName || device.deviceId}{device.platform ? ` · ${device.platform}` : ''}{device.online ? '' : ' · offline'}
+                      {device.displayName || device.deviceId}{device.platform ? ` · ${device.platform}` : ''}{device.online ? '' : t(' · 离线', ' · Offline')}
                     </option>
                   ))}
                 </select>
@@ -251,7 +269,7 @@ export function CreateBotScreen({
 
         {!mustCreatePrimaryBot && (
           <div className="grok-field-section">
-            <label className="grok-section-label">{t('主 Bot 设置', 'Primary Role')}</label>
+            <h3 className="grok-section-label">{t('主 Bot 设置', 'Primary Role')}</h3>
             <div className="grok-card-group">
               <div className="grok-card-row no-active">
                 <span className="grok-row-label">{t('创建后设为该节点的主 Bot', 'Set as Primary Bot on this host')}</span>
@@ -266,7 +284,11 @@ export function CreateBotScreen({
         )}
 
         <div className="grok-field-section">
-          <label className="grok-section-label" htmlFor={remoteConnected && createModelPicker ? createModelId : undefined}>{t('模型', 'Model')}</label>
+          {remoteConnected && createModelPicker ? (
+            <label className="grok-section-label" htmlFor={createModelId}>{t('模型', 'Model')}</label>
+          ) : (
+            <h3 className="grok-section-label">{t('模型', 'Model')}</h3>
+          )}
           <div className="grok-card-group">
             {remoteConnected && createModelPicker ? (
               <div className="grok-card-row no-active">
@@ -312,15 +334,6 @@ export function CreateBotScreen({
           <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
         </ReservedSlot>
       </div>
-      {primaryBackNotice && (
-        <div className="bot-edit-toast-anchor">
-          <FloatingPillToast
-            message={primaryBackNotice.text}
-            tone="warning"
-            onDismiss={onDismissPrimaryBackNotice}
-          />
-        </div>
-      )}
     </main>
   );
 }
@@ -363,6 +376,7 @@ export function CreateGroupScreen({
   onOpenCreateBot,
 }: CreateGroupScreenProps) {
   const t = useText();
+  const groupTitleId = useId();
   const unarchivedCandidates = allBotItems.filter(item => !item.archivedAt);
   const q = groupSearchQuery.trim().toLowerCase();
   const filteredCandidates = q
@@ -415,29 +429,29 @@ export function CreateGroupScreen({
       <div className="grok-subpage-scroll">
         {groupCreateAttempt && (
           <div className="grok-field-section">
-            <div className="grok-card-group">
-              <div className="grok-card-row no-active" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
-                <span style={{ fontSize: '.9rem', lineHeight: 1.5, color: 'var(--text)' }}>
-                  {t('上次创建请求结果尚未确认，已冻结原请求 ID 与成员列表，点击右上角「按原请求重试」不会重复建群。',
-                    'Previous create request is unconfirmed. Original request ID and members are frozen so retrying will not duplicate the group.')}
-                </span>
-                <button
-                  type="button"
-                  className="hub-outline-btn"
+            <InlineBanner
+              tone="attention"
+              title={t('上次创建请求待确认', 'Previous create request unconfirmed')}
+              detail={t('已冻结原请求 ID 与成员列表，点击右上角「按原请求重试」不会重复建群。', 'Original request ID and members are frozen so retrying will not duplicate the group.')}
+              actions={
+                <Button
+                  variant="secondary"
+                  size="sm"
                   disabled={groupCreating}
                   onClick={onDiscardGroupCreateAttempt}
                 >
-                  {t('放弃冻结并重新编辑', 'Discard & Edit Again')}
-                </button>
-              </div>
-            </div>
+                  {t('放弃冻结并重新编辑', 'Discard & edit again')}
+                </Button>
+              }
+            />
           </div>
         )}
 
         <div className="grok-field-section">
-          <label className="grok-section-label">{t('群名称（选填）', 'Group Name (Optional)')}</label>
+          <label className="grok-section-label" htmlFor={groupTitleId}>{t('群名称（选填）', 'Group Name (Optional)')}</label>
           <div className="grok-card-group">
             <input
+              id={groupTitleId}
               className="grok-card-input"
               value={groupCreateAttempt ? groupCreateAttempt.title ?? '' : groupTitle}
               onChange={e => onChangeGroupTitle(e.target.value)}
@@ -449,10 +463,10 @@ export function CreateGroupScreen({
         </div>
 
         <div className="grok-field-section">
-          <label className="grok-section-label">
+          <h3 className="grok-section-label">
             {t(`选择成员（已选 ${activeMembers.length} 位，至少 2 位）`,
               `Select Members (${activeMembers.length} selected, min 2)`)}
-          </label>
+          </h3>
 
           {activeMembers.length > 0 && (
             <div className="group-create-chips">
@@ -491,31 +505,32 @@ export function CreateGroupScreen({
           <div className="grok-card-group">
             {unarchivedCandidates.length > 4 && (
               <label className="group-create-search">
-                <Search size={16} />
+                <Search size={16} aria-hidden="true" />
                 <input
                   type="search"
                   value={groupSearchQuery}
                   onChange={e => onChangeGroupSearchQuery(e.target.value)}
                   placeholder={t('搜索 Bot 或设备…', 'Search bots or hosts…')}
+                  aria-label={t('搜索 Bot 或设备', 'Search bots or hosts')}
                   disabled={groupCreating}
                 />
                 {groupSearchQuery && (
                   <button
                     type="button"
+                    className="group-create-search-clear"
                     onClick={() => onChangeGroupSearchQuery('')}
                     aria-label={t('清除搜索', 'Clear search')}
                   >
-                    <X size={15} />
+                    <X size={15} aria-hidden="true" />
                   </button>
                 )}
               </label>
             )}
 
             {unarchivedCandidates.length < 2 ? (
-              <div className="grok-card-row no-active" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
-                <span style={{ color: 'var(--muted)', fontSize: '.9rem', lineHeight: 1.5 }}>
-                  {t('群聊至少需要 2 个未归档 Bot，当前数量不足，请先新建 Bot。',
-                    'At least 2 active bots are required for a group chat. Create another bot first.')}
+              <div className="grok-card-row no-active group-create-empty-row">
+                <span className="group-create-empty-text">
+                  {t('群聊至少需要 2 个未归档 Bot，当前数量不足，请先新建 Bot。', 'At least 2 active bots are required for a group chat. Create another bot first.')}
                 </span>
                 <button
                   type="button"
@@ -527,7 +542,7 @@ export function CreateGroupScreen({
                 </button>
               </div>
             ) : filteredCandidates.length === 0 ? (
-              <div className="grok-card-row no-active" style={{ color: 'var(--muted)' }}>
+              <div className="grok-card-row no-active group-create-empty-text">
                 {t('没有匹配的 Bot', 'No matching bots')}
               </div>
             ) : (
@@ -551,8 +566,8 @@ export function CreateGroupScreen({
                       offline={offline}
                       size={40}
                     />
-                    <div className="group-create-bot-meta">
-                      <div className="group-create-bot-title-row">
+                    <div className="group-create-bot-info">
+                      <div className="group-create-bot-title">
                         <span className="group-create-bot-name">{bot.role}</span>
                         <span className={`hub-bot-host-badge ${bot.hostKind}${offline ? ' is-offline' : ''}`}>
                           <PlatformLogoIcon platform={bot.platform} size={11} />
@@ -563,7 +578,7 @@ export function CreateGroupScreen({
                         </span>
                       </div>
                       {bot.description ? (
-                        <span className="group-create-bot-desc">{bot.description}</span>
+                        <span className="group-create-bot-sub">{bot.description}</span>
                       ) : null}
                     </div>
                     <span className={`group-create-check${selected ? ' is-selected' : ''}`} aria-hidden="true">

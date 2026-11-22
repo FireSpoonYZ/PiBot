@@ -78,7 +78,8 @@ function countBraces(text) {
 
 export function countCssLiterals(source, relPath) {
   const lines = stripCssCommentsByLine(source);
-  let inTopTokenBlock = relPath === 'web/src/styles.css';
+  let inTopTokenBlock =
+    relPath === 'web/src/styles.css' || relPath === 'web/src/design-system/tokens.css';
   let braceDepth = 0;
   let count = 0;
 

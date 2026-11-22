@@ -5,7 +5,6 @@ import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
-  CircleAlert,
   ClipboardCheck,
   Download,
   FolderInput,
@@ -32,7 +31,11 @@ import {
 import { targetApi } from './targetApi';
 import type { DesktopViewApi } from './types';
 import './DesktopShell.css';
-import { ErrorNotice } from '../../../web/src/ui';
+import { humanizeError, useText } from '../../../web/src/ui';
+import { InlineBanner, Select, type SelectOption } from '../../../web/src/components/ui';
+import { hasOpenFloatingPopover, isEventInsideFloatingUi } from '../../../web/src/components/ui/Overlay';
+import { ConnectionStatusPopover, type ConnectionPhase } from '../../../web/src/connection';
+import { useNotice, type NoticeContextValue } from '../../../web/src/notice';
 import { useClientUpdate } from '../../../web/src/ClientUpdateProvider';
 
 interface ProfileFormState {
@@ -57,10 +60,10 @@ interface AppState {
   ca: string;
   form: ProfileFormState;
   globalError: string | null;
-  bannerError: string | null;
-  bannerNoticeOpen: boolean;
-  /** transport/relay 断开提示（可恢复）；与请求级 bannerError 分离，目标 OFFLINE 不会进入此横幅。 */
+  globalErrorSeq: number;
+  /** transport/relay 断开提示（可恢复）；供左栏 ConnectionStatusPopover 呈现。 */
   connectionError: string | null;
+  checkingConnection: boolean;
   selectedDeviceId: string;
   pendingTarget?: SendRecordsTarget;
   pendingReturnView: 'chat' | 'tasks' | 'board';
@@ -83,6 +86,9 @@ interface AppProps {
   /** 主题三档（由 useDesktopTheme 注入）。 */
   theme: 'light' | 'dark' | 'system';
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
+  /** 全局统一通知层（useNotice）。 */
+  notice: NoticeContextValue;
+  t: (zh: string, en: string) => string;
 }
 
 function runId(): string {
@@ -108,16 +114,17 @@ function phaseText(status: DesktopClientStatus | null, transportConnected: boole
   return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
 }
 
-function WindowsUpdateRailButton({ onOpen }: { onOpen(button: HTMLButtonElement): void }) {
+function ClientUpdateRailButton({ onOpen }: { onOpen(button: HTMLButtonElement): void }) {
   const update = useClientUpdate();
   const status = update?.status;
-  if (!navigator.userAgent.includes('Windows') || !update?.ready || !status?.release ||
+  if (!update?.ready || !status?.release ||
       !['available', 'downloading', 'downloaded', 'waiting-tasks', 'installing'].includes(status.phase)) return null;
   const label = '客户端更新 · ' + status.release.version;
   return (
     <button type="button" className="rail-item" title={label} aria-label={label} aria-haspopup="dialog"
       onClick={event => onOpen(event.currentTarget)}>
-      <span className="rail-icon-wrap rail-update-icon"><Download size={18} aria-hidden /></span>
+      <span className="rail-icon-wrap rail-update-icon"><Download size={16} aria-hidden="true" /></span>
+      <span className="rail-label">更新</span>
     </button>
   );
 }
@@ -136,19 +143,6 @@ class App extends Component<AppProps, AppState> {
   private refreshingProfiles = false;
   private settingsButtonRef: HTMLButtonElement | null = null;
   private updateSettingsTrigger: HTMLButtonElement | null = null;
-  private bannerNoticeAnchorRef: HTMLDivElement | null = null;
-  private bannerNoticeButtonRef: HTMLButtonElement | null = null;
-  private handleBannerNoticePointerDown = (e: MouseEvent): void => {
-    if (!this.state.bannerNoticeOpen) return;
-    if (this.bannerNoticeAnchorRef && e.target instanceof Node && !this.bannerNoticeAnchorRef.contains(e.target)) {
-      this.setState({ bannerNoticeOpen: false });
-    }
-  };
-  private handleBannerNoticeKeyDown = (e: KeyboardEvent): void => {
-    if (!this.state.bannerNoticeOpen || e.key !== 'Escape' || e.defaultPrevented) return;
-    e.preventDefault();
-    this.setState({ bannerNoticeOpen: false }, () => this.bannerNoticeButtonRef?.focus());
-  };
   /** 显式断开/connect 进行中不做恢复采纳：不得违背用户意图把 transport 重新置真。 */
   private suppressRecovery = false;
   /** 已应用的 broker generation；变化表示后端已重连，旧 UI 身份代次必须作废。 */
@@ -198,12 +192,16 @@ class App extends Component<AppProps, AppState> {
   private checkConnection = async (): Promise<void> => {
     const { api, centerConnection } = this.props;
     const identity = api.identity;
-    if (!identity) return;
-    if (centerConnection.status?.state !== 'ready') {
-      await centerConnection.checkCenter();
-      return;
-    }
+    this.setState({ checkingConnection: true });
     try {
+      if (centerConnection.status?.state !== 'ready') {
+        await centerConnection.checkCenter();
+        return;
+      }
+      if (!identity) {
+        await this.refreshProfiles();
+        return;
+      }
       const st = await request('status', {});
       if (!this.devicesMounted || api.identity !== identity ||
           this.props.centerConnection.status?.state !== 'ready' ||
@@ -221,8 +219,29 @@ class App extends Component<AppProps, AppState> {
       });
     } catch (e) {
       if (this.devicesMounted) this.setState({ connectionError: '检查连接失败：' + toError(e).message });
+    } finally {
+      if (this.devicesMounted) this.setState({ checkingConnection: false });
     }
   };
+
+  private pushErrorNotice(id: string, message: string | null): void {
+    const trimmed = message?.trim() ?? '';
+    if (!trimmed) {
+      this.props.notice.dismiss(id);
+      return;
+    }
+    const parsed = humanizeError(trimmed, this.props.t);
+    const title = parsed?.title || trimmed;
+    const detailParts = [parsed?.description, parsed?.detail].filter(
+      (part): part is string => Boolean(part && part.trim() && part.trim() !== title),
+    );
+    this.props.notice.notify({
+      id,
+      tone: 'error',
+      title,
+      detail: detailParts.length > 0 ? detailParts.join('\n') : undefined,
+    });
+  }
 
   constructor(props: AppProps) {
     super(props);
@@ -239,9 +258,9 @@ class App extends Component<AppProps, AppState> {
       ca: '',
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
-      bannerError: null,
-      bannerNoticeOpen: false,
+      globalErrorSeq: 0,
       connectionError: null,
+      checkingConnection: false,
       selectedDeviceId: '',
       pendingReturnView: 'chat',
       pendingAttention: null,
@@ -332,7 +351,7 @@ class App extends Component<AppProps, AppState> {
       });
     });
     this.unsubErrors = this.props.api.subscribeErrors((message) => {
-      this.setState((s) => (s.bannerError === message ? null : { bannerError: message }));
+      this.pushErrorNotice('desktop-banner-error', message);
     });
     this.unsubPending = this.props.api.subscribePending(this.schedulePendingRefresh);
     void this.refreshProfiles();
@@ -345,21 +364,17 @@ class App extends Component<AppProps, AppState> {
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
     if (this.unsubPending) this.unsubPending();
-    document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
-    document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
+    this.props.notice.dismiss('desktop-global-error');
+    this.props.notice.dismiss('desktop-banner-error');
     clearTimeout(this.pendingRefreshTimer);
   }
 
   componentDidUpdate(prev: AppProps, prevState: AppState): void {
-    if (!prevState.bannerNoticeOpen && this.state.bannerNoticeOpen) {
-      document.addEventListener('mousedown', this.handleBannerNoticePointerDown);
-      document.addEventListener('keydown', this.handleBannerNoticeKeyDown);
-    } else if (prevState.bannerNoticeOpen && !this.state.bannerNoticeOpen) {
-      document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
-      document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
-    }
-    if (!this.state.bannerError && this.state.bannerNoticeOpen) {
-      this.setState({ bannerNoticeOpen: false });
+    if (
+      prevState.globalError !== this.state.globalError ||
+      prevState.globalErrorSeq !== this.state.globalErrorSeq
+    ) {
+      this.pushErrorNotice('desktop-global-error', this.state.globalError);
     }
     const a = prevState.identity;
     const b = this.state.identity;
@@ -565,7 +580,10 @@ class App extends Component<AppProps, AppState> {
     try {
       await this.props.centerConnection.disconnectCenter();
     } catch (e) {
-      this.setState({ globalError: '更换中心连接失败：' + toError(e).message });
+      this.setState((s) => ({
+        globalError: '更换中心连接失败：' + toError(e).message,
+        globalErrorSeq: s.globalErrorSeq + 1,
+      }));
     } finally {
       this.actionInFlight = false;
     }
@@ -623,9 +641,14 @@ class App extends Component<AppProps, AppState> {
       });
       // transport 连接以 status.phase === 'connected' 为准；不代表目标 Host 在线。
       this.props.api.setTransportConnected(status.phase === 'connected');
-      this.setState({ busy: false, status, bannerError: null, bannerNoticeOpen: false, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
+      this.props.notice.dismiss('desktop-banner-error');
+      this.setState({ busy: false, status, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
     } catch (e) {
-      this.setState({ busy: false, globalError: '连接失败：' + toError(e).message });
+      this.setState((s) => ({
+        busy: false,
+        globalError: '连接失败：' + toError(e).message,
+        globalErrorSeq: s.globalErrorSeq + 1,
+      }));
     } finally {
       // 保留各局域网调试档案输入态令牌，切换/重试不无故清空。
       this.actionInFlight = false;
@@ -663,7 +686,10 @@ class App extends Component<AppProps, AppState> {
     const { form, profiles } = this.state;
     if (this.actionInFlight) return;
     if (profiles.length >= 16) {
-      this.setState({ globalError: 'profile 已达上限 16' });
+      this.setState((s) => ({
+        globalError: 'profile 已达上限 16',
+        globalErrorSeq: s.globalErrorSeq + 1,
+      }));
       return;
     }
     let next: DesktopUiProfile;
@@ -693,10 +719,41 @@ class App extends Component<AppProps, AppState> {
         ca: '',
       }));
     } catch (e) {
-      this.setState({ globalError: '保存 profile 失败：' + toError(e).message });
+      this.setState((s) => ({
+        globalError: '保存 profile 失败：' + toError(e).message,
+        globalErrorSeq: s.globalErrorSeq + 1,
+      }));
     } finally {
       this.actionInFlight = false;
     }
+  }
+
+  private deriveRailConnectionPhase(centerInterrupted: boolean): {
+    phase: ConnectionPhase;
+    reason: string | null;
+  } {
+    const center = this.props.centerConnection.status;
+    const { status, identity, transportConnected, connectionError } = this.state;
+    if (centerInterrupted) {
+      if (center?.state === 'connecting') {
+        return { phase: 'connecting', reason: '正在恢复中心连接…' };
+      }
+      return { phase: 'error', reason: '中心连接不可用' };
+    }
+    if (status?.phase === 'connecting') {
+      return { phase: 'connecting', reason: connectionError ?? '正在建立连接…' };
+    }
+    const techSuffix = status?.errorCode ? ` (phase=${status.phase} · errorCode=${status.errorCode})` : '';
+    if (status?.phase === 'failed' || (connectionError && identity && !transportConnected)) {
+      return {
+        phase: 'error',
+        reason: (connectionError ?? '连接不可用：请检查中心与设备后重试。') + techSuffix,
+      };
+    }
+    if (!identity || !transportConnected) {
+      return { phase: 'offline', reason: connectionError ?? null };
+    }
+    return { phase: 'online', reason: null };
   }
 
   /* ---------- 渲染 ---------- */
@@ -711,9 +768,11 @@ class App extends Component<AppProps, AppState> {
     const selectedProfile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId) ?? null;
     const showDeviceSelector = this.state.view === 'pending' && !!identity;
     const attentionDevice = this.pendingAttentionDevice();
+    const railConn = this.deriveRailConnectionPhase(centerInterrupted);
+    const endpointLabel = center?.centerUrl || selectedProfile?.url || null;
     return (
       <div className="desktop-shell">
-        <aside className="desktop-rail">
+        <aside className="desktop-rail" aria-label="主导航">
           <div className="rail-group">
             {(
               [
@@ -730,9 +789,9 @@ class App extends Component<AppProps, AppState> {
                 aria-pressed={this.state.view === key}
               >
                 <span className="rail-icon-wrap">
-                  <Icon size={18} aria-hidden />
+                  <Icon size={18} aria-hidden="true" />
                   {key === 'tasks' && identity && this.state.taskWaitingCount > 0 && (
-                    <span className="conn-dot needs-attention" />
+                    <span className="conn-dot needs-attention" aria-hidden="true" />
                   )}
                 </span>
                 <span className="rail-label">{label}</span>
@@ -747,8 +806,8 @@ class App extends Component<AppProps, AppState> {
                 title={attentionDevice ? '有待处理的发送记录' : '发送记录'}
               >
                 <span className="rail-icon-wrap">
-                  <FolderInput size={18} aria-hidden />
-                  {attentionDevice && <span className="conn-dot needs-attention" />}
+                  <FolderInput size={18} aria-hidden="true" />
+                  {attentionDevice && <span className="conn-dot needs-attention" aria-hidden="true" />}
                 </span>
                 <span className="rail-label">发送记录</span>
               </button>
@@ -756,40 +815,19 @@ class App extends Component<AppProps, AppState> {
           </div>
           <div className="rail-spacer" />
           <div className="rail-group">
-            {this.state.bannerError ? (
-              <div className="rail-notice-anchor" ref={(el) => { this.bannerNoticeAnchorRef = el; }}>
-                <button
-                  type="button"
-                  ref={(el) => { this.bannerNoticeButtonRef = el; }}
-                  className={'rail-item rail-notice-trigger' + (this.state.bannerNoticeOpen ? ' active' : '')}
-                  onClick={() => this.setState((s) => ({ bannerNoticeOpen: !s.bannerNoticeOpen }))}
-                  aria-expanded={this.state.bannerNoticeOpen}
-                  aria-haspopup="dialog"
-                  aria-controls="desktop-rail-notice-popover"
-                  title="查看运行提示"
-                >
-                  <span className="rail-icon-wrap">
-                    <CircleAlert size={18} aria-hidden />
-                    <span className="conn-dot needs-attention" />
-                  </span>
-                  <span className="rail-label">提示</span>
-                </button>
-                {this.state.bannerNoticeOpen ? (
-                  <div
-                    id="desktop-rail-notice-popover"
-                    className="rail-notice-popover"
-                    role="region"
-                    aria-label="运行提示"
-                  >
-                    <ErrorNotice
-                      error={this.state.bannerError}
-                      onDismiss={() => this.setState({ bannerError: null, bannerNoticeOpen: false })}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            <WindowsUpdateRailButton onOpen={button => {
+            <ConnectionStatusPopover
+              phase={railConn.phase}
+              reason={railConn.reason}
+              endpointLabel={endpointLabel}
+              onRetry={() => this.checkConnection()}
+              retrying={this.state.checkingConnection}
+              onOpenSettings={() => this.setState({ settingsOpen: true, settingsTab: 'connection' })}
+              compact
+              align="start"
+              side="top"
+              className="rail-conn-status"
+            />
+            <ClientUpdateRailButton onOpen={button => {
               this.updateSettingsTrigger = button;
               this.setState({ settingsOpen: true, settingsTab: 'updates' });
             }} />
@@ -801,44 +839,42 @@ class App extends Component<AppProps, AppState> {
               title={identity ? '当前：' + phaseLabel : '打开设置'}
             >
               <span className="rail-icon-wrap">
-                <Settings size={18} aria-hidden />
-                <span className={'conn-dot ' + (transportConnected ? 'online' : 'offline')} />
+                <Settings size={18} aria-hidden="true" />
               </span>
               <span className="rail-label">设置</span>
             </button>
           </div>
         </aside>
         <main className="app-workspace">
-          {this.state.globalError ? (
-            <aside className="app-notices" aria-label="通知">
-              <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
-            </aside>
+          {centerInterrupted ? (
+            <InlineBanner
+              compact
+              tone="attention"
+              role="status"
+              className="center-recovery-banner"
+              title={center?.state === 'disconnected' ? '中心连接不可用' : '正在恢复中心连接…'}
+              detail="当前为只读离线缓存，草稿已保留；恢复连接后可继续操作。"
+              actions={
+                <>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={this.state.checkingConnection}
+                    onClick={() => void this.checkConnection()}
+                  >
+                    {this.state.checkingConnection ? '重连中…' : '重试连接'}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void this.disconnectCenter()}
+                  >
+                    更换中心连接
+                  </button>
+                </>
+              }
+            />
           ) : null}
-          {centerInterrupted && (
-            <div className="center-recovery">
-              <span role="status">{center?.state === 'disconnected' ? '中心连接不可用' : '正在恢复中心连接…'}</span>
-              <button type="button" className="secondary-button" onClick={() => void this.disconnectCenter()}>
-                更换中心连接
-              </button>
-            </div>
-          )}
-          {!centerInterrupted && this.state.connectionError && identity && !transportConnected && (
-            <div className="error-banner" role="alert">
-              <span className="error-banner-text">
-                {this.state.connectionError}
-                {status?.errorCode ? (
-                  <details>
-                    <summary>技术详情</summary>
-                    <code>{'phase=' + status.phase + ' · errorCode=' + status.errorCode}</code>
-                  </details>
-                ) : null}
-              </span>
-              <div className="error-banner-actions">
-                <button type="button" onClick={() => void this.checkConnection()}>检查连接</button>
-                <button type="button" onClick={() => this.setState({ connectionError: null })}>关闭</button>
-              </div>
-            </div>
-          )}
           <div className="workspace-body">
             {showDeviceSelector ? this.renderDeviceSelector() : null}
             {this.renderWorkspace(centerInterrupted)}
@@ -852,6 +888,26 @@ class App extends Component<AppProps, AppState> {
                 'desktop-dialog settings-dialog settings-shell-dialog' +
                 (this.state.settingsTab === 'center-admin' ? ' settings-shell-center-admin' : '')
               }
+              onEscapeKeyDown={(event) => {
+                if (hasOpenFloatingPopover()) {
+                  event.preventDefault();
+                }
+              }}
+              onPointerDownOutside={(event) => {
+                if (isEventInsideFloatingUi(event)) {
+                  event.preventDefault();
+                }
+              }}
+              onFocusOutside={(event) => {
+                if (isEventInsideFloatingUi(event)) {
+                  event.preventDefault();
+                }
+              }}
+              onInteractOutside={(event) => {
+                if (isEventInsideFloatingUi(event)) {
+                  event.preventDefault();
+                }
+              }}
               onCloseAutoFocus={(e) => {
                 e.preventDefault();
                 const trigger = this.updateSettingsTrigger?.isConnected ? this.updateSettingsTrigger : this.settingsButtonRef;
@@ -930,27 +986,32 @@ class App extends Component<AppProps, AppState> {
   private renderDeviceSelector(): ReactNode {
     const { devices, pendingTarget, selectedDeviceId, archiveBridge, pendingReturnView } = this.state;
     const choices = devices.items.length > 0 ? devices.items : archiveBridge?.devices ?? [];
+    const options: SelectOption<string>[] = [
+      ...(selectedDeviceId && !choices.some((device) => device.deviceId === selectedDeviceId)
+        ? [{ value: selectedDeviceId, label: '目标设备' }]
+        : []),
+      ...choices.map((device) => ({
+        value: device.deviceId,
+        label: (device.displayName || '未命名设备') + (device.online && this.state.transportConnected ? '' : '（离线）'),
+      })),
+    ];
     return (
       <div className="device-selector">
         <button type="button" className="secondary-button" onClick={() => this.setState({ view: pendingReturnView, pendingTarget: undefined })}>
-          <ArrowLeft size={14} aria-hidden /> {pendingTarget ? '返回原会话' : '返回'}
+          <ArrowLeft size={14} aria-hidden="true" /> {pendingTarget ? '返回原会话' : '返回'}
         </button>
-        <label className="pending-device-picker">
+        <div className="pending-device-picker">
           <span className="device-selector-label">设备</span>
-          <select
+          <Select
+            size="sm"
+            className="pending-device-select"
             value={selectedDeviceId}
-            onChange={(e) => this.setState({ selectedDeviceId: e.target.value, pendingTarget: undefined })}
-          >
-            <option value="">{devices.busy ? '正在读取设备…' : '选择设备'}</option>
-            {selectedDeviceId && !choices.some((device) => device.deviceId === selectedDeviceId) &&
-              <option value={selectedDeviceId}>目标设备</option>}
-            {choices.map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {(device.displayName || '未命名设备') + (device.online && this.state.transportConnected ? '' : '（离线）')}
-              </option>
-            ))}
-          </select>
-        </label>
+            onChange={(next) => this.setState({ selectedDeviceId: next, pendingTarget: undefined })}
+            options={options}
+            placeholder={devices.busy ? '正在读取设备…' : '选择设备'}
+            ariaLabel="选择设备"
+          />
+        </div>
         {devices.error && <button type="button" className="secondary-button" onClick={() => void this.loadDevices()}>刷新设备</button>}
       </div>
     );
@@ -1031,6 +1092,8 @@ class App extends Component<AppProps, AppState> {
 function AppShell({ api, pageActive }: { api: DesktopPanelApi; pageActive?: boolean }) {
   const centerConnection = useCenterConnection();
   const { theme, setTheme } = useDesktopTheme();
+  const notice = useNotice();
+  const t = useText();
   return (
     <App
       api={api}
@@ -1038,6 +1101,8 @@ function AppShell({ api, pageActive }: { api: DesktopPanelApi; pageActive?: bool
       centerConnection={centerConnection}
       theme={theme}
       setTheme={setTheme}
+      notice={notice}
+      t={t}
     />
   );
 }
@@ -1064,8 +1129,15 @@ export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: b
     if (this.state.failed) {
       return (
         <div className="desktop-shell error-shell">
-          <div className="error-banner" role="alert">{this.state.failed}</div>
-          <button onClick={() => this.setState({ failed: null })}>重试</button>
+          <InlineBanner
+            tone="danger"
+            title={this.state.failed}
+            actions={
+              <button type="button" className="primary-button" onClick={() => this.setState({ failed: null })}>
+                重试
+              </button>
+            }
+          />
         </div>
       );
     }

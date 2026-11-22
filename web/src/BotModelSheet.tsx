@@ -1,5 +1,5 @@
 // 手机端 Bot 设置抽屉入口：按 tab 展示模型设置、工具与插件、或技能闭环管理。
-import { useState } from 'react';
+import { useMemo } from 'react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import { useText } from './ui';
 import { AdvancedSettingsPage } from './bot-settings/AdvancedSettingsPage';
@@ -42,7 +42,10 @@ export function BotModelSheet({
   onOpenCenterAdmin,
 }: Props) {
   const t = useText();
-  const [target] = useState<Target>(() => ({ identity, deviceId: identity.targetDeviceId, botId }));
+  const target = useMemo<Target>(
+    () => ({ identity, deviceId: identity.targetDeviceId, botId }),
+    [identity, botId],
+  );
 
   if (initialTab === 'capabilities') {
     return (

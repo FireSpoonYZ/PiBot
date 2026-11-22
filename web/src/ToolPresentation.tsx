@@ -1,4 +1,13 @@
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
+import {
+  ArrowRight,
+  CheckCircle2,
+  Circle,
+  CircleDot,
+  ClipboardList,
+  HelpCircle,
+  ListTodo,
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type {
   ToolPresentation as HostToolPresentation,
@@ -7,6 +16,7 @@ import type {
   QuestionnaireAnswerPresentation,
   VaultUnlockPresentation,
 } from '../../host-core/index.js';
+import { ActionSlip, InlineBanner, type ActionSlipTone } from './components/ui';
 import type { TaskStatus, TaskStepStatus } from './tasks/types';
 import {
   GoogleAccountSelectCard,
@@ -304,7 +314,7 @@ export function ToolPresentationCard({
     return <GoogleBrowserTakeoverCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
   }
   if (presentation.kind === 'google-readiness') {
-    return <GoogleReadinessCard presentation={presentation} disabled={disabled} googleContext={googleContext} />;
+    return <GoogleReadinessCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
   }
   return (
     <QuestionnaireCard
@@ -319,6 +329,19 @@ export function ToolPresentationCard({
   );
 }
 
+function taskTone(status: TaskStatus): ActionSlipTone {
+  switch (status) {
+    case 'done':
+      return 'live';
+    case 'waiting':
+      return 'attention';
+    case 'working':
+      return 'info';
+    default:
+      return 'neutral';
+  }
+}
+
 function TaskCard({
   presentation,
   onOpenTask,
@@ -330,53 +353,77 @@ function TaskCard({
 }) {
   const hasSteps = presentation.stepCount.total > 0;
   return (
-    <div className="tp-card tp-task" role="group" aria-label={presentation.title}>
-      <div className="tp-task-row">
-        <div className="tp-task-info">
-          <span className="tp-card-kicker">{presentation.cardLabel}</span>
-          <span className="tp-card-title">{presentation.title}</span>
-          {hasSteps ? (
-            <span className="tp-card-meta">
-              {t(`已完成 ${presentation.stepCount.done}/${presentation.stepCount.total}`, `${presentation.stepCount.done}/${presentation.stepCount.total} done`)}
-            </span>
-          ) : null}
-        </div>
-        {onOpenTask ? (
+    <ActionSlip
+      className="tp-slip tp-task"
+      tone={taskTone(presentation.status)}
+      compact
+      role="group"
+      ariaLabel={presentation.title}
+      icon={<ClipboardList size={16} aria-hidden="true" />}
+      title={presentation.title}
+      status={<span role="status">{presentation.cardLabel}</span>}
+      meta={
+        hasSteps ? (
+          <span className="tabular-nums">
+            {t(`已完成 ${presentation.stepCount.done}/${presentation.stepCount.total}`, `${presentation.stepCount.done}/${presentation.stepCount.total} done`)}
+          </span>
+        ) : undefined
+      }
+      headerExtra={
+        onOpenTask ? (
           <button
             type="button"
             className="tp-btn tp-task-open-btn"
             onClick={() => onOpenTask(presentation.taskId)}
           >
-            {t('查看任务 →', 'View task →')}
+            <span>{t('查看任务', 'View task')}</span>
+            <ArrowRight size={14} aria-hidden="true" />
           </button>
-        ) : null}
-      </div>
-    </div>
+        ) : undefined
+      }
+    />
   );
 }
 
 function TodoCard({ presentation, t }: { presentation: TodoPresentation; t: (zh: string, en: string) => string }) {
   const done = presentation.tasks.filter(task => task.status === 'completed').length;
+  const total = presentation.tasks.length;
+  const allDone = total > 0 && done === total;
   return (
-    <div className="tp-card tp-todo" role="group" aria-label={t('任务列表', 'Task list')}>
-      <div className="tp-card-head">
-        <span className="tp-card-title">{t('任务列表', 'Tasks')}</span>
-        <span className="tp-card-meta">{done}/{presentation.tasks.length}</span>
-      </div>
+    <ActionSlip
+      className="tp-slip tp-todo"
+      tone={allDone ? 'live' : 'neutral'}
+      compact
+      role="group"
+      ariaLabel={t('任务列表', 'Task list')}
+      icon={<ListTodo size={16} aria-hidden="true" />}
+      title={t('任务列表', 'Tasks')}
+      status={
+        <span className="tabular-nums" role="status">
+          {done}/{total}
+        </span>
+      }
+    >
       <ul className="tp-todo-list">
         {presentation.tasks.map(task => (
           <li key={task.id} className={`tp-todo-item is-${task.status}`}>
             <span className="tp-todo-icon" aria-hidden="true">
-              {task.status === 'completed' ? '✓' : task.status === 'in_progress' ? '◐' : '○'}
+              {task.status === 'completed' ? (
+                <CheckCircle2 size={15} aria-hidden="true" />
+              ) : task.status === 'in_progress' ? (
+                <CircleDot size={15} aria-hidden="true" />
+              ) : (
+                <Circle size={15} aria-hidden="true" />
+              )}
             </span>
             <span className="tp-todo-subject">{task.subject}</span>
           </li>
         ))}
-        {presentation.tasks.length === 0 ? (
+        {total === 0 ? (
           <li className="tp-todo-empty">{t('暂无任务', 'No tasks')}</li>
         ) : null}
       </ul>
-    </div>
+    </ActionSlip>
   );
 }
 
@@ -406,6 +453,7 @@ function QuestionnaireCard({
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   t: (zh: string, en: string) => string;
 }) {
+  const errorId = useId();
   const editable = active && !disabled && !interrupted;
   const [localStatus, setLocalStatus] = useState<'settled' | null>(null);
   const [selectedMap, setSelectedMap] = useState<Record<number, number[]>>({});
@@ -413,6 +461,7 @@ function QuestionnaireCard({
   const [notesMap, setNotesMap] = useState<Record<number, string>>({});
   const [globalNote, setGlobalNote] = useState('');
   const [error, setError] = useState('');
+  const [showValidation, setShowValidation] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   /** 成功提交后保持锁定直到 live/历史终态卡片替换，防双击重复提交。 */
   const [submitted, setSubmitted] = useState(false);
@@ -421,7 +470,9 @@ function QuestionnaireCard({
   const busy = submitting || submitted;
 
   const selectedFor = (index: number): number[] => selectedMap[index] ?? [];
-  const clearError = () => { if (error) setError(''); };
+  const clearError = () => {
+    if (error) setError('');
+  };
 
   const toggleOption = (questionIndex: number, optionIndex: number, multi: boolean) => {
     setSelectedMap(prev => {
@@ -466,6 +517,18 @@ function QuestionnaireCard({
 
   const handleSubmit = async (cancelled: boolean) => {
     if (!editable || !onSubmit || submittingRef.current || submitted) return;
+    if (!cancelled) {
+      const unansweredCount = presentation.questions.filter(
+        (_question, idx) => selectedFor(idx).length === 0 && !(customTextMap[idx] ?? '').trim(),
+      ).length;
+      if (unansweredCount > 0) {
+        setShowValidation(true);
+        setError(
+          t(`还有 ${unansweredCount} 道题未回答，请选择选项或填写自定义回答后再提交。`, `${unansweredCount} question(s) unanswered. Select an option or enter a custom answer before submitting.`),
+        );
+        return;
+      }
+    }
     submittingRef.current = true;
     const payload: QuestionnaireSubmitPayload = cancelled
       ? { conversationId: presentation.conversationId, requestId: presentation.requestId, cancelled: true, answers: [] }
@@ -478,6 +541,7 @@ function QuestionnaireCard({
         };
     setSubmitting(true);
     setError('');
+    setShowValidation(false);
     try {
       const result = await onSubmit(payload);
       // 并发先到者已结算：服务端返回 settled 时本地同步终态，不当作错误。
@@ -502,122 +566,46 @@ function QuestionnaireCard({
     : presentation.status === 'cancelled' ? t('已取消', 'Cancelled')
     : settledLocally ? t('已结算（以先到回答为准）', 'Settled (first answer won)')
     : editable ? t('待回答', 'Pending') : t('待回答（只读）', 'Pending (read-only)');
-  const globalNoteInput = <input
-    type="text"
-    className="tp-input tp-global-note"
-    aria-label={t('整体备注（可选）', 'Overall note (optional)')}
-    placeholder={t('整体备注（可选）', 'Overall note (optional)')}
-    value={globalNote}
-    maxLength={GLOBAL_NOTE_LIMIT}
-    disabled={!editable || busy || settledLocally}
-    onChange={event => { setGlobalNote(event.target.value); clearError(); }}
-  />;
+  const slipTone: ActionSlipTone =
+    interrupted || presentation.status === 'cancelled'
+      ? 'neutral'
+      : presentation.status === 'answered' || settledLocally
+        ? 'live'
+        : editable
+          ? 'info'
+          : 'neutral';
+
+  const globalNoteInput = (
+    <input
+      type="text"
+      className="tp-input tp-global-note"
+      aria-label={t('整体备注（可选）', 'Overall note (optional)')}
+      placeholder={t('整体备注（可选）', 'Overall note (optional)')}
+      value={globalNote}
+      maxLength={GLOBAL_NOTE_LIMIT}
+      disabled={!editable || busy || settledLocally}
+      onChange={event => { setGlobalNote(event.target.value); clearError(); }}
+    />
+  );
+
+  const showPendingActions = presentation.status === 'pending' && !interrupted && !settledLocally;
 
   return (
     <div
-      className={`tp-card tp-questionnaire is-${displayStatus}`}
-      role="group"
-      aria-label={t('问卷', 'Questionnaire')}
+      className="tp-questionnaire-wrap"
       data-active-questionnaire={editable && !busy && !settledLocally ? presentation.requestId : undefined}
     >
-      <div className="tp-card-head">
-        <span className="tp-card-title">{t('问卷', 'Questions')}</span>
-        <span className={`tp-status-pill is-${displayStatus}`}>{statusLabel}</span>
-      </div>
-
-      {presentation.status === 'pending' ? (
-        <div className="tp-questions">
-          {presentation.questions.map((question, index) => {
-            const selected = selectedFor(index);
-            const groupName = `tp-q-${presentation.requestId}-${index}`;
-            const inputDisabled = !editable || busy || settledLocally;
-            const multi = question.multiSelect === true;
-            const optionalFields = <>
-              <input
-                type="text"
-                className="tp-input"
-                aria-label={t('自定义回答（可选）', 'Custom answer (optional)')}
-                placeholder={t('自定义回答（可选）', 'Custom answer (optional)')}
-                value={customTextMap[index] ?? ''}
-                maxLength={CUSTOM_TEXT_LIMIT}
-                disabled={inputDisabled}
-                onChange={event => changeCustomText(index, multi, event.target.value)}
-              />
-              <input
-                type="text"
-                className="tp-input tp-notes"
-                aria-label={t('备注（可选）', 'Notes (optional)')}
-                placeholder={t('备注（可选）', 'Notes (optional)')}
-                value={notesMap[index] ?? ''}
-                maxLength={NOTES_LIMIT}
-                disabled={inputDisabled}
-                onChange={event => { setNotesMap(prev => ({ ...prev, [index]: event.target.value })); clearError(); }}
-              />
-            </>;
-            return (
-              <fieldset
-                key={index}
-                className="tp-question"
-                disabled={inputDisabled}
-                data-unanswered={selected.length === 0 && !customTextMap[index]?.trim() ? '' : undefined}
-              >
-                <legend className="tp-question-text">
-                  <span className="tp-question-header">{question.header} · </span>
-                  {question.question}
-                  {multi ? <span className="tp-question-hint">{t('（可多选）', ' (multi)')}</span> : null}
-                </legend>
-                <div className="tp-options" role="group">
-                  {question.options.map((option, optionIndex) => {
-                    const checked = selected.includes(optionIndex);
-                    return (
-                      <label key={optionIndex} className={`tp-option${checked ? ' is-selected' : ''}`}>
-                        <input
-                          type={multi ? 'checkbox' : 'radio'}
-                          name={groupName}
-                          checked={checked}
-                          disabled={inputDisabled}
-                          onChange={() => toggleOption(index, optionIndex, multi)}
-                        />
-                        <span className="tp-option-body">
-                          <span className="tp-option-label">{option.label}</span>
-                          <span className="tp-option-desc">{option.description}</span>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-                {/* preview 只限单选选项（上游契约）；multi 的 preview 字段不渲染。 */}
-                {!multi && question.options.map((option, optionIndex) =>
-                  option.preview && selected.includes(optionIndex) ? (
-                    <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
-                  ) : null,
-                )}
-                {!interrupted && (collapseOptionalFields ? <details className="tp-optional-fields">
-                  <summary>{t('自定义回答和备注', 'Custom answer and notes')}
-                    {customTextMap[index]?.trim() || notesMap[index]?.trim() ? t(' · 已填写', ' · Added') : ''}
-                  </summary>
-                  {optionalFields}
-                </details> : optionalFields)}
-              </fieldset>
-            );
-          })}
-          {!interrupted && (collapseOptionalFields ? <details className="tp-optional-fields">
-            <summary>{globalNote.trim() ? t('整体备注 · 已填写', 'Overall note · Added') : t('添加整体备注', 'Add overall note')}</summary>
-            {globalNoteInput}
-          </details> : globalNoteInput)}
-          {!interrupted && error ? <div className="tp-error" role="alert">{error}</div> : null}
-          {!interrupted && (settledLocally ? (
-            <div className="tp-result-line">{t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}</div>
-          ) : (
+      <ActionSlip
+        className={`tp-slip tp-questionnaire is-${displayStatus}`}
+        tone={slipTone}
+        role="group"
+        ariaLabel={t('问卷', 'Questionnaire')}
+        icon={<HelpCircle size={16} aria-hidden="true" />}
+        title={t('问卷', 'Questions')}
+        status={<span role="status">{statusLabel}</span>}
+        footer={
+          showPendingActions ? (
             <div className="tp-actions">
-              <button
-                type="button"
-                className="tp-btn tp-btn-primary"
-                disabled={!editable || busy}
-                onClick={() => void handleSubmit(false)}
-              >
-                {submitting ? t('提交中…', 'Submitting…') : submitted ? t('已提交，等待确认', 'Submitted, awaiting confirmation') : t('提交回答', 'Submit')}
-              </button>
               <button
                 type="button"
                 className="tp-btn"
@@ -626,39 +614,158 @@ function QuestionnaireCard({
               >
                 {t('取消问卷', 'Cancel')}
               </button>
+              <button
+                type="button"
+                className="tp-btn tp-btn-primary"
+                disabled={!editable || busy}
+                aria-describedby={error ? errorId : undefined}
+                onClick={() => void handleSubmit(false)}
+              >
+                {submitting ? t('提交中…', 'Submitting…') : submitted ? t('已提交，等待确认', 'Submitted, awaiting confirmation') : t('提交回答', 'Submit')}
+              </button>
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="tp-result">
-          {presentation.result?.cancelled || presentation.status === 'cancelled' ? (
-            <div className="tp-result-line">{t('用户已取消该问卷。', 'The questionnaire was cancelled.')}</div>
-          ) : null}
-          {presentation.result?.answers.map((answer: QuestionnaireAnswerPresentation, index) => (
-            <div key={index} className="tp-answer">
-              <div className="tp-answer-question">{answer.question || `#${answer.questionIndex + 1}`}</div>
-              <div className="tp-answer-value">
-                {/* multi 同时显示 selected 与自定义文本；option/custom 显示标量答案。 */}
-                {answer.kind === 'multi' && answer.selected?.length
-                  ? answer.answer
-                    ? `${answer.selected.join(t('、', ', '))}${t('、', ', ')}${answer.answer}`
-                    : answer.selected.join(t('、', ', '))
-                  : answer.answer ?? t('（未回答）', '(unanswered)')}
+          ) : undefined
+        }
+      >
+        {presentation.status === 'pending' ? (
+          <div className="tp-questions">
+            {presentation.questions.map((question, index) => {
+              const selected = selectedFor(index);
+              const groupName = `tp-q-${presentation.requestId}-${index}`;
+              const inputDisabled = !editable || busy || settledLocally;
+              const multi = question.multiSelect === true;
+              const unanswered = selected.length === 0 && !(customTextMap[index] ?? '').trim();
+              const invalid = showValidation && unanswered;
+              const questionScope = question.header || question.question || `#${index + 1}`;
+              const optionalFields = (
+                <>
+                  <input
+                    type="text"
+                    className="tp-input"
+                    aria-label={t(`${questionScope}：自定义回答（可选）`, `${questionScope}: Custom answer (optional)`)}
+                    placeholder={t('自定义回答（可选）', 'Custom answer (optional)')}
+                    value={customTextMap[index] ?? ''}
+                    maxLength={CUSTOM_TEXT_LIMIT}
+                    disabled={inputDisabled}
+                    aria-invalid={invalid || undefined}
+                    aria-describedby={invalid && error ? errorId : undefined}
+                    onChange={event => changeCustomText(index, multi, event.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="tp-input tp-notes"
+                    aria-label={t(`${questionScope}：备注（可选）`, `${questionScope}: Notes (optional)`)}
+                    placeholder={t('备注（可选）', 'Notes (optional)')}
+                    value={notesMap[index] ?? ''}
+                    maxLength={NOTES_LIMIT}
+                    disabled={inputDisabled}
+                    onChange={event => { setNotesMap(prev => ({ ...prev, [index]: event.target.value })); clearError(); }}
+                  />
+                </>
+              );
+              return (
+                <fieldset
+                  key={index}
+                  className={`tp-question${invalid ? ' is-unanswered' : ''}`}
+                  disabled={inputDisabled}
+                  data-unanswered={unanswered ? '' : undefined}
+                  aria-invalid={invalid || undefined}
+                  aria-describedby={invalid && error ? errorId : undefined}
+                >
+                  <legend className="tp-question-text">
+                    <span className="tp-question-header">{question.header} · </span>
+                    {question.question}
+                    {multi ? <span className="tp-question-hint">{t('（可多选）', ' (multi)')}</span> : null}
+                  </legend>
+                  <div className="tp-options" role="group">
+                    {question.options.map((option, optionIndex) => {
+                      const checked = selected.includes(optionIndex);
+                      return (
+                        <label key={optionIndex} className={`tp-option${checked ? ' is-selected' : ''}`}>
+                          <input
+                            type={multi ? 'checkbox' : 'radio'}
+                            name={groupName}
+                            checked={checked}
+                            disabled={inputDisabled}
+                            onChange={() => toggleOption(index, optionIndex, multi)}
+                          />
+                          <span className="tp-option-body">
+                            <span className="tp-option-label">{option.label}</span>
+                            <span className="tp-option-desc">{option.description}</span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {/* preview 只限单选选项（上游契约）；multi 的 preview 字段不渲染。 */}
+                  {!multi && question.options.map((option, optionIndex) =>
+                    option.preview && selected.includes(optionIndex) ? (
+                      <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
+                    ) : null,
+                  )}
+                  {!interrupted && (collapseOptionalFields ? (
+                    <details className="tp-optional-fields">
+                      <summary>
+                        {t('自定义回答和备注', 'Custom answer and notes')}
+                        {customTextMap[index]?.trim() || notesMap[index]?.trim() ? t(' · 已填写', ' · Added') : ''}
+                      </summary>
+                      {optionalFields}
+                    </details>
+                  ) : optionalFields)}
+                </fieldset>
+              );
+            })}
+            {!interrupted && (collapseOptionalFields ? (
+              <details className="tp-optional-fields">
+                <summary>{globalNote.trim() ? t('整体备注 · 已填写', 'Overall note · Added') : t('添加整体备注', 'Add overall note')}</summary>
+                {globalNoteInput}
+              </details>
+            ) : globalNoteInput)}
+            {!interrupted && error ? (
+              <div id={errorId} className="tp-error-wrap">
+                <InlineBanner tone="danger" role="alert" compact title={error} />
               </div>
-              {answer.notes ? <div className="tp-answer-notes">{t('备注：', 'Notes: ')}{answer.notes}</div> : null}
-              {answer.preview ? <OptionPreview preview={answer.preview} /> : null}
-            </div>
-          ))}
-          {presentation.result?.unanswered?.length ? (
-            <div className="tp-result-line">
-              {presentation.result.unanswered.length}{t(' 题未回答', ' unanswered')}
-            </div>
-          ) : null}
-          {presentation.result?.globalNote ? (
-            <div className="tp-answer-notes">{t('整体备注：', 'Note: ')}{presentation.result.globalNote}</div>
-          ) : null}
-        </div>
-      )}
+            ) : null}
+            {!interrupted && settledLocally ? (
+              <InlineBanner
+                tone="live"
+                role="status"
+                compact
+                title={t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}
+              />
+            ) : null}
+          </div>
+        ) : (
+          <div className="tp-result">
+            {presentation.result?.cancelled || presentation.status === 'cancelled' ? (
+              <div className="tp-result-line">{t('用户已取消该问卷。', 'The questionnaire was cancelled.')}</div>
+            ) : null}
+            {presentation.result?.answers.map((answer: QuestionnaireAnswerPresentation, index) => (
+              <div key={index} className="tp-answer">
+                <div className="tp-answer-question">{answer.question || `#${answer.questionIndex + 1}`}</div>
+                <div className="tp-answer-value">
+                  {/* multi 同时显示 selected 与自定义文本；option/custom 显示标量答案。 */}
+                  {answer.kind === 'multi' && answer.selected?.length
+                    ? answer.answer
+                      ? `${answer.selected.join(t('、', ', '))}${t('、', ', ')}${answer.answer}`
+                      : answer.selected.join(t('、', ', '))
+                    : answer.answer ?? t('（未回答）', '(unanswered)')}
+                </div>
+                {answer.notes ? <div className="tp-answer-notes">{t('备注：', 'Notes: ')}{answer.notes}</div> : null}
+                {answer.preview ? <OptionPreview preview={answer.preview} /> : null}
+              </div>
+            ))}
+            {presentation.result?.unanswered?.length ? (
+              <div className="tp-result-line tabular-nums">
+                {presentation.result.unanswered.length}{t(' 题未回答', ' unanswered')}
+              </div>
+            ) : null}
+            {presentation.result?.globalNote ? (
+              <div className="tp-answer-notes">{t('整体备注：', 'Note: ')}{presentation.result.globalNote}</div>
+            ) : null}
+          </div>
+        )}
+      </ActionSlip>
     </div>
   );
 }

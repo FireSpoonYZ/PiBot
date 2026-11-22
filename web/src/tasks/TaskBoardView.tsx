@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Loader2, PanelLeft, Plus } from 'lucide-react';
+import { Button, InlineBanner } from '../components/ui';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { useText } from '../ui';
 import { TaskCreateView } from './TaskCreateView';
@@ -205,16 +206,22 @@ export function TaskBoardView({
             {matchedFetch?.status === 'not_found' ? (
               <div className="tasks-empty" role="status">{t('该任务不存在或已删除。', 'This task does not exist or has been deleted.')}</div>
             ) : matchedFetch?.status === 'error' ? (
-              <div className="tasks-error-strip" role="alert">
-                <span>{matchedFetch.errorMessage || t('加载任务详情失败', 'Failed to load task details')}</span>
-                <button
-                  type="button"
-                  className="mini-pill"
-                  onClick={() => setDetailRetryTick(n => n + 1)}
-                >
-                  {t('重试', 'Retry')}
-                </button>
-              </div>
+              <InlineBanner
+                tone="danger"
+                compact
+                role="alert"
+                className="tasks-error-banner"
+                title={matchedFetch.errorMessage || t('加载任务详情失败', 'Failed to load task details')}
+                actions={
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setDetailRetryTick(n => n + 1)}
+                  >
+                    {t('重试', 'Retry')}
+                  </Button>
+                }
+              />
             ) : (
               <div className="tasks-empty" role="status">{t('正在加载任务详情…', 'Loading task details…')}</div>
             )}
@@ -277,41 +284,47 @@ export function TaskBoardView({
             </div>
           </header>
 
-          <nav className="filter-pills tabular" aria-label={t('事项筛选', 'Filter tasks')}>
+          <nav className="filter-pills tabular tabular-nums" aria-label={t('事项筛选', 'Filter tasks')}>
             <button
               type="button"
               aria-pressed={filter === 'active'}
               onClick={() => setFilter('active')}
             >
-              {t('未完成', 'Active')} {activeList.length}
+              {t('未完成', 'Active')} <span className="tabular-nums">{activeList.length}</span>
             </button>
             <button
               type="button"
               aria-pressed={filter === 'waiting'}
               onClick={() => setFilter('waiting')}
             >
-              {t('待你回应', 'Awaiting reply')} {waitingList.length}
+              {t('待你回应', 'Awaiting reply')} <span className="tabular-nums">{waitingList.length}</span>
             </button>
             <button
               type="button"
               aria-pressed={filter === 'done'}
               onClick={() => setFilter('done')}
             >
-              {t('已完成', 'Completed')} {doneList.length}
+              {t('已完成', 'Completed')} <span className="tabular-nums">{doneList.length}</span>
             </button>
           </nav>
 
           {controller.error ? (
-            <div className="tasks-error-strip" role="alert">
-              <span>{controller.error}</span>
-              <button
-                type="button"
-                className="mini-pill"
-                onClick={() => void controller.refresh()}
-              >
-                {t('重试', 'Retry')}
-              </button>
-            </div>
+            <InlineBanner
+              tone="danger"
+              compact
+              role="alert"
+              className="tasks-error-banner"
+              title={controller.error}
+              actions={
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => void controller.refresh()}
+                >
+                  {t('重试', 'Retry')}
+                </Button>
+              }
+            />
           ) : null}
 
           {!controller.loaded && controller.loading && controller.tasks.length === 0 ? (

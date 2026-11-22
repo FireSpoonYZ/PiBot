@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FocusEvent,
   type KeyboardEvent,
   type PointerEvent,
   type ReactNode,
@@ -22,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { useText } from '../ui';
+import { useTopLayerClose } from '../components/ui/Overlay';
 import './notice-layer.css';
 
 export type NoticeTone = 'info' | 'warning' | 'error' | 'success';
@@ -469,10 +471,19 @@ interface NoticeCardProps {
 function NoticeCard({ notice, onDismiss, onPause, onResume }: NoticeCardProps) {
   const t = useText();
   const detailId = useId();
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const [detailExpanded, setDetailExpanded] = useState(false);
 
   const hasDetail = Boolean(notice.detail);
   const showDetail = hasDetail && detailExpanded;
+
+  useTopLayerClose(!notice.exiting, {
+    kind: 'toast',
+    getElement: () => cardRef.current,
+    canHandleEscape: () => Boolean(cardRef.current?.contains(document.activeElement)),
+    canHandleBack: () => false,
+    onClose: () => onDismiss(notice.id),
+  });
 
   useEffect(() => {
     if (showDetail) {
@@ -502,9 +513,25 @@ function NoticeCard({ notice, onDismiss, onPause, onResume }: NoticeCardProps) {
     [notice.id, onResume],
   );
 
+  const handleFocus = useCallback(() => {
+    onPause(notice.id, 'focus');
+  }, [notice.id, onPause]);
+
+  const handleBlur = useCallback(
+    (event: FocusEvent<HTMLDivElement>) => {
+      const nextTarget = event.relatedTarget as Node | null;
+      if (nextTarget && event.currentTarget.contains(nextTarget)) {
+        return;
+      }
+      onResume(notice.id, 'focus');
+    },
+    [notice.id, onResume],
+  );
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       if (event.key === 'Escape') {
+        event.preventDefault();
         event.stopPropagation();
         onDismiss(notice.id);
       }
@@ -512,19 +539,24 @@ function NoticeCard({ notice, onDismiss, onPause, onResume }: NoticeCardProps) {
     [notice.id, onDismiss],
   );
 
-  const isAlert = notice.tone === 'error' || notice.tone === 'warning';
+  const isCritical = notice.tone === 'error';
 
   return (
     <div
+      ref={cardRef}
       className={`notice-layer-card is-${notice.tone}${notice.exiting ? ' is-exiting' : ''}`}
-      role={isAlert ? 'alert' : 'status'}
-      aria-live={notice.tone === 'error' ? 'assertive' : 'polite'}
+      role={isCritical ? 'alert' : 'status'}
+      aria-live={isCritical ? 'assertive' : 'polite'}
       aria-atomic="true"
+      tabIndex={-1}
+      data-floating-ui="true"
       data-notice-id={notice.id}
       data-notice-tone={notice.tone}
       data-notice-sticky={notice.sticky ? 'true' : undefined}
       onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
       onKeyDown={handleKeyDown}
     >
       <div className="notice-layer-row">

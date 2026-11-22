@@ -3,8 +3,9 @@
 // - Isolates state by scopeKey + runId and refreshes in place on copy/revision updates.
 // - Preserves collapse state across same-step revision/copy changes without unmounting form inputs;
 //   auto-expands on first appearance, a genuinely new run, or a new step needing operator action.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ChevronUp } from 'lucide-react';
+import { SmoothExpand } from '../layout';
 import { useText } from '../ui';
 import {
   deriveGoogleSetupAttention,
@@ -37,6 +38,12 @@ export interface CurrentGoogleSetupCardProps {
   disabled?: boolean;
   active?: boolean;
   hostRevision?: number;
+  /** When embedded inside ConditionDock, suppress redundant outer header & collapse bar. */
+  embeddedInDock?: boolean;
+  /** Notify host dock whether this card currently renders visible content. */
+  onVisibleChange?: (visible: boolean) => void;
+  /** Notify host dock whether this visible card is actively presenting a browser takeover prompt. */
+  onBrowserTakeoverActiveChange?: (active: boolean) => void;
 }
 
 interface ScopedLiveState {
@@ -59,9 +66,17 @@ export function CurrentGoogleSetupCard({
   disabled = false,
   active = true,
   hostRevision,
+  embeddedInDock = false,
+  onVisibleChange,
+  onBrowserTakeoverActiveChange,
 }: CurrentGoogleSetupCardProps) {
   const t = useText();
+  const bodyId = useId();
   const mountedRef = useRef(true);
+  const onVisibleChangeRef = useRef(onVisibleChange);
+  onVisibleChangeRef.current = onVisibleChange;
+  const onBrowserTakeoverActiveChangeRef = useRef(onBrowserTakeoverActiveChange);
+  onBrowserTakeoverActiveChangeRef.current = onBrowserTakeoverActiveChange;
   const requestSeqRef = useRef(0);
   const statusInFlightRef = useRef(new Map<string, Promise<GoogleSetupControlState>>());
   const mutationRef = useRef({ scopeKey, pending: 0, epoch: 0 });
@@ -386,6 +401,29 @@ export function CurrentGoogleSetupCard({
     ? reconcileGoogleSetupDockState(dockState, scopeKey, attention)
     : null;
 
+  const effectiveVisible = Boolean(
+    visible && activePresentation && googleContext && resolvedDockState,
+  );
+  const browserLocked = Boolean(
+    currentLiveSetup?.browserLock?.active || currentLiveSetup?.browserTakeoverRequired,
+  );
+  const setupCompleted =
+    currentLiveSetup?.state === 'done' || currentLiveSetup?.state === 'completed';
+  const isShowingTakeover = Boolean(effectiveVisible && browserLocked && !setupCompleted);
+
+  useEffect(() => {
+    onVisibleChangeRef.current?.(effectiveVisible);
+  }, [effectiveVisible]);
+
+  useEffect(() => {
+    onBrowserTakeoverActiveChangeRef.current?.(isShowingTakeover);
+  }, [isShowingTakeover]);
+
+  useEffect(() => () => {
+    onVisibleChangeRef.current?.(false);
+    onBrowserTakeoverActiveChangeRef.current?.(false);
+  }, []);
+
   useEffect(() => {
     if (resolvedDockState && resolvedDockState !== dockState) {
       setDockState(resolvedDockState);
@@ -402,16 +440,13 @@ export function CurrentGoogleSetupCard({
     setDockState(setGoogleSetupDockExpanded(resolvedDockState, true));
   }, [resolvedDockState]);
 
-  if (!visible || !activePresentation || !googleContext || !resolvedDockState) {
+  if (!effectiveVisible || !activePresentation || !googleContext || !resolvedDockState) {
     return null;
   }
 
-  const expanded = resolvedDockState.expanded;
+  const expanded = embeddedInDock ? true : resolvedDockState.expanded;
   const activeStep = currentLiveSetup?.card?.step ?? currentLiveSetup?.step ?? activePresentation.step ?? null;
   const activeCard = currentLiveSetup?.card?.card ?? activePresentation.card ?? null;
-  const browserLocked = Boolean(
-    currentLiveSetup?.browserLock?.active || currentLiveSetup?.browserTakeoverRequired,
-  );
   const failed = currentLiveSetup?.state === 'failed' || activePresentation.state === 'failed';
   const dockTitle = t('Google 配置', 'Google setup');
   const statusTone = browserLocked || failed ? 'is-warn' : 'is-accent';
@@ -428,17 +463,45 @@ export function CurrentGoogleSetupCard({
               ? t('已暂停', 'Paused')
               : t('进行中', 'In progress');
 
+  const wizardElement = (
+    <GoogleSetupWizard
+      key={`${scopeKey}:${currentActiveRunId}`}
+      scopeKey={scopeKey}
+      api={googleContext.api}
+      identity={googleContext.identity}
+      botId={botId}
+      botName={googleContext.botName}
+      isLocalAndroid={googleContext.isLocalAndroid}
+      expectedRunId={currentActiveRunId}
+      readOnly={Boolean(disabled)}
+      managedStatus
+      compactChat
+      externalSetup={currentLiveSetup}
+      callGoogleSetup={callGoogleSetup ? callWizardSetup : undefined}
+      onOpenBrowser={googleContext.onOpenBrowser}
+      onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
+      provisionGoogleClient={googleContext.provisionGoogleClient}
+      onOpenCapabilities={googleContext.onOpenCapabilities}
+      onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
+      onSetupChange={handleWizardSetupChange}
+      onClose={embeddedInDock ? undefined : handleCollapse}
+    />
+  );
+
   return (
     <div
-      className={`gws-dock${expanded ? ' is-expanded' : ' is-collapsed'}`}
+      className={`gws-dock${expanded ? ' is-expanded' : ' is-collapsed'}${embeddedInDock ? ' is-embedded' : ''}${browserLocked || failed ? ' is-attention' : ''}`}
+      role="region"
+      aria-label={dockTitle}
       data-scope-key={scopeKey}
       data-run-id={currentActiveRunId}
     >
-      {!expanded ? (
+      {!embeddedInDock && !expanded ? (
         <button
           type="button"
           className="gws-dock-bar"
           aria-expanded={false}
+          aria-controls={bodyId}
           aria-label={t(`展开${dockTitle}`, `Expand ${dockTitle}`)}
           onClick={handleExpand}
         >
@@ -455,29 +518,8 @@ export function CurrentGoogleSetupCard({
         </button>
       ) : null}
 
-      <div className={`gws-dock-body${expanded ? '' : ' is-collapsed'}`} hidden={!expanded}>
-        <GoogleSetupWizard
-          key={`${scopeKey}:${currentActiveRunId}`}
-          scopeKey={scopeKey}
-          api={googleContext.api}
-          identity={googleContext.identity}
-          botId={botId}
-          botName={googleContext.botName}
-          isLocalAndroid={googleContext.isLocalAndroid}
-          expectedRunId={currentActiveRunId}
-          readOnly={Boolean(disabled)}
-          managedStatus
-          compactChat
-          externalSetup={currentLiveSetup}
-          callGoogleSetup={callGoogleSetup ? callWizardSetup : undefined}
-          onOpenBrowser={googleContext.onOpenBrowser}
-          onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
-          provisionGoogleClient={googleContext.provisionGoogleClient}
-          onOpenCapabilities={googleContext.onOpenCapabilities}
-          onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
-          onSetupChange={handleWizardSetupChange}
-          onClose={handleCollapse}
-        />
+      <div id={bodyId} className="gws-dock-body">
+        {embeddedInDock ? wizardElement : <SmoothExpand open={expanded}>{wizardElement}</SmoothExpand>}
       </div>
     </div>
   );

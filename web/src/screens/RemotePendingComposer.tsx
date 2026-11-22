@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { Mic, Plus, RefreshCw, Square, Trash2, X, Zap } from 'lucide-react';
+import { Mic, RefreshCw, Square, X, Zap } from 'lucide-react';
 import {
   BotHost,
   type HostSubmission,
@@ -55,7 +55,15 @@ import {
   uuid,
   type SlashCommandName,
 } from '../hub/shared';
-import { ConfirmDialog } from '../components/ui';
+import {
+  ActionSlip,
+  Button,
+  ConditionDock,
+  ConfirmDialog,
+  InlineBanner,
+  type ConditionDockItem,
+} from '../components/ui';
+import { ComposerPlusMenu, ComposerSlashPopover } from '../components/ComposerPopovers';
 import {
   isCoarsePointer,
   useIsCoarsePointer,
@@ -75,70 +83,6 @@ function supportsFieldSizingContent(): boolean {
     CSS.supports('field-sizing', 'content')
   );
 }
-
-const FLOATING_ANCHOR_STYLE: CSSProperties = {
-  position: 'relative',
-  height: 0,
-};
-
-const FLOATING_STACK_STYLE: CSSProperties = {
-  position: 'absolute',
-  left: 0,
-  right: 0,
-  bottom: 12,
-  zIndex: 12,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  pointerEvents: 'none',
-};
-
-const FLOATING_CARD_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  padding: '10px 14px',
-  gap: 8,
-  maxHeight: 'min(26vh, 180px)',
-  overflowY: 'auto',
-  backdropFilter: 'blur(12px)',
-  boxShadow: '0 8px 24px color-mix(in srgb, var(--color-scrim) 20%, transparent)',
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
-
-const FLOATING_CONFLICT_CARD_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  padding: '12px 14px',
-  gap: 8,
-  maxHeight: 'min(42vh, 320px)',
-  overflowY: 'auto',
-  backdropFilter: 'blur(12px)',
-  boxShadow: '0 10px 28px color-mix(in srgb, var(--color-scrim) 24%, transparent)',
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
-
-const FLOATING_FILES_ROW_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  marginBottom: 0,
-  padding: '6px 10px',
-  maxHeight: 88,
-  overflowY: 'auto',
-  borderRadius: 'var(--radius-md, 14px)',
-  border: '1px solid var(--line)',
-  background: 'color-mix(in srgb, var(--color-surface-2, var(--surface)) 92%, var(--bg))',
-  backdropFilter: 'blur(12px)',
-  boxShadow: '0 4px 14px color-mix(in srgb, var(--color-scrim) 14%, transparent)',
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
-
-const FLOATING_QUEUE_WRAP_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  marginBottom: -6,
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
-
-const PORTALED_QUEUE_WRAP_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
 
 export interface RemotePendingComposerProps {
   api: DesktopPanelApi;
@@ -178,11 +122,13 @@ export interface RemotePendingComposerProps {
   onUnconfirmed(requestId: string): void;
   onNotSent(requestId: string): void;
   onUserSend?(): void;
-  pendingQuote?: { seq: number; text: string } | null;
+  pendingQuote?: { seq: number; text: string; mode?: 'quote' | 'append' } | null;
   onConsumedQuote?: () => void;
   taskContext?: RemoteTaskContext;
   onTaskMessageSent?: (rawText: string, capturedContext?: RemoteTaskContext) => void;
   floatingDockContainer?: HTMLElement | null;
+  onDockItemsChange?: (items: ConditionDockItem[]) => void;
+  hideInlineEditBanner?: boolean;
 }
 
 export function RemotePendingComposer({
@@ -223,6 +169,8 @@ export function RemotePendingComposer({
   taskContext,
   onTaskMessageSent,
   floatingDockContainer,
+  onDockItemsChange,
+  hideInlineEditBanner = false,
 }: RemotePendingComposerProps) {
   const t = useText();
   const { notify, dismiss } = useNotice();
@@ -357,13 +305,15 @@ export function RemotePendingComposer({
 
   useEffect(() => {
     if (!pendingQuote) return;
-    const quoted =
-      pendingQuote.text
-        .split('\n')
-        .slice(0, 6)
-        .map(line => `> ${line}`)
-        .join('\n') + '\n\n';
-    const next = drafts.text ? `${drafts.text.trimEnd()}\n${quoted}` : quoted;
+    const insertion =
+      pendingQuote.mode === 'append'
+        ? pendingQuote.text
+        : pendingQuote.text
+            .split('\n')
+            .slice(0, 6)
+            .map(line => `> ${line}`)
+            .join('\n') + '\n\n';
+    const next = drafts.text ? `${drafts.text.trimEnd()}\n${insertion}` : insertion;
     drafts.editText(next);
     onConsumedQuote?.();
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -506,6 +456,7 @@ export function RemotePendingComposer({
   const [sendingNow, setSendingNow] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRowRef = useRef<HTMLDivElement | null>(null);
   /** 停止与发送并存、独立：不被 attempt/上传/草稿/action.busy 锁禁，只防重复。 */
   const stopBusy = Boolean(stopping);
   const runAbort = async () => {
@@ -1023,182 +974,257 @@ export function RemotePendingComposer({
     }
   };
 
-  const hasFloatingStrips = Boolean(
-    fallbackDraft ||
-    confirmedConflict ||
-    (!editingTurn && drafts.files.length > 0) ||
-    (!editingTurn && queuedStripItems.length > 0),
-  );
   const mergeIdleLabel = t('合并到草稿', 'Merge into draft');
   const mergeBusyLabel = t('合并中…', 'Merging…');
   const keepNewerIdleLabel = t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt');
   const keepNewerBusyLabel = t('正在处理…', 'Resolving…');
 
-  const floatingStripItems = hasFloatingStrips ? (
-    <>
-      {fallbackDraft && (
-        <section className="grok-card-group" role="status" style={FLOATING_CARD_STYLE}>
-          <p>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
-          <button
-            type="button"
-            className="hub-outline-btn"
-            disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)}
-            onClick={() => {
-              const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
-              setTransfer({ source: fallbackDraft, text });
-              drafts.editText(text);
-            }}
-          >
-            <LabelStack
-              active={transfer ? mergeBusyLabel : mergeIdleLabel}
-              labels={[mergeIdleLabel, mergeBusyLabel]}
-            />
-          </button>
-        </section>
-      )}
-      {confirmedConflict && (
-        <section className="grok-card-group" aria-label={t('草稿冲突', 'Draft conflict')} style={FLOATING_CONFLICT_CARD_STYLE}>
-          <p>{t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}</p>
-          {confirmedConflict.original.attachments?.length ? (
-            <SentAttachments attachments={confirmedConflict.original.attachments} fetcher={remoteFetcher} />
-          ) : null}
-          <textarea readOnly rows={4} value={confirmedConflict.original.text} aria-label={t('原草稿，可选择复制', 'Original draft, selectable for copying')} style={{ width: '100%' }} />
-          {confirmedConflict.original.files.map((file, index) => <div key={`${file.path}:${index}`} className="pre-wrap">{file.name}: {file.path}</div>)}
-          <button type="button" className="hub-outline-btn" disabled={resolvingConflict} onClick={() => void keepNewerDraft()}>
-            <LabelStack
-              active={resolvingConflict ? keepNewerBusyLabel : keepNewerIdleLabel}
-              labels={[keepNewerIdleLabel, keepNewerBusyLabel]}
-            />
-          </button>
-        </section>
-      )}
-      {!editingTurn && drafts.files.length > 0 && (
-        <div className="grok-composer-files-row" style={FLOATING_FILES_ROW_STYLE}>
-          {drafts.files.map((file, index) => (
-            <span key={`${file.path}:${index}`} className="grok-model-quick-chip active">
-              <span>{file.name}</span>
-              <button
-                type="button"
-                disabled={Boolean(drafts.attempt) || blocked}
-                onClick={() => drafts.removeFile(index)}
-                aria-label={t('移除', 'Remove')}
+  const dockActionsRef = useRef({
+    drafts,
+    remoteFetcher,
+    keepNewerDraft,
+    recallRemoteQueuedItem,
+    recallAllRemoteQueued,
+    steerRemoteQueuedItem,
+  });
+  dockActionsRef.current = {
+    drafts,
+    remoteFetcher,
+    keepNewerDraft,
+    recallRemoteQueuedItem,
+    recallAllRemoteQueued,
+    steerRemoteQueuedItem,
+  };
+
+  const hasDraftAttempt = Boolean(drafts.attempt);
+  const isEditing = Boolean(editingTurn);
+  const hasDraftKey = Boolean(drafts.key);
+  const isTransferring = Boolean(transfer);
+
+  const remoteDockItems = useMemo<ConditionDockItem[]>(() => {
+    const items: ConditionDockItem[] = [];
+
+    if (confirmedConflict) {
+      items.push({
+        id: 'remote-conflict',
+        priority: 100,
+        tone: 'danger',
+        label: t('草稿冲突', 'Draft conflict'),
+        collapsible: false,
+        render: ctx => (
+          <ActionSlip
+            tone="danger"
+            role="alert"
+            compact
+            ariaLabel={t('草稿冲突', 'Draft conflict')}
+            title={ctx?.multiple ? undefined : t('草稿冲突', 'Draft conflict')}
+            meta={t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}
+            className="remote-conflict-slip"
+            footer={
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={resolvingConflict}
+                onClick={() => void dockActionsRef.current.keepNewerDraft()}
               >
-                <X size={12} />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {!editingTurn && queuedStripItems.length > 0 ? (
-        <div
-          className="remote-composer-queue-float"
-          style={floatingDockContainer ? PORTALED_QUEUE_WRAP_STYLE : FLOATING_QUEUE_WRAP_STYLE}
-        >
+                <LabelStack
+                  active={resolvingConflict ? keepNewerBusyLabel : keepNewerIdleLabel}
+                  labels={[keepNewerIdleLabel, keepNewerBusyLabel]}
+                />
+              </Button>
+            }
+          >
+            {confirmedConflict.original.attachments?.length ? (
+              <SentAttachments
+                attachments={confirmedConflict.original.attachments}
+                fetcher={dockActionsRef.current.remoteFetcher}
+              />
+            ) : null}
+            <textarea
+              readOnly
+              rows={4}
+              className="remote-conflict-textarea"
+              value={confirmedConflict.original.text}
+              aria-label={t('原草稿，可选择复制', 'Original draft, selectable for copying')}
+            />
+            {confirmedConflict.original.files.map((file, index) => (
+              <div key={`${file.path}:${index}`} className="remote-conflict-file pre-wrap">
+                {file.name}: {file.path}
+              </div>
+            ))}
+          </ActionSlip>
+        ),
+      });
+    }
+
+    if (fallbackDraft) {
+      items.push({
+        id: 'remote-fallback',
+        priority: 70,
+        tone: 'attention',
+        label: t('离线草稿', 'Offline draft'),
+        defaultExpanded: true,
+        render: () => (
+          <InlineBanner
+            tone="attention"
+            compact
+            role="status"
+            className="remote-fallback-banner"
+            title={t('离线输入已保留', 'Offline draft retained')}
+            detail={fallbackDraft}
+            actions={
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={!hasDraftKey || hasDraftAttempt || isTransferring}
+                onClick={() => {
+                  const currentDrafts = dockActionsRef.current.drafts;
+                  const text =
+                    currentDrafts.text === fallbackDraft
+                      ? currentDrafts.text
+                      : [currentDrafts.text, fallbackDraft].filter(Boolean).join('\n');
+                  setTransfer({ source: fallbackDraft, text });
+                  currentDrafts.editText(text);
+                }}
+              >
+                <LabelStack
+                  active={isTransferring ? mergeBusyLabel : mergeIdleLabel}
+                  labels={[mergeIdleLabel, mergeBusyLabel]}
+                />
+              </Button>
+            }
+          />
+        ),
+      });
+    }
+
+    if (!isEditing && queuedStripItems.length > 0) {
+      items.push({
+        id: 'remote-queue',
+        priority: 30,
+        tone: 'neutral',
+        label: t('排队消息', 'Queue'),
+        badge: queuedStripItems.length,
+        defaultExpanded: true,
+        render: () => (
           <PendingQueueStrip
             items={queuedStripItems}
             disabled={queueBusy || stopBusy}
             canSteer={canSteerRemote}
-            onRecall={item => void recallRemoteQueuedItem(item, true)}
-            onRecallAll={() => void recallAllRemoteQueued()}
-            onDiscard={item => void recallRemoteQueuedItem(item, false)}
-            onSteer={canSteerRemote ? (item => void steerRemoteQueuedItem(item)) : undefined}
+            onRecall={item => void dockActionsRef.current.recallRemoteQueuedItem(item, true)}
+            onRecallAll={() => void dockActionsRef.current.recallAllRemoteQueued()}
+            onDiscard={item => void dockActionsRef.current.recallRemoteQueuedItem(item, false)}
+            onSteer={canSteerRemote ? (item => void dockActionsRef.current.steerRemoteQueuedItem(item)) : undefined}
             tr={t}
           />
-        </div>
-      ) : null}
-    </>
+        ),
+      });
+    }
+
+    if (!isEditing && drafts.files.length > 0) {
+      items.push({
+        id: 'remote-files',
+        priority: 20,
+        tone: 'neutral',
+        label: t('引用文件', 'Files'),
+        badge: drafts.files.length,
+        defaultExpanded: true,
+        render: () => (
+          <div className="grok-composer-files-row remote-composer-files-row">
+            {drafts.files.map((file, index) => (
+              <span key={`${file.path}:${index}`} className="grok-model-quick-chip active remote-file-chip">
+                <span className="remote-file-chip-name">{file.name}</span>
+                <button
+                  type="button"
+                  className="remote-file-chip-remove"
+                  disabled={hasDraftAttempt || blocked}
+                  onClick={() => dockActionsRef.current.drafts.removeFile(index)}
+                  aria-label={t(`移除文件 ${file.name}`, `Remove file ${file.name}`)}
+                >
+                  <X size={12} aria-hidden="true" />
+                </button>
+              </span>
+            ))}
+          </div>
+        ),
+      });
+    }
+
+    return items;
+  }, [
+    confirmedConflict,
+    resolvingConflict,
+    keepNewerIdleLabel,
+    keepNewerBusyLabel,
+    fallbackDraft,
+    hasDraftKey,
+    hasDraftAttempt,
+    isTransferring,
+    mergeIdleLabel,
+    mergeBusyLabel,
+    isEditing,
+    queuedStripItems,
+    queueBusy,
+    stopBusy,
+    canSteerRemote,
+    drafts.files,
+    blocked,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (!onDockItemsChange) return;
+    onDockItemsChange(remoteDockItems);
+  }, [onDockItemsChange, remoteDockItems]);
+
+  useEffect(() => {
+    if (!onDockItemsChange) return;
+    return () => {
+      onDockItemsChange([]);
+    };
+  }, [onDockItemsChange]);
+
+  const standaloneDock = !onDockItemsChange && remoteDockItems.length > 0 ? (
+    <ConditionDock items={remoteDockItems} className="remote-condition-dock" />
   ) : null;
+
+  const voiceOnlyMessage = t('语音输入仅支持本机 Bot', 'Voice input is only available for local Bots');
 
   return (
     <>
-      {floatingStripItems
+      {standaloneDock
         ? floatingDockContainer
-          ? createPortal(floatingStripItems, floatingDockContainer)
+          ? createPortal(standaloneDock, floatingDockContainer)
           : (
-              <div className="remote-composer-float-anchor" style={FLOATING_ANCHOR_STYLE}>
-                <div className="remote-composer-floating-stack" style={FLOATING_STACK_STYLE}>
-                  {floatingStripItems}
-                </div>
+              <div className="remote-composer-inline-dock">
+                {standaloneDock}
               </div>
             )
         : null}
 
-      {slash.open && (
-        <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
-          {slash.matches.map((command, index) => (
-            <div
-              key={command.name}
-              {...slash.optionProps(index)}
-              className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
-            >
-              <code>{command.name}</code>
-              <span>{t(command.zh, command.en)}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      <ComposerSlashPopover
+        open={slash.open}
+        query={effectiveText}
+        listboxId={slash.listboxId}
+        matches={slash.matches}
+        activeIndex={slash.activeIndex}
+        optionProps={slash.optionProps}
+        anchorRef={composerRowRef}
+        returnFocusRef={textareaRef}
+      />
 
-      {composerMenuOpen && (
-        <div className="bot-plus-popover" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
-            onClick={() => {
-              onToggleComposerMenu();
-              pickRemoteImages('photos');
-            }}
-          >
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="5" width="18" height="14" rx="2" />
-              <circle cx="8.5" cy="10.5" r="1.5" />
-              <path d="m21 15-4.5-4.5L9 18" />
-            </svg>
-            <span>{t('选择图片', 'Choose image')}</span>
-          </button>
-          {inTauriUi && (
-            <button
-              type="button"
-              role="menuitem"
-              disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
-              onClick={() => {
-                onToggleComposerMenu();
-                pickRemoteImages('camera');
-              }}
-            >
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                <circle cx="12" cy="13" r="4" />
-              </svg>
-              <span>{t('拍照', 'Camera')}</span>
-            </button>
-          )}
-          <div className="composer-menu-separator" role="separator" aria-hidden="true" />
-          <button
-            type="button"
-            role="menuitem"
-            className="danger"
-            disabled={Boolean(editingTurn)}
-            onClick={() => {
-              onToggleComposerMenu();
-              setClearConfirmOpen(true);
-            }}
-          >
-            <Trash2 size={18} />
-            <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
-          </button>
-        </div>
-      )}
+      {!hideInlineEditBanner ? (
+        <SmoothExpand open={Boolean(editingTurn)}>
+          {editingTurn || editBannerMounted ? (
+            <ComposerEditBanner
+              disabled={!editingTurn || Boolean(editSubmitting)}
+              onCancel={() => onCancelEditTurn?.()}
+              tr={t}
+            />
+          ) : null}
+        </SmoothExpand>
+      ) : null}
 
-      <SmoothExpand open={Boolean(editingTurn)}>
-        {editingTurn || editBannerMounted ? (
-          <ComposerEditBanner
-            disabled={!editingTurn || Boolean(editSubmitting)}
-            onCancel={() => onCancelEditTurn?.()}
-            tr={t}
-          />
-        ) : null}
-      </SmoothExpand>
       <SmoothExpand open={effectiveAttachments.length > 0}>
         {effectiveAttachments.length > 0 ? (
           <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
@@ -1222,18 +1248,28 @@ export function RemotePendingComposer({
         ) : null}
       </SmoothExpand>
 
-      <div className="grok-composer-row">
-        <button
-          type="button"
-          className={`grok-composer-plus-circle${composerMenuOpen ? ' active' : ''}`}
-          aria-label={t('更多操作', 'More actions')}
-          aria-expanded={composerMenuOpen}
-          onClick={onToggleComposerMenu}
-        >
-          <Plus size={22} />
-        </button>
+      <div ref={composerRowRef} className="grok-composer-row">
+        <ComposerPlusMenu
+          open={composerMenuOpen}
+          onOpenChange={next => {
+            if (next !== composerMenuOpen) onToggleComposerMenu();
+          }}
+          inTauriUi={inTauriUi}
+          imageDisabled={
+            effectiveAttachments.length >= IMAGE_MAX_COUNT ||
+            imageUploading ||
+            Boolean(drafts.attempt) ||
+            blocked ||
+            commandLocked ||
+            Boolean(editSubmitting)
+          }
+          onPickPhotos={() => pickRemoteImages('photos')}
+          onPickCamera={() => pickRemoteImages('camera')}
+          clearDisabled={Boolean(editingTurn)}
+          onRequestClear={() => setClearConfirmOpen(true)}
+        />
 
-        <div className="grok-composer-pill">
+        <div className={`grok-composer-pill${editingTurn ? ' is-editing' : ''}`}>
           <textarea
             ref={textareaRef}
             rows={1}
@@ -1295,22 +1331,34 @@ export function RemotePendingComposer({
               type="button"
               className="grok-composer-mic-inline is-unsupported"
               aria-disabled="true"
-              aria-label={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
-              title={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
+              aria-label={voiceOnlyMessage}
+              title={coarsePointer ? undefined : voiceOnlyMessage}
               onClick={() =>
                 notify({
                   id: unsupportedNoticeId,
                   tone: 'warning',
-                  title: t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'),
+                  title: voiceOnlyMessage,
                   durationMs: 3000,
                 })
               }
             >
-              <Mic size={19} />
+              <Mic size={19} aria-hidden="true" />
             </button>
           )}
 
           <div className="grok-composer-actions">
+            {editingTurn && onCancelEditTurn ? (
+              <button
+                type="button"
+                className="grok-composer-edit-cancel-btn"
+                aria-label={t('取消编辑 (Esc)', 'Cancel editing (Esc)')}
+                title={t('取消编辑 (Esc)', 'Cancel editing (Esc)')}
+                disabled={Boolean(editSubmitting)}
+                onClick={onCancelEditTurn}
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            ) : null}
             {isStoppingPhase ? (
               <button
                 type="button"

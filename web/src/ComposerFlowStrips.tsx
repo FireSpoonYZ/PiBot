@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { ChevronDown, ChevronUp, CornerUpLeft, Pencil, X, Zap } from 'lucide-react';
 import type { UnifiedQueuedStripItem } from './composerFlowControl';
 import { Button, IconButton } from './components/ui';
@@ -53,6 +53,7 @@ export function PendingQueueStrip({
 }: PendingQueueStripProps) {
   const fallbackT = useText();
   const t = tr ?? fallbackT;
+  const listId = useId();
   const isCoarse = useIsCoarsePointer();
   const [expanded, setExpanded] = useState(false);
 
@@ -145,7 +146,7 @@ export function PendingQueueStrip({
             <span className="cf-queue-lead-icon" aria-hidden="true">
               {isSteer ? <Zap size={12} /> : <CornerUpLeft size={12} />}
             </span>
-            <span className="cf-queue-tag">
+            <span className="cf-queue-tag tabular-nums">
               {isOutbox
                 ? t('待发送', 'Pending')
                 : isSteer
@@ -180,7 +181,7 @@ export function PendingQueueStrip({
       aria-label={onlyOutbox ? t('待发送消息', 'Pending messages') : t('排队消息', 'Queued messages')}
     >
       {expanded ? (
-        <div className="cf-queue-expanded-list">
+        <div id={listId} className="cf-queue-expanded-list">
           {items.map(item => {
             const isOutbox = item.source === 'outbox';
             const isSteer = !isOutbox && item.delivery === 'steer';
@@ -228,6 +229,7 @@ export function PendingQueueStrip({
           className="cf-queue-main"
           onClick={() => setExpanded(prev => !prev)}
           aria-expanded={expanded}
+          aria-controls={listId}
           title={
             isCoarse
               ? undefined
@@ -239,7 +241,7 @@ export function PendingQueueStrip({
           <span className="cf-queue-lead-icon" aria-hidden="true">
             <CornerUpLeft size={12} />
           </span>
-          <span className="cf-queue-tag">
+          <span className="cf-queue-tag tabular-nums">
             {onlyOutbox
               ? t(`${items.length} 条待发送`, `${items.length} pending`)
               : outboxCount === 0

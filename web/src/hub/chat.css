@@ -1,36 +1,170 @@
-/* chat lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+/* chat lane styles: loaded after web/src/styles.css via hub/lanes.css.
+ * Consumes canonical Wave 1 design tokens; zero raw hex/rgb/hsl. */
 
-/* Divider above the destructive "clear history" item in the chat top menu. */
-.grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
+/* Divider above destructive items in menus. */
+.grok-menu-separator {
+  height: 1px;
+  margin: var(--space-1, 4px) 6px;
+  background: var(--border-subtle);
+}
 
-/* 历史消息编辑态高亮与后续消息淡出 */
+/* ————— Chat Transcript Turns (Editorial Assistant + Mineral User) ————— */
+
+.bot-chat-bubble.assistant {
+  --table-edge-bg: var(--ground);
+  width: 100%;
+  max-width: min(68ch, 100%);
+  align-self: flex-start;
+  text-align: left;
+  padding: var(--space-1, 4px) 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-primary);
+  box-shadow: none;
+  line-height: 1.65;
+}
+
+.bot-chat-bubble.assistant:has(.table-scroll) {
+  max-width: 100%;
+}
+
+.bot-chat-bubble.user {
+  --table-edge-bg: var(--surface-1);
+  align-self: flex-end;
+  width: auto;
+  max-width: min(82%, 560px);
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-1);
+  color: var(--ink-primary);
+  box-shadow: none;
+  line-height: 1.55;
+}
+
+.bot-chat-bubble.user.is-peer {
+  --table-edge-bg: var(--surface-1);
+  align-self: flex-start;
+  max-width: min(84%, 600px);
+  background: var(--surface-1);
+  color: var(--ink-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 12px);
+  box-shadow: none;
+}
+
+/* History edit highlight & subsequent-turn fade. */
 .bot-chat-bubble.is-editing-target {
-  outline: 1.5px solid var(--accent);
+  outline: 1.5px solid var(--signal-primary);
   outline-offset: 2px;
+  border-radius: var(--radius-md, 12px);
 }
 
 .bot-chat-bubble.is-editing-after {
   opacity: 0.45;
-  transition: opacity 160ms ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out);
 }
 
-/* 聊天顶栏居中 Bot 胶囊文字与固定高度状态副标题（D1：高度恒为 --tap-min） */
-.grok-chat-floating-header .grok-chat-center-pill {
-  height: var(--tap-min);
-  min-height: var(--tap-min);
-  max-height: var(--tap-min);
-  padding: 4px var(--space-3) 4px 10px;
+/* Turn metadata: strictly proportional font + tabular-nums; fine-pointer hover actions gated. */
+.bot-chat-turn-meta {
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-tertiary);
+  opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .bot-chat-turn .bot-chat-turn-action {
+    opacity: 0;
+    transition:
+      opacity var(--dur-fast, 150ms) var(--ease-out),
+      background-color var(--dur-fast, 150ms) var(--ease-out),
+      color var(--dur-fast, 150ms) var(--ease-out);
+  }
+
+  .bot-chat-turn:hover .bot-chat-turn-action,
+  .bot-chat-turn:focus-within .bot-chat-turn-action,
+  .bot-chat-turn .bot-chat-turn-action:focus-visible,
+  .bot-chat-turn .bot-chat-turn-copy[data-copied],
+  .bot-chat-turn .bot-chat-turn-copy[data-copy-error] {
+    opacity: 1;
+  }
+
+  .bot-chat-turn-action:hover:not(:disabled) {
+    color: var(--ink-primary);
+    background: var(--surface-1);
+  }
+}
+
+.bot-chat-turn-action:active:not(:disabled),
+.bot-chat-turn-action:focus-visible {
+  color: var(--ink-primary);
+  background: var(--surface-1);
+}
+
+.bot-chat-turn-copy[data-copied] {
+  color: var(--signal-primary);
+}
+
+.bot-chat-turn-copy[data-copy-error] {
+  color: var(--state-danger);
+}
+
+/* Lightbox z-index unified to --z-lightbox. */
+.image-attachment-viewer {
+  z-index: var(--z-lightbox, 450);
+}
+
+.image-attachment-viewer-content {
+  z-index: calc(var(--z-lightbox, 450) + 1);
+}
+
+/* ————— Top Floating Header: ONE 44px Identity Trigger + ConnectionStatusPopover + PopoverMenu ————— */
+
+.grok-chat-floating-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+@media (max-width: 480px) {
+  .grok-chat-floating-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+  }
+}
+
+.grok-chat-floating-header .grok-chat-center-pill,
+.grok-chat-identity-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
+  height: var(--tap-min, 44px);
+  min-height: var(--tap-min, 44px);
+  max-height: var(--tap-min, 44px);
+  padding: var(--space-1, 4px) var(--space-3, 12px) var(--space-1, 4px) 10px;
   box-sizing: border-box;
-}
-
-.grok-chat-pill-avatar-btn {
-  flex: none;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 0;
-  min-height: 0;
-  border-radius: var(--radius-full);
+  gap: var(--space-2, 8px);
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.grok-chat-identity-btn:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .grok-chat-identity-btn:hover {
+    background: var(--surface-1);
+  }
 }
 
 .grok-chat-pill-meta {
@@ -44,44 +178,27 @@
   line-height: 1.15;
 }
 
-.grok-chat-pill-name-btn {
-  display: flex;
-  align-items: center;
-  max-width: 100%;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  padding: 0;
-  text-align: left;
-}
-
 .grok-chat-pill-meta .grok-chat-pill-name {
   max-width: 100%;
-  font-size: var(--text-md);
+  font-size: var(--text-md, 0.9375rem);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--ink-primary);
   line-height: 1.2;
-}
-
-.grok-chat-pill-sub-slot {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-width: 0;
-  height: 15px;
-  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grok-chat-pill-sub {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  color: var(--color-text-muted);
+  gap: var(--space-1, 4px);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-secondary);
   max-width: 100%;
   min-width: 0;
-  min-height: 0;
-  padding: 0;
-  text-align: left;
+  line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -93,82 +210,39 @@
   white-space: nowrap;
 }
 
-.grok-chat-pill-sub.is-empty {
-  opacity: 0;
-  pointer-events: none;
-  user-select: none;
-}
-
-.grok-chat-pill-sub.is-conn-trigger {
-  position: relative;
-  cursor: pointer;
-}
-
-.grok-chat-pill-sub.is-conn-trigger::before {
-  content: '';
-  position: absolute;
-  left: -4px;
-  right: -4px;
-  top: 50%;
-  transform: translateY(-50%);
-  height: 28px;
-}
-
-.grok-chat-pill-sub.is-conn-trigger .hub-top-status-spin {
-  width: 11px;
-  height: 11px;
-}
-
-.grok-chat-pill-sub.is-conn-trigger .hub-top-status-dot {
-  width: 6px;
-  height: 6px;
-}
-
-.grok-chat-pill-sub.is-connecting {
-  color: var(--color-text-muted);
-}
-
-.grok-chat-pill-sub.is-offline {
-  color: var(--color-warning);
-}
-
-.grok-chat-pill-sub.is-error {
-  color: var(--color-danger);
-}
-
 .grok-chat-pill-sub.is-danger {
-  color: var(--color-danger);
+  color: var(--state-danger);
 }
 
 .grok-chat-pill-sub.is-warn {
-  color: var(--color-warning);
+  color: var(--state-attention);
 }
 
-/* C7: 原地替换顶栏居中内容的搜索条（高度恒为 --tap-min，零顶栏跳动） */
+/* In-place header search bar (fixed 44px height, zero header shift). */
 .grok-chat-header-search {
   flex: 1;
   min-width: 0;
-  height: var(--tap-min);
-  min-height: var(--tap-min);
-  max-height: var(--tap-min);
+  height: var(--tap-min, 44px);
+  min-height: var(--tap-min, 44px);
+  max-height: var(--tap-min, 44px);
   box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 6px 0 12px;
+  padding: 0 6px 0 var(--space-3, 12px);
   border-radius: var(--radius-full);
-  background: var(--color-surface-2);
-  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
-  box-shadow: 0 3px 14px color-mix(in srgb, var(--color-scrim) 14%, transparent);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-control);
 }
 
 .grok-chat-header-search:focus-within {
-  border-color: color-mix(in srgb, var(--color-primary) 55%, var(--color-line));
+  border-color: var(--signal-primary);
 }
 
 .grok-chat-header-search-icon {
   flex: none;
-  color: var(--color-text-muted);
+  color: var(--ink-tertiary);
   width: 15px;
   height: 15px;
 }
@@ -181,8 +255,8 @@
   border: 0;
   background: transparent;
   padding: 0;
-  font-size: var(--text-md);
-  color: var(--color-text);
+  font-size: var(--text-md, 0.9375rem);
+  color: var(--ink-primary);
   outline: none;
 }
 
@@ -192,9 +266,9 @@
 
 .grok-chat-header-search-count {
   flex: none;
-  font-size: var(--text-xs);
+  font-size: var(--text-xs, 0.75rem);
   font-variant-numeric: tabular-nums;
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
   white-space: nowrap;
 }
 
@@ -207,7 +281,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
 }
 
 .grok-chat-header-search-close::before {
@@ -216,26 +290,19 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: var(--tap-min);
-  height: var(--tap-min);
-}
-
-@media (max-width: 480px) {
-  .grok-chat-floating-header .grok-chat-header-search {
-    grid-area: bot;
-    max-width: none;
-  }
+  width: var(--tap-min, 44px);
+  height: var(--tap-min, 44px);
 }
 
 .grok-row-value.is-warn {
-  color: var(--color-warning);
+  color: var(--state-attention);
 }
 
 .grok-row-value.is-muted {
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
 }
 
-/* 移动端/共享界面用户气泡轻触操作胶囊（复制 / 编辑） */
+/* Mobile / shared bubble touch action pill (Copy / Edit) with >= 44px hit targets. */
 .bot-bubble-action-bar {
   display: inline-flex;
   align-items: center;
@@ -243,24 +310,24 @@
   margin-top: 6px;
   padding: 3px 5px;
   border-radius: var(--radius-full);
-  border: 1px solid var(--color-line);
-  background: var(--color-bg);
-  color: var(--color-text);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-text) 10%, transparent);
-  animation: grok-pop-up 140ms var(--ease-out) both;
+  border: 1px solid var(--border-default);
+  background: var(--surface-overlay);
+  color: var(--ink-primary);
+  box-shadow: var(--shadow-popover);
+  animation: grok-pop-up var(--dur-fast, 150ms) var(--ease-out) both;
 }
 
 .bot-bubble-action-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-1, 4px);
   height: 24px;
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-2, 8px);
   border-radius: var(--radius-full);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  color: var(--color-text);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-primary);
   white-space: nowrap;
 }
 
@@ -268,10 +335,10 @@
   content: '';
   position: absolute;
   top: 50%;
-  left: 0;
-  right: 0;
-  height: var(--tap-min);
-  transform: translateY(-50%);
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
 }
 
 .bot-bubble-action-btn svg {
@@ -279,22 +346,22 @@
   height: 12px;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bot-bubble-action-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+    background: var(--surface-1);
   }
 }
 
 .bot-bubble-action-btn:active:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text) 12%, transparent);
+  background: var(--surface-inset);
 }
 
 .bot-bubble-action-btn:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
 }
 
-/* 融合工作槽与失败状态行 */
+/* Fused working slot and failure row. */
 .sand-activity-slot,
 .sand-activity-mark {
   min-width: 0;
@@ -303,11 +370,11 @@
 
 .sand-activity-slot.is-inline {
   animation: none;
-  padding: 4px 2px 2px;
+  padding: var(--space-1, 4px) 2px 2px;
 }
 
 .bot-chat-bubble + .sand-activity-slot.is-inline {
-  margin-top: var(--space-1);
+  margin-top: var(--space-1, 4px);
 }
 
 .sand-activity-detail-toggle {
@@ -319,11 +386,11 @@
   min-height: 0;
   padding: 2px 6px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs, 6px);
   background: transparent;
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
+  color: var(--ink-secondary);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
   cursor: pointer;
 }
 
@@ -333,29 +400,29 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min));
-  height: max(100%, var(--tap-min));
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .sand-activity-detail-toggle:hover {
-    color: var(--color-text);
-    background: color-mix(in srgb, var(--color-surface-1) 75%, var(--color-text) 10%);
+    color: var(--ink-primary);
+    background: var(--surface-1);
   }
 }
 
 .sand-activity-detail-toggle:active {
-  color: var(--color-text);
-  background: color-mix(in srgb, var(--color-surface-1) 65%, var(--color-text) 14%);
+  color: var(--ink-primary);
+  background: var(--surface-inset);
 }
 
 .sand-activity-detail-toggle:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
 }
 
 .sand-activity-detail-toggle svg {
-  transition: transform var(--dur-fast) ease;
+  transition: transform var(--dur-fast, 150ms) var(--ease-out);
 }
 
 .sand-activity-detail-toggle[aria-expanded="true"] svg {
@@ -363,27 +430,27 @@
 }
 
 .sand-activity-failure-detail {
-  margin: 4px 0 0 46px;
-  padding: var(--space-2) 10px;
+  margin: var(--space-1, 4px) 0 0 46px;
+  padding: var(--space-2, 8px) 10px;
   max-width: calc(100% - 46px);
   min-width: 0;
   max-height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
-  border: 0;
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 8px);
   box-shadow: none;
-  background: var(--color-surface-1);
-  color: var(--color-text-muted);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: var(--text-xs);
+  background: var(--surface-inset);
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
-/* F6 + C5 + C7: 相对定位承载绝对定位骨架/空态层；开启 overflow-anchor 稳定历史阅读位置 */
+/* Message scroll container + cross-fading skeleton/empty overlay. */
 .bot-chat-messages {
   position: relative;
   overflow-anchor: auto;
@@ -392,7 +459,7 @@
 .bot-chat-messages-content {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-4, 16px);
   width: 100%;
   min-width: 0;
   flex: none;
@@ -401,7 +468,7 @@
 .bot-chat-turns-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-4, 16px);
   width: 100%;
   min-width: 0;
 }
@@ -410,20 +477,21 @@
   display: none;
 }
 
-/* C7: 骨架屏与空态共用同一绝对定位层，仅靠 opacity 交叉淡入淡出，零布局位移 */
 .bot-chat-empty-overlay {
   position: absolute;
   inset: 0;
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
-  transition: opacity var(--dur-fast) ease, visibility 0s linear var(--dur-fast);
+  transition:
+    opacity var(--dur-fast, 150ms) var(--ease-out),
+    visibility 0s linear var(--dur-fast, 150ms);
 }
 
 .bot-chat-empty-overlay.is-visible {
   opacity: 1;
   visibility: visible;
-  transition: opacity var(--dur-fast) ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out);
 }
 
 .bot-chat-state-layer {
@@ -431,10 +499,10 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--space-3) var(--space-4) var(--space-6);
+  padding: var(--space-3, 12px) var(--space-4, 16px) var(--space-6, 24px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--dur-fast) ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out);
 }
 
 .bot-chat-state-layer.is-active {
@@ -445,39 +513,36 @@
   pointer-events: auto;
 }
 
-/* 聊天历史加载骨架占位 */
+/* Chat history loading skeleton. */
 .bot-chat-skeleton {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: var(--space-3) var(--space-1);
+  padding: var(--space-3, 12px) var(--space-1, 4px);
   width: 100%;
 }
 
 .bot-chat-skeleton-bar {
-  height: var(--tap-min);
-  border-radius: 18px;
-  background: var(--color-surface-1);
+  height: var(--tap-min, 44px);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-1);
   animation: bot-chat-skeleton-pulse 1.4s ease-in-out infinite;
 }
 
 .bot-chat-skeleton-bar.is-short {
   width: 56%;
   align-self: flex-end;
-  border-bottom-right-radius: 6px;
 }
 
 .bot-chat-skeleton-bar.is-wide {
   width: 82%;
   height: 64px;
   align-self: flex-start;
-  border-bottom-left-radius: 6px;
 }
 
 .bot-chat-skeleton-bar.is-medium {
   width: 68%;
   align-self: flex-start;
-  border-bottom-left-radius: 6px;
 }
 
 @keyframes bot-chat-skeleton-pulse {
@@ -485,21 +550,21 @@
   50% { opacity: 0.92; }
 }
 
-/* 聊天搜索零结果空态 */
+/* Empty search state. */
 .bot-chat-search-empty {
   margin: auto;
-  padding: var(--space-8) var(--space-5);
+  padding: var(--space-8, 32px) var(--space-5, 20px);
   text-align: center;
-  font-size: var(--text-md);
-  color: var(--color-text-muted);
+  font-size: var(--text-md, 0.9375rem);
+  color: var(--ink-secondary);
 }
 
-/* 未贴底且有新内容时的「↓ 新消息」回底胶囊 */
+/* Jump-to-latest pill. */
 .bot-chat-jump-anchor {
   position: relative;
   height: 0;
   flex: none;
-  z-index: var(--z-sticky);
+  z-index: var(--z-sticky, 10);
 }
 
 .bot-chat-jump-latest {
@@ -509,23 +574,23 @@
   bottom: 10px;
   margin-inline: auto;
   width: fit-content;
-  height: var(--tap-min);
-  min-height: var(--tap-min);
-  padding: 0 var(--space-4);
+  height: var(--tap-min, 44px);
+  min-height: var(--tap-min, 44px);
+  padding: 0 var(--space-4, 16px);
   border-radius: var(--radius-full);
-  border: 1px solid var(--color-line);
-  background: var(--color-surface-1);
-  color: var(--color-text);
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-text) 14%, transparent);
+  border: 1px solid var(--border-default);
+  background: var(--surface-overlay);
+  color: var(--ink-primary);
+  box-shadow: var(--shadow-float);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-semibold, 600);
   white-space: nowrap;
   cursor: pointer;
-  animation: grok-pop-up 160ms var(--ease-out) both;
+  animation: grok-pop-up var(--dur-fast, 150ms) var(--ease-out) both;
 }
 
 .grok-composer-floating-dock > .bot-chat-jump-anchor {
@@ -546,23 +611,23 @@
   pointer-events: auto;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bot-chat-jump-latest:hover {
-    border-color: var(--color-primary);
+    border-color: var(--signal-primary);
   }
 }
 
 .bot-chat-jump-latest:active {
   transform: scale(0.96);
-  border-color: var(--color-primary);
+  border-color: var(--signal-primary);
 }
 
 .bot-chat-jump-latest:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
 }
 
-/* C5: 长消息列表渲染性能优化——仅对较早消息启用 content-visibility，最后 12 条与流式消息保持正常排版 */
+/* Long transcript rendering optimization. */
 .bot-chat-turns-list > .bot-chat-turn:not(.is-streaming) {
   content-visibility: auto;
   contain-intrinsic-size: auto 96px;
@@ -576,8 +641,21 @@
 
 @media (prefers-reduced-motion: reduce) {
   .bot-chat-empty-overlay,
-  .bot-chat-state-layer {
+  .bot-chat-state-layer,
+  .bot-chat-bubble.is-editing-after,
+  .bot-chat-turn .bot-chat-turn-action,
+  .sand-activity-detail-toggle svg {
     transition: none;
+  }
+
+  .bot-chat-skeleton-bar,
+  .bot-bubble-action-bar,
+  .bot-chat-jump-latest {
+    animation: none;
+  }
+
+  .bot-chat-jump-latest:active {
+    transform: none;
   }
 }
 
@@ -587,7 +665,7 @@
   }
 }
 
-/* 强制创建主 Bot 页底部 toast 锚点（复用 .bot-chat-toast 定位） */
+/* Forced primary-bot creation page toast anchor. */
 .bot-edit-toast-anchor {
   position: relative;
   flex: none;

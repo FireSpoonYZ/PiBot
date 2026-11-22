@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type SetStateAction } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type SetStateAction } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import {
   INITIAL_ACTION_STATE,
@@ -850,6 +850,7 @@ export function ErrorNotice({
   stale = false,
 }: ErrorNoticeProps) {
   const t = useText();
+  const detailId = useId();
   const [showDetail, setShowDetail] = useState(false);
   const isProgress = toneOverride === 'progress';
   const parsed = !isProgress && error ? humanizeError(error, t) : null;
@@ -897,11 +898,12 @@ export function ErrorNotice({
                 className="grok-notice-detail-toggle"
                 onClick={() => setShowDetail(v => !v)}
                 aria-expanded={showDetail}
+                aria-controls={detailId}
               >
                 <span>{showDetail ? t('收起详情', 'Hide details') : t('查看详情', 'Details')}</span>
                 {showDetail ? <ChevronUp size={13} aria-hidden="true" /> : <ChevronDown size={13} aria-hidden="true" />}
               </button>
-              {showDetail && <pre className="grok-notice-detail-code">{detail}</pre>}
+              {showDetail && <pre id={detailId} className="grok-notice-detail-code">{detail}</pre>}
             </div>
           )}
         </div>

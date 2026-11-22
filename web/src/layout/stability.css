@@ -38,7 +38,7 @@
   width: 100%;
   min-width: 0;
   opacity: 1;
-  transition: opacity var(--dur-fast, 150ms) ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .ls-reserved-slot-inner.is-empty {
@@ -47,7 +47,7 @@
 }
 
 .ls-reserved-slot-inner.is-swapping {
-  animation: ls-slot-fade-in var(--dur-fast, 150ms) ease;
+  animation: ls-slot-fade-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 @keyframes ls-slot-fade-in {
@@ -99,12 +99,12 @@
   width: 100%;
   height: 14px;
   border-radius: var(--radius-sm, 8px);
-  background-color: var(--color-surface-1, var(--surface));
+  background-color: var(--surface-1, var(--color-surface-1, var(--surface)));
   background-image: linear-gradient(
     90deg,
-    var(--color-surface-1, var(--surface)) 25%,
-    var(--color-surface-3, var(--line)) 50%,
-    var(--color-surface-1, var(--surface)) 75%
+    var(--surface-1, var(--color-surface-1, var(--surface))) 25%,
+    var(--surface-raised, var(--color-surface-3, var(--line))) 50%,
+    var(--surface-1, var(--color-surface-1, var(--surface))) 75%
   );
   background-size: 200% 100%;
   animation: ls-skeleton-shimmer 1.5s ease-in-out infinite;
@@ -117,7 +117,7 @@
 
 .ls-skeleton-bar.is-text {
   height: 1em;
-  border-radius: 6px;
+  border-radius: var(--radius-xs, 6px);
 }
 
 .ls-skeleton-bar.is-rect {
@@ -181,7 +181,7 @@
   left: 14px;
   right: 0;
   height: 1px;
-  background: var(--bs-hairline, var(--color-line, var(--line)));
+  background: var(--bs-hairline, var(--border-subtle, var(--color-line, var(--line))));
 }
 
 .ls-skeleton-row-body {
@@ -208,10 +208,10 @@
   height: auto;
   opacity: 1;
   transition:
-    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    opacity var(--dur-fast, 150ms) ease,
-    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .smooth-expand-mount {
@@ -219,8 +219,8 @@
   height: auto;
   opacity: 1;
   transition:
-    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    opacity var(--dur-fast, 150ms) ease;
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 @starting-style {
@@ -246,10 +246,10 @@
   pointer-events: none;
   visibility: hidden;
   transition:
-    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    opacity var(--dur-fast, 150ms) ease,
-    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    margin var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    padding var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
     visibility 0s linear var(--dur-base, 220ms);
 }
 

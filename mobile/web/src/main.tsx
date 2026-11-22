@@ -73,9 +73,26 @@ const readHasCachedRemoteBots = (): boolean => {
   }
 };
 
+const THEME_COLOR_LIGHT = '#F7F6F2';
+const THEME_COLOR_DARK = '#141614';
+
 const resolveTheme = (appearance: MobileUiSettings['appearance']): 'light' | 'dark' => {
   if (appearance === 'dark' || appearance === 'light') return appearance;
   return darkMediaQuery()?.matches ? 'dark' : 'light';
+};
+
+const syncMetaThemeColor = (resolved: 'light' | 'dark') => {
+  if (typeof document === 'undefined') return;
+  const color = resolved === 'dark' ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    document.head?.appendChild(meta);
+  }
+  if (meta.getAttribute('content') !== color) {
+    meta.setAttribute('content', color);
+  }
 };
 
 const applyTheme = (appearance: MobileUiSettings['appearance']) => {
@@ -83,6 +100,7 @@ const applyTheme = (appearance: MobileUiSettings['appearance']) => {
   document.documentElement.dataset.themePref = appearance;
   document.documentElement.dataset.theme = resolved;
   document.documentElement.style.colorScheme = resolved;
+  syncMetaThemeColor(resolved);
 };
 
 const applyUi = (ui: MobileUiSettings) => {

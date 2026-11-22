@@ -1,41 +1,47 @@
 /* Shower 虚拟桌面工作台（设计 5.5）：右侧分屏伴随 + 全窗口剧场双模式。
- * 暗色舞台（#0f1110）与手机端 BotScreenPanel 同风格；桌面新增样式一律落在
- * .desktop-shell（或剧场覆盖层 .desktop-shell .shower-theater）作用域内。
+ * 暗色舞台复用 tokens.css 的 --stage-dark-* 与语义状态令牌（零硬编码颜色）；
+ * 桌面新增样式一律落在 .desktop-shell（或剧场覆盖层 .shower-theater）作用域内。
  * .remote-client 下无 .desktop-shell 祖先（Android Capacitor / 手机远程容器），
- * 因此另给无作用域的回退选择器，保证 Android 挂载时同一组件零回归。 */
+ * 因此另给回退选择器，保证 Android 挂载时同一组件零回归。 */
 
 .desktop-shell .shower-preview,
 .remote-client .shower-preview {
-  --shower-bg: #0f1110;
-  --shower-surface: #161917;
-  --shower-surface-2: #1c201d;
-  --shower-line: #2a2f2b;
-  --shower-text: #eeeee8;
-  --shower-muted: #9aa49b;
-  --shower-live: #4ade80;
-  --shower-warn: #fbbf24;
-  --shower-danger: #ff9a92;
-  --shower-accent: #3b7dff;
+  --shower-bg: var(--stage-dark-ground);
+  --shower-surface: var(--stage-dark-surface);
+  --shower-surface-2: var(--stage-dark-raised);
+  --shower-line: var(--stage-dark-border);
+  --shower-text: var(--stage-dark-ink);
+  --shower-muted: var(--stage-dark-ink-muted);
+  --shower-live: var(--state-live);
+  --shower-warn: var(--state-attention);
+  --shower-danger: var(--state-danger);
+  --shower-accent: var(--signal-primary);
+  --shower-accent-hover: var(--signal-primary-hover);
+  --shower-on-accent: var(--signal-primary-ink);
+  --shower-scrim: var(--scrim);
 
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 8px 16px;
-  padding: 12px;
+  gap: var(--space-2, 8px);
+  margin: var(--space-2, 8px) var(--space-4, 16px);
+  padding: var(--space-3, 12px);
   border: 1px solid var(--shower-line);
-  border-radius: 18px;
+  border-radius: var(--radius-lg, 16px);
   background: var(--shower-bg);
   color: var(--shower-text);
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
   max-height: 78vh;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 /* 子项按内容自然高度排列：任何子项不得被压缩（否则会被裁切的画幅反向溢出覆盖上下控件）。 */
 .desktop-shell .shower-preview > *,
-.remote-client .shower-preview > * { flex: 0 0 auto; }
+.remote-client .shower-preview > * {
+  flex: 0 0 auto;
+}
 
 /* ————— 头部：标题 + 模式切换 + 关闭 ————— */
 
@@ -47,23 +53,28 @@
 }
 
 .desktop-shell .shower-head-text,
-.remote-client .shower-head-text { flex: 1 1 auto; min-width: 0; }
+.remote-client .shower-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 
 .desktop-shell .shower-title,
 .remote-client .shower-title {
-  font-weight: 650;
-  font-size: 14px;
+  font-weight: var(--weight-semibold, 600);
+  font-size: var(--text-base, 0.875rem);
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
 .desktop-shell .shower-title svg,
-.remote-client .shower-title svg { flex: none; }
+.remote-client .shower-title svg {
+  flex: none;
+}
 
 .desktop-shell .shower-sub,
 .remote-client .shower-sub {
-  font-size: 11px;
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   overflow-wrap: anywhere;
 }
@@ -76,8 +87,7 @@
   gap: 6px;
 }
 
-/* 面板内小圆图标按钮；桌面态复用通用 .icon-button 类名（Lane 1 预留），
- * 未定义时本文件给最小样式兜底，不影响 app.css 后续接管。 */
+/* 面板内图标按钮 */
 .desktop-shell .shower-preview .icon-button,
 .desktop-shell .shower-theater .icon-button,
 .remote-client .shower-preview .icon-button,
@@ -85,37 +95,47 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: var(--space-1, 4px);
   min-height: 28px;
   min-width: 28px;
-  padding: 3px 8px;
+  padding: 3px var(--space-2, 8px);
   border: 1px solid var(--shower-line);
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   background: var(--shower-surface-2);
   color: var(--shower-text);
-  font-size: 11px;
+  font-size: var(--text-2xs, 0.6875rem);
   cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-.desktop-shell .shower-preview .icon-button:hover:not(:disabled),
-.desktop-shell .shower-theater .icon-button:hover:not(:disabled),
-.remote-client .shower-preview .icon-button:hover:not(:disabled),
-.shower-theater .icon-button:hover:not(:disabled) {
-  border-color: var(--shower-muted);
+.desktop-shell .shower-preview .icon-button:active:not(:disabled),
+.desktop-shell .shower-theater .icon-button:active:not(:disabled),
+.remote-client .shower-preview .icon-button:active:not(:disabled),
+.shower-theater .icon-button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .desktop-shell .shower-preview .icon-button:disabled,
-.remote-client .shower-preview .icon-button:disabled { opacity: .5; cursor: not-allowed; }
+.desktop-shell .shower-theater .icon-button:disabled,
+.remote-client .shower-preview .icon-button:disabled,
+.shower-theater .icon-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
-/* ————— 状态行 / 能力 / 提示 ————— */
+/* ————— 状态行 / 能力 / InlineBanner 暗色舞台适配 ————— */
 
 .desktop-shell .shower-status,
 .remote-client .shower-status {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  font-size: 11px;
+  gap: var(--space-1, 4px) var(--space-2, 8px);
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   overflow-wrap: anywhere;
 }
@@ -125,61 +145,88 @@
   flex: none;
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   background: var(--shower-muted);
 }
 
 .desktop-shell .shower-dot.live,
 .remote-client .shower-dot.live {
   background: var(--shower-live);
-  box-shadow: 0 0 8px rgb(74 222 128 / .55);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--shower-live) 55%, transparent);
 }
 
 .desktop-shell .shower-dot.busy,
-.remote-client .shower-dot.busy { background: var(--shower-warn); }
+.remote-client .shower-dot.busy {
+  background: var(--shower-warn);
+}
 
 .desktop-shell .shower-offline,
-.remote-client .shower-offline { color: var(--shower-warn); }
+.remote-client .shower-offline {
+  color: color-mix(in srgb, var(--shower-warn) 68%, var(--shower-text));
+}
 
 .desktop-shell .shower-caps,
 .remote-client .shower-caps {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  font-size: 11px;
+  gap: var(--space-2, 8px);
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   overflow-wrap: anywhere;
 }
 
 .desktop-shell .shower-unsupported,
-.remote-client .shower-unsupported { color: var(--shower-danger); }
+.remote-client .shower-unsupported {
+  color: color-mix(in srgb, var(--shower-danger) 72%, var(--shower-text));
+}
 
-.desktop-shell .shower-guide,
-.remote-client .shower-guide {
-  font-size: 11px;
-  color: var(--shower-warn);
+.desktop-shell .shower-preview .ui-inline-banner,
+.remote-client .shower-preview .ui-inline-banner,
+.shower-theater .ui-inline-banner {
+  --banner-bg: var(--shower-surface);
+  --banner-border: var(--shower-line);
+  --banner-ink: var(--shower-text);
+  --banner-icon: var(--shower-muted);
+  --ink-secondary: var(--shower-muted);
+  --border-subtle: var(--shower-line);
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.desktop-shell .shower-notice,
-.remote-client .shower-notice {
-  font-size: 11px;
-  color: var(--shower-live);
-  overflow-wrap: anywhere;
+.desktop-shell .shower-preview .ui-inline-banner.is-attention,
+.remote-client .shower-preview .ui-inline-banner.is-attention,
+.shower-theater .ui-inline-banner.is-attention {
+  --banner-bg: color-mix(in srgb, var(--shower-warn) 16%, var(--shower-surface));
+  --banner-border: color-mix(in srgb, var(--shower-warn) 42%, var(--shower-line));
+  --banner-ink: var(--shower-text);
+  --banner-icon: var(--shower-warn);
 }
 
-/* 暗色面板内的错误横幅（覆盖 app.css 的浅色底，仅限本组件内部）。 */
-.desktop-shell .shower-preview .error-banner,
-.desktop-shell .shower-theater .error-banner,
-.remote-client .shower-preview .error-banner {
-  margin: 0;
-  border: 1px solid color-mix(in srgb, var(--shower-danger) 45%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--shower-danger) 12%, var(--shower-bg));
-  color: var(--shower-danger);
-  font-size: 11px;
-  padding: 8px 10px;
-  overflow-wrap: anywhere;
+.desktop-shell .shower-preview .ui-inline-banner.is-danger,
+.remote-client .shower-preview .ui-inline-banner.is-danger,
+.shower-theater .ui-inline-banner.is-danger {
+  --banner-bg: color-mix(in srgb, var(--shower-danger) 16%, var(--shower-surface));
+  --banner-border: color-mix(in srgb, var(--shower-danger) 45%, var(--shower-line));
+  --banner-ink: var(--shower-text);
+  --banner-icon: var(--shower-danger);
+}
+
+.desktop-shell .shower-preview .ui-inline-banner.is-live,
+.remote-client .shower-preview .ui-inline-banner.is-live,
+.shower-theater .ui-inline-banner.is-live {
+  --banner-bg: color-mix(in srgb, var(--shower-live) 16%, var(--shower-surface));
+  --banner-border: color-mix(in srgb, var(--shower-live) 42%, var(--shower-line));
+  --banner-ink: var(--shower-text);
+  --banner-icon: var(--shower-live);
+}
+
+.desktop-shell .shower-preview .ui-inline-banner.is-info,
+.remote-client .shower-preview .ui-inline-banner.is-info,
+.shower-theater .ui-inline-banner.is-info {
+  --banner-bg: color-mix(in srgb, var(--shower-accent) 18%, var(--shower-surface));
+  --banner-border: color-mix(in srgb, var(--shower-accent) 45%, var(--shower-line));
+  --banner-ink: var(--shower-text);
+  --banner-icon: var(--shower-accent);
 }
 
 /* ————— 画面舞台 ————— */
@@ -187,8 +234,8 @@
 .desktop-shell .shower-surface,
 .remote-client .shower-surface {
   border: 1px solid var(--shower-line);
-  border-radius: 12px;
-  background: #0a0c0b;
+  border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--shower-bg) 82%, var(--shower-scrim));
   min-height: 140px;
   display: flex;
   align-items: center;
@@ -209,28 +256,35 @@
 }
 
 .desktop-shell .shower-frame.interactive,
-.remote-client .shower-frame.interactive { cursor: crosshair; touch-action: none; }
+.remote-client .shower-frame.interactive {
+  cursor: crosshair;
+  touch-action: none;
+}
 
 .desktop-shell .shower-empty,
 .remote-client .shower-empty {
   padding: 30px 14px;
-  font-size: 11px;
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
+  overflow-wrap: anywhere;
 }
 
 .desktop-shell .shower-empty svg,
-.remote-client .shower-empty svg { opacity: .7; }
+.remote-client .shower-empty svg {
+  opacity: 0.7;
+}
 
 .desktop-shell .shower-meta,
 .remote-client .shower-meta {
-  font-size: 10.5px;
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
-  font-family: var(--mono);
+  font-family: var(--font-mono, var(--mono));
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -254,23 +308,39 @@
   justify-content: center;
   gap: 5px;
   min-height: 30px;
-  padding: 4px 12px;
+  padding: var(--space-1, 4px) var(--space-3, 12px);
   border: 1px solid var(--shower-line);
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   background: var(--shower-surface-2);
   color: var(--shower-text);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-semibold, 600);
   cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-.desktop-shell .shower-controls button:hover:not(:disabled),
-.desktop-shell .shower-footer button:hover:not(:disabled),
-.desktop-shell .shower-theater-bar button:hover:not(:disabled),
-.remote-client .shower-controls button:hover:not(:disabled),
-.remote-client .shower-footer button:hover:not(:disabled),
-.shower-theater-bar button:hover:not(:disabled) {
-  border-color: var(--shower-muted);
+.desktop-shell .shower-controls button:active:not(:disabled),
+.desktop-shell .shower-footer button:active:not(:disabled),
+.desktop-shell .shower-theater-bar button:active:not(:disabled),
+.remote-client .shower-controls button:active:not(:disabled),
+.remote-client .shower-footer button:active:not(:disabled),
+.shower-theater-bar button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.desktop-shell .shower-controls button:disabled,
+.desktop-shell .shower-footer button:disabled,
+.desktop-shell .shower-theater-bar button:disabled,
+.remote-client .shower-controls button:disabled,
+.remote-client .shower-footer button:disabled,
+.shower-theater-bar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .desktop-shell .shower-controls button.primary,
@@ -279,33 +349,41 @@
 .shower-theater-bar button.primary {
   background: var(--shower-accent);
   border-color: var(--shower-accent);
-  color: #fff;
-}
-
-.desktop-shell .shower-controls button.primary:hover:not(:disabled),
-.desktop-shell .shower-theater-bar button.primary:hover:not(:disabled),
-.remote-client .shower-controls button.primary:hover:not(:disabled),
-.shower-theater-bar button.primary:hover:not(:disabled) {
-  border-color: var(--shower-accent);
-  filter: brightness(1.08);
+  color: var(--shower-on-accent);
 }
 
 .desktop-shell .shower-controls button.taken-over,
 .desktop-shell .shower-theater-bar button.taken-over,
 .remote-client .shower-controls button.taken-over,
 .shower-theater-bar button.taken-over {
-  background: color-mix(in srgb, var(--shower-live) 18%, var(--shower-surface-2));
-  border-color: color-mix(in srgb, var(--shower-live) 55%, transparent);
-  color: var(--shower-live);
+  background: color-mix(in srgb, var(--shower-live) 22%, var(--shower-surface-2));
+  border-color: color-mix(in srgb, var(--shower-live) 55%, var(--shower-line));
+  color: color-mix(in srgb, var(--shower-live) 55%, var(--shower-text));
+}
+
+.desktop-shell .shower-preview button:focus-visible,
+.remote-client .shower-preview button:focus-visible,
+.shower-theater button:focus-visible,
+.desktop-shell .shower-diagnostics > summary:focus-visible,
+.shower-theater .shower-diagnostics > summary:focus-visible {
+  outline: 2px solid var(--shower-accent);
+  outline-offset: 2px;
 }
 
 /* ————— 人工输入槽 ————— */
 
 .desktop-shell .shower-input,
-.remote-client .shower-input { display: flex; flex-direction: column; gap: 4px; }
+.remote-client .shower-input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1, 4px);
+}
 
 .desktop-shell .shower-input-label,
-.remote-client .shower-input-label { font-size: 11px; color: var(--shower-muted); }
+.remote-client .shower-input-label {
+  font-size: var(--text-2xs, 0.6875rem);
+  color: var(--shower-muted);
+}
 
 .desktop-shell .shower-text,
 .remote-client .shower-text,
@@ -313,22 +391,26 @@
 .shower-theater .shower-text {
   width: 100%;
   min-height: 32px;
-  padding: 6px 12px;
+  padding: 6px var(--space-3, 12px);
   border: 1px solid var(--shower-line);
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   background: var(--shower-surface-2);
   color: var(--shower-text);
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
+  transition: border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .desktop-shell .shower-text:focus,
 .remote-client .shower-text:focus,
-.shower-theater .shower-text:focus { border-color: var(--shower-accent); }
+.shower-theater .shower-text:focus {
+  border-color: var(--shower-accent);
+  outline: none;
+}
 
 .desktop-shell .shower-preview .hint,
 .remote-client .shower-preview .hint,
 .shower-theater .hint {
-  font-size: 10.5px;
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   overflow-wrap: anywhere;
 }
@@ -340,42 +422,56 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
 }
 
 .desktop-shell .shower-release,
 .remote-client .shower-release,
 .shower-theater .shower-release {
-  color: var(--shower-danger);
-  border-color: color-mix(in srgb, var(--shower-danger) 45%, transparent);
-  background: color-mix(in srgb, var(--shower-danger) 10%, var(--shower-surface-2));
+  color: color-mix(in srgb, var(--shower-danger) 70%, var(--shower-text));
+  border-color: color-mix(in srgb, var(--shower-danger) 50%, var(--shower-line));
+  background: color-mix(in srgb, var(--shower-danger) 18%, var(--shower-surface-2));
 }
 
-/* 全屏舞台经 portal 挂到 body，返回和关闭按钮始终可达。 */
+/* 全屏舞台经 portal 挂到 body，返回和关闭按钮始终可达；
+ * 层级使用 --z-fullscreen (400)，保证全局 NoticeLayer (--z-toast: 500) 始终浮于上方。 */
 
 .desktop-shell .shower-theater,
 .remote-client .shower-theater,
 .shower-theater {
-  --shower-bg: #0f1110;
-  --shower-surface: #161917;
-  --shower-surface-2: #1c201d;
-  --shower-line: #2a2f2b;
-  --shower-text: #eeeee8;
-  --shower-muted: #9aa49b;
-  --shower-live: #4ade80;
-  --shower-warn: #fbbf24;
-  --shower-danger: #ff9a92;
-  --shower-accent: #3b7dff;
+  --shower-bg: var(--stage-dark-ground);
+  --shower-surface: var(--stage-dark-surface);
+  --shower-surface-2: var(--stage-dark-raised);
+  --shower-line: var(--stage-dark-border);
+  --shower-text: var(--stage-dark-ink);
+  --shower-muted: var(--stage-dark-ink-muted);
+  --shower-live: var(--state-live);
+  --shower-warn: var(--state-attention);
+  --shower-danger: var(--state-danger);
+  --shower-accent: var(--signal-primary);
+  --shower-accent-hover: var(--signal-primary-hover);
+  --shower-on-accent: var(--signal-primary-ink);
+  --shower-scrim: var(--scrim);
 
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-fullscreen, 400);
   display: flex;
   flex-direction: column;
   gap: 0;
   background: var(--shower-bg);
   color: var(--shower-text);
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
+  overscroll-behavior: contain;
+}
+
+/* 剧场全屏内打开 ConfirmDialog 时浮于剧场之上（418/419），同时低于浮层菜单（425）与 NoticeLayer（500）。 */
+body:has(.shower-theater) .bs-confirm-overlay {
+  z-index: 418;
+}
+
+body:has(.shower-theater) .bs-confirm-dialog {
+  z-index: 419;
 }
 
 .desktop-shell .shower-theater-top,
@@ -385,9 +481,10 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  background: color-mix(in srgb, var(--shower-surface) 82%, transparent);
+  padding: calc(10px + var(--top, 0px)) calc(var(--space-4, 16px) + var(--safe-right, 0px)) 10px calc(var(--space-4, 16px) + var(--safe-left, 0px));
+  background: color-mix(in srgb, var(--shower-surface) 84%, transparent);
   backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--shower-line);
 }
 
@@ -398,15 +495,17 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 650;
+  gap: var(--space-2, 8px);
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-semibold, 600);
   overflow: hidden;
 }
 
 .desktop-shell .shower-theater-title .shower-sub,
 .remote-client .shower-theater-title .shower-sub,
-.shower-theater-title .shower-sub { font-weight: 400; }
+.shower-theater-title .shower-sub {
+  font-weight: var(--weight-regular, 400);
+}
 
 .desktop-shell .shower-theater-stage,
 .remote-client .shower-theater-stage,
@@ -417,7 +516,7 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  padding: 12px;
+  padding: var(--space-3, 12px) calc(var(--space-3, 12px) + var(--safe-right, 0px)) var(--space-3, 12px) calc(var(--space-3, 12px) + var(--safe-left, 0px));
 }
 
 .desktop-shell .shower-theater-stage .shower-frame,
@@ -427,7 +526,7 @@
   height: auto;
   max-width: 100%;
   max-height: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-sm, 8px);
 }
 
 .desktop-shell .shower-theater-alerts,
@@ -437,7 +536,13 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 0 16px;
+  padding: 0 calc(var(--space-4, 16px) + var(--safe-right, 0px)) var(--space-2, 8px) calc(var(--space-4, 16px) + var(--safe-left, 0px));
+}
+
+.desktop-shell .shower-theater-alerts:empty,
+.remote-client .shower-theater-alerts:empty,
+.shower-theater-alerts:empty {
+  display: none;
 }
 
 .desktop-shell .shower-theater-bar,
@@ -447,10 +552,11 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
-  background: color-mix(in srgb, var(--shower-surface) 82%, transparent);
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px) calc(var(--space-4, 16px) + var(--safe-right, 0px)) calc(var(--space-3, 12px) + max(var(--bottom, env(safe-area-inset-bottom, 0px)), var(--ime-bottom, 0px))) calc(var(--space-4, 16px) + var(--safe-left, 0px));
+  background: color-mix(in srgb, var(--shower-surface) 84%, transparent);
   backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-top: 1px solid var(--shower-line);
 }
 
@@ -471,9 +577,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  padding: 8px 16px;
-  font-size: 11px;
+  gap: var(--space-1, 4px) var(--space-2, 8px);
+  padding: var(--space-2, 8px) calc(var(--space-4, 16px) + var(--safe-right, 0px)) var(--space-2, 8px) calc(var(--space-4, 16px) + var(--safe-left, 0px));
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
   overflow-wrap: anywhere;
 }
@@ -482,61 +588,46 @@
   flex: none;
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   background: var(--shower-muted);
 }
 
 .shower-theater .shower-dot.live {
   background: var(--shower-live);
-  box-shadow: 0 0 8px rgb(74 222 128 / .55);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--shower-live) 55%, transparent);
 }
 
-.shower-theater .shower-dot.busy { background: var(--shower-warn); }
-
-.shower-theater .shower-offline { color: var(--shower-warn); }
-
-.shower-theater .shower-guide {
-  font-size: 11px;
-  color: var(--shower-warn);
-  overflow-wrap: anywhere;
+.shower-theater .shower-dot.busy {
+  background: var(--shower-warn);
 }
 
-.shower-theater .shower-notice {
-  font-size: 11px;
-  color: var(--shower-live);
-  overflow-wrap: anywhere;
-}
-
-.shower-theater .error-banner {
-  margin: 0;
-  border: 1px solid color-mix(in srgb, var(--shower-danger) 45%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--shower-danger) 12%, var(--shower-bg));
-  color: var(--shower-danger);
-  font-size: 11px;
-  padding: 8px 10px;
-  overflow-wrap: anywhere;
+.shower-theater .shower-offline {
+  color: color-mix(in srgb, var(--shower-warn) 68%, var(--shower-text));
 }
 
 .shower-theater .shower-empty {
   padding: 30px 14px;
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
   color: var(--shower-muted);
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
+  overflow-wrap: anywhere;
 }
 
-.shower-theater .shower-empty svg { opacity: .7; }
+.shower-theater .shower-empty svg {
+  opacity: 0.7;
+}
 
 .shower-theater .shower-meta {
   flex: none;
-  padding: 0 16px 6px;
-  font-size: 10.5px;
+  padding: 0 var(--space-4, 16px) 6px;
+  font-size: var(--text-2xs, 0.6875rem);
   color: var(--shower-muted);
-  font-family: var(--mono);
+  font-family: var(--font-mono, var(--mono));
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -552,42 +643,122 @@
   touch-action: pan-y;
 }
 
-.shower-theater .shower-frame.interactive { cursor: crosshair; touch-action: none; }
+.shower-theater .shower-frame.interactive {
+  cursor: crosshair;
+  touch-action: none;
+}
 
 /* 舞台作为初始聚焦点（tabIndex=-1），不显示焦点环。 */
-.shower-theater-stage:focus { outline: none; }
+.shower-theater-stage:focus {
+  outline: none;
+}
 
-.shower-desktop .shower-controls { align-items: center; }
-.shower-desktop .shower-controls .hint { margin: 0; }
-.shower-desktop .shower-controls:empty,
-.shower-desktop .shower-theater-alerts:empty { display: none; }
+.shower-desktop .shower-controls {
+  align-items: center;
+}
+
+.shower-desktop .shower-controls .hint {
+  margin: 0;
+}
+
+.shower-desktop .shower-controls:empty {
+  display: none;
+}
+
 .shower-desktop .shower-diagnostics > summary {
   width: fit-content;
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
   color: var(--shower-muted);
   cursor: pointer;
 }
-.shower-desktop .shower-diagnostics[open] { flex-basis: 100%; }
+
+.shower-desktop .shower-diagnostics[open] {
+  flex-basis: 100%;
+}
+
 .shower-desktop .shower-diagnostics-body {
   display: grid;
   justify-items: start;
   gap: 5px;
-  padding: 8px 0 0;
+  padding: var(--space-2, 8px) 0 0;
   color: var(--shower-muted);
-  font-size: 12px;
+  font-size: var(--text-xs, 0.75rem);
   overflow-wrap: anywhere;
 }
+
 .shower-theater.shower-desktop .shower-diagnostics-body {
   max-height: min(160px, 25vh);
   overflow: auto;
+  overscroll-behavior: contain;
 }
-.shower-theater.shower-desktop .shower-input { flex: 1 1 220px; }
-.shower-theater.shower-desktop .shower-input-label { color: var(--shower-muted); font-size: 11px; }
-.shower-desktop .shower-confirm-end {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  color: var(--shower-text);
+
+.shower-theater.shower-desktop .shower-input {
+  flex: 1 1 220px;
 }
-.shower-desktop .shower-confirm-end p { margin: 0; font-size: 12px; }
+
+.shower-theater.shower-desktop .shower-input-label {
+  color: var(--shower-muted);
+  font-size: var(--text-2xs, 0.6875rem);
+}
+
+/* Pointer hover rules gated strictly to hover-capable fine pointers */
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .shower-preview .icon-button:hover:not(:disabled),
+  .desktop-shell .shower-theater .icon-button:hover:not(:disabled),
+  .remote-client .shower-preview .icon-button:hover:not(:disabled),
+  .shower-theater .icon-button:hover:not(:disabled),
+  .desktop-shell .shower-controls button:hover:not(:disabled),
+  .desktop-shell .shower-footer button:hover:not(:disabled),
+  .desktop-shell .shower-theater-bar button:hover:not(:disabled),
+  .remote-client .shower-controls button:hover:not(:disabled),
+  .remote-client .shower-footer button:hover:not(:disabled),
+  .shower-theater-bar button:hover:not(:disabled) {
+    border-color: var(--shower-muted);
+  }
+
+  .desktop-shell .shower-controls button.primary:hover:not(:disabled),
+  .desktop-shell .shower-theater-bar button.primary:hover:not(:disabled),
+  .remote-client .shower-controls button.primary:hover:not(:disabled),
+  .shower-theater-bar button.primary:hover:not(:disabled) {
+    background: var(--shower-accent-hover);
+    border-color: var(--shower-accent-hover);
+  }
+
+  .desktop-shell .shower-release:hover:not(:disabled),
+  .remote-client .shower-release:hover:not(:disabled),
+  .shower-theater .shower-release:hover:not(:disabled) {
+    border-color: var(--shower-danger);
+    background: color-mix(in srgb, var(--shower-danger) 24%, var(--shower-surface-2));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-shell .shower-preview .icon-button,
+  .desktop-shell .shower-theater .icon-button,
+  .remote-client .shower-preview .icon-button,
+  .shower-theater .icon-button,
+  .desktop-shell .shower-controls button,
+  .desktop-shell .shower-footer button,
+  .desktop-shell .shower-theater-bar button,
+  .remote-client .shower-controls button,
+  .remote-client .shower-footer button,
+  .shower-theater-bar button,
+  .desktop-shell .shower-text,
+  .remote-client .shower-text,
+  .shower-theater .shower-text {
+    transition: none;
+  }
+
+  .desktop-shell .shower-preview .icon-button:active:not(:disabled),
+  .desktop-shell .shower-theater .icon-button:active:not(:disabled),
+  .remote-client .shower-preview .icon-button:active:not(:disabled),
+  .shower-theater .icon-button:active:not(:disabled),
+  .desktop-shell .shower-controls button:active:not(:disabled),
+  .desktop-shell .shower-footer button:active:not(:disabled),
+  .desktop-shell .shower-theater-bar button:active:not(:disabled),
+  .remote-client .shower-controls button:active:not(:disabled),
+  .remote-client .shower-footer button:active:not(:disabled),
+  .shower-theater-bar button:active:not(:disabled) {
+    transform: none;
+  }
+}

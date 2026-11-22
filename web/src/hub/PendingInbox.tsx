@@ -13,7 +13,8 @@ import type { ScopeConversation } from '../gbot-ui';
 import type { UnifiedBotItem } from './shared';
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
-import { ErrorNotice, errorText, humanizeError, splitErrorCode, useText } from '../ui';
+import { Button, ConfirmDialog, InlineBanner } from '../components/ui';
+import { errorText, humanizeError, splitErrorCode, useText } from '../ui';
 import './pending.css';
 
 interface Props {
@@ -61,6 +62,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
   const [settled, setSettled] = useState<{ api: DesktopPanelApi | null; key: string }>({ api: null, key: '' });
   const [busyId, setBusyId] = useState<string | null>(null);
   const [doneOpen, setDoneOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<PendingRecord | null>(null);
   const epochRef = useRef(0);
   const inFlightRef = useRef(false);
 
@@ -93,6 +95,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     setItems([]);
     setErrors({});
     setLoadError('');
+    setDeleteTarget(null);
     if (!api || !identity || !fetchKey) {
       setSettled({ api, key: fetchKey });
       return;
@@ -221,7 +224,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     const raw = errors[id];
     if (!raw) return null;
     const parsed = humanizeError(raw, t);
-    return <p className="pending-card-error">{parsed?.title ?? raw}</p>;
+    return <p className="pending-card-error" role="alert">{parsed?.title ?? raw}</p>;
   };
 
   const renderRecord = (item: PendingRecord): ReactNode => {
@@ -252,7 +255,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
       );
       secondaryBtn = (
         <button type="button" className="hub-outline-btn" disabled={anyBusy}
-          onClick={() => void run(item, 'pending_cancel')}>
+          onClick={() => setDeleteTarget(item)}>
           {t('删除', 'Delete')}
         </button>
       );
@@ -304,11 +307,11 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
         <div className="pending-card-main">
           <div className="pending-card-head">
             <span className="pending-card-title">{title}</span>
-            <span className="pending-card-subtitle">{subtitle}</span>
+            <span className="pending-card-subtitle tabular-nums">{subtitle}</span>
           </div>
           {item.text && <p className="pending-card-text">{item.text}</p>}
           <div className="pending-card-foot">
-            <span className={'pending-card-status is-' + tone}>{statusLine}</span>
+            <span className={'pending-card-status is-' + tone} role={tone === 'error' ? 'alert' : 'status'}>{statusLine}</span>
             {(primaryBtn || secondaryBtn) && <div className="pending-card-actions">{secondaryBtn}{primaryBtn}</div>}
           </div>
           {renderError(item.id)}
@@ -373,7 +376,12 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
             <span className="pending-card-subtitle">{deviceName(intent.targetDeviceId)}</span>
           </div>
           <div className="pending-card-foot">
-            <span className={'pending-card-status is-' + (intent.outcome === 'responded' ? 'ok' : intent.outcome === 'unconfirmed' ? 'warn' : 'error')}>{statusLine}</span>
+            <span
+              className={'pending-card-status is-' + (intent.outcome === 'responded' ? 'ok' : intent.outcome === 'unconfirmed' ? 'warn' : 'error')}
+              role={intent.outcome === 'not-sent' ? 'alert' : 'status'}
+            >
+              {statusLine}
+            </span>
             {hint}
             {primaryBtn && <div className="pending-card-actions">{primaryBtn}</div>}
           </div>
@@ -389,7 +397,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
         className="pending-inbox"
         role="status"
         aria-busy="true"
-        aria-label={t('正在加载待发送消息', 'Loading pending messages')}
+        aria-label={t('正在加载待发送消息…', 'Loading pending messages…')}
       >
         {[0, 1, 2].map(idx => (
           <div key={idx} className="pending-card is-skeleton" aria-hidden="true">
@@ -408,12 +416,19 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
   }
 
   if (api && loadError && isEmpty) {
+    const parsedLoadError = humanizeError(loadError, t);
     return (
       <div className="pending-inbox">
-        <ErrorNotice
-          error={loadError}
-          actionLabel={t('重试', 'Retry')}
-          onAction={retry}
+        <InlineBanner
+          tone="danger"
+          role="alert"
+          title={t('加载待发送消息失败', 'Failed to load pending messages')}
+          detail={parsedLoadError?.title ?? loadError}
+          actions={
+            <Button variant="secondary" size="sm" onClick={retry}>
+              {t('重试', 'Retry')}
+            </Button>
+          }
         />
       </div>
     );
@@ -421,14 +436,12 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
 
   if (!api || isEmpty) {
     return (
-      <section className="pending-inbox-empty grok-card-group grok-schedule-empty">
+      <section className="pending-inbox-empty grok-card-group grok-schedule-empty" role="status">
         <Inbox size={36} className="grok-row-icon" aria-hidden="true" />
         <h4>{t('没有待发送的消息', 'Nothing waiting to send')}</h4>
         <p>{api
-          ? t('离线时发出的消息会暂存在这里，联网后可以继续发送。',
-               'Messages written while offline stay here and can be sent once you are back online.')
-          : t('连接中心后，这里会显示没有发出的消息。',
-               'Connect to Center and unsent messages will show up here.')}</p>
+          ? t('离线时发出的消息会暂存在这里，联网后可以继续发送。', 'Messages written while offline stay here and can be sent once you are back online.')
+          : t('连接中心后，这里会显示没有发出的消息。', 'Connect to Center and unsent messages will show up here.')}</p>
         {!api && (
           <button type="button" className="grok-done-pill-btn" onClick={onOpenSettings}>
             {t('去设置', 'Open Settings')}
@@ -438,21 +451,41 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     );
   }
 
+  const parsedLoadError = loadError ? humanizeError(loadError, t) : null;
+  const activeDeleteTarget = deleteTarget
+    ? needItems.find(it => it.id === deleteTarget.id && it.state === 'pending') ?? null
+    : null;
+  const deletePreview = (() => {
+    const raw = activeDeleteTarget?.text?.trim().replace(/\s+/g, ' ') ?? '';
+    if (!raw) return '';
+    const chars = Array.from(raw);
+    return chars.length > 40 ? `${chars.slice(0, 40).join('')}…` : raw;
+  })();
+
   return (
     <div className="pending-inbox">
       {loadError && (
-        <ErrorNotice
-          error={loadError}
-          actionLabel={t('重试', 'Retry')}
-          onAction={retry}
+        <InlineBanner
+          tone="danger"
+          role="alert"
           compact
+          title={t('部分待发送消息加载失败', 'Some pending messages failed to load')}
+          detail={parsedLoadError?.title ?? loadError}
+          actions={
+            <Button variant="secondary" size="sm" onClick={retry}>
+              {t('重试', 'Retry')}
+            </Button>
+          }
         />
       )}
       {offline && (
-        <p className="pending-inbox-offline">
-          {t('当前未联网。可以删除消息，联网后才能发送。',
-             'You are offline. Messages can be deleted now and sent once you are back online.')}
-        </p>
+        <InlineBanner
+          tone="attention"
+          role="status"
+          compact
+          title={t('当前未联网', 'Offline')}
+          detail={t('可以删除消息，联网后才能发送。', 'Messages can be deleted now and sent once you are back online.')}
+        />
       )}
       {needItems.map(renderRecord)}
       {needIntents.map(renderIntent)}
@@ -471,6 +504,28 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
           )}
         </section>
       )}
+      <ConfirmDialog
+        open={activeDeleteTarget !== null}
+        title={t('删除待发送消息？', 'Delete pending message?')}
+        description={
+          deletePreview
+            ? t(`确定要删除「${deletePreview}」吗？删除后不会发送且无法恢复。`, `Delete "${deletePreview}"? It will not be sent and cannot be undone.`)
+            : t('确定要删除这条未发出的消息吗？删除后不会发送且无法恢复。', 'Delete this unsent message? It will not be sent and cannot be undone.')
+        }
+        danger
+        busy={busyId !== null}
+        confirmLabel={t('删除', 'Delete')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => {
+          if (busyId === null) setDeleteTarget(null);
+        }}
+        onConfirm={() => {
+          if (!activeDeleteTarget || busyId !== null) return;
+          const target = activeDeleteTarget;
+          setDeleteTarget(null);
+          void run(target, 'pending_cancel');
+        }}
+      />
     </div>
   );
 }

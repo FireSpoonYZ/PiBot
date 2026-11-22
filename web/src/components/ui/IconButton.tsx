@@ -5,6 +5,7 @@ export type IconButtonVariant = 'ghost' | 'secondary' | 'primary' | 'danger';
 
 export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'children'> {
   label: string;
+  title?: string;
   size?: IconButtonSize;
   variant?: IconButtonVariant;
   children: ReactNode;
@@ -13,6 +14,7 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
 
 export function IconButton({
   label,
+  title,
   size = 'md',
   variant = 'ghost',
   type = 'button',
@@ -33,6 +35,7 @@ export function IconButton({
       ref={ref}
       type={type}
       aria-label={label}
+      title={title}
       className={cls}
       {...rest}
     >

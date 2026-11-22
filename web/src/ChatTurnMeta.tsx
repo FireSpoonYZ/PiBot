@@ -126,12 +126,16 @@ export function ChatTurnMeta({
 
   return (
     <div
-      className="bot-chat-turn-meta"
-      style={shouldReserve ? { minHeight: reservedMinHeight } : undefined}
+      className="bot-chat-turn-meta tabular-nums"
+      style={{
+        fontFamily: 'var(--font-sans)',
+        fontVariantNumeric: 'tabular-nums',
+        ...(shouldReserve ? { minHeight: reservedMinHeight } : undefined),
+      }}
     >
-      {hasDate && <time dateTime={date.toISOString()}>{dateTimeFormat.format(date)}</time>}
+      {hasDate && <time className="tabular-nums" dateTime={date.toISOString()}>{dateTimeFormat.format(date)}</time>}
       {durationMs !== undefined && (
-        <span className="bot-chat-turn-duration">
+        <span className="bot-chat-turn-duration tabular-nums">
           <Clock className="bot-chat-turn-clock" aria-hidden />
           {formatTurnDuration(durationMs, t)}
         </span>

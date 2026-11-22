@@ -198,7 +198,8 @@ import {
   parseBotSoul,
 } from './hub/shared';
 import { SettingsSheet } from './bot-settings/primitives';
-import { MobileClientUpdatePrompt } from './ClientUpdateSection';
+import { CLIENT_UPDATE_OPEN_EVENT } from './ClientUpdate';
+import { ShellUpdateBanner, useHasShellUpdate } from './components/ShellUpdateBanner';
 import './hub/schedules.css';
 import { ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
 import { parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
@@ -398,6 +399,18 @@ export function HostPage({
   // Mobile navigation drawer shares the app's modal focus and dismissal behavior.
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const navigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const lastDrawerTriggerRef = useRef<HTMLElement | null>(null);
+  const drawerNavigatedRef = useRef(false);
+  const hasShellUpdate = useHasShellUpdate();
+  const screenRef = useRef<MobileHubScreen>(screen);
+  screenRef.current = screen;
+  const openLeftDrawer = useCallback(() => {
+    drawerNavigatedRef.current = false;
+    const activeEl = document.activeElement;
+    lastDrawerTriggerRef.current =
+      activeEl instanceof HTMLElement ? activeEl : navigationTriggerRef.current;
+    setLeftDrawerOpen(true);
+  }, []);
 
   // Hub search
   const [searchQuery, setSearchQuery] = useState('');
@@ -594,8 +607,56 @@ export function HostPage({
   const [editingTurn, setEditingTurn] = useState<ActiveEditingTurn | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [bubbleActionTurn, setBubbleActionTurn] = useState<BubbleActionTurnState | null>(null);
-  const [pendingRemoteQuote, setPendingRemoteQuote] = useState<{ seq: number; text: string } | null>(null);
+  const [pendingRemoteQuote, setPendingRemoteQuote] = useState<{ seq: number; text: string; mode?: 'quote' | 'append' } | null>(null);
   const [queueActionBusy, setQueueActionBusy] = useState(false);
+  const retryAdmissionInFlightRef = useRef(false);
+  const chatTurnAdmissionRef = useRef<{ requestId: string; phase: string } | null>(null);
+  const taskFailureRevisionRef = useRef<Map<string, number>>(new Map());
+  const fullscreenReturnFocusRef = useRef<{ screen: 'bot-browser' | 'bot-screen'; element: HTMLElement | null } | null>(null);
+  const prevScreenForFocusRef = useRef(screen);
+  const bubbleSheetSkipAutoFocusRef = useRef(false);
+
+  const captureFullscreenTriggerFocus = useCallback((targetScreen: 'bot-browser' | 'bot-screen') => {
+    const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+    fullscreenReturnFocusRef.current = {
+      screen: targetScreen,
+      element: activeEl instanceof HTMLElement && activeEl !== document.body ? activeEl : null,
+    };
+  }, []);
+
+  useEffect(() => {
+    const prev = prevScreenForFocusRef.current;
+    prevScreenForFocusRef.current = screen;
+    if ((prev === 'bot-browser' || prev === 'bot-screen') && screen !== prev) {
+      const saved = fullscreenReturnFocusRef.current;
+      fullscreenReturnFocusRef.current = null;
+      requestAnimationFrame(() => {
+        const el = saved?.element;
+        if (
+          el &&
+          el.isConnected &&
+          !el.closest('.hub-hidden') &&
+          !el.closest('[hidden]') &&
+          !el.closest('[inert]') &&
+          !(el as HTMLButtonElement).disabled
+        ) {
+          el.focus();
+          return;
+        }
+        if (screenRef.current === 'chat') {
+          const textarea = composerTextareaRef.current;
+          if (textarea && textarea.isConnected && !textarea.disabled) {
+            textarea.focus();
+            return;
+          }
+        }
+        const fallback = document.querySelector<HTMLElement>(
+          '.bot-hub-shell main:not(.hub-hidden) header button:not(:disabled), .bot-hub-shell main:not(.hub-hidden) button:not(:disabled)',
+        );
+        fallback?.focus();
+      });
+    }
+  }, [screen]);
 
   useEffect(() => {
     setOfflineNotice(undefined);
@@ -649,6 +710,11 @@ export function HostPage({
 
   // Bot Soul & Extensions state
   const [botSoul, setBotSoul] = useState<BotSoul | null>(null);
+  const [botSoulKey, setBotSoulKey] = useState<string | null>(null);
+  const botSoulKeyRef = useRef<string | null>(null);
+  botSoulKeyRef.current = botSoulKey;
+  const [botSoulLoading, setBotSoulLoading] = useState(false);
+  const [botSoulError, setBotSoulError] = useState('');
   const [soulDraft, setSoulDraft] = useState('');
   const [soulDirty, setSoulDirty] = useState(false);
 
@@ -660,6 +726,8 @@ export function HostPage({
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
     now: Date.now(),
   });
+  const [botSchedulesLoading, setBotSchedulesLoading] = useState(false);
+  const [botSchedulesLoadError, setBotSchedulesLoadError] = useState('');
   const [scheduleFilter, setScheduleFilter] = useState<'all' | 'enabled' | 'paused'>('all');
   const [scheduleEditing, setScheduleEditing] = useState<'new' | 'edit' | null>(null);
   const [scheduleDeleteTarget, setScheduleDeleteTarget] = useState<BotScheduleTask | null>(null);
@@ -891,6 +959,11 @@ export function HostPage({
       return;
     }
     directoryFailStreakRef.current += 1;
+    // BotBoard renders directoryError inline with Retry; suppress duplicate floating toast on board.
+    if (screenRef.current === 'board') {
+      dismiss(HUB_DIRECTORY_SYNC_NOTICE_ID);
+      return;
+    }
     // H2: 连续失败 >= 2 次才弹出 F1 浮层通知，避免 2 秒轮询偶发抖动闪烁。
     if (directoryFailStreakRef.current >= 2 && lastNotifiedDirErrorRef.current !== trimmed) {
       lastNotifiedDirErrorRef.current = trimmed;
@@ -1633,15 +1706,24 @@ export function HostPage({
   const activeBotBannerTask = activeBotTaskContext.linkedTask;
   const activeBotTaskPrefix = activeBotTaskContext.taskPrefix;
 
+  const taskActionFailureKey = useCallback(
+    (spec: Pick<PendingTaskChatActionInput, 'scopeKey' | 'botKey' | 'kind' | 'taskId'>) =>
+      `${spec.scopeKey}|${spec.botKey}|${spec.kind}|${spec.taskId}`,
+    [],
+  );
+
   const executeTaskChatAction = useCallback(
-    async (spec: PendingTaskChatActionInput): Promise<boolean> => {
-      const failureKey = `${spec.scopeKey}|${spec.botKey}`;
+    async (
+      spec: PendingTaskChatActionInput,
+      options?: { expectedRevision?: number; throwOnError?: boolean },
+    ): Promise<boolean> => {
+      const failureKey = taskActionFailureKey(spec);
       try {
         let updated: GlobalTask;
         if (spec.kind === 'answer_prompt') {
-          updated = await globalTasks.answerPrompt(spec.taskId, spec.answer);
+          updated = await globalTasks.answerPrompt(spec.taskId, spec.answer, options?.expectedRevision);
         } else if (spec.kind === 'confirm_plan') {
-          updated = await globalTasks.confirmPlan(spec.taskId);
+          updated = await globalTasks.confirmPlan(spec.taskId, options?.expectedRevision);
         } else {
           updated = await globalTasks.updateTask(spec.payload);
         }
@@ -1649,6 +1731,7 @@ export function HostPage({
         if (updated) {
           setFetchedTasksById((prev) => ({ ...prev, [updated.id]: updated }));
         }
+        taskFailureRevisionRef.current.delete(failureKey);
         setTaskActionFailures((prev) => {
           if (!prev[failureKey]) return prev;
           const next = { ...prev };
@@ -1658,38 +1741,49 @@ export function HostPage({
         return true;
       } catch (err) {
         if (taskScopeRef.current !== spec.scopeKey) return false;
+        if (typeof options?.expectedRevision === 'number') {
+          taskFailureRevisionRef.current.set(failureKey, options.expectedRevision);
+        }
         setTaskActionFailures((prev) => ({
           ...prev,
           [failureKey]: { ...spec, error: errorText(err) },
         }));
+        if (options?.throwOnError) {
+          throw err;
+        }
         return false;
       }
     },
-    [globalTasks],
+    [globalTasks, taskActionFailureKey],
   );
 
   const retryTaskChatAction = useCallback(
     async (failure: PendingTaskChatAction) => {
-      const failureKey = `${failure.scopeKey}|${failure.botKey}`;
+      const failureKey = taskActionFailureKey(failure);
+      const expectedRevision = taskFailureRevisionRef.current.get(failureKey);
       setRetryingTaskActionKey(failureKey);
       try {
-        await executeTaskChatAction(failure);
+        await executeTaskChatAction(failure, { expectedRevision });
       } finally {
         setRetryingTaskActionKey((cur) => (cur === failureKey ? null : cur));
       }
     },
-    [executeTaskChatAction],
+    [executeTaskChatAction, taskActionFailureKey],
   );
 
-  const dismissTaskChatAction = useCallback((failure: PendingTaskChatAction) => {
-    const failureKey = `${failure.scopeKey}|${failure.botKey}`;
-    setTaskActionFailures((prev) => {
-      if (!prev[failureKey]) return prev;
-      const next = { ...prev };
-      delete next[failureKey];
-      return next;
-    });
-  }, []);
+  const dismissTaskChatAction = useCallback(
+    (failure: PendingTaskChatAction) => {
+      const failureKey = taskActionFailureKey(failure);
+      taskFailureRevisionRef.current.delete(failureKey);
+      setTaskActionFailures((prev) => {
+        if (!prev[failureKey]) return prev;
+        const next = { ...prev };
+        delete next[failureKey];
+        return next;
+      });
+    },
+    [taskActionFailureKey],
+  );
 
   const handleTaskMessageAccepted = useCallback(
     (
@@ -2189,16 +2283,28 @@ export function HostPage({
   const loadBotSchedules = useCallback(
     async (bot: UnifiedBotItem) => {
       if (deletingBots.current.has(bot.key)) return;
+      const t = tRef.current;
       const generation = ++scheduleLoadGeneration.current;
+      const isCurrent = () => generation === scheduleLoadGeneration.current;
+      setBotSchedulesLoading(true);
+      setBotSchedulesLoadError('');
       try {
         let rawResult: unknown;
         if (bot.hostKind === 'local') {
           const snap = await ensureLocalHostRunning();
-          if (!snap || snap.phase !== 'running') return;
+          if (!isCurrent()) return;
+          if (!snap || snap.phase !== 'running') {
+            setBotSchedulesLoadError(t('本机运行环境尚未就绪，请重试。', 'Local host runtime is not ready. Please retry.'));
+            return;
+          }
           const latestBots = await syncLocalBots(snap);
+          if (!isCurrent()) return;
           const matched = latestBots.find(b => b.botId === bot.botId);
           const convId = bot.primaryConversationId || matched?.primaryConversationId || '';
-          if (!convId) return;
+          if (!convId) {
+            setBotSchedulesLoadError(t('主对话尚未就绪，暂时无法读取定时任务。', 'Primary conversation is not ready; unable to load schedules.'));
+            return;
+          }
           const env = await BotHost.call({
             method: 'uiScheduleTask',
             params: {
@@ -2214,17 +2320,12 @@ export function HostPage({
             input: { action: 'list', limit: 50 },
           });
         } else {
-          setBotScheduleState({
-            botKey: bot.key,
-            tasks: [],
-            exactAlarmGranted: true,
-            schedulingError: '',
-            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
-            now: Date.now(),
-          });
+          if (isCurrent()) {
+            setBotSchedulesLoadError(t('目标设备尚未连接，连接恢复后可重试。', 'Target device is unavailable. Reconnect and retry.'));
+          }
           return;
         }
-        if (generation !== scheduleLoadGeneration.current) return;
+        if (!isCurrent()) return;
         const raw = record(rawResult);
         const tasks = array<BotScheduleTask>(raw.tasks);
         const nextState: BotScheduleState = {
@@ -2238,10 +2339,15 @@ export function HostPage({
           now: typeof raw.now === 'number' ? raw.now : Date.now(),
         };
         setBotScheduleState({ ...nextState, botKey: bot.key });
+        setBotSchedulesLoadError('');
         const enabledCount = tasks.filter(item => item.enabled !== false).length;
         updateBotMeta(bot.key, { scheduleCount: enabledCount });
-      } catch {
-        // Ignore transient schedule load error
+      } catch (err) {
+        if (isCurrent()) {
+          setBotSchedulesLoadError(errorText(err) || t('定时任务加载失败，请重试。', 'Failed to load schedules. Please retry.'));
+        }
+      } finally {
+        if (isCurrent()) setBotSchedulesLoading(false);
       }
     },
     [ensureLocalHostRunning, syncLocalBots, updateBotMeta],
@@ -2250,12 +2356,26 @@ export function HostPage({
   // Load SOUL for the active Bot when entering profile or edit
   const loadBotSoul = useCallback(
     async (bot: UnifiedBotItem) => {
+      const t = tRef.current;
       const generation = ++profileLoadGeneration.current;
       const current = () => generation === profileLoadGeneration.current;
-      if (bot.hostKind === 'local') {
-        const snap = await ensureLocalHostRunning();
-        if (!snap || snap.phase !== 'running') return;
-        try {
+      if (botSoulKeyRef.current !== bot.key) {
+        botSoulKeyRef.current = bot.key;
+        setBotSoulKey(bot.key);
+        setBotSoul(null);
+        setSoulDraft('');
+        setSoulDirty(false);
+      }
+      setBotSoulLoading(true);
+      setBotSoulError('');
+      try {
+        if (bot.hostKind === 'local') {
+          const snap = await ensureLocalHostRunning();
+          if (!current()) return;
+          if (!snap || snap.phase !== 'running') {
+            setBotSoulError(t('本机运行环境尚未就绪，请重试。', 'Local host runtime is not ready. Please retry.'));
+            return;
+          }
           const soulEnv = await BotHost.call({ method: 'getBotSoul', params: { botId: bot.botId } });
           if (!current()) return;
           const parsedSoul = parseBotSoul(soulEnv.result);
@@ -2263,13 +2383,12 @@ export function HostPage({
             setBotSoul(parsedSoul);
             setSoulDraft(parsedSoul.text);
             setSoulDirty(false);
+            setBotSoulError('');
+          } else {
+            setBotSoulError(t('人设数据格式异常，请重试。', 'Persona payload was malformed. Please retry.'));
           }
-        } catch {
-          // Ignore
-        }
-      } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
-        const api = remoteClientRef.current.api;
-        try {
+        } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
+          const api = remoteClientRef.current.api;
           const soulRes = await api.call(bot.remoteIdentity, 'getBotSoul', { botId: bot.botId });
           if (!current()) return;
           const parsedSoul = parseBotSoul(soulRes);
@@ -2277,10 +2396,21 @@ export function HostPage({
             setBotSoul(parsedSoul);
             setSoulDraft(parsedSoul.text);
             setSoulDirty(false);
+            setBotSoulError('');
+          } else {
+            setBotSoulError(t('人设数据格式异常，请重试。', 'Persona payload was malformed. Please retry.'));
           }
-        } catch {
-          // Ignore
+        } else {
+          if (current()) {
+            setBotSoulError(t('目标设备尚未连接，连接恢复后可重试。', 'Target device is unavailable. Reconnect and retry.'));
+          }
         }
+      } catch (err) {
+        if (current()) {
+          setBotSoulError(errorText(err) || t('人设加载失败，请重试。', 'Failed to load persona. Please retry.'));
+        }
+      } finally {
+        if (current()) setBotSoulLoading(false);
       }
     },
     [ensureLocalHostRunning],
@@ -2817,6 +2947,9 @@ export function HostPage({
     setEditModelRef('');
     setEditAvatarPreset(nextPreset);
     setEditInitialSoul('');
+    setBotSoulKey(null);
+    setBotSoulLoading(false);
+    setBotSoulError('');
     setSoulDraft('');
     setSoulDirty(false);
     setEditVoiceTone('未设置'); // i18n-ok
@@ -3517,73 +3650,99 @@ ${newer}` : draftSnapshot;
     });
 
   // 受理失败的 Host 队列请求按同一 requestId/原文显式重试；submit 端按请求标识幂等，不新建消息。
-  const retryAdmission = () =>
-    action.run(async () => {
-      const bot = activeBot;
-      const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
-      if (!bot || bot.hostKind !== 'local' || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
-      const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
-      const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
-      if (!stillOwned()) return;
-      if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
-        setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
-        return;
-      }
-      const snap = await ensureLocalHostRunning();
-      if (!snap || snap.phase !== 'running' || !stillOwned()) return;
+  const retryAdmission = () => {
+    if (retryAdmissionInFlightRef.current) return Promise.resolve();
+    const bot = activeBot;
+    const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
+    if (!bot || bot.hostKind !== 'local' || !entry?.pending.requestId || entry.pending.botKey !== bot.key) {
+      return Promise.resolve();
+    }
+    const failedAdmission = chatTurnAdmissionRef.current;
+    if (failedAdmission?.phase === 'failed' && failedAdmission.requestId && entry.pending.requestId !== failedAdmission.requestId) {
+      return Promise.resolve();
+    }
+    retryAdmissionInFlightRef.current = true;
+    return action.run(async () => {
       try {
-        const result = await BotHost.call({
-          method: 'submit',
-          params: {
+        const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
+        const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
+        if (!stillOwned()) return;
+        if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
+          setOfflineNotice({ botKey: bot.key, text: t('中心离线，草稿已保留。', 'Center offline; draft retained.') });
+          return;
+        }
+        const snap = await ensureLocalHostRunning();
+        if (!snap || snap.phase !== 'running' || !stillOwned()) return;
+        try {
+          const result = await BotHost.call({
+            method: 'submit',
+            params: {
+              botId: bot.botId,
+              requestId,
+              text,
+              ...(attachments?.length ? { attachments } : {}),
+              ...(delivery ? { delivery } : {}),
+            },
+          });
+          const receipt = result.result as HostSubmission & TurnAdmissionCarrier;
+          if (!stillOwned()) return;
+          updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt.admission ?? null }, receipt });
+        } catch (error) {
+          if (!stillOwned()) return;
+          if ((error as { outcome?: string })?.outcome === 'not-sent') removePending(scopeKey, requestId);
+          else updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
+          if (currentChatScope.current === scopeKey) throw error;
+        }
+      } finally {
+        retryAdmissionInFlightRef.current = false;
+      }
+    });
+  };
+
+  // remote Bot 的同 ID 准入重试：直接 remote submit（同 requestId/原文），Host 端幂等受理，
+  // 不走本地 pending_send——accepted 的 outbox 记录会被 store 短路而达不到 Host。
+  const retryRemoteAdmission = () => {
+    if (retryAdmissionInFlightRef.current) return Promise.resolve();
+    const bot = activeBot;
+    const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
+    if (!bot || bot.hostKind !== 'remote' || !bot.remoteIdentity || !remoteClientRef.current || !entry?.pending.requestId || entry.pending.botKey !== bot.key) {
+      return Promise.resolve();
+    }
+    const failedAdmission = chatTurnAdmissionRef.current;
+    if (failedAdmission?.phase === 'failed' && failedAdmission.requestId && entry.pending.requestId !== failedAdmission.requestId) {
+      return Promise.resolve();
+    }
+    retryAdmissionInFlightRef.current = true;
+    return action.run(async () => {
+      try {
+        const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
+        const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
+        if (!stillOwned()) return;
+        if (!remoteConnected || bot.online === false) {
+          setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
+          return;
+        }
+        try {
+          const result = await remoteClientRef.current!.api.call(bot.remoteIdentity!, 'submit', {
             botId: bot.botId,
             requestId,
             text,
             ...(attachments?.length ? { attachments } : {}),
             ...(delivery ? { delivery } : {}),
-          },
-        });
-        const receipt = result.result as HostSubmission & TurnAdmissionCarrier;
-        if (!stillOwned()) return;
-        updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt.admission ?? null }, receipt });
-      } catch (error) {
-        if (!stillOwned()) return;
-        if ((error as { outcome?: string })?.outcome === 'not-sent') removePending(scopeKey, requestId);
-        else updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
-        if (currentChatScope.current === scopeKey) throw error;
+          });
+          const receipt = result as HostSubmission & TurnAdmissionCarrier;
+          if (!stillOwned()) return;
+          updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt?.admission ?? null }, receipt });
+        } catch (error) {
+          if (!stillOwned()) return;
+          updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
+          if (currentChatScope.current === scopeKey) throw error;
+        }
+      } finally {
+        retryAdmissionInFlightRef.current = false;
       }
     });
-
-  // remote Bot 的同 ID 准入重试：直接 remote submit（同 requestId/原文），Host 端幂等受理，
-  // 不走本地 pending_send——accepted 的 outbox 记录会被 store 短路而达不到 Host。
-  const retryRemoteAdmission = () =>
-    action.run(async () => {
-      const bot = activeBot;
-      const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
-      if (!bot || bot.hostKind !== 'remote' || !bot.remoteIdentity || !remoteClientRef.current || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
-      const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
-      const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
-      if (!stillOwned()) return;
-      if (!remoteConnected || bot.online === false) {
-        setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
-        return;
-      }
-      try {
-        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', {
-          botId: bot.botId,
-          requestId,
-          text,
-          ...(attachments?.length ? { attachments } : {}),
-          ...(delivery ? { delivery } : {}),
-        });
-        const receipt = result as HostSubmission & TurnAdmissionCarrier;
-        if (!stillOwned()) return;
-        updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt?.admission ?? null }, receipt });
-      } catch (error) {
-        if (!stillOwned()) return;
-        updatePending({ pending: { ...entry.pending, phase: 'recovering' } });
-        if (currentChatScope.current === scopeKey) throw error;
-      }
-    });
+  };
 
   const saveAvatar = async (bot: { deviceId: string; botId: string }, value: GrokAvatarPreset | null) => {
     const api = await ensureRemoteApi();
@@ -3835,6 +3994,7 @@ ${newer}` : draftSnapshot;
       action.setError(t('主 Bot 受保护，请先将其他 Bot 设为主 Bot 后再归档', 'Primary bot is protected. Switch primary bot before archiving.'));
       return;
     }
+    action.setError('');
     setBotConfirmModal({ kind: 'archive', bot });
   };
 
@@ -3892,6 +4052,7 @@ ${newer}` : draftSnapshot;
       action.setError(t('主 Bot 受保护，不能直接删除。请先将其他 Bot 设为主 Bot。', 'Primary bot is protected. Switch primary bot before deleting.'));
       return;
     }
+    action.setError('');
     setBotConfirmModal({ kind: 'delete', bot });
   };
 
@@ -4246,7 +4407,7 @@ ${newer}` : draftSnapshot;
       }
       if (!activeBot) return;
       if (soulBytes(soulDraft) > SOUL_MAX_BYTES) {
-        throw new Error(t('灵魂文档超出 64 KiB 上限', 'SOUL.md exceeds 64 KiB limit'));
+        throw new Error(t('人设文档超出 64 KiB 上限', 'Persona exceeds 64 KiB limit'));
       }
       if (activeBot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
@@ -4504,6 +4665,7 @@ ${newer}` : draftSnapshot;
   const chatTurnAdmission = effectiveChatLive !== undefined
     ? liveTurnAdmission
     : pendingAdmission;
+  chatTurnAdmissionRef.current = chatTurnAdmission;
   const admissionStatusText = chatTurnAdmission?.phase === 'failed'
     ? chatTurnAdmission.error?.code === 'MODEL_NO_VISION'
       ? t('当前模型不支持图片输入：请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。',
@@ -5922,7 +6084,15 @@ ${newer}` : draftSnapshot;
       }
       if (!selection.cancelled && selection.email) {
         const reply = t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`);
-        setChatDraft(previous => previous ? `${previous}\n${reply}` : reply);
+        if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
+          setPendingRemoteQuote(prev => ({ seq: (prev?.seq ?? 0) + 1, text: reply, mode: 'append' }));
+        } else {
+          setChatDraft(previous => {
+            const next = previous ? `${previous}\n${reply}` : reply;
+            if (currentChatScope.current) writeChatDraft(currentChatScope.current, next);
+            return next;
+          });
+        }
       }
       return { selected: selection.email };
     },
@@ -5930,9 +6100,10 @@ ${newer}` : draftSnapshot;
   );
   const openBotBrowser = useCallback(() => {
     if (!activeBot) return;
+    captureFullscreenTriggerFocus('bot-browser');
     saveCurrentChatAnchor();
     nav.push({ screen: 'bot-browser', botKey: activeBot.key });
-  }, [activeBot, nav, saveCurrentChatAnchor]);
+  }, [activeBot, captureFullscreenTriggerFocus, nav, saveCurrentChatAnchor]);
   const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
   const browserDestinationScope = `${showerPreviewKey}:${browserRelayIdentity?.generation ?? '-'}`;
   const openBrowserDestination = useCallback((value: BrowserDestination) => {
@@ -5986,6 +6157,7 @@ ${newer}` : draftSnapshot;
     selectGoogleAccount,
   ]);
   const browserTakeoverHint = useMemo(() => {
+    if (!activeBot || activeBot.archivedAt || !botPanelConnected) return null;
     const tools = array<Record<string, unknown>>(effectiveChatLive?.tools);
     const activeTakeover = tools.find(slot => {
       const pres = slot?.presentation as Record<string, unknown> | undefined;
@@ -5993,7 +6165,7 @@ ${newer}` : draftSnapshot;
     });
     if (!activeTakeover) return null;
     return t('Bot 浏览器待接管 · 点击查看', 'Bot browser needs takeover · Tap to open');
-  }, [effectiveChatLive?.tools, t]);
+  }, [activeBot, botPanelConnected, effectiveChatLive?.tools, t]);
   const toolScopeKey = JSON.stringify([botPanelIdentityKey, activeBot?.primaryConversationId, botPanelConnected]);
 
   useEffect(() => {
@@ -6141,6 +6313,13 @@ ${newer}` : draftSnapshot;
     });
   }, [screen, board.storageError, notify, dismiss]);
 
+  // BotBoard renders directoryError inline with Retry; clear any Hub directory toast while on board.
+  useEffect(() => {
+    if (screen === 'board') {
+      dismiss(HUB_DIRECTORY_SYNC_NOTICE_ID);
+    }
+  }, [screen, dismiss]);
+
   useEffect(() => () => {
     dismiss(BOT_BOARD_WARNING_NOTICE_ID);
   }, [dismiss]);
@@ -6158,24 +6337,51 @@ ${newer}` : draftSnapshot;
       setCreatingTask(false);
       setTaskInitialEditMode(false);
     }
+    drawerNavigatedRef.current = next !== screen;
     setLeftDrawerOpen(false);
     nav.resetTo(next === 'settings' ? { screen: 'settings', settingsPage: 'overview' } : { screen: next });
   };
+
+  const openUpdatesFromShell = () => {
+    drawerNavigatedRef.current = true;
+    setLeftDrawerOpen(false);
+    if (screen === 'chat') {
+      saveCurrentChatAnchor();
+      nav.push({ screen: 'settings', settingsPage: 'updates' });
+      return;
+    }
+    navigateFromSidebar('settings');
+    nav.push({ screen: 'settings', settingsPage: 'updates' });
+  };
+  const openUpdatesFromShellRef = useRef(openUpdatesFromShell);
+  openUpdatesFromShellRef.current = openUpdatesFromShell;
+
+  useEffect(() => {
+    if (!active) return;
+    const handleOpenUpdate = () => openUpdatesFromShellRef.current();
+    window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, handleOpenUpdate);
+    return () => window.removeEventListener(CLIENT_UPDATE_OPEN_EVENT, handleOpenUpdate);
+  }, [active]);
   // ---
+
+  const keepHubMounted =
+    screen === 'hub' ||
+    screen === 'chat' ||
+    screen === 'conversation' ||
+    screen === 'dm' ||
+    screen === 'group-create' ||
+    screen === 'bot-profile' ||
+    screen === 'bot-profile-manage' ||
+    screen === 'bot-edit' ||
+    screen === 'bot-avatar' ||
+    screen === 'bot-soul' ||
+    screen === 'bot-schedules' ||
+    screen === 'bot-skills';
 
   return (
     <div
       className={`bot-hub-shell${screen === 'bot-screen' || screen === 'bot-browser' ? ' is-fullscreen-computer' : ''}`}
     >
-      <MobileClientUpdatePrompt active={active} onOpenUpdates={() => {
-        if (screen === 'chat') {
-          saveCurrentChatAnchor();
-          nav.push({ screen: 'settings', settingsPage: 'updates' });
-          return;
-        }
-        navigateFromSidebar('settings');
-        nav.push({ screen: 'settings', settingsPage: 'updates' });
-      }} />
       <Dialog
         open={leftDrawerOpen}
         onOpenChange={setLeftDrawerOpen}
@@ -6184,7 +6390,20 @@ ${newer}` : draftSnapshot;
         className="hub-navigation"
         onCloseAutoFocus={event => {
           event.preventDefault();
-          navigationTriggerRef.current?.focus();
+          if (drawerNavigatedRef.current) {
+            drawerNavigatedRef.current = false;
+            return;
+          }
+          const savedTrigger = lastDrawerTriggerRef.current;
+          const target =
+            savedTrigger && savedTrigger.isConnected && !savedTrigger.closest('.hub-hidden')
+              ? savedTrigger
+              : screenRef.current === 'hub'
+                ? navigationTriggerRef.current
+                : null;
+          requestAnimationFrame(() => {
+            target?.focus();
+          });
         }}
       >
         <nav className="hub-left-drawer-nav" aria-label={t('主导航', 'Main navigation')}>
@@ -6213,6 +6432,7 @@ ${newer}` : draftSnapshot;
         </nav>
         <div className="hub-left-drawer-spacer" />
         <footer className="hub-left-drawer-footer">
+          <ShellUpdateBanner onOpenUpdates={openUpdatesFromShell} />
           <Button
             variant="ghost"
             fullWidth
@@ -6226,7 +6446,7 @@ ${newer}` : draftSnapshot;
         </footer>
       </Dialog>
       {/* ==================== SCREEN 1: MAIN HUB (15844.jpg + PanelLeft icon) ==================== */}
-      {/* 群聊/私聊子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
+      {/* 聊天/资料/新建子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
           用显式 class 而非 hidden 属性，避免 author CSS display 覆盖。 */}
       {screen === 'tasks' && (
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, height: '100%' }}>
@@ -6256,7 +6476,7 @@ ${newer}` : draftSnapshot;
               setActiveTaskId(taskId);
               setTaskInitialEditMode(Boolean(openInEditMode));
             }}
-            onOpenMobileDrawer={() => setLeftDrawerOpen(true)}
+            onOpenMobileDrawer={openLeftDrawer}
             onJumpToChat={({ deviceId, botId, taskId, stepId }) => {
               const hasDeviceId = Boolean(deviceId && deviceId.trim());
               const targetBot = hasDeviceId
@@ -6290,7 +6510,9 @@ ${newer}` : draftSnapshot;
         board={board}
         loading={hubRefreshing || (!localBotsLoaded && localHost?.phase === 'running')}
         error={directoryError}
-        onOpenMobileDrawer={() => setLeftDrawerOpen(true)}
+        hasUpdate={hasShellUpdate}
+        onRetry={() => void triggerHubRefresh()}
+        onOpenMobileDrawer={openLeftDrawer}
         onBack={() => nav.resetTo({ screen: 'hub' })}
         onOpenTask={(taskId) => {
           setActiveTaskId(taskId);
@@ -6303,13 +6525,14 @@ ${newer}` : draftSnapshot;
           if (bot) openBotChat(bot, 'board');
         }}
       />}
-      {(screen === 'hub' || screen === 'chat' || screen === 'conversation' || screen === 'dm' || screen === 'group-create') && (
+      {keepHubMounted && (
         <HubScreen
           visible={screen === 'hub'}
           anyDrawerOpen={anyDrawerOpen}
           leftDrawerOpen={leftDrawerOpen}
           navigationTriggerRef={navigationTriggerRef}
-          onOpenLeftDrawer={() => setLeftDrawerOpen(true)}
+          onOpenLeftDrawer={openLeftDrawer}
+          hasUpdate={hasShellUpdate}
           connectionPhase={connectionPhase}
           connectionDetail={connectionDetail}
           ipcReconnecting={shellConnPhase.ipcReconnecting}
@@ -6539,33 +6762,39 @@ ${newer}` : draftSnapshot;
               answer,
             });
           }}
-          onConfirmTaskPlanFromBanner={async tid => {
+          onConfirmTaskPlanFromBanner={async (tid, expectedRevision) => {
             setTaskBannerBusy(true);
             try {
               const target = effectiveGlobalTasks.find(item => item.id === tid);
-              await executeTaskChatAction({
-                kind: 'confirm_plan',
-                scopeKey: taskScopeKey,
-                botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
-                taskId: tid,
-                taskTitle: target?.title ?? tid,
-              });
+              await executeTaskChatAction(
+                {
+                  kind: 'confirm_plan',
+                  scopeKey: taskScopeKey,
+                  botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
+                  taskId: tid,
+                  taskTitle: target?.title ?? tid,
+                },
+                { expectedRevision, throwOnError: true },
+              );
             } finally {
               setTaskBannerBusy(false);
             }
           }}
-          onAnswerTaskPromptFromBanner={async (tid, answer) => {
+          onAnswerTaskPromptFromBanner={async (tid, answer, expectedRevision) => {
             setTaskBannerBusy(true);
             try {
               const target = effectiveGlobalTasks.find(item => item.id === tid);
-              await executeTaskChatAction({
-                kind: 'answer_prompt',
-                scopeKey: taskScopeKey,
-                botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
-                taskId: tid,
-                taskTitle: target?.title ?? tid,
-                answer,
-              });
+              await executeTaskChatAction(
+                {
+                  kind: 'answer_prompt',
+                  scopeKey: taskScopeKey,
+                  botKey: `${chatScreenBot.deviceId}:${chatScreenBot.botId}`,
+                  taskId: tid,
+                  taskTitle: target?.title ?? tid,
+                  answer,
+                },
+                { expectedRevision, throwOnError: true },
+              );
             } finally {
               setTaskBannerBusy(false);
             }
@@ -6765,12 +6994,20 @@ ${newer}` : draftSnapshot;
             onSave={() => void handleSaveBotEdit('profile')}
             onOpenAvatarPicker={openAvatarPicker}
             onOpenModelSettings={() => (canOpenRemoteBotConfig ? openModelPickerSheet('model') : openCenterSettings())}
-            onOpenSoul={() => nav.push({ screen: 'bot-soul', botKey: activeBot.key })}
+            onOpenSoul={() => {
+              if (!botSoul || botSoulKey !== activeBot.key || botSoulError) {
+                void loadBotSoul(activeBot);
+              }
+              nav.push({ screen: 'bot-soul', botKey: activeBot.key });
+            }}
             onOpenSkills={() => nav.push({ screen: 'bot-skills', botKey: activeBot.key })}
             onOpenCapabilities={() => (canOpenRemoteBotConfig ? openModelPickerSheet('capabilities') : openCenterSettings())}
             onOpenSchedules={() => openBotSchedules(activeBot)}
             onOpenVault={() => setVaultTargetKey(botPanelIdentityKey)}
-            onOpenComputer={() => nav.push({ screen: 'bot-screen', botKey: activeBot.key })}
+            onOpenComputer={() => {
+              captureFullscreenTriggerFocus('bot-screen');
+              nav.push({ screen: 'bot-screen', botKey: activeBot.key });
+            }}
             onOpenBrowser={openBotBrowser}
             onOpenManage={() => nav.push({ screen: 'bot-profile-manage', botKey: activeBot.key })}
           />
@@ -7023,6 +7260,11 @@ ${newer}` : draftSnapshot;
           soulSaved={soulSaved}
           soulDraftBytes={soulDraftBytes}
           soulByteRatio={soulByteRatio}
+          soulLoading={botSoulLoading}
+          soulError={botSoulError}
+          onRetryLoad={() => {
+            if (activeBot) void loadBotSoul(activeBot);
+          }}
           action={action}
           onBack={() => {
             if (!popScreen()) nav.resetTo({ screen: 'hub' });
@@ -7040,6 +7282,9 @@ ${newer}` : draftSnapshot;
           botScheduleState={botScheduleState}
           scheduleTasks={scheduleTasks}
           scheduleError={scheduleError}
+          schedulesLoading={botSchedulesLoading}
+          schedulesLoadError={botSchedulesLoadError}
+          onRetryLoad={() => void loadBotSchedules(activeBot)}
           scheduleOffline={scheduleOffline}
           scheduleFilter={scheduleFilter}
           onChangeScheduleFilter={setScheduleFilter}
@@ -7120,7 +7365,7 @@ ${newer}` : draftSnapshot;
             else nav.push({ screen: 'settings', settingsPage: nextPage });
           }}
           onBack={backFromSettings}
-          onOpenDrawer={() => setLeftDrawerOpen(true)}
+          onOpenDrawer={openLeftDrawer}
           drawerOpen={leftDrawerOpen}
           ensureRemoteApi={ensureRemoteApi}
           remoteProfiles={remoteProfiles}
@@ -7195,6 +7440,7 @@ ${newer}` : draftSnapshot;
           archivedBots={archivedBots}
           hasRemoteConfigured={hasRemoteConfigured}
           action={action}
+          loading={!botsHydrated}
           onBack={() => {
             if (!popScreen()) nav.resetTo({ screen: 'settings', settingsPage: 'overview' });
           }}
@@ -7421,6 +7667,7 @@ ${newer}` : draftSnapshot;
                 label: t('引用回复', 'Quote'),
                 icon: <Quote size={18} />,
                 onSelect: () => {
+                  bubbleSheetSkipAutoFocusRef.current = true;
                   const quoted =
                     textToUse
                       .split('\n')
@@ -7445,6 +7692,7 @@ ${newer}` : draftSnapshot;
               label: t('编辑', 'Edit'),
               icon: <Pencil size={18} />,
               onSelect: () => {
+                bubbleSheetSkipAutoFocusRef.current = true;
                 setComposerImageError('');
                 setEditingTurn({
                   botKey: activeBot.key,
@@ -7475,6 +7723,15 @@ ${newer}` : draftSnapshot;
             onOpenChange={open => {
               if (!open) setBubbleActionTurn(null);
             }}
+            onCloseAutoFocus={event => {
+              if (bubbleSheetSkipAutoFocusRef.current) {
+                bubbleSheetSkipAutoFocusRef.current = false;
+                event.preventDefault();
+                if (activeBot?.hostKind !== 'remote') {
+                  requestAnimationFrame(() => composerTextareaRef.current?.focus());
+                }
+              }
+            }}
             title={t('消息操作', 'Message actions')}
             items={bubbleActionItems}
           />
@@ -7484,10 +7741,11 @@ ${newer}` : draftSnapshot;
       {/* 清空当前对话历史确认弹窗 */}
       <ConfirmDialog
         open={clearConfirmOpen}
-        title={t('清空对话历史', 'Clear Conversation History')}
-        description={t('确定要清空当前对话记录并重置上下文吗？此操作不可撤销。',
-          'Clear the current conversation history and reset context? This cannot be undone.')}
+        title={t('清空对话历史', 'Clear conversation history')}
+        description={t('确定要清空当前对话记录并重置上下文吗？此操作不可撤销。', 'Clear the current conversation history and reset context? This cannot be undone.')}
         danger
+        confirmLabel={t('清空对话历史', 'Clear history')}
+        cancelLabel={t('取消', 'Cancel')}
         onCancel={() => setClearConfirmOpen(false)}
         onConfirm={() => {
           mobileHaptic('confirm');
@@ -7505,26 +7763,35 @@ ${newer}` : draftSnapshot;
         title={
           botConfirmModal?.kind === 'archive'
             ? t('归档 Bot', 'Archive Bot')
-            : t('永久删除 Bot', 'Permanently Delete Bot')
+            : t('永久删除 Bot', 'Permanently delete Bot')
         }
         description={
           botConfirmModal?.kind === 'archive'
-            ? t(`确定要归档「${botConfirmModal.bot.role}」吗？归档后将移至「设置 · 已归档 Bot」并保留 14 天，期间可查看只读历史或随时恢复，14 天后自动清理。`,
-                `Archive "${botConfirmModal.bot.role}"? It will move to Settings > Archived Bots for 14 days (read-only history, restorable) before auto-deletion.`)
+            ? t(`确定要归档「${botConfirmModal.bot.role}」吗？归档后将移至「设置 · 已归档 Bot」并保留 14 天，期间可查看只读历史或随时恢复，14 天后自动清理。`, `Archive "${botConfirmModal.bot.role}"? It will move to Settings > Archived Bots for 14 days (read-only history, restorable) before auto-deletion.`)
             : botConfirmModal
-              ? t(`确定要永久删除 Bot「${botConfirmModal.bot.role}」及其所有历史对话与人设文档吗？此操作不可恢复。`,
-                  `Permanently delete "${botConfirmModal.bot.role}" and all its conversation history and persona? This cannot be undone.`)
+              ? t(`确定要永久删除 Bot「${botConfirmModal.bot.role}」及其所有历史对话与人设文档吗？此操作不可恢复。`, `Permanently delete "${botConfirmModal.bot.role}" and all its conversation history and persona? This cannot be undone.`)
               : ''
         }
         danger={botConfirmModal?.kind === 'delete'}
+        busy={action.busy}
+        disabled={action.busy}
+        error={action.error || null}
+        confirmLabel={
+          botConfirmModal?.kind === 'archive'
+            ? (action.busy ? t('归档中…', 'Archiving…') : t('归档 Bot', 'Archive Bot'))
+            : (action.busy ? t('删除中…', 'Deleting…') : t('永久删除 Bot', 'Delete Bot'))
+        }
+        cancelLabel={t('取消', 'Cancel')}
         onCancel={() => {
-          if (!action.busy) setBotConfirmModal(null);
+          if (!action.busy) {
+            action.setError('');
+            setBotConfirmModal(null);
+          }
         }}
         onConfirm={() => {
           if (!botConfirmModal || action.busy) return;
           mobileHaptic('confirm');
           const target = botConfirmModal;
-          setBotConfirmModal(null);
           if (target.kind === 'archive') {
             void handleArchiveBot(target.bot);
           } else {
@@ -7533,71 +7800,55 @@ ${newer}` : draftSnapshot;
         }}
       />
 
-      {/* 群聊解散并删除二次确认弹窗（先读 authority 最新 scope 冻结 requestId / expectedRevision，未确认可按原 ID 确认） */}
-      <Dialog
+      {/* 群聊解散并删除二次确认弹窗（统一使用 ConfirmDialog，保留权威节点 revision 与原请求 ID 保护） */}
+      <ConfirmDialog
         open={roomDeleteModal !== null}
-        onOpenChange={open => {
-          if (!open && roomDeleteModal && !roomDeleteModal.submitting) {
+        title={t('解散并删除群聊', 'Disband & delete group')}
+        description={
+          !roomDeleteModal
+            ? ''
+            : roomDeleteModal.loadingLatest
+              ? t('正在从权威节点读取最新群聊信息…', 'Reading latest group state from authority node…')
+              : roomDeleteModal.attempt?.unconfirmed
+                ? t(`上次解散群聊「${roomDeleteModal.attempt.title || roomDeleteModal.room.title}」的结果尚未确认。请按原请求 ID 再次确认解散（避免重复请求），或取消后检查群聊状态。`, `The previous disband attempt for "${roomDeleteModal.attempt.title || roomDeleteModal.room.title}" is unconfirmed. Confirm again with the original request ID to avoid duplicate requests, or cancel to inspect group status.`)
+                : t(`确定要解散并删除群聊「${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}」吗？所有设备上的该群聊及全部群历史消息都将被删除，此操作不可恢复。`, `Disband and delete group "${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}"? The group and all its message history across all devices will be deleted. This cannot be undone.`)
+        }
+        error={roomDeleteModal?.error || null}
+        busy={Boolean(roomDeleteModal?.loadingLatest || roomDeleteModal?.submitting)}
+        disabled={Boolean(roomDeleteModal?.loadingLatest || roomDeleteModal?.submitting)}
+        danger={Boolean(roomDeleteModal?.attempt && !roomDeleteModal.loadingLatest)}
+        confirmLabel={
+          !roomDeleteModal
+            ? t('解散并删除群聊', 'Disband & delete group')
+            : roomDeleteModal.loadingLatest
+              ? t('正在读取群信息…', 'Loading group…')
+              : roomDeleteModal.submitting
+                ? t('正在解散群聊…', 'Disbanding group…')
+                : roomDeleteModal.conflictNeedReload && !roomDeleteModal.attempt?.unconfirmed
+                  ? t('重新读取群信息', 'Reload group state')
+                  : !roomDeleteModal.attempt
+                    ? t('重试读取群信息', 'Retry loading group')
+                    : roomDeleteModal.attempt.unconfirmed
+                      ? t('按原 ID 确认解散', 'Confirm disband (original ID)')
+                      : t('解散并删除群聊', 'Disband & delete group')
+        }
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => {
+          if (roomDeleteModal && !roomDeleteModal.submitting) {
             roomDeleteFetchSeqRef.current += 1;
             setRoomDeleteModal(null);
           }
         }}
-        title={t('解散并删除群聊', 'Disband & Delete Group')}
-      >
-        {roomDeleteModal && (
-          <>
-            <p className="secondary">
-              {roomDeleteModal.loadingLatest
-                ? t('正在从权威节点读取最新群聊信息…', 'Reading latest group state from authority node…')
-                : t(`确定要解散并删除群聊「${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}」吗？所有设备上的该群聊及全部群历史消息都将被删除，此操作不可恢复。`,
-                    `Disband and delete group "${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}"? The group and all its message history across all devices will be deleted. This cannot be undone.`)}
-            </p>
-            {roomDeleteModal.error && (
-              <ErrorNotice compact error={roomDeleteModal.error} />
-            )}
-            <div className="dialog-actions">
-              <button
-                type="button"
-                className="button secondary-button"
-                disabled={roomDeleteModal.submitting}
-                onClick={() => {
-                  roomDeleteFetchSeqRef.current += 1;
-                  setRoomDeleteModal(null);
-                }}
-              >
-                {t('取消', 'Cancel')}
-              </button>
-              {roomDeleteModal.conflictNeedReload && !roomDeleteModal.attempt?.unconfirmed && (
-                <button
-                  type="button"
-                  className="button secondary-button"
-                  disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
-                  onClick={() => void loadLatestRoomForDelete(roomDeleteModal.room)}
-                >
-                  {t('重新读取', 'Reload')}
-                </button>
-              )}
-              {roomDeleteModal.attempt && (
-                <button
-                  type="button"
-                  className="button danger-button"
-                  disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
-                  onClick={() => {
-                    mobileHaptic('confirm');
-                    void executeRoomDelete();
-                  }}
-                >
-                  {roomDeleteModal.submitting
-                    ? t('正在处理…', 'Processing…')
-                    : roomDeleteModal.attempt.unconfirmed
-                      ? t('按原 ID 确认', 'Confirm Original ID')
-                      : t('解散并删除群聊', 'Disband & Delete Group')}
-                </button>
-              )}
-            </div>
-          </>
-        )}
-      </Dialog>
+        onConfirm={() => {
+          if (!roomDeleteModal || roomDeleteModal.loadingLatest || roomDeleteModal.submitting) return;
+          if (!roomDeleteModal.attempt || (roomDeleteModal.conflictNeedReload && !roomDeleteModal.attempt.unconfirmed)) {
+            void loadLatestRoomForDelete(roomDeleteModal.room);
+            return;
+          }
+          mobileHaptic('confirm');
+          void executeRoomDelete();
+        }}
+      />
     </div>
   );
 }

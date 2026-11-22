@@ -1,9 +1,19 @@
 // Bot 电脑全屏视图（Grok Bot 风格）：全屏深色展示该 Bot 的虚拟工作屏幕。
 // 顶部为返回按钮、Bot 头像与名称、右上角状态/帮助按钮；中央为全幅画面；右下角为「接管控制」胶囊按钮。
 // 原生接管先中断当前对话；RPC 接管由服务端处理中断与执行器停止。
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { ChevronLeft, CircleHelp, Monitor, Play, RefreshCw, Trash2 } from 'lucide-react';
 import type { ShowerTarget } from '../../host-core/index.js';
+import { ConfirmDialog, Dialog } from './components/ui';
+import { useExternalOverlayPresent } from './components/ui/Overlay';
 import { GrokBotAvatar, type GrokAvatarPreset } from './GrokBotAvatar';
 import { BotHost } from './native';
 import { resolveScreenClient, type ScreenViewState, type ScreenViewer } from './screen';
@@ -19,6 +29,22 @@ const DEFAULT_HEIGHT = 1920;
 const SWIPE_THRESHOLD_PX = 18;
 const MIN_SWIPE_DURATION_MS = 120;
 const MAX_SWIPE_DURATION_MS = 1200;
+
+const RPC_KEY_MAP: Record<string, string> = {
+  Enter: 'ENTER',
+  Backspace: 'BACKSPACE',
+  Delete: 'DELETE',
+  Escape: 'ESCAPE',
+  ArrowLeft: 'LEFT',
+  ArrowRight: 'RIGHT',
+  ArrowUp: 'UP',
+  ArrowDown: 'DOWN',
+  Home: 'HOME',
+  End: 'END',
+  PageUp: 'PAGEUP',
+  PageDown: 'PAGEDOWN',
+  ' ': 'SPACE',
+};
 
 interface RpcStatusSnapshot {
   live: boolean;
@@ -88,21 +114,39 @@ export function BotScreenPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [helpOpen, setHelpOpen] = useState(false);
+  const [releaseConfirmOpen, setReleaseConfirmOpen] = useState(false);
+  const [releaseError, setReleaseError] = useState('');
 
+  const screenRef = useRef<HTMLElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const backBtnRef = useRef<HTMLButtonElement>(null);
+  const helpBtnRef = useRef<HTMLButtonElement>(null);
   const viewerRef = useRef<ScreenViewer | null>(null);
   const settledRef = useRef(false);
+  const externalOverlayVisible = useExternalOverlayPresent(open && isNativeClient, screenRef);
   const helpOpenRef = useRef(helpOpen);
   helpOpenRef.current = helpOpen;
+  const releaseConfirmOpenRef = useRef(releaseConfirmOpen);
+  releaseConfirmOpenRef.current = releaseConfirmOpen;
+  const hasError = Boolean(error);
+  const hasErrorRef = useRef(hasError);
+  hasErrorRef.current = hasError;
+  const externalOverlayVisibleRef = useRef(externalOverlayVisible);
+  externalOverlayVisibleRef.current = externalOverlayVisible;
   const gestureStartRef = useRef<{ x: number; y: number; at: number; pointerId: number } | null>(null);
 
   const pushLayout = useCallback(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
     const rect = stageRef.current?.getBoundingClientRect();
-    // 打开顶部帮助浮层时暂时隐藏原生 TextureView，避免原生视图遮挡 HTML 浮层。
-    const visible = settledRef.current && !helpOpenRef.current && !!rect && rect.width > 0 && rect.height > 0;
+    // 任意弹窗、确认框、错误条、外部弹层或全局通知可见时隐藏原生 TextureView，避免遮挡 HTML UI。
+    const overlayBlocking =
+      helpOpenRef.current ||
+      releaseConfirmOpenRef.current ||
+      hasErrorRef.current ||
+      externalOverlayVisibleRef.current;
+    const visible = settledRef.current && !overlayBlocking && !!rect && rect.width > 0 && rect.height > 0;
     const viewport = visible && rect
       ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height, radius: STAGE_RADIUS }
       : null;
@@ -164,8 +208,10 @@ export function BotScreenPanel({
       // 会话结束或换了 sessionId 时先清掉旧帧与旧会话引用，避免短暂显示上一会话画面。
       const sessionChanged = sessionId !== lastSessionIdRef.current;
       const live = sessPhase === 'ready';
-      if (!live || sessionChanged) setRpcFrameSrc('');
-      if (sessionChanged) takeoverSessionIdRef.current = '';
+      if (!live || sessionChanged) {
+        setRpcFrameSrc('');
+        takeoverSessionIdRef.current = '';
+      }
       lastSessionIdRef.current = sessionId;
       const width = typeof raw?.width === 'number' && raw.width > 0 ? raw.width : DEFAULT_WIDTH;
       const height = typeof raw?.height === 'number' && raw.height > 0 ? raw.height : DEFAULT_HEIGHT;
@@ -234,6 +280,8 @@ export function BotScreenPanel({
   useEffect(() => {
     rpcGenRef.current += 1;
     rpcInFlightRef.current = false;
+    lastSessionIdRef.current = '';
+    takeoverSessionIdRef.current = '';
     setRpcState(null);
     setRpcFrameSrc('');
     if (!open || !canUseRpcFallback) return;
@@ -243,6 +291,8 @@ export function BotScreenPanel({
     }, POLL_MS);
     return () => {
       rpcGenRef.current += 1;
+      lastSessionIdRef.current = '';
+      takeoverSessionIdRef.current = '';
       window.clearInterval(poll);
     };
   }, [open, canUseRpcFallback, refreshRpcStatus]);
@@ -261,33 +311,30 @@ export function BotScreenPanel({
 
   useEffect(() => {
     pushLayout();
-  }, [helpOpen, pushLayout]);
+  }, [helpOpen, releaseConfirmOpen, hasError, externalOverlayVisible, pushLayout]);
 
   useEffect(() => {
-    if (!open) setHelpOpen(false);
+    if (!open) {
+      setHelpOpen(false);
+      setReleaseConfirmOpen(false);
+      setReleaseError('');
+    }
   }, [open]);
 
+  // 全屏打开时聚焦返回按钮，关闭时如原触发元素仍在文档中则还原焦点。
   useEffect(() => {
-    if (!helpOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) {
-        event.preventDefault();
-        setHelpOpen(false);
+    if (!open || typeof document === 'undefined') return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const raf = window.requestAnimationFrame(() => {
+      (backBtnRef.current ?? helpBtnRef.current)?.focus({ preventScroll: true });
+    });
+    return () => {
+      window.cancelAnimationFrame(raf);
+      if (previousFocus && previousFocus.isConnected) {
+        previousFocus.focus({ preventScroll: true });
       }
     };
-    const onAppBack = (event: Event) => {
-      if (event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      setHelpOpen(false);
-    };
-    document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('app-back', onAppBack, true);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('app-back', onAppBack, true);
-    };
-  }, [helpOpen]);
+  }, [open]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -387,6 +434,7 @@ export function BotScreenPanel({
     if (!canControlSession || !rpcCall || !baseParams || busy) return;
     setBusy(true);
     setError('');
+    setReleaseError('');
     try {
       const sid = await resolveCurrentSessionId();
       if (sid) {
@@ -408,9 +456,13 @@ export function BotScreenPanel({
       } else {
         await refreshRpcStatus(true);
       }
+      setReleaseConfirmOpen(false);
+      setReleaseError('');
       setHelpOpen(false);
     } catch (failure) {
-      setError(errorText(failure));
+      const msg = errorText(failure);
+      setReleaseError(msg);
+      setError(msg);
     } finally {
       setBusy(false);
     }
@@ -436,6 +488,7 @@ export function BotScreenPanel({
   };
 
   const onRpcPointerDown = (e: ReactPointerEvent<HTMLImageElement>) => {
+    e.currentTarget.focus({ preventScroll: true });
     if (!rpcState?.live || !rpcState?.userControl || busy) return;
     const pt = mapPointerToDevice(e, false);
     if (!pt) return;
@@ -483,6 +536,80 @@ export function BotScreenPanel({
     })();
   };
 
+  const onRpcKeyDown = (e: ReactKeyboardEvent<HTMLImageElement>) => {
+    if (e.nativeEvent.isComposing) return;
+    // Shift+Escape exits focus from the screen canvas cleanly so keyboard users are never trapped.
+    if (e.key === 'Escape' && e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.currentTarget.blur();
+      (backBtnRef.current ?? helpBtnRef.current)?.focus({ preventScroll: true });
+      return;
+    }
+
+    if (!rpcState?.live) return;
+
+    if (!rpcState.userControl) {
+      if ((e.key === 'Enter' || e.key === ' ') && !busy) {
+        e.preventDefault();
+        void takeover();
+      } else if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey && !busy) {
+        e.preventDefault();
+        void refreshRpcStatus(true);
+      }
+      return;
+    }
+
+    // Preserve Tab for normal focus order.
+    if (e.key === 'Tab') return;
+    if (busy || !canUseRpcFallback || !rpcCall || !baseParams) return;
+    const sid = rpcState.sessionId || lastSessionIdRef.current;
+    if (!sid) return;
+
+    const mappedKey = RPC_KEY_MAP[e.key];
+    if (mappedKey) {
+      e.preventDefault();
+      if (mappedKey === 'ESCAPE') e.stopPropagation();
+      const modifiers: string[] = [];
+      if (e.ctrlKey) modifiers.push('CTRL');
+      if (e.altKey) modifiers.push('ALT');
+      if (e.shiftKey) modifiers.push('SHIFT');
+      if (e.metaKey) modifiers.push('META');
+      void (async () => {
+        try {
+          await rpcCall('sendShowerInput', {
+            ...baseParams,
+            sessionId: sid,
+            input: modifiers.length
+              ? { type: 'key', key: mappedKey, modifiers }
+              : { type: 'key', key: mappedKey },
+          });
+          await refreshRpcStatus(true);
+        } catch (failure) {
+          setError(errorText(failure));
+        }
+      })();
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) {
+      e.preventDefault();
+      const text = e.key;
+      void (async () => {
+        try {
+          await rpcCall('sendShowerInput', {
+            ...baseParams,
+            sessionId: sid,
+            input: { type: 'text', text },
+          });
+          await refreshRpcStatus(true);
+        } catch (failure) {
+          setError(errorText(failure));
+        }
+      })();
+    }
+  };
+
   const activeState = isNativeClient ? state : rpcState;
   const supported = isNativeClient || canUseRpcFallback;
   const phase = supported ? activeState?.phase ?? 'connecting' : 'unsupported';
@@ -525,10 +652,11 @@ export function BotScreenPanel({
       : t(`实时 · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`, `Live · ${activeState?.width ?? 0}×${activeState?.height ?? 0}`);
 
   return (
-    <main className="grok-computer-screen grok-page-enter" aria-label={t('Bot 电脑屏幕', 'Bot Computer Screen')}>
-      {/* Top Bar (15859.jpg) */}
+    <main ref={screenRef} className="grok-computer-screen grok-page-enter" aria-label={t('Bot 电脑屏幕', 'Bot Computer Screen')}>
+      {/* Top Bar */}
       <header className="grok-computer-topbar">
         <button
+          ref={backBtnRef}
           type="button"
           className="grok-computer-circle-btn"
           aria-label={t('返回', 'Back')}
@@ -546,92 +674,154 @@ export function BotScreenPanel({
         </div>
 
         <button
+          ref={helpBtnRef}
           type="button"
           className={`grok-computer-circle-btn${helpOpen ? ' active' : ''}`}
           aria-label={t('屏幕信息与选项', 'Screen info & options')}
           aria-expanded={helpOpen}
+          aria-haspopup="dialog"
           onClick={() => setHelpOpen(v => !v)}
         >
           <CircleHelp size={20} aria-hidden="true" />
         </button>
-
-        {helpOpen && (
-          <>
-            <div className="grok-computer-popover-backdrop" role="presentation" aria-hidden="true" onClick={() => setHelpOpen(false)} />
-            <div className="grok-computer-help-popover" role="dialog" aria-label={t('电脑屏幕状态', 'Computer Status')}>
-              <div className="grok-computer-help-title">
-                <span>{t('虚拟电脑状态', 'Virtual Screen Status')}</span>
-                <span className={`grok-computer-status-pill${live ? ' live' : ''}`}>{metaText}</span>
-              </div>
-              <p className="grok-computer-help-desc">
-                {t('Bot 在后台执行应用任务时会在此虚拟屏幕中运行。点击右下角「接管控制」可中断当前任务并由你直接触控操作。',
-                  'The Bot operates apps inside this virtual screen. Tap "Take over" at the bottom-right to interrupt the Bot and interact directly.')}
-              </p>
-              {canControlSession && (
-                <div className="grok-computer-help-actions">
-                  <button
-                    type="button"
-                    className="grok-computer-action-chip"
-                    disabled={busy}
-                    onClick={() => void handleCreateRpcScreen()}
-                  >
-                    <Play size={14} aria-hidden="true" />
-                    <span>{live ? t('重置屏幕', 'Reset') : t('启动屏幕', 'Start Screen')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="grok-computer-action-chip"
-                    disabled={busy}
-                    onClick={() => {
-                      if (isNativeClient) pushLayout();
-                      else void refreshRpcStatus(true);
-                      setHelpOpen(false);
-                    }}
-                  >
-                    <RefreshCw size={14} aria-hidden="true" />
-                    <span>{t('刷新画面', 'Refresh')}</span>
-                  </button>
-                  {live && (
-                    <button
-                      type="button"
-                      className="grok-computer-action-chip danger"
-                      disabled={busy}
-                      onClick={() => void handleReleaseRpcScreen()}
-                    >
-                      <Trash2 size={14} aria-hidden="true" />
-                      <span>{t('关闭屏幕', 'Close Screen')}</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </>
-        )}
       </header>
 
-      {/* Full-Screen Center Stage (15859.jpg) */}
-      <div className="grok-computer-stage" ref={stageRef}>
+      <Dialog
+        open={helpOpen}
+        onOpenChange={setHelpOpen}
+        title={t('虚拟电脑状态', 'Virtual Screen Status')}
+        description={t('查看当前虚拟屏幕状态并执行启动、刷新或关闭操作。', 'View virtual screen status and start, refresh, or close the screen.')}
+        className="grok-computer-help-dialog"
+        onCloseAutoFocus={event => {
+          if (open && helpBtnRef.current) {
+            event.preventDefault();
+            helpBtnRef.current.focus();
+          }
+        }}
+      >
+        <div className="grok-computer-help-title" style={{ marginBottom: 'var(--space-2)' }}>
+          <span
+            className={`grok-computer-status-pill tabular-nums${live ? ' live' : ''}`}
+            style={{ fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
+          >
+            {metaText}
+          </span>
+        </div>
+        <p
+          className="grok-computer-help-desc secondary"
+          style={{ margin: '0 0 var(--space-3)', overflowWrap: 'anywhere', lineHeight: 1.5 }}
+        >
+          {t('Bot 在后台执行应用任务时会在此虚拟屏幕中运行。点击右下角「接管控制」可中断当前任务并由你直接触控操作。', 'The Bot operates apps inside this virtual screen. Tap "Take over" at the bottom-right to interrupt the Bot and interact directly.')}
+        </p>
+        {canControlSession && (
+          <div className="grok-computer-help-actions">
+            <button
+              type="button"
+              className="grok-computer-action-chip"
+              disabled={busy}
+              onClick={() => void handleCreateRpcScreen()}
+            >
+              <Play size={14} aria-hidden="true" />
+              <span>{live ? t('重置屏幕', 'Reset') : t('启动屏幕', 'Start Screen')}</span>
+            </button>
+            <button
+              type="button"
+              className="grok-computer-action-chip"
+              disabled={busy}
+              onClick={() => {
+                if (isNativeClient) pushLayout();
+                else void refreshRpcStatus(true);
+                setHelpOpen(false);
+              }}
+            >
+              <RefreshCw size={14} aria-hidden="true" />
+              <span>{t('刷新画面', 'Refresh')}</span>
+            </button>
+            {live && (
+              <button
+                type="button"
+                className="grok-computer-action-chip danger"
+                disabled={busy}
+                onClick={() => {
+                  setReleaseError('');
+                  setHelpOpen(false);
+                  setReleaseConfirmOpen(true);
+                }}
+              >
+                <Trash2 size={14} aria-hidden="true" />
+                <span>{t('关闭屏幕', 'Close Screen')}</span>
+              </button>
+            )}
+          </div>
+        )}
+      </Dialog>
+
+      <ConfirmDialog
+        open={releaseConfirmOpen}
+        title={t('关闭虚拟屏幕？', 'Close virtual screen?')}
+        description={t('关闭虚拟屏幕会立即结束当前会话并释放环境，未保存的应用状态会丢失；仅退出查看请点击左上角返回。', 'Closing the virtual screen immediately ends the current session and releases the environment. Unsaved app state will be lost. To only leave the view, tap Back.')}
+        danger
+        busy={busy}
+        error={releaseError || null}
+        confirmLabel={busy ? t('关闭中…', 'Closing…') : t('关闭屏幕', 'Close Screen')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => {
+          if (!busy) {
+            setReleaseConfirmOpen(false);
+            setReleaseError('');
+          }
+        }}
+        onConfirm={() => {
+          void handleReleaseRpcScreen();
+        }}
+        onCloseAutoFocus={event => {
+          const target = helpBtnRef.current?.isConnected ? helpBtnRef.current : backBtnRef.current;
+          if (open && target?.isConnected) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
+        }}
+      />
+
+      {/* Full-Screen Center Stage (always-dark stage tokens) */}
+      <div
+        className="grok-computer-stage"
+        ref={stageRef}
+        style={{ background: 'var(--stage-dark-ground)' }}
+      >
         {!isNativeClient && live && rpcFrameSrc ? (
           <img
             ref={imgRef}
             className={`grok-computer-frame-img${userControl ? ' interactive' : ''}`}
             src={rpcFrameSrc}
             alt={t('Bot 虚拟屏幕画面', 'Bot virtual screen')}
+            tabIndex={0}
+            role={userControl ? 'application' : undefined}
+            aria-label={
+              userControl
+                ? t('Bot 虚拟屏幕实时画布，可直接触控或按方向键、回车、退格键发送按键，按 Shift+Esc 退出画布焦点', 'Interactive Bot virtual screen canvas. Touch directly or press Arrow keys, Enter, or Backspace to send input. Press Shift+Escape to leave focus.')
+                : t('Bot 虚拟屏幕实时画面，按回车接管控制，按 R 刷新画面', 'Live Bot virtual screen. Press Enter to take over control, or R to refresh.')
+            }
             draggable={false}
             onPointerDown={onRpcPointerDown}
             onPointerUp={onRpcPointerUp}
             onPointerCancel={e => {
               if (gestureStartRef.current?.pointerId === e.pointerId) gestureStartRef.current = null;
             }}
+            onKeyDown={onRpcKeyDown}
           />
         ) : null}
 
         {!live && (
-          <div className="grok-computer-empty-status" role="status">
+          <div
+            className="grok-computer-empty-status"
+            role="status"
+            style={{ color: 'var(--stage-dark-ink-muted)' }}
+          >
             <div className="grok-computer-empty-icon" aria-hidden="true">
               <Monitor size={30} />
             </div>
-            <p>{statusText}</p>
+            <p style={{ overflowWrap: 'anywhere', maxWidth: '100%' }}>{statusText}</p>
             {canControlSession && (phase === 'none' || phase === 'ended') && (
               <button
                 type="button"
@@ -641,6 +831,30 @@ export function BotScreenPanel({
               >
                 <Play size={15} aria-hidden="true" />
                 <span>{busy ? t('正在启动…', 'Starting…') : t('启动虚拟屏幕', 'Start Virtual Screen')}</span>
+              </button>
+            )}
+            {supported && (phase === 'error' || phase === 'unavailable') && (
+              <button
+                type="button"
+                className="grok-computer-start-pill"
+                disabled={busy}
+                onClick={() => {
+                  setError('');
+                  if (isNativeClient) {
+                    const viewer = viewerRef.current;
+                    if (viewer) {
+                      void viewer.status().then(next => {
+                        if (viewerRef.current === viewer) setState(next);
+                      }).catch(failure => setError(errorText(failure)));
+                    }
+                    pushLayout();
+                  } else {
+                    void refreshRpcStatus(true);
+                  }
+                }}
+              >
+                <RefreshCw size={15} aria-hidden="true" />
+                <span>{t('重试连接', 'Retry connection')}</span>
               </button>
             )}
           </div>
@@ -658,10 +872,24 @@ export function BotScreenPanel({
         </div>
       )}
 
-      {/* Bottom Bar with Right-Aligned Takeover Pill (15859.jpg) */}
+      {/* Bottom Bar with Right-Aligned Takeover Pill */}
       <footer className="grok-computer-bottombar">
-        <span className="grok-computer-bottom-meta">
-          {userControl ? t('你可以直接触控屏幕，Bot 也可能同时操作', 'Direct touch active') : ''}
+        <span
+          className="grok-computer-bottom-meta tabular-nums"
+          style={{ fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
+        >
+          {userControl ? (
+            t('你可以直接触控屏幕，Bot 也可能同时操作', 'Direct touch active')
+          ) : live ? (
+            <span
+              className="grok-computer-status-pill tabular-nums live"
+              style={{ fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere', whiteSpace: 'normal' }}
+            >
+              {metaText}
+            </span>
+          ) : (
+            ''
+          )}
         </span>
         <button
           type="button"

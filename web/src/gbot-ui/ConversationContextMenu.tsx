@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { ActionSheet } from '../components/ui';
+import { getViewportSafeBounds, useTopLayerClose } from '../components/ui/Overlay';
 import { mobileHaptic } from '../native/tauri-host';
 import { useText } from '../ui';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
@@ -98,29 +99,40 @@ export function ConversationContextMenu({
     if (!menu) return;
 
     const rect = menu.getBoundingClientRect();
-    const left = Math.max(
-      MENU_MARGIN,
-      Math.min(position.x, window.innerWidth - rect.width - MENU_MARGIN),
-    );
-    const top = Math.max(
-      MENU_MARGIN,
-      Math.min(position.y, window.innerHeight - rect.height - MENU_MARGIN),
-    );
+    const bounds = getViewportSafeBounds(MENU_MARGIN);
+    const maxLeft = Math.max(bounds.left, window.innerWidth - bounds.right - rect.width);
+    const maxTop = Math.max(bounds.top, window.innerHeight - bounds.bottom - rect.height);
+    const left = Math.max(bounds.left, Math.min(position.x, maxLeft));
+    const top = Math.max(bounds.top, Math.min(position.y, maxTop));
     setMenuPosition({ left, top, ready: true });
   }, [useSheet, position, resolvedItems.length]);
 
   const close = (restoreFocus = true) => {
     const returnTarget = focusReturnRef.current;
+    const menuEl = menuRef.current;
     onCloseRef.current();
     if (restoreFocus) {
       queueMicrotask(() => {
-        if (returnTarget?.isConnected)
+        const active = document.activeElement;
+        const focusLost =
+          !active ||
+          active === document.body ||
+          !active.isConnected ||
+          Boolean(menuEl && menuEl.contains(active));
+        if (focusLost && returnTarget?.isConnected) {
           returnTarget.focus({ preventScroll: true });
+        }
       });
     }
   };
   const closeRef = useRef(close);
   closeRef.current = close;
+
+  useTopLayerClose(shouldRenderMenu && !useSheet, {
+    kind: 'floating',
+    getElement: () => menuRef.current,
+    onClose: () => closeRef.current(true),
+  });
 
   useEffect(() => {
     if (!position || useSheet) return;
@@ -154,20 +166,12 @@ export function ConversationContextMenu({
       closeRef.current(true);
     };
     const handleViewportChange = () => closeRef.current(true);
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      closeRef.current(true);
-    };
 
     document.addEventListener('pointerdown', handlePointerDown, true);
-    document.addEventListener('keydown', handleEscape, true);
     window.addEventListener('resize', handleViewportChange);
     window.addEventListener('scroll', handleViewportChange, true);
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true);
-      document.removeEventListener('keydown', handleEscape, true);
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('scroll', handleViewportChange, true);
       window.removeEventListener('gbot-close-context-menu', handleForceClose);
@@ -233,12 +237,14 @@ export function ConversationContextMenu({
     <div
       aria-label={menuTitle}
       className="baby-grok-bot-context-menu gbot-context-menu"
+      data-ui-dialog="open"
+      data-floating-ui="true"
       data-ready={menuPosition.ready || undefined}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={handleMenuKeyDown}
       ref={menuRef}
       role="menu"
-      style={{ left: menuPosition.left, top: menuPosition.top }}
+      style={{ left: menuPosition.left, top: menuPosition.top, zIndex: 425, pointerEvents: 'auto' }}
     >
       <div className="baby-grok-bot-context-menu__label">{menuTitle}</div>
       {resolvedItems.map((item) => (

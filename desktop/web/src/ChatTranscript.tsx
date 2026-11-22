@@ -81,6 +81,7 @@ export interface ChatTranscriptProps {
   googleContext?: GoogleChatCardContext;
   /** 输入区正上方的稳定插槽容器；通过 Portal 挂载唯一的 CurrentGoogleSetupCard。 */
   googleSetupSlotContainer?: HTMLElement | null;
+  onGoogleSetupBrowserTakeoverActiveChange?: (active: boolean) => void;
   /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
   attachmentFetcher?: AttachmentFetcher | null;
   loading?: boolean;
@@ -131,6 +132,7 @@ export function ChatTranscript({
   onSubmitVaultUnlock,
   googleContext,
   googleSetupSlotContainer = null,
+  onGoogleSetupBrowserTakeoverActiveChange,
   attachmentFetcher = null,
   loading = false,
   error = null,
@@ -304,11 +306,36 @@ export function ChatTranscript({
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
   const nearBottomRef = useRef(true);
+  const lastClientHeightRef = useRef<number | null>(null);
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (
+      nearBottomRef.current &&
+      lastClientHeightRef.current !== null &&
+      el.clientHeight < lastClientHeightRef.current
+    ) {
+      lastClientHeightRef.current = el.clientHeight;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    lastClientHeightRef.current = el.clientHeight;
     nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
   }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver !== 'function') return;
+    lastClientHeightRef.current = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      lastClientHeightRef.current = el.clientHeight;
+      if (nearBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [botKey]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -373,6 +400,9 @@ export function ChatTranscript({
           presentation={currentGoogleSetup}
           googleContext={googleContext}
           disabled={disabled || archived}
+          active={!archived}
+          embeddedInDock
+          onBrowserTakeoverActiveChange={onGoogleSetupBrowserTakeoverActiveChange}
         />,
         googleSetupSlotContainer,
       )
@@ -453,7 +483,7 @@ export function ChatTranscript({
             t,
           ) : '';
           return (
-            <div key={turn.id} className="bot-chat-turn">
+            <div key={turn.id} className={`bot-chat-turn${turn.isStreaming ? ' is-streaming' : ''}`}>
               {showArticle ? (
                 <article
                   className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}

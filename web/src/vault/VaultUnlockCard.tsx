@@ -1,5 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { KeyRound, ShieldCheck } from 'lucide-react';
 import type { VaultUnlockPresentation } from '../../../host-core/index.js';
+import { ActionSlip, InlineBanner, type ActionSlipTone } from '../components/ui';
 import type { VaultUnlockSubmitPayload } from '../ToolPresentation';
 import { useText } from '../ui';
 import '../tool-presentation.css';
@@ -52,21 +54,21 @@ function VaultUnlockSession({ presentation, active, disabled = false, requesterN
 
   function failure(code: unknown): string {
     switch (code) {
-      case 'VAULT_UNLOCK_FAILED': return t('无法解锁密码库，请检查主密码后重新输入。', 'Could not unlock Vault. Check the master password and enter it again.');
+      case 'VAULT_UNLOCK_FAILED': return t('无法解锁密码库。输入框已为安全自动清空，请核对主密码后重新输入。', 'Could not unlock Vault. The password field was cleared for security — check your master password and enter it again.');
       case 'VAULT_LOGIN_CHALLENGE': return t('账号要求额外登录验证，当前尚不支持该验证方式。', 'This account requires additional login verification that is not supported yet.');
       case 'VAULT_STALE_SESSION': return t('密码库账号或会话已变更，请重新发起解锁。', 'Vault account or session changed. Start a new unlock request.');
       case 'VAULT_REQUEST_EXPIRED': return t('解锁请求已结束或过期，请发起新的请求。', 'This unlock request ended or expired. Start a new request.');
       case 'VAULT_REQUEST_BUSY': return t('该请求正在处理，请等待状态更新后再操作。', 'This request is being processed. Wait for a status update before trying again.');
-      case 'VAULT_INVALID_ARGUMENT': return t('输入无效，请检查并重新输入主密码。', 'Invalid input. Check and re-enter the master password.');
+      case 'VAULT_INVALID_ARGUMENT': return t('输入无效，输入框已清空，请检查并重新输入主密码。', 'Invalid input. The field was cleared — check and re-enter the master password.');
       case 'VAULT_NOT_INITIALIZED': return t('密码库尚未创建，请发起新的解锁请求。', 'Vault is not initialized. Start a new unlock request.');
       case 'VAULT_ALREADY_INITIALIZED': return t('密码库已创建，请发起新的解锁请求。', 'Vault is already initialized. Start a new unlock request.');
       case 'VAULT_FORBIDDEN': return t('密码库访问未获授权，请检查 Bot 授权。', 'Vault access is not permitted. Review Bot permissions.');
       case 'NOT_CONNECTED':
       case 'OFFLINE':
       case 'CONTROL_UNAVAILABLE':
-      case 'CENTER_OFFLINE': return t('目标 Host 离线，未排队或自动重试。', 'Target Host is offline. Nothing was queued or automatically retried.');
-      case 'RUNTIME_BUSY': return t('Host 正在维护，请稍后再操作。', 'Host is busy with maintenance. Try again later.');
-      default: return t('操作结果未确认，请等待状态更新；不会自动重试。', 'Operation unconfirmed. Wait for a status update; there is no automatic retry.');
+      case 'CENTER_OFFLINE': return t('目标 Host 离线，未排队或自动重试；输入框已清空。', 'Target Host is offline. Nothing was queued or retried, and the field was cleared.');
+      case 'RUNTIME_BUSY': return t('Host 正在维护，请稍后再操作；输入框已清空。', 'Host is busy with maintenance. Try again later; the field was cleared.');
+      default: return t('操作结果未确认，请等待状态更新；不会自动重试，输入框已清空。', 'Operation unconfirmed. Wait for a status update; there is no automatic retry, and the field was cleared.');
     }
   }
 
@@ -108,64 +110,141 @@ function VaultUnlockSession({ presentation, active, disabled = false, requesterN
           ? t('处理中…', 'Working…')
           : initializing ? t('等待创建', 'Awaiting setup') : t('等待解锁', 'Awaiting unlock');
 
+  const slipTone: ActionSlipTone =
+    status === 'unlocked'
+      ? 'live'
+      : status === 'pending'
+        ? 'attention'
+        : 'neutral';
+
+  const describedBy = error ? `${descriptionId} ${errorId}` : descriptionId;
+
   return (
-    <section className={`tp-card tp-vault-unlock is-${status}`} aria-label={t('密码库解锁', 'Unlock Vault')} aria-busy={submitting}>
-      <div className="tp-card-head">
-        <span className="tp-card-title">{t('密码库', 'Password Vault')}</span>
-        <span className={`tp-status-pill is-${status}`} role="status">{statusLabel}</span>
-      </div>
-      {requesterName ? <p className="tp-vault-hint">{t(`请求 Bot · ${requesterName}`, `Requested by ${requesterName}`)}</p> : null}
-      <p id={descriptionId} className="tp-vault-hint">{t('作用于当前 Host 的密码库；条目仍按各 Bot 的授权控制。主密码仅通过专用通道提交，不进入聊天。', 'Applies to this Host’s Vault; each Bot’s entry permissions still apply. The master password uses a private control channel, not chat.')}</p>
-      {presentation.source === 'vaultwarden' ? (
-        <p className="tp-vault-hint">{t('来源', 'Source')}: Vaultwarden{presentation.serverUrl ? ' · ' + presentation.serverUrl : ''}。{t('首次使用时，本次主密码也用于登录已配置账号。', 'On first use, this master password also signs in to the configured account.')}</p>
-      ) : null}
-      {canRespond ? (
-        <form ref={formRef} className="tp-vault-form" autoComplete="off" noValidate onSubmit={event => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const masterPassword = (form.elements.namedItem('masterPassword') as HTMLInputElement).value;
-          const confirmation = (form.elements.namedItem('confirmation') as HTMLInputElement | null)?.value;
-          form.reset();
-          if (!editable || inFlight.current) return;
-          if (!masterPassword || masterPassword.length > 1024) {
-            setError(t('请输入 1–1024 个字符的主密码。', 'Enter a master password of 1–1024 characters.'));
-            return;
-          }
-          if (initializing && masterPassword !== confirmation) {
-            setError(t('两次主密码不一致，请重新输入。', 'Master passwords do not match. Enter them again.'));
-            return;
-          }
-          void submit({ requestId: presentation.requestId, masterPassword });
-        }}>
-          <fieldset disabled={!editable}>
-            <legend className="tp-vault-legend">{initializing ? t('设置主密码', 'Set a master password') : t('输入主密码', 'Enter the master password')}</legend>
-            <label>
-              {t('主密码', 'Master password')}
-              <input className="tp-input" name="masterPassword" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} required maxLength={1024} aria-describedby={error ? `${descriptionId} ${errorId}` : descriptionId} onChange={() => setError('')} />
-            </label>
-            {initializing ? (
+    <ActionSlip
+      className={`tp-slip tp-vault-unlock is-${status}`}
+      tone={slipTone}
+      ariaLabel={t('密码库解锁', 'Unlock Vault')}
+      icon={
+        status === 'unlocked' ? (
+          <ShieldCheck size={16} aria-hidden="true" />
+        ) : (
+          <KeyRound size={16} aria-hidden="true" />
+        )
+      }
+      title={t('密码库', 'Password Vault')}
+      status={<span role="status">{statusLabel}</span>}
+      meta={requesterName ? t(`请求 Bot · ${requesterName}`, `Requested by ${requesterName}`) : undefined}
+    >
+      <div className="tp-vault-body" aria-busy={submitting}>
+        <p id={descriptionId} className="tp-vault-hint">
+          {t('作用于当前 Host 的密码库；条目仍按各 Bot 的授权控制。主密码仅通过专用通道提交，不进入聊天；出于安全考虑，每次提交或重试后输入框都会自动清空。', 'Applies to this Host’s Vault; each Bot’s entry permissions still apply. The master password uses a private control channel, not chat, and clears automatically after each attempt or retry.')}
+        </p>
+        {presentation.source === 'vaultwarden' ? (
+          <p className="tp-vault-hint">
+            {t('来源：Vaultwarden', 'Source: Vaultwarden')}
+            {presentation.serverUrl ? ` · ${presentation.serverUrl}` : ''}
+            {t('。首次使用时，本次主密码也用于登录已配置账号。', '. On first use, this master password also signs in to the configured account.')}
+          </p>
+        ) : null}
+        {canRespond ? (
+          <form
+            ref={formRef}
+            className="tp-vault-form"
+            autoComplete="off"
+            noValidate
+            onSubmit={event => {
+              event.preventDefault();
+              const form = event.currentTarget;
+              const masterPassword = (form.elements.namedItem('masterPassword') as HTMLInputElement).value;
+              const confirmation = (form.elements.namedItem('confirmation') as HTMLInputElement | null)?.value;
+              form.reset();
+              if (!editable || inFlight.current) return;
+              if (!masterPassword || masterPassword.length > 1024) {
+                setError(t('请输入 1–1024 个字符的主密码（输入框已清空）。', 'Enter a master password of 1–1024 characters (the input was cleared).'));
+                return;
+              }
+              if (initializing && masterPassword !== confirmation) {
+                setError(t('两次主密码不一致，输入框已清空，请重新输入。', 'Master passwords do not match. Fields were cleared — enter them again.'));
+                return;
+              }
+              void submit({ requestId: presentation.requestId, masterPassword });
+            }}
+          >
+            <fieldset disabled={!editable}>
+              <legend className="tp-vault-legend">{initializing ? t('设置主密码', 'Set a master password') : t('输入主密码', 'Enter the master password')}</legend>
               <label>
-                {t('确认主密码', 'Confirm master password')}
-                <input className="tp-input" name="confirmation" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} required maxLength={1024} aria-describedby={error ? errorId : undefined} onChange={() => setError('')} />
+                <span>{t('主密码', 'Master password')}</span>
+                <input
+                  className="tp-input"
+                  name="masterPassword"
+                  type="password"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  required
+                  maxLength={1024}
+                  aria-invalid={Boolean(error) || undefined}
+                  aria-describedby={describedBy}
+                  onChange={() => setError('')}
+                />
               </label>
+              {initializing ? (
+                <label>
+                  <span>{t('确认主密码', 'Confirm master password')}</span>
+                  <input
+                    className="tp-input"
+                    name="confirmation"
+                    type="password"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    maxLength={1024}
+                    aria-invalid={Boolean(error) || undefined}
+                    aria-describedby={describedBy}
+                    onChange={() => setError('')}
+                  />
+                </label>
+              ) : null}
+              <div className="tp-actions">
+                <button
+                  type="button"
+                  className="tp-btn"
+                  onClick={() => void submit({ requestId: presentation.requestId, cancelled: true })}
+                >
+                  {t('取消', 'Cancel')}
+                </button>
+                <button type="submit" className="tp-btn tp-btn-primary">
+                  {submitting ? t('处理中…', 'Working…') : initializing ? t('创建并解锁', 'Create and unlock') : t('解锁', 'Unlock')}
+                </button>
+              </div>
+            </fieldset>
+            {disabled ? (
+              <InlineBanner
+                tone="attention"
+                role="status"
+                compact
+                title={t('当前连接不可操作，请连接目标 Host 后重试。', 'Unavailable on this connection. Connect to the target Host before trying again.')}
+              />
             ) : null}
-            <div className="tp-actions">
-              <button type="submit" className="tp-btn tp-btn-primary">{submitting ? t('处理中…', 'Working…') : initializing ? t('创建并解锁', 'Create and unlock') : t('解锁', 'Unlock')}</button>
-              <button type="button" className="tp-btn" onClick={() => void submit({ requestId: presentation.requestId, cancelled: true })}>{t('取消', 'Cancel')}</button>
-            </div>
-          </fieldset>
-          {disabled ? <p className="tp-vault-hint">{t('当前连接不可操作，请连接目标 Host 后重试。', 'Unavailable on this connection. Connect to the target Host before trying again.')}</p> : null}
-        </form>
-      ) : (
-        <p className="tp-result-line">{status === 'unlocked'
-          ? t('此请求已完成解锁，不代表密码库当前仍处于解锁状态。', 'This request completed an unlock. It does not mean Vault is still unlocked now.')
-          : status === 'cancelled'
-            ? t('此解锁请求已取消。', 'This unlock request was cancelled.')
-            : status === 'interrupted'
-              ? t('此解锁请求已中断或过期，不能从历史记录提交。请发起新的请求。', 'This unlock request was interrupted or expired. History cannot be submitted; start a new request.')
-              : t('当前视图只读，无法提交主密码。', 'This view is read-only. The master password cannot be submitted here.')}</p>
-      )}
-      {error ? <div id={errorId} className="tp-error" role="alert">{error}</div> : null}
-    </section>
+          </form>
+        ) : (
+          <p className="tp-result-line">
+            {status === 'unlocked'
+              ? t('此请求已完成解锁，不代表密码库当前仍处于解锁状态。', 'This request completed an unlock. It does not mean Vault is still unlocked now.')
+              : status === 'cancelled'
+                ? t('此解锁请求已取消。', 'This unlock request was cancelled.')
+                : status === 'interrupted'
+                  ? t('此解锁请求已中断或过期，不能从历史记录提交。请发起新的请求。', 'This unlock request was interrupted or expired. History cannot be submitted; start a new request.')
+                  : t('当前视图只读，无法提交主密码。', 'This view is read-only. The master password cannot be submitted here.')}
+          </p>
+        )}
+        {error ? (
+          <div id={errorId} className="tp-vault-error">
+            <InlineBanner tone="danger" role="alert" compact title={error} />
+          </div>
+        ) : null}
+      </div>
+    </ActionSlip>
   );
 }

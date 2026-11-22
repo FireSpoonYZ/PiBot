@@ -27,6 +27,20 @@
   root.dataset.themePref = themePref;
   root.dataset.theme = resolvedTheme;
   style.colorScheme = resolvedTheme;
+  try {
+    var themeMeta = document.querySelector('meta[name="theme-color"]');
+    var themeColor = isDark ? '#141614' : '#F7F6F2';
+    if (themeMeta) {
+      themeMeta.setAttribute('content', themeColor);
+    } else if (document.head) {
+      var meta = document.createElement('meta');
+      meta.name = 'theme-color';
+      meta.content = themeColor;
+      document.head.appendChild(meta);
+    }
+  } catch (e) {
+    // Ignore head manipulation errors before DOM readiness.
+  }
 
   if (storedLang === 'zh' || storedLang === 'en') {
     root.lang = storedLang;

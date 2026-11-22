@@ -7,7 +7,6 @@
 // - Rules target this (deviceId, botId) only; pausing a rule never affects manual use or other rules.
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
-  AlertTriangle,
   Bell,
   Calendar,
   ChevronDown,
@@ -18,7 +17,6 @@ import {
   Mail,
   Plus,
   RefreshCw,
-  ShieldAlert,
   Trash2,
 } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
@@ -29,6 +27,8 @@ import {
   parseCalendarMinutesBefore,
 } from '../center-admin/googleHelpers';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { ConfirmDialog, InlineBanner } from '../components/ui';
+import { SmoothExpand } from '../layout';
 import { useText } from '../ui';
 import {
   checkGoogleAccount,
@@ -179,7 +179,7 @@ export function GoogleCapabilitySection({
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesError, setRulesError] = useState('');
   const [rulesBusyId, setRulesBusyId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmDeleteRule, setConfirmDeleteRule] = useState<GoogleRuleDto | null>(null);
 
   // New / edit rule draft
   const [ruleFormOpen, setRuleFormOpen] = useState(false);
@@ -429,7 +429,7 @@ export function GoogleCapabilitySection({
     try {
       await removeGoogleRule(api, identity, { id: rule.id });
       if (!mountedRef.current) return;
-      setConfirmDeleteId(null);
+      setConfirmDeleteRule(null);
       await loadRules();
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -446,11 +446,13 @@ export function GoogleCapabilitySection({
       : client?.configured
         ? {
             label: client.clientId
-              ? t(`已配置 (Web Client · ${maskClientId(client.clientId)})`, `Configured (Web · ${maskClientId(client.clientId)})`)
+              ? t(`已配置 · ${maskClientId(client.clientId)}`, `Configured · ${maskClientId(client.clientId)}`)
               : t('已配置 Web Client', 'Web Client configured'),
             tone: 'ok' as const,
           }
         : { label: t('未配置中心应用', 'Center app not configured'), tone: 'muted' as const };
+
+  const rulesBodyId = `${fieldId}-rules-body`;
 
   return (
     <section
@@ -487,20 +489,29 @@ export function GoogleCapabilitySection({
       </div>
 
       {statusError ? (
-        <div className={tempError ? 'gws-warning' : 'gws-error'} role="alert">
-          {tempError ? <AlertTriangle size={15} aria-hidden="true" /> : <ShieldAlert size={15} aria-hidden="true" />}
-          <div className="gws-error-body">
-            <span>{statusError}</span>
-            {tempError ? (
+        <InlineBanner
+          tone={tempError ? 'attention' : 'danger'}
+          role={tempError ? 'status' : 'alert'}
+          title={statusError}
+          actions={
+            tempError ? (
               <button type="button" className="gws-link-btn" onClick={() => void loadStatus()}>
                 {t('重试检查', 'Retry check')}
               </button>
-            ) : null}
-          </div>
-        </div>
+            ) : undefined
+          }
+        />
       ) : null}
 
-      {notice ? <p className="gws-notice" role="status">{notice}</p> : null}
+      {notice ? (
+        <InlineBanner
+          tone="live"
+          role="status"
+          compact
+          title={notice}
+          onDismiss={() => setNotice('')}
+        />
+      ) : null}
 
       {/* Unconfigured Center App actions */}
       {!unavailable && snapshot && !client?.configured ? (
@@ -753,287 +764,282 @@ export function GoogleCapabilitySection({
             type="button"
             className="gws-collapse-trigger"
             aria-expanded={rulesOpen}
+            aria-controls={rulesBodyId}
             onClick={() => setRulesOpen(v => !v)}
           >
             <span className="gws-collapse-title">
               <Bell size={14} aria-hidden="true" />
               <span>{t('本 Bot 自动触发规则（新邮件 / 会前提醒）', 'Auto-trigger rules for this Bot (Mail / Meetings)')}</span>
-              {rulesLoaded ? <span className="gws-pill is-muted">{rules.length}</span> : null}
+              {rulesLoaded ? <span className="gws-pill is-muted tabular-nums">{rules.length}</span> : null}
             </span>
             <ChevronDown size={15} className={`gws-chevron${rulesOpen ? ' is-open' : ''}`} aria-hidden="true" />
           </button>
 
-          {rulesOpen ? (
-            <div className="gws-rules-body">
-              <p className="gws-muted">
-                {t('规则仅决定新邮件或会议开始前自动通知本 Bot，不是为本 Bot 开通 Google 授权。暂停单条规则不影响手动查询或其他规则。', 'Rules trigger this Bot on new mail or upcoming meetings (not per-Bot Google authorization). Pausing a rule never affects manual queries.')}
-              </p>
+          <div id={rulesBodyId}>
+            <SmoothExpand open={rulesOpen}>
+              <div className="gws-rules-body">
+                <p className="gws-muted">
+                  {t('规则仅决定新邮件或会议开始前自动通知本 Bot，不是为本 Bot 开通 Google 授权。暂停单条规则不影响手动查询或其他规则。', 'Rules trigger this Bot on new mail or upcoming meetings (not per-Bot Google authorization). Pausing a rule never affects manual queries.')}
+                </p>
 
-              {rulesError ? (
-                <div className="gws-error" role="alert">
-                  <ShieldAlert size={14} aria-hidden="true" />
-                  <span>{rulesError}</span>
-                </div>
-              ) : null}
+                {rulesError ? (
+                  <InlineBanner tone="danger" role="alert" compact title={rulesError} />
+                ) : null}
 
-              {rulesLoading ? (
-                <p className="gws-muted" role="status">{t('正在读取规则…', 'Loading rules…')}</p>
-              ) : null}
+                {rulesLoading ? (
+                  <p className="gws-muted" role="status">{t('正在读取规则…', 'Loading rules…')}</p>
+                ) : null}
 
-              {!rulesLoading && rules.length > 0 ? (
-                <div className="gws-rule-list">
-                  {rules.map(rule => {
-                    const key = rule.id ?? `${rule.source}:${rule.account}:${rule.instruction}`;
-                    const acc = accounts.find(a => a.email.toLowerCase() === rule.account.toLowerCase());
-                    const status = ruleStatusDisplay(rule, acc, t);
-                    const busy = rulesBusyId === key;
-                    const confirmingDelete = confirmDeleteId === rule.id;
-                    const fromDisplay = formatRuleFrom(rule.from);
-                    const lastChecked = rule.runtime?.lastCheckedAt ?? rule.lastCheckedAt;
-                    const pendingCount = rule.runtime?.pendingCount ?? 0;
+                {!rulesLoading && rules.length > 0 ? (
+                  <div className="gws-rule-list">
+                    {rules.map(rule => {
+                      const key = rule.id ?? `${rule.source}:${rule.account}:${rule.instruction}`;
+                      const acc = accounts.find(a => a.email.toLowerCase() === rule.account.toLowerCase());
+                      const status = ruleStatusDisplay(rule, acc, t);
+                      const busy = rulesBusyId === key;
+                      const fromDisplay = formatRuleFrom(rule.from);
+                      const lastChecked = rule.runtime?.lastCheckedAt ?? rule.lastCheckedAt;
+                      const pendingCount = rule.runtime?.pendingCount ?? 0;
 
-                    return (
-                      <div key={key} className="gws-rule-item">
-                        <div className="gws-rule-head">
-                          <span className="gws-rule-kind">
-                            {rule.source === 'gmail' ? <Mail size={13} aria-hidden="true" /> : <Calendar size={13} aria-hidden="true" />}
-                            <span>
-                              {rule.source === 'gmail'
-                                ? t('新邮件触发', 'New email')
-                                : formatCalendarMinutesBefore(rule.minutesBefore, t)}
+                      return (
+                        <div key={key} className="gws-rule-item">
+                          <div className="gws-rule-head">
+                            <span className="gws-rule-kind">
+                              {rule.source === 'gmail' ? <Mail size={13} aria-hidden="true" /> : <Calendar size={13} aria-hidden="true" />}
+                              <span>
+                                {rule.source === 'gmail'
+                                  ? t('新邮件触发', 'New email')
+                                  : formatCalendarMinutesBefore(rule.minutesBefore, t)}
+                              </span>
                             </span>
-                          </span>
-                          <span className={`gws-pill is-${status.tone}`}>{status.label}</span>
-                        </div>
-                        <div className="gws-rule-meta">
-                          <span>{rule.account}</span>
-                          {rule.source === 'gmail' && fromDisplay ? <span>· {t(`发件人: ${fromDisplay}`, `From: ${fromDisplay}`)}</span> : null}
-                          {rule.source === 'gmail' && rule.subjectContains ? <span>· {t(`主题含: ${rule.subjectContains}`, `Subject: ${rule.subjectContains}`)}</span> : null}
-                          {rule.source === 'calendar' && rule.calendar ? <span>· {t(`日历: ${rule.calendar}`, `Calendar: ${rule.calendar}`)}</span> : null}
-                          {lastChecked ? <span>· {t(`上次检查 ${formatRuleTime(lastChecked)}`, `Checked ${formatRuleTime(lastChecked)}`)}</span> : null}
-                          {pendingCount > 0 ? <span>· {t(`待投递 ${pendingCount}`, `${pendingCount} pending`)}</span> : null}
-                        </div>
-                        <p className="gws-rule-instruction">{rule.instruction}</p>
-                        <div className="gws-rule-actions">
-                          <button
-                            type="button"
-                            className="gws-btn is-ghost is-xs"
-                            disabled={busy}
-                            onClick={() => void handleToggleRule(rule)}
-                          >
-                            {rule.enabled ? t('暂停规则', 'Pause') : t('启用规则', 'Enable')}
-                          </button>
-                          <button
-                            type="button"
-                            className="gws-btn is-ghost is-xs"
-                            disabled={busy}
-                            onClick={() => openEditRuleForm(rule)}
-                          >
-                            {t('编辑', 'Edit')}
-                          </button>
-                          {rule.id ? (
-                            confirmingDelete ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="gws-btn is-danger is-xs"
-                                  disabled={busy}
-                                  onClick={() => void handleDeleteRule(rule)}
-                                >
-                                  {t('确认删除', 'Confirm delete')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="gws-btn is-ghost is-xs"
-                                  disabled={busy}
-                                  onClick={() => setConfirmDeleteId(null)}
-                                >
-                                  {t('取消', 'Cancel')}
-                                </button>
-                              </>
-                            ) : (
+                            <span className={`gws-pill is-${status.tone}`}>{status.label}</span>
+                          </div>
+                          <div className="gws-rule-meta">
+                            <span>{rule.account}</span>
+                            {rule.source === 'gmail' && fromDisplay ? <span>· {t(`发件人: ${fromDisplay}`, `From: ${fromDisplay}`)}</span> : null}
+                            {rule.source === 'gmail' && rule.subjectContains ? <span>· {t(`主题含: ${rule.subjectContains}`, `Subject: ${rule.subjectContains}`)}</span> : null}
+                            {rule.source === 'calendar' && rule.calendar ? <span>· {t(`日历: ${rule.calendar}`, `Calendar: ${rule.calendar}`)}</span> : null}
+                            {lastChecked ? <span>· {t(`上次检查 ${formatRuleTime(lastChecked)}`, `Checked ${formatRuleTime(lastChecked)}`)}</span> : null}
+                            {pendingCount > 0 ? <span className="tabular-nums">· {t(`待投递 ${pendingCount}`, `${pendingCount} pending`)}</span> : null}
+                          </div>
+                          <p className="gws-rule-instruction">{rule.instruction}</p>
+                          <div className="gws-rule-actions">
+                            <button
+                              type="button"
+                              className="gws-btn is-ghost is-xs"
+                              disabled={busy}
+                              onClick={() => void handleToggleRule(rule)}
+                            >
+                              {rule.enabled ? t('暂停规则', 'Pause') : t('启用规则', 'Enable')}
+                            </button>
+                            <button
+                              type="button"
+                              className="gws-btn is-ghost is-xs"
+                              disabled={busy}
+                              onClick={() => openEditRuleForm(rule)}
+                            >
+                              {t('编辑', 'Edit')}
+                            </button>
+                            {rule.id ? (
                               <button
                                 type="button"
                                 className="gws-btn is-ghost is-xs"
                                 disabled={busy}
-                                onClick={() => setConfirmDeleteId(rule.id!)}
+                                onClick={() => setConfirmDeleteRule(rule)}
                               >
                                 <Trash2 size={12} aria-hidden="true" />
                                 <span>{t('删除', 'Delete')}</span>
                               </button>
-                            )
-                          ) : null}
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : !rulesLoading && !ruleFormOpen ? (
-                <p className="gws-muted">{t('本 Bot 尚未配置 Google 自动触发规则。', 'No Google trigger rules configured for this Bot.')}</p>
-              ) : null}
-
-              {!ruleFormOpen ? (
-                <div className="gws-actions">
-                  <button
-                    type="button"
-                    className="gws-btn is-ghost is-sm"
-                    disabled={accounts.length === 0}
-                    onClick={() => openNewRuleForm('gmail')}
-                  >
-                    <Mail size={13} aria-hidden="true" />
-                    <span>{t('新建邮件触发', 'Add email rule')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="gws-btn is-ghost is-sm"
-                    disabled={accounts.length === 0}
-                    onClick={() => openNewRuleForm('calendar')}
-                  >
-                    <Calendar size={13} aria-hidden="true" />
-                    <span>{t('新建会前提醒', 'Add meeting rule')}</span>
-                  </button>
-                </div>
-              ) : (
-                <form className="gws-rule-form" onSubmit={e => void handleSaveRule(e)}>
-                  <div className="gws-row-between">
-                    <strong>
-                      {editingRuleId
-                        ? t('编辑触发规则', 'Edit trigger rule')
-                        : ruleSource === 'gmail'
-                          ? t('新建新邮件触发', 'New email trigger')
-                          : t('新建会前提醒触发', 'New pre-meeting trigger')}
-                    </strong>
-                    {!editingRuleId ? (
-                      <div className="gws-seg">
-                        <button
-                          type="button"
-                          className={`gws-seg-btn${ruleSource === 'gmail' ? ' is-active' : ''}`}
-                          onClick={() => setRuleSource('gmail')}
-                        >
-                          Gmail
-                        </button>
-                        <button
-                          type="button"
-                          className={`gws-seg-btn${ruleSource === 'calendar' ? ' is-active' : ''}`}
-                          onClick={() => setRuleSource('calendar')}
-                        >
-                          Calendar
-                        </button>
-                      </div>
-                    ) : null}
+                      );
+                    })}
                   </div>
+                ) : !rulesLoading && !ruleFormOpen ? (
+                  <p className="gws-muted">{t('本 Bot 尚未配置 Google 自动触发规则。', 'No Google trigger rules configured for this Bot.')}</p>
+                ) : null}
 
-                  <label className="gws-field" htmlFor={`${fieldId}-rule-account`}>
-                    <span className="gws-label">{t('中心 Google 账号', 'Center Google account')}</span>
-                    <select
-                      id={`${fieldId}-rule-account`}
-                      className="gws-input"
-                      value={ruleAccount}
-                      disabled={ruleSaving}
-                      onChange={e => setRuleAccount(e.target.value)}
-                    >
-                      <option value="">{t('请选择账号…', 'Select an account…')}</option>
-                      {accounts.map(acc => (
-                        <option key={acc.email} value={acc.email}>
-                          {acc.email}
-                          {acc.status === 'reconnect' ? ` (${t('需重连', 'reconnect required')})` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  {ruleSource === 'gmail' ? (
-                    <>
-                      <label className="gws-field" htmlFor={`${fieldId}-rule-from`}>
-                        <span className="gws-label">{t('发件人过滤（可选）', 'From filter (optional)')}</span>
-                        <input
-                          id={`${fieldId}-rule-from`}
-                          type="text"
-                          className="gws-input"
-                          value={ruleFrom}
-                          disabled={ruleSaving}
-                          placeholder="alerts@example.com"
-                          onChange={e => setRuleFrom(e.target.value)}
-                        />
-                      </label>
-                      <label className="gws-field" htmlFor={`${fieldId}-rule-subject`}>
-                        <span className="gws-label">{t('主题关键词（可选）', 'Subject contains (optional)')}</span>
-                        <input
-                          id={`${fieldId}-rule-subject`}
-                          type="text"
-                          className="gws-input"
-                          value={ruleSubject}
-                          disabled={ruleSaving}
-                          placeholder={t('例如：账单 / 审批', 'e.g. invoice / approval')}
-                          onChange={e => setRuleSubject(e.target.value)}
-                        />
-                      </label>
-                      <p className="gws-muted">
-                        {t('仅对开启后新到达的邮件生效，不回放历史收件箱。', 'Applies only to new mail arriving after activation; past inbox history is not replayed.')}
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <label className="gws-field" htmlFor={`${fieldId}-rule-cal`}>
-                        <span className="gws-label">{t('日历（默认 primary）', 'Calendar (default primary)')}</span>
-                        <input
-                          id={`${fieldId}-rule-cal`}
-                          type="text"
-                          className="gws-input"
-                          value={ruleCalendar}
-                          disabled={ruleSaving}
-                          placeholder="primary"
-                          onChange={e => setRuleCalendar(e.target.value)}
-                        />
-                      </label>
-                      <label className="gws-field" htmlFor={`${fieldId}-rule-mins`}>
-                        <span className="gws-label">{t('提前提醒分钟数', 'Minutes before event')}</span>
-                        <input
-                          id={`${fieldId}-rule-mins`}
-                          type="number"
-                          min={0}
-                          max={1440}
-                          step={1}
-                          className="gws-input"
-                          value={ruleMinutesBefore}
-                          disabled={ruleSaving}
-                          onChange={e => setRuleMinutesBefore(e.target.value)}
-                        />
-                      </label>
-                    </>
-                  )}
-
-                  <label className="gws-field" htmlFor={`${fieldId}-rule-inst`}>
-                    <span className="gws-label">{t('触发后执行指令', 'Instruction for this Bot')}</span>
-                    <textarea
-                      id={`${fieldId}-rule-inst`}
-                      className="gws-input gws-textarea"
-                      rows={2}
-                      value={ruleInstruction}
-                      disabled={ruleSaving}
-                      onChange={e => setRuleInstruction(e.target.value)}
-                    />
-                  </label>
-
+                {!ruleFormOpen ? (
                   <div className="gws-actions">
-                    <button type="submit" className="gws-btn is-primary is-sm" disabled={ruleSaving}>
-                      {ruleSaving ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
+                    <button
+                      type="button"
+                      className="gws-btn is-ghost is-sm"
+                      disabled={accounts.length === 0}
+                      onClick={() => openNewRuleForm('gmail')}
+                    >
+                      <Mail size={13} aria-hidden="true" />
+                      <span>{t('新建邮件触发', 'Add email rule')}</span>
                     </button>
                     <button
                       type="button"
                       className="gws-btn is-ghost is-sm"
-                      disabled={ruleSaving}
-                      onClick={() => { setRuleFormOpen(false); setEditingRuleId(undefined); }}
+                      disabled={accounts.length === 0}
+                      onClick={() => openNewRuleForm('calendar')}
                     >
-                      {t('取消', 'Cancel')}
+                      <Calendar size={13} aria-hidden="true" />
+                      <span>{t('新建会前提醒', 'Add meeting rule')}</span>
                     </button>
                   </div>
-                </form>
-              )}
-            </div>
-          ) : null}
+                ) : (
+                  <form className="gws-rule-form" onSubmit={e => void handleSaveRule(e)}>
+                    <div className="gws-row-between">
+                      <strong>
+                        {editingRuleId
+                          ? t('编辑触发规则', 'Edit trigger rule')
+                          : ruleSource === 'gmail'
+                            ? t('新建新邮件触发', 'New email trigger')
+                            : t('新建会前提醒触发', 'New pre-meeting trigger')}
+                      </strong>
+                      {!editingRuleId ? (
+                        <div className="gws-seg" role="group" aria-label={t('规则来源', 'Rule source')}>
+                          <button
+                            type="button"
+                            aria-pressed={ruleSource === 'gmail'}
+                            className={`gws-seg-btn${ruleSource === 'gmail' ? ' is-active' : ''}`}
+                            onClick={() => setRuleSource('gmail')}
+                          >
+                            Gmail
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={ruleSource === 'calendar'}
+                            className={`gws-seg-btn${ruleSource === 'calendar' ? ' is-active' : ''}`}
+                            onClick={() => setRuleSource('calendar')}
+                          >
+                            Calendar
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <label className="gws-field" htmlFor={`${fieldId}-rule-account`}>
+                      <span className="gws-label">{t('中心 Google 账号', 'Center Google account')}</span>
+                      <select
+                        id={`${fieldId}-rule-account`}
+                        className="gws-input"
+                        value={ruleAccount}
+                        disabled={ruleSaving}
+                        onChange={e => setRuleAccount(e.target.value)}
+                      >
+                        <option value="">{t('请选择账号…', 'Select an account…')}</option>
+                        {accounts.map(acc => (
+                          <option key={acc.email} value={acc.email}>
+                            {acc.email}
+                            {acc.status === 'reconnect' ? ` (${t('需重连', 'reconnect required')})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {ruleSource === 'gmail' ? (
+                      <>
+                        <label className="gws-field" htmlFor={`${fieldId}-rule-from`}>
+                          <span className="gws-label">{t('发件人过滤（可选）', 'From filter (optional)')}</span>
+                          <input
+                            id={`${fieldId}-rule-from`}
+                            type="text"
+                            className="gws-input"
+                            value={ruleFrom}
+                            disabled={ruleSaving}
+                            placeholder="alerts@example.com"
+                            onChange={e => setRuleFrom(e.target.value)}
+                          />
+                        </label>
+                        <label className="gws-field" htmlFor={`${fieldId}-rule-subject`}>
+                          <span className="gws-label">{t('主题关键词（可选）', 'Subject contains (optional)')}</span>
+                          <input
+                            id={`${fieldId}-rule-subject`}
+                            type="text"
+                            className="gws-input"
+                            value={ruleSubject}
+                            disabled={ruleSaving}
+                            placeholder={t('例如：账单 / 审批', 'e.g. invoice / approval')}
+                            onChange={e => setRuleSubject(e.target.value)}
+                          />
+                        </label>
+                        <p className="gws-muted">
+                          {t('仅对开启后新到达的邮件生效，不回放历史收件箱。', 'Applies only to new mail arriving after activation; past inbox history is not replayed.')}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <label className="gws-field" htmlFor={`${fieldId}-rule-cal`}>
+                          <span className="gws-label">{t('日历（默认 primary）', 'Calendar (default primary)')}</span>
+                          <input
+                            id={`${fieldId}-rule-cal`}
+                            type="text"
+                            className="gws-input"
+                            value={ruleCalendar}
+                            disabled={ruleSaving}
+                            placeholder="primary"
+                            onChange={e => setRuleCalendar(e.target.value)}
+                          />
+                        </label>
+                        <label className="gws-field" htmlFor={`${fieldId}-rule-mins`}>
+                          <span className="gws-label">{t('提前提醒分钟数', 'Minutes before event')}</span>
+                          <input
+                            id={`${fieldId}-rule-mins`}
+                            type="number"
+                            min={0}
+                            max={1440}
+                            step={1}
+                            className="gws-input"
+                            value={ruleMinutesBefore}
+                            disabled={ruleSaving}
+                            onChange={e => setRuleMinutesBefore(e.target.value)}
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    <label className="gws-field" htmlFor={`${fieldId}-rule-inst`}>
+                      <span className="gws-label">{t('触发后执行指令', 'Instruction for this Bot')}</span>
+                      <textarea
+                        id={`${fieldId}-rule-inst`}
+                        className="gws-input gws-textarea"
+                        rows={2}
+                        value={ruleInstruction}
+                        disabled={ruleSaving}
+                        onChange={e => setRuleInstruction(e.target.value)}
+                      />
+                    </label>
+
+                    <div className="gws-actions">
+                      <button type="submit" className="gws-btn is-primary is-sm" disabled={ruleSaving}>
+                        {ruleSaving ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
+                      </button>
+                      <button
+                        type="button"
+                        className="gws-btn is-ghost is-sm"
+                        disabled={ruleSaving}
+                        onClick={() => { setRuleFormOpen(false); setEditingRuleId(undefined); }}
+                      >
+                        {t('取消', 'Cancel')}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </SmoothExpand>
+          </div>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={confirmDeleteRule !== null}
+        title={t('删除自动触发规则？', 'Delete trigger rule?')}
+        description={confirmDeleteRule ? t(`将删除针对 ${confirmDeleteRule.account} 的自动触发规则，删除后不再自动通知本 Bot。确认删除吗？`, `Delete the auto-trigger rule for ${confirmDeleteRule.account}? This Bot will no longer be triggered automatically.`) : ''}
+        danger
+        confirmLabel={t('确认删除', 'Delete')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => setConfirmDeleteRule(null)}
+        onConfirm={() => {
+          const target = confirmDeleteRule;
+          setConfirmDeleteRule(null);
+          if (target) void handleDeleteRule(target);
+        }}
+      />
 
       {/* Browser isolation note + quick actions */}
       <div className="gws-footer-bar">

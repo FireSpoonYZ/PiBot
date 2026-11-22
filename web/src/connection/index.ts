@@ -21,3 +21,8 @@ export {
   type ConnectionPhaseProviderProps,
   type ConnectionPhaseProviderValueProps,
 } from './ConnectionPhaseContext';
+
+export {
+  ConnectionStatusPopover,
+  type ConnectionStatusPopoverProps,
+} from './ConnectionStatusPopover';
