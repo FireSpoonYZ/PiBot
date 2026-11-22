@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type UIEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+  type UIEvent,
+} from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -69,9 +79,12 @@ import { humanizeError, useText } from '../ui';
 import { SendButtonIcon } from '../SendButtonIcon';
 import {
   TaskChatPromptBanner,
+  isTaskWaitingForBot,
   type BotChatTaskContextResult,
   type TaskBotOption,
 } from '../tasks';
+import { ActionBar } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import {
   PlatformLogoIcon,
   TurnToolCallsSection,
@@ -430,6 +443,10 @@ export function ChatScreen({
   const centerConn = useCenterConnection();
   const { notify, dismiss } = useNotice();
   const [connPopoverOpen, setConnPopoverOpen] = useState(false);
+  const [localSlashDismissedText, setLocalSlashDismissedText] = useState<string | null>(null);
+  const [dismissRemotePopoversSeq, setDismissRemotePopoversSeq] = useState(0);
+  const [remotePopoverOpen, setRemotePopoverOpen] = useState(false);
+  const [remoteDockActive, setRemoteDockActive] = useState(false);
   const [remoteFloatingDockEl, setRemoteFloatingDockEl] = useState<HTMLDivElement | null>(null);
 
   const composerAreaRef = useRef<HTMLElement | null>(null);
@@ -440,11 +457,55 @@ export function ChatScreen({
   const actionsRef = useRef({
     onOpenCenterSettings,
     onRetryTaskChatAction,
+    onCloseChatTopMenu,
+    onCloseComposerMenu,
   });
   actionsRef.current = {
     onOpenCenterSettings,
     onRetryTaskChatAction,
+    onCloseChatTopMenu,
+    onCloseComposerMenu,
   };
+  const slashRef = useRef(slash);
+  slashRef.current = slash;
+  const effectiveLocalDraftRef = useRef(effectiveLocalDraft);
+  effectiveLocalDraftRef.current = effectiveLocalDraft;
+  const chatTopMenuOpenRef = useRef(chatTopMenuOpen);
+  chatTopMenuOpenRef.current = chatTopMenuOpen;
+  const composerMenuOpenRef = useRef(composerMenuOpen);
+  composerMenuOpenRef.current = composerMenuOpen;
+
+  const isRemoteComposer =
+    !activeBot.archivedAt &&
+    activeBot.hostKind === 'remote' &&
+    Boolean(activeBot.remoteIdentity) &&
+    Boolean(remoteApi);
+
+  useEffect(() => {
+    setLocalSlashDismissedText(null);
+  }, [effectiveLocalDraft]);
+
+  useEffect(() => {
+    if (!isRemoteComposer) {
+      setRemotePopoverOpen(false);
+      setRemoteDockActive(false);
+    }
+  }, [isRemoteComposer, activeBot.key]);
+
+  const dismissLocalSlash = useCallback(() => {
+    setLocalSlashDismissedText(effectiveLocalDraftRef.current);
+    slashRef.current.onKeyDown({
+      key: 'Escape',
+      keyCode: 27,
+      nativeEvent: { isComposing: false },
+      preventDefault() {},
+    } as unknown as ReactKeyboardEvent<HTMLTextAreaElement>);
+  }, []);
+
+  const handleOpenRemoteComposerPopover = useCallback(() => {
+    setConnPopoverOpen(false);
+    if (chatTopMenuOpenRef.current) actionsRef.current.onCloseChatTopMenu();
+  }, []);
 
   const bubbleLongPressRef = useRef<{ timer: number | null; startX: number; startY: number }>({
     timer: null,
@@ -467,20 +528,132 @@ export function ChatScreen({
     cancelBubbleLongPress();
   }, [cancelBubbleLongPress]);
 
-  useEffect(() => {
-    if (!visible || connectionPhase === 'online' || chatSearchOpen || chatTopMenuOpen) {
-      setConnPopoverOpen(false);
-    }
-  }, [visible, connectionPhase, chatSearchOpen, chatTopMenuOpen]);
+  const localComposerActive = visible && !activeBot.archivedAt && !isRemoteComposer;
+  const topMenuVisible = visible && chatTopMenuOpen && !anyDrawerOpen;
+  const connPopoverVisible =
+    visible &&
+    connPopoverOpen &&
+    connectionPhase !== 'online' &&
+    !chatSearchOpen &&
+    !chatTopMenuOpen &&
+    !composerMenuOpen &&
+    !anyDrawerOpen;
+  const localPlusMenuVisible =
+    localComposerActive &&
+    composerMenuOpen &&
+    !chatTopMenuOpen &&
+    !connPopoverVisible &&
+    !anyDrawerOpen;
+  const localSlashVisible =
+    localComposerActive &&
+    slash.open &&
+    localSlashDismissedText !== effectiveLocalDraft &&
+    !composerMenuOpen &&
+    !chatTopMenuOpen &&
+    !connPopoverVisible &&
+    !anyDrawerOpen;
+  const anyComposerPopoverOpen = localPlusMenuVisible || localSlashVisible || remotePopoverOpen;
 
   useEffect(() => {
-    if (!connPopoverOpen) return;
+    if (!visible || anyDrawerOpen || connectionPhase === 'online' || chatSearchOpen || chatTopMenuOpen || composerMenuOpen) {
+      setConnPopoverOpen(false);
+    }
+  }, [visible, anyDrawerOpen, connectionPhase, chatSearchOpen, chatTopMenuOpen, composerMenuOpen]);
+
+  useEffect(() => {
+    if (!visible || anyDrawerOpen) {
+      if (chatTopMenuOpenRef.current) actionsRef.current.onCloseChatTopMenu();
+      if (composerMenuOpenRef.current) actionsRef.current.onCloseComposerMenu();
+      if (slashRef.current.open) dismissLocalSlash();
+    }
+  }, [visible, anyDrawerOpen, dismissLocalSlash]);
+
+  useEffect(() => {
+    if (!chatSearchOpen) return;
+    if (composerMenuOpenRef.current) actionsRef.current.onCloseComposerMenu();
+    if (slashRef.current.open) dismissLocalSlash();
+    setDismissRemotePopoversSeq(seq => seq + 1);
+  }, [chatSearchOpen, dismissLocalSlash]);
+
+  useEffect(() => {
+    if (!connPopoverVisible && !topMenuVisible) return;
+    if (slashRef.current.open) dismissLocalSlash();
+  }, [connPopoverVisible, topMenuVisible, dismissLocalSlash]);
+
+  useEffect(() => {
+    if (!localSlashVisible) return;
+    setConnPopoverOpen(false);
+    if (chatTopMenuOpenRef.current) actionsRef.current.onCloseChatTopMenu();
+    if (composerMenuOpenRef.current) actionsRef.current.onCloseComposerMenu();
+  }, [localSlashVisible]);
+
+  useEffect(() => {
+    if (!connPopoverVisible) return;
+    return registerOverlayBackHandler(() => setConnPopoverOpen(false));
+  }, [connPopoverVisible]);
+
+  useEffect(() => {
+    if (!connPopoverVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConnPopoverOpen(false);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setConnPopoverOpen(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverOpen]);
+  }, [connPopoverVisible]);
+
+  useEffect(() => {
+    if (!topMenuVisible) return;
+    return registerOverlayBackHandler(() => actionsRef.current.onCloseChatTopMenu());
+  }, [topMenuVisible]);
+
+  useEffect(() => {
+    if (!topMenuVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        actionsRef.current.onCloseChatTopMenu();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [topMenuVisible]);
+
+  useEffect(() => {
+    if (!localPlusMenuVisible) return;
+    return registerOverlayBackHandler(() => actionsRef.current.onCloseComposerMenu());
+  }, [localPlusMenuVisible]);
+
+  useEffect(() => {
+    if (!localPlusMenuVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        actionsRef.current.onCloseComposerMenu();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [localPlusMenuVisible]);
+
+  useEffect(() => {
+    if (!localSlashVisible) return;
+    return registerOverlayBackHandler(() => dismissLocalSlash());
+  }, [localSlashVisible, dismissLocalSlash]);
+
+  useEffect(() => {
+    if (!localSlashVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismissLocalSlash();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [localSlashVisible, dismissLocalSlash]);
 
   // C7: conn 系统提示走 F1 浮层通知，不插入消息流。
   useEffect(() => {
@@ -529,11 +702,6 @@ export function ChatScreen({
   }, [chatLoadMessage, activeBot.key, notify, dismiss]);
 
   // C6: 本机输入区异步错误（stopError / action.error）走 F1 浮层。
-  const isRemoteComposer =
-    !activeBot.archivedAt &&
-    activeBot.hostKind === 'remote' &&
-    Boolean(activeBot.remoteIdentity) &&
-    Boolean(remoteApi);
   const composerAsyncError =
     visible && !activeBot.archivedAt && !isRemoteComposer
       ? (stopError || action.error).trim()
@@ -769,12 +937,41 @@ export function ChatScreen({
   const showBotEmptyState = visibleTurns.length === 0 && !showSkeletonState && !chatSearchActive && !displayGeneratingText;
   const showEmptyOverlay = showSkeletonState || showSearchEmptyState || showBotEmptyState;
 
-  const showBrowserStrip = Boolean(browserTakeoverHint && onOpenBrowser);
-  const showLocalQueueStrip =
+  const hasTaskPrompt = Boolean(
     !activeBot.archivedAt &&
-    !isRemoteComposer &&
-    !activeEditing &&
-    localQueuedStripItems.length > 0;
+      activeBotBannerTask &&
+      isTaskWaitingForBot(activeBotBannerTask, activeBot.deviceId, activeBot.botId) &&
+      activeBotBannerTask.pendingPrompt,
+  );
+  const hasTaskQuote = Boolean(
+    !activeBot.archivedAt &&
+      !hasTaskPrompt &&
+      activeBotTaskContext.showQuoteStrip &&
+      activeBotBannerTask,
+  );
+  const composerInlineBusy = Boolean(activeBot.archivedAt || activeEditing || isLocalVoiceActive);
+  const canShowBrowserStrip = !composerInlineBusy && Boolean(browserTakeoverHint && onOpenBrowser);
+  const canShowLocalQueueStrip =
+    !composerInlineBusy && !isRemoteComposer && localQueuedStripItems.length > 0;
+  const showJumpLatest = Boolean(chatHasNewContent && !chatSearchOpen);
+
+  // Consolidate inline status strips above the composer to a single highest-priority strip:
+  // browser takeover > remote draft/conflict/queue > local queue > task prompt > passive task quote.
+  const activeDockStrip: 'browser' | 'remote' | 'local-queue' | 'task-prompt' | 'task-quote' | null =
+    composerInlineBusy
+      ? null
+      : canShowBrowserStrip
+        ? 'browser'
+        : isRemoteComposer && remoteDockActive
+          ? 'remote'
+          : canShowLocalQueueStrip
+            ? 'local-queue'
+            : hasTaskPrompt
+              ? 'task-prompt'
+              : hasTaskQuote
+                ? 'task-quote'
+                : null;
+  const hideFloatingDock = anyComposerPopoverOpen || (!showJumpLatest && activeDockStrip === null);
 
   return (
     <main
@@ -850,11 +1047,17 @@ export function ChatScreen({
                     type="button"
                     className={`grok-chat-pill-sub is-conn-trigger is-${connectionPhase}`}
                     aria-haspopup="dialog"
-                    aria-expanded={connPopoverOpen}
+                    aria-expanded={connPopoverVisible}
                     aria-label={`${connStatusLabel} - ${t('查看连接详情', 'View connection details')}`}
                     onClick={() => {
-                      if (chatTopMenuOpen) onCloseChatTopMenu();
-                      setConnPopoverOpen(v => !v);
+                      const opening = !connPopoverOpen;
+                      if (opening) {
+                        if (chatTopMenuOpen) onCloseChatTopMenu();
+                        if (composerMenuOpen) onCloseComposerMenu();
+                        dismissLocalSlash();
+                        setDismissRemotePopoversSeq(seq => seq + 1);
+                      }
+                      setConnPopoverOpen(opening);
                     }}
                   >
                     {connectionPhase === 'connecting' ? (
@@ -884,16 +1087,22 @@ export function ChatScreen({
           type="button"
           className="grok-floating-circle-btn grok-chat-header-more"
           aria-label={t('更多选项', 'More options')}
-          aria-expanded={chatTopMenuOpen}
+          aria-haspopup="menu"
+          aria-expanded={topMenuVisible}
           onClick={() => {
-            setConnPopoverOpen(false);
+            if (!chatTopMenuOpen) {
+              setConnPopoverOpen(false);
+              if (composerMenuOpen) onCloseComposerMenu();
+              dismissLocalSlash();
+              setDismissRemotePopoversSeq(seq => seq + 1);
+            }
             onToggleChatTopMenu();
           }}
         >
           <MoreHorizontal size={20} />
         </button>
 
-        {connPopoverOpen && connectionPhase !== 'online' && !chatSearchOpen && (
+        {connPopoverVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={() => setConnPopoverOpen(false)} />
             <div
@@ -910,105 +1119,128 @@ export function ChatScreen({
                 <span>{connPopoverHeading}</span>
               </div>
               <p className="hub-conn-popover-desc">{connPopoverDescription}</p>
-              <div className="hub-conn-popover-actions">
+              <ActionBar align="end" className="hub-conn-popover-actions">
                 <button
                   type="button"
                   className="hub-conn-popover-btn"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   onClick={() => {
                     setConnPopoverOpen(false);
                     onRetryConnection();
                   }}
                 >
-                  {t('立即重试', 'Retry now')}
+                  {t('重试连接', 'Retry connection')}
                 </button>
                 <button
                   type="button"
                   className="hub-conn-popover-btn is-primary"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   onClick={() => {
                     setConnPopoverOpen(false);
                     onOpenCenterSettings();
                   }}
                 >
-                  {t('去设置', 'Settings')}
+                  {t('打开设置', 'Open settings')}
                 </button>
-              </div>
+              </ActionBar>
             </div>
           </>
         )}
 
         {/* Dropdown Menu Card */}
-        {chatTopMenuOpen && (
+        {topMenuVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={onCloseChatTopMenu} />
             <div className="grok-floating-menu" role="menu">
               <button
                 type="button"
                 role="menuitem"
+                style={{ whiteSpace: 'nowrap' }}
                 onClick={() => onOpenBotProfile(activeBot)}
               >
-                <User size={19} />
-                <span>{t('查看资料', 'View Profile')}</span>
+                <User size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t('查看资料', 'View Profile')}
+                </span>
               </button>
               <button
                 type="button"
                 role="menuitem"
+                style={{ whiteSpace: 'nowrap' }}
                 onClick={() => onOpenBotDmList(activeBot)}
               >
-                <MessageSquare size={19} />
-                <span>{t('查看 Bot 私聊', 'View Bot DMs')}</span>
+                <MessageSquare size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t('查看 Bot 私聊', 'View Bot DMs')}
+                </span>
               </button>
               {onOpenBrowser ? (
                 <button
                   type="button"
                   role="menuitem"
+                  style={{ whiteSpace: 'nowrap' }}
                   onClick={() => {
                     onCloseChatTopMenu();
                     onOpenBrowser();
                   }}
                 >
-                  <Globe size={19} />
-                  <span>{t('Bot 浏览器', 'Bot Browser')}</span>
+                  <Globe size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('Bot 浏览器', 'Bot Browser')}
+                  </span>
                 </button>
               ) : null}
               <button
                 type="button"
                 role="menuitem"
+                style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseChatTopMenu();
                   onToggleChatSearch();
                 }}
               >
-                <Search size={19} />
-                <span>{t('在聊天中查找', 'Search in Chat')}</span>
+                <Search size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t('在聊天中查找', 'Search in Chat')}
+                </span>
               </button>
               {!activeBot.isPrimary && !activeBot.archivedAt && (
                 <button
                   type="button"
                   role="menuitem"
+                  style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onSetPrimaryBot(activeBot)}
                 >
-                  <Star size={19} />
-                  <span>{t('设为主 Bot', 'Set as Primary Bot')}</span>
+                  <Star size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('设为主 Bot', 'Set as Primary Bot')}
+                  </span>
                 </button>
               )}
               {!activeBot.isPrimary && !activeBot.archivedAt && (
                 <button
                   type="button"
                   role="menuitem"
+                  style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onRequestArchiveBot(activeBot)}
                 >
-                  <Archive size={19} />
-                  <span>{t('归档 Bot', 'Archive Bot')}</span>
+                  <Archive size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('归档 Bot', 'Archive Bot')}
+                  </span>
                 </button>
               )}
               {Boolean(activeBot.archivedAt) && (
                 <button
                   type="button"
                   role="menuitem"
+                  style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onUnarchiveBot(activeBot)}
                 >
-                  <RotateCcw size={19} />
-                  <span>{t('恢复 Bot', 'Unarchive Bot')}</span>
+                  <RotateCcw size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('恢复 Bot', 'Unarchive Bot')}
+                  </span>
                 </button>
               )}
               {!activeBot.isPrimary && (
@@ -1016,10 +1248,13 @@ export function ChatScreen({
                   type="button"
                   role="menuitem"
                   className="danger"
+                  style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onRequestDeleteBot(activeBot)}
                 >
-                  <Trash2 size={19} />
-                  <span>{t('永久删除 Bot', 'Permanently Delete Bot')}</span>
+                  <Trash2 size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('永久删除 Bot', 'Permanently Delete Bot')}
+                  </span>
                 </button>
               )}
               {!activeBot.archivedAt && (
@@ -1029,13 +1264,16 @@ export function ChatScreen({
                     type="button"
                     role="menuitem"
                     className="danger"
+                    style={{ whiteSpace: 'nowrap' }}
                     onClick={() => {
                       onCloseChatTopMenu();
                       onOpenClearConfirm();
                     }}
                   >
-                    <Trash2 size={19} />
-                    <span>{t('清空当前对话', 'Clear History')}</span>
+                    <Trash2 size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t('清空对话', 'Clear conversation')}
+                    </span>
                   </button>
                 </>
               )}
@@ -1054,6 +1292,8 @@ export function ChatScreen({
           if (composerMenuOpen) onCloseComposerMenu();
           if (chatTopMenuOpen) onCloseChatTopMenu();
           if (connPopoverOpen) setConnPopoverOpen(false);
+          if (localSlashVisible) dismissLocalSlash();
+          if (remotePopoverOpen) setDismissRemotePopoversSeq(seq => seq + 1);
         }}
       >
         {/* C7: 骨架屏、搜索无结果与空态统一放在同一绝对定位层内交叉淡入淡出，零布局位移 */}
@@ -1163,6 +1403,9 @@ export function ChatScreen({
                             mobileHaptic('longPress');
                             if (composerMenuOpen) onCloseComposerMenu();
                             if (chatTopMenuOpen) onCloseChatTopMenu();
+                            if (connPopoverOpen) setConnPopoverOpen(false);
+                            if (localSlashVisible) dismissLocalSlash();
+                            if (remotePopoverOpen) setDismissRemotePopoversSeq(seq => seq + 1);
                             onOpenBubbleActions({ turn, editable: turnEditable, canRetry: canRetryTurn });
                           }, 450);
                         } : undefined}
@@ -1299,9 +1542,12 @@ export function ChatScreen({
       </section>
 
       <footer ref={composerAreaRef} className="grok-chat-composer-area">
-        {/* C6 + C7: 统一浮层停靠栈（跳回最新、浏览器接管、远端草稿/冲突/排队、本机排队、任务提示），零流内位移且互不遮挡 */}
-        <div className="grok-composer-floating-dock">
-          {chatHasNewContent && !chatSearchOpen ? (
+        {/* C6 + C7: 统一浮层停靠栈（单一最高优先级状态条，不堆叠且不与输入弹窗重叠） */}
+        <div
+          className="grok-composer-floating-dock"
+          style={hideFloatingDock ? { display: 'none' } : undefined}
+        >
+          {showJumpLatest ? (
             <div className="bot-chat-jump-anchor">
               <button
                 type="button"
@@ -1314,7 +1560,7 @@ export function ChatScreen({
               </button>
             </div>
           ) : null}
-          {showBrowserStrip && onOpenBrowser ? (
+          {activeDockStrip === 'browser' && onOpenBrowser ? (
             <button
               type="button"
               className="gws-browser-strip"
@@ -1328,8 +1574,12 @@ export function ChatScreen({
               <ChevronUp size={16} aria-hidden="true" />
             </button>
           ) : null}
-          <div ref={setRemoteFloatingDockEl} className="grok-composer-floating-slot" />
-          {showLocalQueueStrip ? (
+          <div
+            ref={setRemoteFloatingDockEl}
+            className="grok-composer-floating-slot"
+            style={activeDockStrip !== 'remote' ? { display: 'none' } : undefined}
+          />
+          {activeDockStrip === 'local-queue' ? (
             <PendingQueueStrip
               items={localQueuedStripItems}
               disabled={queueActionBusy || isStoppingBot}
@@ -1341,23 +1591,25 @@ export function ChatScreen({
               tr={t}
             />
           ) : null}
-          <TaskChatPromptBanner
-            variant="mobile"
-            botDeviceId={activeBot.deviceId}
-            botId={activeBot.botId}
-            task={activeBotBannerTask}
-            focusedStep={activeBotFocusedStep}
-            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
-            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
-            waitingTaskIndex={activeBotTaskContext.waitingIndex}
-            bots={taskBotOptions}
-            busy={taskBannerBusy}
-            onClearQuote={onClearJumpedTaskQuote}
-            onCycleWaitingTask={onCycleWaitingTask}
-            onConfirmPlan={onConfirmTaskPlanFromBanner}
-            onOpenTaskDetail={onOpenTaskDetail}
-            onAnswerPrompt={onAnswerTaskPromptFromBanner}
-          />
+          {activeDockStrip === 'task-prompt' || activeDockStrip === 'task-quote' ? (
+            <TaskChatPromptBanner
+              variant="mobile"
+              botDeviceId={activeBot.deviceId}
+              botId={activeBot.botId}
+              task={activeBotBannerTask}
+              focusedStep={activeBotFocusedStep}
+              showQuoteStrip={activeDockStrip === 'task-quote' && activeBotTaskContext.showQuoteStrip}
+              waitingTasksCount={activeBotTaskContext.waitingTasks.length}
+              waitingTaskIndex={activeBotTaskContext.waitingIndex}
+              bots={taskBotOptions}
+              busy={taskBannerBusy}
+              onClearQuote={onClearJumpedTaskQuote}
+              onCycleWaitingTask={onCycleWaitingTask}
+              onConfirmPlan={onConfirmTaskPlanFromBanner}
+              onOpenTaskDetail={onOpenTaskDetail}
+              onAnswerPrompt={onAnswerTaskPromptFromBanner}
+            />
+          ) : null}
         </div>
 
         <CurrentGoogleSetupCard
@@ -1371,29 +1623,31 @@ export function ChatScreen({
 
         {activeBot.archivedAt ? (
           <div className="grok-card-group composer-archived-banner">
-            <span className="composer-archived-banner-text">
+            <span className="composer-archived-banner-text" style={{ fontVariantNumeric: 'tabular-nums' }}>
               {t(`该 Bot 已归档（14 天保留期剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天），当前为只读历史`, `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d left of 14d retention) · Read-only history`)}
             </span>
-            <div className="composer-archived-banner-actions">
+            <ActionBar align="end" className="composer-archived-banner-actions">
               <button
                 type="button"
                 className="grok-done-pill-btn"
+                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                 disabled={action.busy}
                 onClick={() => onUnarchiveBot(activeBot)}
               >
-                {t('立即恢复', 'Restore')}
+                {t('恢复 Bot', 'Restore Bot')}
               </button>
               {!activeBot.isPrimary && (
                 <button
                   type="button"
                   className="hub-outline-btn danger"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   disabled={action.busy}
                   onClick={() => onRequestDeleteBot(activeBot)}
                 >
-                  {t('永久删除 Bot', 'Permanently Delete')}
+                  {t('永久删除 Bot', 'Permanently Delete Bot')}
                 </button>
               )}
-            </div>
+            </ActionBar>
           </div>
         ) : isRemoteComposer && activeBot.remoteIdentity && remoteApi ? (
           <RemotePendingComposer
@@ -1414,6 +1668,7 @@ export function ChatScreen({
             onOffline={() => onShowOfflineNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'))}
             composerMenuOpen={composerMenuOpen}
             onToggleComposerMenu={onToggleComposerMenu}
+            onCloseComposerMenu={onCloseComposerMenu}
             onRunCommand={onRunSlashCommand}
             commandBusy={Boolean(slashBusy)}
             canStop={canStopBot}
@@ -1443,29 +1698,39 @@ export function ChatScreen({
             }}
             onTaskMessageSent={onTaskMessageSent}
             floatingDockContainer={remoteFloatingDockEl}
+            visible={visible}
+            externalOverlayOpen={Boolean(connPopoverVisible || topMenuVisible || anyDrawerOpen || chatSearchOpen)}
+            dismissPopoversSeq={dismissRemotePopoversSeq}
+            onOpenComposerPopover={handleOpenRemoteComposerPopover}
+            onPopoverOpenChange={setRemotePopoverOpen}
+            onFloatingDockActiveChange={setRemoteDockActive}
           />
         ) : (
           <>
-            {slash.open && (
+            {localSlashVisible && (
               <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
                 {slash.matches.map((command, index) => (
                   <div
                     key={command.name}
                     {...slash.optionProps(index)}
                     className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
+                    style={{ minWidth: 0 }}
                   >
-                    <code>{command.name}</code>
-                    <span>{t(command.zh, command.en)}</span>
+                    <code style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>{command.name}</code>
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t(command.zh, command.en)}
+                    </span>
                   </div>
                 ))}
               </div>
             )}
 
-            {composerMenuOpen && (
+            {localPlusMenuVisible && (
               <div className="bot-plus-popover" role="menu">
                 <button
                   type="button"
                   role="menuitem"
+                  style={{ whiteSpace: 'nowrap' }}
                   className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
                   aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
                   disabled={activeBot.hostKind !== 'remote' && (!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading)}
@@ -1478,17 +1743,20 @@ export function ChatScreen({
                     onPickLocalImages('photos');
                   }}
                 >
-                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
                     <rect x="3" y="5" width="18" height="14" rx="2" />
                     <circle cx="8.5" cy="10.5" r="1.5" />
                     <path d="m21 15-4.5-4.5L9 18" />
                   </svg>
-                  <span>{t('选择图片', 'Choose image')}</span>
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('选择图片', 'Choose image')}
+                  </span>
                 </button>
                 {inTauriUi && (
                   <button
                     type="button"
                     role="menuitem"
+                    style={{ whiteSpace: 'nowrap' }}
                     className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
                     aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
                     disabled={activeBot.hostKind !== 'remote' && (!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading)}
@@ -1501,11 +1769,13 @@ export function ChatScreen({
                       onPickLocalImages('camera');
                     }}
                   >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
                       <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                       <circle cx="12" cy="13" r="4" />
                     </svg>
-                    <span>{t('拍照', 'Camera')}</span>
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {t('拍照', 'Camera')}
+                    </span>
                   </button>
                 )}
                 <div className="composer-menu-separator" role="separator" aria-hidden="true" />
@@ -1513,14 +1783,17 @@ export function ChatScreen({
                   type="button"
                   role="menuitem"
                   className="danger"
+                  style={{ whiteSpace: 'nowrap' }}
                   disabled={Boolean(activeEditing)}
                   onClick={() => {
                     onCloseComposerMenu();
                     onOpenClearConfirm();
                   }}
                 >
-                  <Trash2 size={18} />
-                  <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
+                  <Trash2 size={18} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {t('清空对话 (/clear)', 'Clear conversation (/clear)')}
+                  </span>
                 </button>
               </div>
             )}
@@ -1576,10 +1849,18 @@ export function ChatScreen({
             <div className="grok-composer-row">
               <button
                 type="button"
-                className={`grok-composer-plus-circle${composerMenuOpen ? ' active' : ''}`}
+                className={`grok-composer-plus-circle${localPlusMenuVisible ? ' active' : ''}`}
                 aria-label={t('更多操作', 'More actions')}
-                aria-expanded={composerMenuOpen}
-                onClick={onToggleComposerMenu}
+                aria-haspopup="menu"
+                aria-expanded={localPlusMenuVisible}
+                onClick={() => {
+                  if (!composerMenuOpen) {
+                    setConnPopoverOpen(false);
+                    if (chatTopMenuOpen) onCloseChatTopMenu();
+                    dismissLocalSlash();
+                  }
+                  onToggleComposerMenu();
+                }}
               >
                 <Plus size={22} />
               </button>
@@ -1592,7 +1873,15 @@ export function ChatScreen({
                   value={effectiveLocalDraft}
                   disabled={!activeChatScope || Boolean(slashBusy) || editSubmitting}
                   {...slash.textareaProps}
-                  onChange={e => onChangeLocalDraft(e.target.value)}
+                  aria-controls={localSlashVisible ? slash.listboxId : undefined}
+                  aria-expanded={localSlashVisible}
+                  aria-activedescendant={localSlashVisible ? `${slash.listboxId}-${slash.activeIndex}` : undefined}
+                  onChange={e => {
+                    if (composerMenuOpen) onCloseComposerMenu();
+                    if (chatTopMenuOpen) onCloseChatTopMenu();
+                    if (connPopoverOpen) setConnPopoverOpen(false);
+                    onChangeLocalDraft(e.target.value);
+                  }}
                   placeholder={
                     !activeChatScope
                       ? t('正在读取目标身份…', 'Loading target identity…')
@@ -1624,7 +1913,7 @@ export function ChatScreen({
                       onRecallLocalQueuedItem(localQueuedStripItems[localQueuedStripItems.length - 1], true);
                       return;
                     }
-                    if (slash.onKeyDown(e)) return;
+                    if (localSlashVisible && slash.onKeyDown(e)) return;
                     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                       e.preventDefault();
                       if (!activeChatScope) return;

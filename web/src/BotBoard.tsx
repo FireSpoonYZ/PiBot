@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ArrowLeft, ChevronRight, PanelLeft, Search, X } from 'lucide-react';
+import { ArrowLeft, Bot, ChevronRight, PanelLeft, Search, X } from 'lucide-react';
 import type { BotBoardItem } from '../../host-core/index.js';
+import { ActionBar, Button, EmptyState } from './components/ui';
 import { formatWorkingElapsed, GrokBotAvatar } from './GrokBotAvatar';
 import { botActivityText, isBotActivityBusy, parseBotActivityStartedAt } from './botActivity';
 import { useText } from './ui';
@@ -108,7 +109,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
     const review = desktop && !stale && bucket === 'review';
     const failed = desktop && !stale && item?.activity.phase === 'failed' && !interrupted;
     const action = questionnaire
-      ? t('回答问题', 'Answer')
+      ? t('回答问题', 'Answer question')
       : review
         ? t('查看结果', 'View result')
         : failed
@@ -225,17 +226,17 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
             </span>
           </span>
           <span className="bot-board-card-meta">
-            {badge && <span className={`bot-board-badge is-${badge.tone}`}>{badge.label}</span>}
-            {compactTime && <span className="bot-board-time">{compactTime}</span>}
+            {badge && <span className={`bot-board-badge tabular-nums is-${badge.tone}`}>{badge.label}</span>}
+            {compactTime && <span className="bot-board-time tabular-nums">{compactTime}</span>}
             {!hasTaskLink && <ChevronRight size={16} className="bot-board-chevron" aria-hidden="true" />}
           </span>
         </span>
         {summary && (
-          <span className={`bot-board-summary${summary.tone !== 'default' ? ` is-${summary.tone}` : ''}`}>
+          <span className={`bot-board-summary tabular-nums${summary.tone !== 'default' ? ` is-${summary.tone}` : ''}`}>
             {summary.text}
           </span>
         )}
-        {staleNote && <small className="bot-board-stale-note">{staleNote}</small>}
+        {staleNote && <small className="bot-board-stale-note tabular-nums">{staleNote}</small>}
       </>
     );
 
@@ -253,7 +254,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
           >
             {cardContent}
           </button>
-          <div className="bot-board-links">
+          <ActionBar align="between" className="bot-board-links">
             <button
               type="button"
               className="bot-board-link-btn"
@@ -261,7 +262,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
               onClick={() => onOpenTask!(taskId!)}
             >
               <span>{t('查看任务', 'View task')}</span>
-              <span aria-hidden="true"> →</span>
+              <span aria-hidden="true">{'\u00A0'}→</span>
             </button>
             <button
               type="button"
@@ -270,9 +271,9 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
               onClick={openChat}
             >
               <span>{action}</span>
-              <span aria-hidden="true"> →</span>
+              <span aria-hidden="true">{'\u00A0'}→</span>
             </button>
-          </div>
+          </ActionBar>
         </article>
       );
     }
@@ -295,7 +296,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
       <h2 className="bot-board-group-head">
         <span className={`bot-board-dot is-${column.key}`} aria-hidden="true" />
         <span>{column.label}</span>{' '}
-        <small className="bot-board-group-count">{cards.length}</small>
+        <small className="bot-board-group-count tabular-nums">{cards.length}</small>
       </h2>
       <div className="bot-board-grid">
         {cards.map(renderCard)}
@@ -329,14 +330,16 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
       <h2 className="bot-board-group-head">
         <span className="bot-board-dot is-offline" aria-hidden="true" />
         <span>{t('状态未确认', 'Status unconfirmed')}</span>{' '}
-        <small className="bot-board-group-count">{unknown.length}</small>
+        <small className="bot-board-group-count tabular-nums">{unknown.length}</small>
       </h2>
       <div className="bot-board-grid">{unknown.map(renderCard)}</div>
     </section>
   );
 
   const storageErrorText = localizeBoardError(board.storageError || undefined, t);
+  const onlineCount = rows.filter(row => row.target.online).length;
   const offlineTotal = rows.filter(row => row.bucket === 'offline').length;
+  const hasStaleSnapshot = filtered.some(r => r.stale && r.item);
   const filterChips: { key: BoardBucket | 'all'; label: string; count: number }[] = [
     { key: 'all', label: t('全部', 'All'), count: rows.length },
     ...columns
@@ -392,8 +395,11 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
             <h1>{t('Bot 看板', 'Bot Board')}</h1>
           </div>
           {targets.length > 0 && (
-            <span className="bot-board-total" aria-label={t(`共 ${targets.length} 个 Bot`, `${targets.length} bots total`)}>
-              {t(`共 ${targets.length} 个`, `${targets.length} total`)}
+            <span
+              className="bot-board-total tabular-nums"
+              aria-label={t(`共 ${targets.length} 个 Bot，${onlineCount} 个在线`, `${onlineCount} of ${targets.length} bots online`)}
+            >
+              {t(`${onlineCount}/${targets.length} 在线`, `${onlineCount}/${targets.length} online`)}
             </span>
           )}
         </header>
@@ -431,31 +437,58 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
               onClick={() => setFilter(c.key)}
             >
               <span>{c.label}</span>{' '}
-              <span className="bot-board-filter-count">{c.count}</span>
+              <span className="bot-board-filter-count tabular-nums">{c.count}</span>
             </button>
           ))}
         </nav>
 
-        {error && <p role="alert" className="bot-board-alert">{t(`目录读取失败：${error}`, `Failed to load directory: ${error}`)}</p>}
-        {storageErrorText && <p role="alert" className="bot-board-alert">{storageErrorText}</p>}
-        {filtered.some(r => r.stale && r.item) && (
-          <p className="bot-board-snapshot-note">
+        {error ? (
+          <p role="alert" className="bot-board-alert">{t(`目录读取失败：${error}`, `Failed to load directory: ${error}`)}</p>
+        ) : storageErrorText ? (
+          <p role="alert" className="bot-board-alert">{storageErrorText}</p>
+        ) : hasStaleSnapshot ? (
+          <p role="status" className="bot-board-snapshot-note">
             {t('以下保留最后一次读取的状态，请留意更新时间。', 'Showing the last fetched status; check the update timestamp.')}
           </p>
-        )}
+        ) : null}
 
         {!targets.length && (
-          <p className="bot-board-empty-state" role="status">
-            {loading
-              ? t('正在加载 Bot 目录…', 'Loading Bot directory…')
-              : error
-                ? t('目录暂不可用，请恢复连接后重试。', 'Directory unavailable. Restore connection and retry.')
-                : t('还没有 Bot，请先在对话页创建。', 'No Bots yet. Create one in chat first.')}
-          </p>
+          loading ? (
+            <p className="bot-board-empty-state" role="status">{t('正在加载 Bot 目录…', 'Loading Bot directory…')}</p>
+          ) : error ? (
+            <p className="bot-board-empty-state" role="status">{t('目录暂不可用，请恢复连接后重试。', 'Directory unavailable. Restore connection and retry.')}</p>
+          ) : (
+            <EmptyState
+              className="bot-board-empty-state"
+              icon={<Bot aria-hidden="true" />}
+              title={t('还没有 Bot', 'No Bots yet')}
+              description={t('请先在对话页创建 Bot，随后可在此查看实时在线与工作状态。', 'Create a Bot in chat first to monitor its live readiness and activity here.')}
+            />
+          )
         )}
 
         {showFilterEmpty && (
-          <p className="bot-board-empty-state" role="status">{filterEmptyText}</p>
+          <EmptyState
+            className="bot-board-empty-state"
+            icon={<Search aria-hidden="true" />}
+            title={filterEmptyText}
+            action={
+              q || filter !== 'all' ? (
+                <ActionBar align="start">
+                  {q ? (
+                    <Button variant="secondary" size="sm" onClick={() => setQuery('')}>
+                      {t('清空搜索', 'Clear search')}
+                    </Button>
+                  ) : null}
+                  {filter !== 'all' ? (
+                    <Button variant="secondary" size="sm" onClick={() => setFilter('all')}>
+                      {t('显示全部 Bot', 'Show all bots')}
+                    </Button>
+                  ) : null}
+                </ActionBar>
+              ) : undefined
+            }
+          />
         )}
 
         {!desktop && unknownSection}
@@ -472,7 +505,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
           <details className="bot-board-other" open={q ? true : undefined}>
             <summary>
               <ChevronRight size={15} className="bot-board-other-chevron" aria-hidden="true" />
-              <span>{otherSummary}</span>
+              <span className="tabular-nums">{otherSummary}</span>
             </summary>
             <div className="bot-board-groups">
               {otherColumns.map(column => renderGroup(column, cardsByBucket.get(column.key) ?? []))}

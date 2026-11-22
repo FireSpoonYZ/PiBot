@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Loader2, PanelLeft, Plus } from 'lucide-react';
+import { ArrowLeft, ClipboardList, Filter, Loader2, PanelLeft, Plus } from 'lucide-react';
+import { ActionBar, Button, EmptyState, ErrorState } from '../components/ui';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { useText } from '../ui';
 import { TaskCreateView } from './TaskCreateView';
@@ -197,24 +198,29 @@ export function TaskBoardView({
         <div className="tasks-scroll">
           <div className="tasks-container page-enter">
             <header className="detail-topbar">
-              <button type="button" className="back-btn" onClick={() => onSelectTask(null)}>
-                <ArrowLeft size={19} aria-hidden="true" />
-                <span>{t('任务', 'Tasks')}</span>
-              </button>
+              <ActionBar align="start">
+                <button type="button" className="back-btn" onClick={() => onSelectTask(null)}>
+                  <ArrowLeft size={19} aria-hidden="true" />
+                  <span>{t('任务列表', 'Tasks')}</span>
+                </button>
+              </ActionBar>
             </header>
             {matchedFetch?.status === 'not_found' ? (
-              <div className="tasks-empty" role="status">{t('该任务不存在或已删除。', 'This task does not exist or has been deleted.')}</div>
+              <EmptyState
+                className="tasks-empty"
+                icon={<ClipboardList aria-hidden="true" />}
+                title={t('找不到该任务', 'Task not found')}
+                description={t('该任务不存在或已被删除。', 'This task does not exist or has been deleted.')}
+                actionLabel={t('返回任务列表', 'Back to tasks')}
+                onAction={() => onSelectTask(null)}
+              />
             ) : matchedFetch?.status === 'error' ? (
-              <div className="tasks-error-strip" role="alert">
-                <span>{matchedFetch.errorMessage || t('加载任务详情失败', 'Failed to load task details')}</span>
-                <button
-                  type="button"
-                  className="mini-pill"
-                  onClick={() => setDetailRetryTick(n => n + 1)}
-                >
-                  {t('重试', 'Retry')}
-                </button>
-              </div>
+              <ErrorState
+                title={t('加载任务详情失败', 'Failed to load task details')}
+                description={matchedFetch.errorMessage || t('请检查网络连接后重试。', 'Check your connection and try again.')}
+                retryLabel={t('重新加载', 'Reload task')}
+                onRetry={() => setDetailRetryTick(n => n + 1)}
+              />
             ) : (
               <div className="tasks-empty" role="status">{t('正在加载任务详情…', 'Loading task details…')}</div>
             )}
@@ -262,7 +268,7 @@ export function TaskBoardView({
               ) : null}
               <h1>{t('任务', 'Tasks')}</h1>
             </div>
-            <div className="view-topbar-right">
+            <ActionBar align="end" className="view-topbar-right">
               <button
                 type="button"
                 className="new-task-btn"
@@ -274,7 +280,7 @@ export function TaskBoardView({
                 <span className="new-task-btn-text">{t('新建任务', 'New task')}</span>
                 {hasDraft ? <span className="draft-dot" aria-hidden="true" /> : null}
               </button>
-            </div>
+            </ActionBar>
           </header>
 
           <nav className="filter-pills tabular" aria-label={t('事项筛选', 'Filter tasks')}>
@@ -301,21 +307,40 @@ export function TaskBoardView({
             </button>
           </nav>
 
-          {controller.error ? (
+          {controller.error && controller.tasks.length > 0 ? (
             <div className="tasks-error-strip" role="alert">
               <span>{controller.error}</span>
-              <button
-                type="button"
-                className="mini-pill"
-                onClick={() => void controller.refresh()}
-              >
-                {t('重试', 'Retry')}
-              </button>
+              <ActionBar align="end">
+                <button
+                  type="button"
+                  className="mini-pill"
+                  disabled={controller.loading}
+                  aria-busy={controller.loading || undefined}
+                  onClick={() => void controller.refresh()}
+                >
+                  {controller.loading ? t('刷新中…', 'Refreshing…') : t('重新加载', 'Reload tasks')}
+                </button>
+              </ActionBar>
             </div>
           ) : null}
 
           {!controller.loaded && controller.loading && controller.tasks.length === 0 ? (
             <p className="tasks-empty" role="status">{t('正在加载任务…', 'Loading tasks…')}</p>
+          ) : controller.error && controller.tasks.length === 0 ? (
+            <ErrorState
+              title={t('加载任务列表失败', 'Failed to load tasks')}
+              description={controller.error}
+              action={(
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={controller.loading}
+                  onClick={() => void controller.refresh()}
+                >
+                  {controller.loading ? t('加载中…', 'Loading…') : t('重新加载', 'Reload tasks')}
+                </Button>
+              )}
+            />
           ) : visibleList.length > 0 ? (
             <>
               <div className="task-list">{visibleList.map(renderCard)}</div>
@@ -331,11 +356,59 @@ export function TaskBoardView({
               ) : null}
             </>
           ) : controller.tasks.length === 0 ? (
-            <p className="tasks-empty">
-              {t('还没有跟进中的任务，点右上角新建任务，或在和 Bot 聊天时随时交代。', 'No tasks yet. Tap New task above, or ask a Bot in chat anytime.')}
-            </p>
+            <EmptyState
+              className="tasks-empty"
+              icon={<ClipboardList aria-hidden="true" />}
+              title={t('还没有任务', 'No tasks yet')}
+              description={t('写下想法或要求交给 Bot 协作推进，也可以在和 Bot 聊天时随时交代。', 'Write down an idea or request for Bots to coordinate, or ask a Bot anytime in chat.')}
+              actionLabel={hasDraft ? t('继续编辑草稿', 'Resume draft') : t('新建任务', 'New task')}
+              onAction={onOpenCreate}
+            />
+          ) : filter === 'active' ? (
+            <EmptyState
+              className="tasks-empty"
+              icon={<Filter aria-hidden="true" />}
+              title={t('没有未完成的任务', 'No active tasks')}
+              description={t('现有任务都已完成，可切换到「已完成」查看记录，或新建任务。', 'All tasks are completed. Switch to Completed to review them, or create a new task.')}
+              action={(
+                <ActionBar align="start">
+                  <Button variant="secondary" size="sm" onClick={() => setFilter('done')}>
+                    {t('查看已完成', 'View completed')}
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={onOpenCreate}>
+                    {hasDraft ? t('继续编辑草稿', 'Resume draft') : t('新建任务', 'New task')}
+                  </Button>
+                </ActionBar>
+              )}
+            />
+          ) : filter === 'waiting' ? (
+            <EmptyState
+              className="tasks-empty"
+              icon={<Filter aria-hidden="true" />}
+              title={t('没有待你回应的任务', 'Nothing awaiting reply')}
+              description={t('当前没有需要你确认安排或回答问题的事项。', 'No tasks currently need your confirmation or reply.')}
+              action={(
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setFilter(activeList.length > 0 ? 'active' : 'done')}
+                >
+                  {activeList.length > 0 ? t('查看未完成', 'View active') : t('查看已完成', 'View completed')}
+                </Button>
+              )}
+            />
           ) : (
-            <p className="tasks-empty">{t('当前筛选下没有事项。', 'No tasks match this filter.')}</p>
+            <EmptyState
+              className="tasks-empty"
+              icon={<Filter aria-hidden="true" />}
+              title={t('还没有已完成任务', 'No completed tasks yet')}
+              description={t('任务完成后会归档显示在这里。', 'Completed tasks will appear here once finished.')}
+              action={(
+                <Button variant="secondary" size="sm" onClick={() => setFilter('active')}>
+                  {t('查看未完成', 'View active')}
+                </Button>
+              )}
+            />
           )}
         </div>
       </div>

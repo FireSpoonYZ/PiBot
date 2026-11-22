@@ -58,14 +58,16 @@
 
 .bot-board-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3, 12px);
+  gap: var(--space-2, 8px) var(--space-3, 12px);
   min-height: var(--tap-min, 44px);
   margin-bottom: var(--space-3, 12px);
 }
 
 .bot-board-header-left {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: var(--space-2, 8px);
@@ -88,6 +90,8 @@
   align-items: center;
   justify-content: center;
   flex: none;
+  flex-shrink: 0;
+  white-space: nowrap;
   min-width: var(--tap-min, 44px);
   min-height: var(--tap-min, 44px);
   margin-left: -10px;
@@ -96,8 +100,8 @@
   background: transparent;
   padding: 0;
   color: var(--bb-text);
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-header button svg {
@@ -113,6 +117,7 @@
 
 .bot-board-total {
   flex: none;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   padding: 3px 10px;
@@ -128,6 +133,10 @@
 /* ————— Toolbar & Search ————— */
 
 .bot-board-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
   margin-bottom: var(--space-3, 12px);
 }
 
@@ -135,6 +144,8 @@
   display: flex;
   align-items: center;
   gap: var(--space-2, 8px);
+  flex: 1 1 240px;
+  min-width: 0;
   width: 100%;
   min-height: 40px;
   padding: 0 var(--space-3, 12px);
@@ -143,8 +154,8 @@
   background: var(--bb-surface);
   color: var(--bb-text);
   font-size: var(--text-sm, 0.8125rem);
-  transition: border-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    background-color var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-search:focus-within {
@@ -188,6 +199,8 @@
 .bot-board-search-clear {
   position: relative;
   flex: none;
+  flex-shrink: 0;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -200,8 +213,8 @@
   border-radius: var(--radius-full, 999px);
   background: color-mix(in srgb, var(--bb-text) 10%, transparent);
   color: var(--bb-muted);
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    color var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-search-clear::before {
@@ -229,16 +242,11 @@
 
 .bot-board-filters {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2, 8px);
-  overflow-x: auto;
-  scrollbar-width: none;
   padding: 5px 2px;
   margin: -5px -2px var(--space-4, 16px);
-}
-
-.bot-board-filters::-webkit-scrollbar {
-  display: none;
 }
 
 .bot-board-filters button {
@@ -247,6 +255,7 @@
   align-items: center;
   gap: 5px;
   flex: none;
+  flex-shrink: 0;
   white-space: nowrap;
   min-height: 34px;
   padding: 5px 12px;
@@ -258,10 +267,10 @@
   font-weight: var(--weight-medium, 500);
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    border-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    color var(--dur-fast, 150ms) var(--ease-out, ease),
-    opacity var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-filters button::before {
@@ -293,6 +302,7 @@
 }
 
 .bot-board-filter-count {
+  font-variant-numeric: tabular-nums;
   opacity: 0.78;
 }
 
@@ -423,12 +433,13 @@
   text-align: left;
   padding: var(--space-3, 12px) 14px;
   border: 1px solid var(--bb-line);
-  border-radius: var(--radius-md, 14px);
+  border-radius: var(--radius-md, 12px);
   background: var(--bb-surface-elevated);
+  box-shadow: none;
   overflow-wrap: anywhere;
-  transition: border-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-card.is-offline {
@@ -455,8 +466,10 @@
   text-align: left;
   padding: var(--space-3, 12px) 14px 10px;
   border: 0;
-  border-radius: var(--radius-md, 14px) var(--radius-md, 14px) 0 0;
+  border-radius: var(--radius-md, 12px) var(--radius-md, 12px) 0 0;
   background: transparent;
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 button.bot-board-card:active:not(:disabled),
@@ -525,10 +538,12 @@ button.bot-board-card:active:not(:disabled),
 .bot-board-badge {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   padding: 2px 8px;
   border-radius: var(--radius-full, 999px);
   font-size: 0.71875rem;
   font-weight: var(--weight-semibold, 600);
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
   white-space: nowrap;
   color: var(--bb-muted);
@@ -605,6 +620,7 @@ button.bot-board-card:active:not(:disabled),
 
 .bot-board-links {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2, 8px);
@@ -617,6 +633,9 @@ button.bot-board-card:active:not(:disabled),
   position: relative;
   display: inline-flex;
   align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
   min-height: 30px;
   padding: 4px 6px;
   border: 0;
@@ -625,9 +644,9 @@ button.bot-board-card:active:not(:disabled),
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
   color: var(--bb-muted);
-  transition: color var(--dur-fast, 150ms) var(--ease-out, ease),
-    background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    opacity var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .bot-board-link-btn::before {
@@ -664,6 +683,8 @@ details.bot-board-other > summary {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
   width: fit-content;
   min-height: 36px;
   padding: 6px 4px;
@@ -674,7 +695,7 @@ details.bot-board-other > summary {
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-semibold, 600);
   font-variant-numeric: tabular-nums;
-  transition: color var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 details.bot-board-other > summary::-webkit-details-marker {
@@ -698,7 +719,7 @@ details.bot-board-other > :not(summary) {
   flex: none;
   width: 15px;
   height: 15px;
-  transition: transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 details.bot-board-other[open] .bot-board-other-chevron {
@@ -707,30 +728,30 @@ details.bot-board-other[open] .bot-board-other-chevron {
 
 /* ————— Hover (Pointer devices) ————— */
 
-@media (hover: hover) {
-  .bot-board-header button:hover {
+@media (hover: hover) and (pointer: fine) {
+  .bot-board-header button:hover:not(:disabled) {
     background: var(--bb-surface);
   }
-  .bot-board-search-clear:hover {
+  .bot-board-search-clear:hover:not(:disabled) {
     background: color-mix(in srgb, var(--bb-text) 16%, transparent);
     color: var(--bb-text);
   }
-  .bot-board-filters button:hover {
+  .bot-board-filters button:hover:not(:disabled) {
     color: var(--bb-text);
     border-color: color-mix(in srgb, var(--bb-muted) 45%, var(--bb-line));
     opacity: 1;
   }
-  .bot-board-filters button[aria-pressed="true"]:hover {
+  .bot-board-filters button[aria-pressed="true"]:hover:not(:disabled) {
     border-color: var(--bb-primary);
   }
   .bot-board-card:hover {
     border-color: color-mix(in srgb, var(--bb-muted) 42%, var(--bb-line));
   }
-  .bot-board-link-btn:hover {
+  .bot-board-link-btn:hover:not(:disabled) {
     color: var(--bb-text);
     background: var(--bb-surface);
   }
-  .bot-board-link-btn.is-primary:hover {
+  .bot-board-link-btn.is-primary:hover:not(:disabled) {
     color: var(--bb-primary);
     background: var(--bb-primary-soft);
   }
@@ -739,14 +760,26 @@ details.bot-board-other[open] .bot-board-other-chevron {
   }
 }
 
-/* ————— Mobile Responsive ————— */
+/* ————— Responsive (aligned 768px / 640px breakpoints) ————— */
 
-@media (max-width: 700px) {
+@media (max-width: 768px) {
   .bot-board {
-    padding: calc(var(--space-3, 12px) + var(--top, 0px)) var(--space-4, 16px) calc(var(--space-5, 20px) + var(--bottom, 0px));
+    padding: calc(var(--space-4, 16px) + var(--top, 0px)) var(--space-4, 16px) calc(var(--space-5, 20px) + var(--bottom, 0px));
   }
   .bot-board-desktop .bot-board-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .bot-board {
+    padding: calc(var(--space-3, 12px) + var(--top, 0px)) var(--space-4, 16px) calc(var(--space-5, 20px) + var(--bottom, 0px));
+  }
+  .bot-board-card {
+    padding: var(--space-3, 12px);
+  }
+  .bot-board-card-main {
+    padding: var(--space-3, 12px) var(--space-3, 12px) 10px;
   }
 }
 
@@ -758,9 +791,15 @@ details.bot-board-other[open] .bot-board-other-chevron {
   .bot-board-search-clear,
   .bot-board-filters button,
   .bot-board-card,
+  .bot-board-card-main,
   .bot-board-link-btn,
   details.bot-board-other > summary,
   .bot-board-other-chevron {
     transition: none;
+  }
+  .bot-board-header button:active:not(:disabled),
+  button.bot-board-card:active:not(:disabled),
+  .bot-board-card-main:active:not(:disabled) {
+    transform: none;
   }
 }

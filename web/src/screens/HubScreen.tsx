@@ -20,7 +20,8 @@ import {
 import { botAvatarKey } from '../botAvatarSync';
 import { humanizeError, useText } from '../ui';
 import { PlatformLogoIcon, type BotPreviewMeta, type UnifiedBotItem } from '../hub/shared';
-import { Chips } from '../bot-settings/primitives';
+import { ActionBar, Chips } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { HubPrimaryHero } from './HubParts';
 import type { HubContextMenuState, HubListEntry } from './types';
 
@@ -152,27 +153,57 @@ export function HubScreen({
     onRefreshRoomConversations,
     onTriggerRefresh,
     onOpenCenterSettings,
+    onCloseHubAddMenu,
   });
   actionsRef.current = {
     onRefreshRoomConversations,
     onTriggerRefresh,
     onOpenCenterSettings,
+    onCloseHubAddMenu,
   };
 
   useEffect(() => {
-    if (!visible || connectionPhase === 'online' || hubAddMenuOpen) {
+    if (!visible || anyDrawerOpen || connectionPhase === 'online' || hubAddMenuOpen) {
       setConnPopoverOpen(false);
     }
-  }, [visible, connectionPhase, hubAddMenuOpen]);
+  }, [visible, anyDrawerOpen, connectionPhase, hubAddMenuOpen]);
+
+  const connPopoverVisible = visible && connPopoverOpen && connectionPhase !== 'online' && !anyDrawerOpen;
+  const hubAddMenuVisible = visible && hubAddMenuOpen && !anyDrawerOpen;
 
   useEffect(() => {
-    if (!connPopoverOpen) return;
+    if (!connPopoverVisible) return;
+    return registerOverlayBackHandler(() => setConnPopoverOpen(false));
+  }, [connPopoverVisible]);
+
+  useEffect(() => {
+    if (!connPopoverVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConnPopoverOpen(false);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setConnPopoverOpen(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverOpen]);
+  }, [connPopoverVisible]);
+
+  useEffect(() => {
+    if (!hubAddMenuVisible) return;
+    return registerOverlayBackHandler(() => actionsRef.current.onCloseHubAddMenu());
+  }, [hubAddMenuVisible]);
+
+  useEffect(() => {
+    if (!hubAddMenuVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        actionsRef.current.onCloseHubAddMenu();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [hubAddMenuVisible]);
 
   // H5: 群聊加载失败走 F1 浮层通知，带重试按钮；成功或离页立即清除。
   useEffect(() => {
@@ -274,22 +305,33 @@ export function HubScreen({
           type="button"
           ref={navigationTriggerRef}
           className="hub-circle-btn hub-left-trigger"
+          style={{ flexShrink: 0 }}
           aria-label={t('打开侧边栏', 'Open sidebar')}
           aria-haspopup="dialog"
           aria-expanded={leftDrawerOpen}
-          onClick={onOpenLeftDrawer}
+          onClick={() => {
+            setConnPopoverOpen(false);
+            if (hubAddMenuOpen) onCloseHubAddMenu();
+            onOpenLeftDrawer();
+          }}
         >
           <PanelLeft size={20} strokeWidth={2} />
         </button>
 
         {connectionPhase === 'online' ? (
-          <h1 className={`hub-top-title${titleObscured ? ' is-obscured' : ''}`}>PiBot</h1>
+          <h1
+            className={`hub-top-title${titleObscured ? ' is-obscured' : ''}`}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            PiBot
+          </h1>
         ) : (
           <button
             type="button"
             className={`hub-top-title hub-top-status-btn is-${connectionPhase}${titleObscured ? ' is-obscured' : ''}`}
+            style={{ whiteSpace: 'nowrap', minWidth: 0 }}
             aria-haspopup="dialog"
-            aria-expanded={connPopoverOpen}
+            aria-expanded={connPopoverVisible}
             aria-label={`${statusText} - ${t('查看连接详情', 'View connection details')}`}
             onClick={() => {
               if (hubAddMenuOpen) onCloseHubAddMenu();
@@ -301,7 +343,7 @@ export function HubScreen({
             ) : (
               <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
             )}
-            <span className="hub-top-status-label">{statusText}</span>
+            <span className="hub-top-status-label" style={{ whiteSpace: 'nowrap' }}>{statusText}</span>
           </button>
         )}
 
@@ -346,9 +388,10 @@ export function HubScreen({
         <button
           type="button"
           className="hub-circle-btn hub-add-btn"
+          style={{ flexShrink: 0 }}
           aria-label={t('新建', 'New')}
           aria-haspopup="menu"
-          aria-expanded={hubAddMenuOpen}
+          aria-expanded={hubAddMenuVisible}
           onClick={() => {
             setConnPopoverOpen(false);
             onToggleHubAddMenu();
@@ -357,7 +400,7 @@ export function HubScreen({
           <Plus size={22} strokeWidth={2.2} />
         </button>
 
-        {connPopoverOpen && connectionPhase !== 'online' && (
+        {connPopoverVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={() => setConnPopoverOpen(false)} />
             <div
@@ -377,57 +420,65 @@ export function HubScreen({
               <p className="hub-conn-popover-hint">
                 {t('提示：在首页下拉也可立即检查并尝试恢复连接。', 'Tip: Pull down on Hub to check and retry connecting.')}
               </p>
-              <div className="hub-conn-popover-actions">
+              <ActionBar align="end" className="hub-conn-popover-actions">
                 <button
                   type="button"
                   className="hub-conn-popover-btn"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   onClick={() => {
                     setConnPopoverOpen(false);
                     onTriggerRefresh();
                   }}
                 >
-                  {t('立即重试', 'Retry now')}
+                  {t('重试连接', 'Retry connection')}
                 </button>
                 <button
                   type="button"
                   className="hub-conn-popover-btn is-primary"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                   onClick={() => {
                     setConnPopoverOpen(false);
                     onOpenCenterSettings();
                   }}
                 >
-                  {t('去设置', 'Settings')}
+                  {t('打开设置', 'Open settings')}
                 </button>
-              </div>
+              </ActionBar>
             </div>
           </>
         )}
 
-        {hubAddMenuOpen && (
+        {hubAddMenuVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={onCloseHubAddMenu} />
             <div className="grok-floating-menu" role="menu">
               <button
                 type="button"
                 role="menuitem"
+                style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseHubAddMenu();
                   onOpenCreateBot(false);
                 }}
               >
-                <Sparkles size={19} />
-                <span>{t('新建 Bot', 'New Bot')}</span>
+                <Sparkles size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t('新建 Bot', 'New Bot')}
+                </span>
               </button>
               <button
                 type="button"
                 role="menuitem"
+                style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseHubAddMenu();
                   onOpenCreateGroup();
                 }}
               >
-                <Users size={19} />
-                <span>{t('创建群聊', 'Create Group Chat')}</span>
+                <Users size={19} style={{ flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t('创建群聊', 'Create Group Chat')}
+                </span>
               </button>
             </div>
           </>
@@ -470,6 +521,7 @@ export function HubScreen({
             <button
               type="button"
               className="hub-hero-button hub-hero-card hub-hero-placeholder"
+              style={{ minWidth: 0, fontVariantNumeric: 'tabular-nums' }}
               onClick={onOpenPrimaryCreate}
               aria-label={t('创建主 Bot', 'Create Primary Bot')}
             >
@@ -480,11 +532,26 @@ export function HubScreen({
                 platformBadge={<PlatformLogoIcon platform="android" size={11} />}
                 size={64}
               />
-              <div className="hub-hero-card-text">
-                <span className="hub-hero-name">{t('创建主 Bot', 'Create Primary Bot')}</span>
-                <span className="hub-bot-host-badge local">
-                  <PlatformLogoIcon platform="android" size={12} />
-                  <span className="hub-bot-host-text">{t('本机', 'Local')}</span>
+              <div className="hub-hero-card-text" style={{ minWidth: 0 }}>
+                <span
+                  className="hub-hero-name"
+                  style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  {t('创建主 Bot', 'Create Primary Bot')}
+                </span>
+                <span
+                  className="hub-bot-host-badge local"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0, maxWidth: '100%', fontVariantNumeric: 'tabular-nums' }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+                    <PlatformLogoIcon platform="android" size={12} />
+                  </span>
+                  <span
+                    className="hub-bot-host-text"
+                    style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
+                    {t('本机', 'Local')}
+                  </span>
                 </span>
               </div>
             </button>
@@ -493,7 +560,7 @@ export function HubScreen({
 
         {/* Pinned & Regular Bots and Rooms (Archived section moved to Settings) */}
         <section className="hub-bot-list" aria-label={t('Bot 列表', 'Bots')}>
-          <div className="hub-filter-chips">
+          <div className="hub-filter-chips" style={{ minWidth: 0 }}>
             <Chips<'all' | 'bots' | 'rooms'>
               value={hubFilter}
               onChange={onChangeHubFilter}

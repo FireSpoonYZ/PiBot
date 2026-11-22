@@ -1,7 +1,10 @@
 // 发送记录从当前档案的本机账本读取。发送、核对与取消仍绑定原记录和设备。
-import { Component, createRef, type ReactNode } from 'react';
+import { Component, createRef, type ContextType, type ReactNode } from 'react';
+import { CheckCircle2, Filter, History, Inbox, RefreshCw } from 'lucide-react';
 import type { PendingCursor, PendingListPage, PendingRecord, PendingState } from '../../../host-core/index.js';
 import type { DesktopUiIntent } from '../../../host-core/desktop-client.js';
+import { ActionBar, EmptyState, ErrorState, InlineNotice, Segmented } from '../../../web/src/components/ui';
+import { LanguageOverride, useText } from '../../../web/src/ui';
 import type { SendRecordsTarget } from './BotChats';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { toError } from './api';
@@ -9,6 +12,8 @@ import './PendingPanel.css';
 
 type RecordsView = 'attention' | 'history';
 type Cursors = Partial<Record<PendingState, PendingCursor | null>>;
+type BusyOp = 'pending_send' | 'pending_reconcile' | 'pending_cancel' | 'reconcile_intent' | 'delete_intent';
+type Translate = (zh: string, en: string) => string;
 
 interface Props {
   api: DesktopPanelApi;
@@ -30,6 +35,7 @@ interface State {
   notice: string | null;
   loading: boolean;
   busyId: string | null;
+  busyOp: BusyOp | null;
 }
 
 const VIEW_STATES: Record<RecordsView, readonly PendingState[]> = {
@@ -37,12 +43,14 @@ const VIEW_STATES: Record<RecordsView, readonly PendingState[]> = {
   history: ['accepted', 'rejected'],
 };
 
-const INTENT_LABELS: Record<DesktopUiIntent['method'], string> = {
-  createBot: '创建智能体',
-  createScope: '创建群聊',
-  updateScope: '更新群聊',
-  deleteScope: '解散群聊',
-};
+function intentLabel(method: DesktopUiIntent['method'], t: Translate): string {
+  switch (method) {
+    case 'createBot': return t('创建智能体', 'Create agent');
+    case 'createScope': return t('创建群聊', 'Create group chat');
+    case 'updateScope': return t('更新群聊', 'Update group chat');
+    case 'deleteScope': return t('解散群聊', 'Delete group chat');
+  }
+}
 
 function isCancelled(item: PendingRecord): boolean {
   return item.state === 'rejected' && item.receipt === null &&
@@ -56,14 +64,34 @@ function canSendRecord(item: PendingRecord): boolean {
   );
 }
 
-function recordStatus(item: PendingRecord): string {
+function recordStatus(item: PendingRecord, t: Translate): string {
   switch (item.state) {
-    case 'pending': return item.lastError?.outcome === 'not-sent' ? '未发出' : '等待发送';
-    case 'sending': return '发送中';
-    case 'unconfirmed': return '结果未知';
-    case 'accepted': return '已接收';
-    case 'rejected': return isCancelled(item) ? '已取消' : '已拒绝';
+    case 'pending': return item.lastError?.outcome === 'not-sent' ? t('未发出', 'Not sent') : t('等待发送', 'Queued');
+    case 'sending': return t('发送中', 'Sending');
+    case 'unconfirmed': return t('结果未知', 'Unconfirmed');
+    case 'accepted': return t('已接收', 'Accepted');
+    case 'rejected': return isCancelled(item) ? t('已取消', 'Cancelled') : t('已拒绝', 'Rejected');
   }
+}
+
+function recordGuidance(item: PendingRecord, transportConnected: boolean, t: Translate): string | undefined {
+  if (item.state === 'unconfirmed' || item.state === 'sending') {
+    return transportConnected
+      ? t('尚未收到明确回执，请先核对发送结果，避免重复发送。', 'No final receipt yet; verify status before retrying.')
+      : t('设备当前离线，恢复连接后可核对发送结果。', 'Device is offline; reconnect to verify send status.');
+  }
+  if (item.state === 'pending' && !transportConnected) {
+    return t('设备当前离线，恢复连接后可继续发送，或先取消此记录。', 'Device is offline; reconnect to send, or cancel this queued message.');
+  }
+  if (item.state === 'rejected' && !isCancelled(item)) {
+    if (item.lastError?.code === 'REQUEST_CONFLICT') {
+      return t('请求与远端更新冲突，无法直接重发。', 'This request conflicted with a newer update and cannot be resent directly.');
+    }
+    if (canSendRecord(item) && !transportConnected) {
+      return t('设备当前离线，恢复连接后可重新发送。', 'Device is offline; reconnect to resend.');
+    }
+  }
+  return undefined;
 }
 
 function recordTarget(item: PendingRecord): SendRecordsTarget {
@@ -73,62 +101,83 @@ function recordTarget(item: PendingRecord): SendRecordsTarget {
 }
 
 function TechDetails({ rows, raw }: { rows: string[]; raw?: unknown }) {
+  const t = useText();
   return (
     <details className="pending-tech">
-      <summary>技术详情</summary>
+      <summary>{t('技术详情', 'Technical details')}</summary>
       <div className="pending-tech-body">
         {rows.map((row) => <span key={row} className="metadata pending-mono">{row}</span>)}
         {raw != null && (
-          <details className="pending-raw raw-history">
-            <summary>原始回执</summary>
+          <div className="pending-raw" style={{ marginTop: 4 }}>
+            <span className="metadata" style={{ display: 'block', marginBottom: 4 }}>{t('原始回执', 'Raw receipt')}</span>
             <pre className="raw-history-content">{JSON.stringify(raw, null, 2)}</pre>
-          </details>
+          </div>
         )}
       </div>
     </details>
   );
 }
 
-function RecordRow({ title, status, statusClass, createdAt, preview, action, extraActions, details, raw }: {
+function RecordRow({ title, status, statusClass, createdAt, preview, guidance, actions, details, raw }: {
   title: string;
   status: string;
   statusClass: string;
   createdAt?: string;
   preview?: ReactNode;
-  action?: ReactNode;
-  extraActions?: ReactNode;
+  guidance?: string;
+  actions?: ReactNode;
   details: string[];
   raw?: unknown;
 }) {
   const created = createdAt ? new Date(createdAt) : null;
-  const technicalDetails = <TechDetails rows={details} raw={raw} />;
   return (
-    <article className="pending-record">
-      <div className="pending-record-copy">
-        <strong className="entity-title">{title}</strong>
-        <div className="pending-record-meta">
-          <span className={'status ' + statusClass}>{status}</span>
-          {created && !Number.isNaN(created.getTime()) && (
-            <time className="metadata" dateTime={createdAt}>{created.toLocaleString()}</time>
-          )}
-        </div>
-        {preview && <p className="pending-text">{preview}</p>}
-      </div>
-      {action}
-      {extraActions ? (
-        <details className="pending-record-more">
-          <summary>更多</summary>
-          <div className="pending-more-content">
-            <div className="pending-extra-actions">{extraActions}</div>
-            {technicalDetails}
+    <article
+      className="pending-record"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        padding: '12px 14px',
+        border: '1px solid var(--line)',
+        borderRadius: 'var(--radius-md)',
+        background: 'var(--surface-elevated)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: '8px 12px',
+        }}
+      >
+        <div className="pending-record-copy" style={{ flex: '1 1 220px', minWidth: 0 }}>
+          <strong className="entity-title">{title}</strong>
+          <div className="pending-record-meta">
+            <span className={'status ' + statusClass}>{status}</span>
+            {created && !Number.isNaN(created.getTime()) && (
+              <time className="metadata" dateTime={createdAt}>{created.toLocaleString()}</time>
+            )}
           </div>
-        </details>
-      ) : technicalDetails}
+          {preview && <p className="pending-text">{preview}</p>}
+          {guidance && <p className="metadata" style={{ margin: '4px 0 0' }}>{guidance}</p>}
+        </div>
+        {actions ? (
+          <ActionBar align="end" style={{ flexWrap: 'wrap' }}>
+            {actions}
+          </ActionBar>
+        ) : null}
+      </div>
+      <TechDetails rows={details} raw={raw} />
     </article>
   );
 }
 
 export class PendingPanel extends Component<Props, State> {
+  static contextType = LanguageOverride;
+  declare context: ContextType<typeof LanguageOverride>;
+
   state: State = {
     view: 'attention',
     items: [],
@@ -139,6 +188,17 @@ export class PendingPanel extends Component<Props, State> {
     notice: null,
     loading: true,
     busyId: null,
+    busyOp: null,
+  };
+
+  private t = (zh: string, en: string): string => {
+    const language = this.context;
+    const isEn =
+      language === 'en' ||
+      ((language === 'system' || language === undefined) &&
+        typeof navigator !== 'undefined' &&
+        navigator.language.startsWith('en'));
+    return isEn ? en : zh;
   };
 
   private unsub?: () => void;
@@ -187,7 +247,7 @@ export class PendingPanel extends Component<Props, State> {
     if (!sameDevice || prev.target !== this.props.target) {
       this.identityEpoch += 1;
       this.loadedPages = 1;
-      this.setState({ view: 'attention', items: [], cursors: {}, focused: undefined, busyId: null, notice: null }, () => {
+      this.setState({ view: 'attention', items: [], cursors: {}, focused: undefined, busyId: null, busyOp: null, notice: null }, () => {
         void this.load();
         void this.loadFocused();
       });
@@ -195,7 +255,7 @@ export class PendingPanel extends Component<Props, State> {
       // 同一账本换代时保留已加载页和视口，旧代回执仍作废。
       if (a?.generation !== b?.generation) {
         this.identityEpoch += 1;
-        this.setState({ busyId: null });
+        this.setState({ busyId: null, busyOp: null });
       }
       void this.load(false, this.loadedPages);
       void this.loadFocused();
@@ -274,7 +334,7 @@ export class PendingPanel extends Component<Props, State> {
     this.setState((state) => ({
       items: state.items.map((old) => old.id === item.id ? item : old),
       focused: this.props.target?.recordId === item.id ? item : state.focused,
-      notice: recordStatus(item),
+      notice: this.t(`当前记录状态：${recordStatus(item, this.t)}`, `Record status: ${recordStatus(item, this.t)}`),
     }));
   }
 
@@ -284,13 +344,13 @@ export class PendingPanel extends Component<Props, State> {
     const epoch = this.identityEpoch;
     this.inFlight = true;
     let refresh = true;
-    this.setState({ busyId: item.id, error: null, notice: null });
+    this.setState({ busyId: item.id, busyOp: op, error: null, notice: null });
     try {
       if (op === 'pending_send') {
         const latest = await api.pending(identity, 'pending_get', { id: item.id });
         if (!this.isCurrent(identity, epoch) || !this.props.transportConnected) return;
         if (!latest) {
-          this.setState({ notice: '该记录已不可用。' });
+          this.setState({ notice: this.t('该记录已不可用。', 'This record is no longer available.') });
           return;
         }
         if (!canSendRecord(latest)) {
@@ -307,7 +367,7 @@ export class PendingPanel extends Component<Props, State> {
       }
     } finally {
       this.inFlight = false;
-      if (this.isCurrent(identity, epoch)) this.setState({ busyId: null });
+      if (this.isCurrent(identity, epoch)) this.setState({ busyId: null, busyOp: null });
       if (this.mounted && refresh) void this.load(false, this.loadedPages);
     }
   }
@@ -319,18 +379,43 @@ export class PendingPanel extends Component<Props, State> {
         intent.targetDeviceId !== identity.targetDeviceId) return;
     const epoch = this.identityEpoch;
     this.inFlight = true;
-    this.setState({ busyId: intent.id, error: null, notice: null });
+    this.setState({ busyId: intent.id, busyOp: 'reconcile_intent', error: null, notice: null });
     try {
       const { requestId } = intent.params as { requestId: string };
       const bot = await api.call(identity, 'findByRequest', { requestId });
       if (!this.isCurrent(identity, epoch)) return;
       if (bot) await api.updateIntent(intent.id, { outcome: 'responded', result: bot, error: undefined });
-      if (this.isCurrent(identity, epoch)) this.setState({ notice: bot ? '已找到创建结果。' : '暂时无法确认创建结果。' });
+      if (this.isCurrent(identity, epoch)) {
+        this.setState({
+          notice: bot
+            ? this.t('已找到智能体创建结果。', 'Found agent creation result.')
+            : this.t('暂时无法确认创建结果，请稍后再核对。', 'Could not confirm creation result yet; verify again later.'),
+        });
+      }
     } catch (error) {
       if (this.isCurrent(identity, epoch)) this.setState({ error: toError(error).message });
     } finally {
       this.inFlight = false;
-      if (this.isCurrent(identity, epoch)) this.setState({ busyId: null });
+      if (this.isCurrent(identity, epoch)) this.setState({ busyId: null, busyOp: null });
+    }
+  }
+
+  private async deleteIntentRecord(intent: DesktopUiIntent): Promise<void> {
+    const { identity, api } = this.props;
+    if (!identity || this.inFlight) return;
+    const epoch = this.identityEpoch;
+    this.inFlight = true;
+    this.setState({ busyId: intent.id, busyOp: 'delete_intent', error: null, notice: null });
+    try {
+      await api.deleteIntent(intent.id);
+      if (this.isCurrent(identity, epoch)) {
+        this.setState({ notice: this.t('已移除操作记录。', 'Action record removed.') });
+      }
+    } catch (error) {
+      if (this.isCurrent(identity, epoch)) this.setState({ error: toError(error).message });
+    } finally {
+      this.inFlight = false;
+      if (this.isCurrent(identity, epoch)) this.setState({ busyId: null, busyOp: null });
     }
   }
 
@@ -339,37 +424,73 @@ export class PendingPanel extends Component<Props, State> {
     const target = recordTarget(item);
     const name = conversationName?.(target);
     const busy = this.state.busyId !== null;
+    const busyThis = this.state.busyId === item.id;
+    const busyOp = busyThis ? this.state.busyOp : null;
     const canCheck = item.state === 'unconfirmed' || item.state === 'sending';
     const canSend = canSendRecord(item);
     const canCancel = item.state === 'pending';
     const canOpen = Boolean(name && onOpenConversation);
-    const action = canCheck ? (
-      <button type="button" className="primary-button pending-primary-action" onClick={() => void this.run(item, 'pending_reconcile')} disabled={busy || !transportConnected}>
-        核对结果
-      </button>
-    ) : canSend ? (
-      <button type="button" className="primary-button pending-primary-action" onClick={() => void this.run(item, 'pending_send')} disabled={busy || !transportConnected}>
-        {item.lastError || item.state === 'rejected' ? '重新发送' : '发送'}
-      </button>
+    const hasActions = canCheck || canSend || canCancel || canOpen;
+    const actions = hasActions ? (
+      <>
+        {canCheck && (
+          <button
+            type="button"
+            className="primary-button pending-primary-action"
+            onClick={() => void this.run(item, 'pending_reconcile')}
+            disabled={busy || !transportConnected}
+          >
+            {busyOp === 'pending_reconcile' ? this.t('正在核对…', 'Verifying…') : this.t('核对发送结果', 'Verify send status')}
+          </button>
+        )}
+        {!canCheck && canSend && (
+          <button
+            type="button"
+            className="primary-button pending-primary-action"
+            onClick={() => void this.run(item, 'pending_send')}
+            disabled={busy || !transportConnected}
+          >
+            {busyOp === 'pending_send'
+              ? this.t('正在发送…', 'Sending…')
+              : item.lastError || item.state === 'rejected'
+                ? this.t('重新发送消息', 'Resend message')
+                : this.t('发送消息', 'Send message')}
+          </button>
+        )}
+        {canCancel && (
+          <button
+            type="button"
+            className="secondary-button pending-quiet-button"
+            onClick={() => void this.run(item, 'pending_cancel')}
+            disabled={busy}
+          >
+            {busyOp === 'pending_cancel' ? this.t('正在取消…', 'Cancelling…') : this.t('取消发送', 'Cancel send')}
+          </button>
+        )}
+        {canOpen && (
+          <button
+            type="button"
+            className="secondary-button pending-quiet-button"
+            onClick={() => onOpenConversation?.(target)}
+          >
+            {item.kind === 'primary' ? this.t('打开所属对话', 'Open conversation') : this.t('打开所属群聊', 'Open group chat')}
+          </button>
+        )}
+      </>
     ) : undefined;
     return (
       <RecordRow
         key={'message:' + item.id}
-        title={name ?? (item.kind === 'primary' ? '智能体对话' : '群聊')}
-        status={recordStatus(item)}
+        title={name ?? (item.kind === 'primary' ? this.t('智能体对话', 'Agent conversation') : this.t('群聊', 'Group chat'))}
+        status={recordStatus(item, this.t)}
         statusClass={'pending-state-' + (isCancelled(item) ? 'cancelled' : item.state)}
         createdAt={item.createdAt}
-        preview={item.text || (item.kind === 'primary' && item.attachments?.length ? `${item.attachments.length} 张图片` : undefined)}
-        action={action}
-        extraActions={(canCancel || canOpen) ? (
-          <>
-            {canCancel && <button type="button" className="secondary-button" onClick={() => void this.run(item, 'pending_cancel')} disabled={busy}>取消发送</button>}
-            {canOpen && <button type="button" className="secondary-button" onClick={() => onOpenConversation?.(target)}>打开对话</button>}
-          </>
-        ) : undefined}
+        preview={item.text || (item.kind === 'primary' && item.attachments?.length ? this.t(`${item.attachments.length} 张图片`, `${item.attachments.length} images`) : undefined)}
+        guidance={recordGuidance(item, transportConnected, this.t)}
+        actions={actions}
         details={[
-          '目标设备 ' + item.targetDeviceId,
-          item.kind === 'primary' ? '智能体 ' + item.botId : '群聊 ' + item.scopeId,
+          this.t('目标设备 ', 'Target device ') + item.targetDeviceId,
+          item.kind === 'primary' ? this.t('智能体 ', 'Agent ') + item.botId : this.t('群聊 ', 'Group ') + item.scopeId,
           item.kind === 'primary' ? 'requestId ' + item.requestId : 'messageId ' + item.messageId,
           ...(item.lastError ? [item.lastError.code + ' · ' + item.lastError.outcome] : []),
         ]}
@@ -379,39 +500,72 @@ export class PendingPanel extends Component<Props, State> {
   }
 
   private renderIntent(intent: DesktopUiIntent): ReactNode {
-    const { conversationName, onOpenConversation, transportConnected, api } = this.props;
+    const { conversationName, onOpenConversation, transportConnected } = this.props;
     const params = intent.params as { requestId?: string; role?: string; scopeId?: string };
     const target = params.scopeId ? { deviceId: intent.targetDeviceId, scopeId: params.scopeId } : undefined;
     const name = target && conversationName?.(target);
     const waiting = intent.outcome === 'unconfirmed';
     const canCheck = waiting && intent.method === 'createBot';
     const canOpen = Boolean(target && name && onOpenConversation);
+    const canRemove = !waiting;
     const subject = params.role || name;
     const failed = intent.outcome === 'responded' && !!intent.error && !intent.result;
-    const status = waiting ? '结果未知' : intent.outcome === 'not-sent' ? '未发出' : failed ? '操作失败' : '已完成';
+    const status = waiting
+      ? this.t('结果未知', 'Unconfirmed')
+      : intent.outcome === 'not-sent'
+        ? this.t('未发出', 'Not sent')
+        : failed
+          ? this.t('操作失败', 'Failed')
+          : this.t('已完成', 'Completed');
+    const busy = this.state.busyId !== null;
+    const busyThis = this.state.busyId === intent.id;
+    const busyOp = busyThis ? this.state.busyOp : null;
+    const guidance = waiting && !transportConnected
+      ? this.t('设备当前离线，恢复连接后可核对操作结果。', 'Device is offline; reconnect to verify action status.')
+      : undefined;
+    const actions = (canCheck || canOpen || canRemove) ? (
+      <>
+        {canCheck && (
+          <button
+            type="button"
+            className="primary-button pending-primary-action"
+            onClick={() => void this.reconcileBotIntent(intent)}
+            disabled={busy || !transportConnected}
+          >
+            {busyOp === 'reconcile_intent' ? this.t('正在核对…', 'Verifying…') : this.t('核对创建结果', 'Verify creation')}
+          </button>
+        )}
+        {target && canOpen && (
+          <button
+            type="button"
+            className="secondary-button pending-quiet-button"
+            onClick={() => onOpenConversation?.(target)}
+          >
+            {this.t('打开所属群聊', 'Open group chat')}
+          </button>
+        )}
+        {canRemove && (
+          <button
+            type="button"
+            className="secondary-button pending-quiet-button"
+            onClick={() => void this.deleteIntentRecord(intent)}
+            disabled={busy}
+          >
+            {busyOp === 'delete_intent' ? this.t('正在移除…', 'Removing…') : this.t('移除此记录', 'Remove record')}
+          </button>
+        )}
+      </>
+    ) : undefined;
     return (
       <RecordRow
         key={'intent:' + intent.id}
-        title={INTENT_LABELS[intent.method] + (subject ? ' · ' + subject : '')}
+        title={intentLabel(intent.method, this.t) + (subject ? ' · ' + subject : '')}
         status={status}
         statusClass={failed ? 'pending-state-rejected' : 'pending-outcome-' + intent.outcome}
-        action={canCheck && (
-          <button type="button" className="primary-button pending-primary-action" onClick={() => void this.reconcileBotIntent(intent)} disabled={!!this.state.busyId || !transportConnected}>
-            核对结果
-          </button>
-        )}
-        extraActions={(canOpen || !waiting) ? (
-          <>
-            {target && canOpen && <button type="button" className="secondary-button" onClick={() => onOpenConversation?.(target)}>打开群聊</button>}
-            {!waiting && (
-              <button type="button" className="secondary-button" onClick={() => void api.deleteIntent(intent.id).catch((error) => this.setState({ error: toError(error).message }))} disabled={!!this.state.busyId}>
-                删除记录
-              </button>
-            )}
-          </>
-        ) : undefined}
+        guidance={guidance}
+        actions={actions}
         details={[
-          '目标设备 ' + intent.targetDeviceId,
+          this.t('目标设备 ', 'Target device ') + intent.targetDeviceId,
           'requestId ' + (params.requestId ?? '—'),
           ...(intent.error ? [intent.error.code + ' · ' + intent.error.outcome] : []),
         ]}
@@ -420,17 +574,35 @@ export class PendingPanel extends Component<Props, State> {
     );
   }
 
-  private switchView(): void {
-    const view = this.state.view === 'attention' ? 'history' : 'attention';
+  private switchView = (view: RecordsView): void => {
+    if (view === this.state.view) return;
     this.loadedPages = 1;
     if (this.bodyRef.current) this.bodyRef.current.scrollTop = 0;
     this.setState({ view, items: [], cursors: {}, error: null, notice: null, loading: true }, () => void this.load());
-  }
+  };
+
+  private refreshRecords = (): void => {
+    if (!this.props.identity || this.state.loading || this.state.busyId) return;
+    void this.load(false, this.loadedPages);
+    void this.loadFocused();
+  };
 
   render(): ReactNode {
     const { identity, transportConnected, target, conversationName, onClearTarget } = this.props;
-    const { view, loading, error, notice, focused, cursors } = this.state;
-    if (!identity) return <p className="empty-state">连接设备后查看发送记录。</p>;
+    const { view, loading, error, notice, focused, cursors, busyId } = this.state;
+    if (!identity) {
+      return (
+        <div className="pending-panel">
+          <div className="chat-pane pending-panel-body">
+            <EmptyState
+              icon={<Inbox />}
+              title={this.t('尚未连接设备', 'No device connected')}
+              description={this.t('连接中心或本机服务并选择设备后，即可查看本机发送账本与待处理记录。', 'Connect to a center or local service and select a device to view local send records.')}
+            />
+          </div>
+        </div>
+      );
+    }
     const items = this.state.items.filter((item) =>
       item.id !== focused?.id && VIEW_STATES[view].includes(item.state) && this.matchesConversation(item),
     );
@@ -442,52 +614,247 @@ export class PendingPanel extends Component<Props, State> {
     const hasMore = Object.values(cursors).some(Boolean);
     const showingHistory = view === 'history';
     const noRecords = !items.length && !intents.length && !target?.recordId;
+
+    // 单一优先级状态栏：有列表项时的操作错误 > 离线只读提示 > 操作结果提示；空态错误交由 ErrorState 统一呈现，避免双重报错。
+    let statusBanner: ReactNode = null;
+    if (error && !noRecords) {
+      statusBanner = (
+        <InlineNotice
+          tone="error"
+          title={this.t('记录操作未能完成', 'Could not complete record action')}
+          description={
+            error + ' ' + (
+              transportConnected
+                ? this.t('请重新读取账本确认最新状态，避免重复发送。', 'Reload the ledger to verify the latest status before retrying.')
+                : this.t('当前设备离线，请先检查设备连接后再重试。', 'Device is currently offline; check connection before retrying.')
+            )
+          }
+          onDismiss={() => this.setState({ error: null })}
+          action={(
+            <ActionBar align="start">
+              <button
+                type="button"
+                className="secondary-button pending-quiet-button"
+                onClick={this.refreshRecords}
+                disabled={loading || !!busyId}
+              >
+                {this.t('重新读取记录', 'Reload records')}
+              </button>
+            </ActionBar>
+          )}
+        />
+      );
+    } else if (!transportConnected) {
+      statusBanner = (
+        <InlineNotice
+          tone="warning"
+          title={this.t('当前设备连接不可用', 'Device connection unavailable')}
+          description={this.t('离线时仍可浏览本地账本或取消待发送消息；设备恢复在线后可继续发送与核对结果。', 'You can still inspect the local ledger or cancel queued messages while offline; reconnect to send or verify.')}
+          action={(
+            <ActionBar align="start">
+              <button
+                type="button"
+                className="secondary-button pending-quiet-button"
+                onClick={this.refreshRecords}
+                disabled={loading || !!busyId}
+              >
+                {this.t('刷新本地账本', 'Refresh local ledger')}
+              </button>
+            </ActionBar>
+          )}
+        />
+      );
+    } else if (notice) {
+      statusBanner = (
+        <InlineNotice
+          tone="info"
+          title={notice}
+          onDismiss={() => this.setState({ notice: null })}
+        />
+      );
+    }
+
     return (
       <div className="pending-panel">
         <header className="pending-panel-head">
           <div className="pending-panel-heading">
             <div>
-              <h3>{showingHistory ? '历史记录' : '待处理'}</h3>
+              <h3>{showingHistory ? this.t('历史发送记录', 'Send history') : this.t('待处理记录', 'Needs attention')}</h3>
               {target && (
                 <div className="pending-context">
-                  <span className="metadata">{conversationName?.(target) ?? (target.scopeId ? '当前群聊' : '当前会话')}</span>
-                  <button type="button" className="pending-context-link" onClick={onClearTarget}>查看设备全部记录</button>
+                  <span className="metadata">
+                    {conversationName?.(target) ?? (target.scopeId ? this.t('当前群聊', 'Current group') : this.t('当前会话', 'Current conversation'))}
+                  </span>
+                  <button type="button" className="pending-context-link" onClick={onClearTarget}>
+                    {this.t('查看设备全部记录', 'View all device records')}
+                  </button>
                 </div>
               )}
             </div>
-            <button type="button" className="secondary-button pending-quiet-button" onClick={() => this.switchView()}>
-              {showingHistory ? '返回待处理' : '查看历史'}
-            </button>
+            <ActionBar align="end">
+              <Segmented<RecordsView>
+                aria-label={this.t('发送记录视图', 'Send records view')}
+                value={view}
+                disabled={!!busyId}
+                onChange={this.switchView}
+                options={[
+                  { value: 'attention', label: this.t('待处理', 'Needs attention') },
+                  { value: 'history', label: this.t('历史记录', 'History') },
+                ]}
+              />
+              <button
+                type="button"
+                className="secondary-button pending-quiet-button"
+                onClick={this.refreshRecords}
+                disabled={loading || !!busyId}
+              >
+                <RefreshCw size={13} aria-hidden="true" />
+                {loading ? this.t('正在刷新…', 'Refreshing…') : this.t('刷新记录', 'Refresh records')}
+              </button>
+            </ActionBar>
           </div>
         </header>
         <div className="chat-pane pending-panel-body" ref={this.bodyRef}>
-          {!transportConnected && <p className="status">设备连接不可用。可查看或取消待发记录，恢复后可发送和核对。</p>}
-          {notice && <p className="status" role="status">{notice}</p>}
-          {error && (
-            <div className="error-banner" role="alert">
-              操作暂未完成
-              <button type="button" onClick={() => { void this.load(false, this.loadedPages); void this.loadFocused(); }}>重新读取记录</button>
-              <TechDetails rows={[error]} />
-            </div>
-          )}
+          {statusBanner}
           {target?.recordId && (
-            <section className="pending-focused" aria-label="指定记录">
-              <h4>指定记录</h4>
-              {focused ? this.renderItem(focused) : <p className="empty-state">{focused === null ? '找不到这条记录。' : '正在读取记录…'}</p>}
+            <section className="pending-focused" aria-label={this.t('指定记录', 'Pinned record')} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <h4>{this.t('指定记录', 'Pinned record')}</h4>
+              {focused ? this.renderItem(focused) : (
+                <p className="empty-state">
+                  {focused === null
+                    ? this.t('在当前设备账本中未找到这条记录。', 'This record was not found in the current device ledger.')
+                    : this.t('正在读取指定记录…', 'Loading pinned record…')}
+                </p>
+              )}
             </section>
           )}
-          <section className="pending-records" aria-label={showingHistory ? '历史记录' : '待处理记录'} aria-busy={loading}>
+          <section
+            className="pending-records"
+            aria-label={showingHistory ? this.t('历史记录', 'History records') : this.t('待处理记录', 'Pending records')}
+            aria-busy={loading}
+            style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
             {items.map((item) => this.renderItem(item))}
             {!showingHistory && intents.map((intent) => this.renderIntent(intent))}
           </section>
-          {noRecords && !error && (
-            <p className="empty-state">{loading ? '正在读取记录…' : hasMore ? '当前页暂无匹配记录，可继续加载。' : showingHistory ? '暂无历史记录。' : '没有待处理的记录。'}</p>
+          {noRecords && error && (
+            <ErrorState
+              title={this.t('无法读取发送记录', 'Could not load send records')}
+              description={error}
+              action={(
+                <ActionBar align="start" style={{ justifyContent: 'center' }}>
+                  <button
+                    type="button"
+                    className="primary-button pending-primary-action"
+                    onClick={this.refreshRecords}
+                    disabled={loading || !!busyId}
+                  >
+                    {this.t('重新读取记录', 'Reload records')}
+                  </button>
+                  {target ? (
+                    <button type="button" className="secondary-button pending-quiet-button" onClick={onClearTarget}>
+                      {this.t('查看设备全部记录', 'View all device records')}
+                    </button>
+                  ) : null}
+                </ActionBar>
+              )}
+            />
           )}
-          {hasMore && <button type="button" className="secondary-button" onClick={() => void this.load(true)} disabled={loading || !!this.state.busyId}>加载更多</button>}
+          {noRecords && !error && loading && (
+            <EmptyState
+              icon={<RefreshCw />}
+              title={this.t('正在读取发送记录…', 'Loading send records…')}
+              description={this.t('正在从当前档案的本机账本读取最新状态。', 'Reading the latest status from this profile’s local ledger.')}
+            />
+          )}
+          {noRecords && !error && !loading && hasMore && (
+            <EmptyState
+              icon={<Filter />}
+              title={this.t('当前页暂无匹配记录', 'No matching records on this page')}
+              description={this.t('当前筛选条件下本页为空，可以向后加载更多账本记录，或查看设备全部记录。', 'No records match this filter on the current page. Load more pages or view all device records.')}
+              action={(
+                <ActionBar align="start" style={{ justifyContent: 'center' }}>
+                  <button
+                    type="button"
+                    className="primary-button pending-primary-action"
+                    onClick={() => void this.load(true)}
+                    disabled={loading || !!busyId}
+                  >
+                    {this.t('加载更多记录', 'Load more records')}
+                  </button>
+                  {target ? (
+                    <button type="button" className="secondary-button pending-quiet-button" onClick={onClearTarget}>
+                      {this.t('查看设备全部记录', 'View all device records')}
+                    </button>
+                  ) : null}
+                </ActionBar>
+              )}
+            />
+          )}
+          {noRecords && !error && !loading && !hasMore && !showingHistory && (
+            <EmptyState
+              icon={<CheckCircle2 />}
+              title={target ? this.t('当前会话没有待处理记录', 'No pending records for this conversation') : this.t('所有消息均已处理完成', 'All clear — nothing needs attention')}
+              description={this.t('当前没有等待发送、发送中或结果待核对的记录。已受理、被拒绝或已取消的记录均保留在历史记录中。', 'No queued, in-flight, or unconfirmed records remain. Accepted, rejected, and cancelled records are kept in History.')}
+              action={(
+                <ActionBar align="start" style={{ justifyContent: 'center' }}>
+                  <button
+                    type="button"
+                    className="secondary-button pending-quiet-button"
+                    onClick={() => this.switchView('history')}
+                  >
+                    {this.t('查看历史记录', 'View history')}
+                  </button>
+                  {target ? (
+                    <button type="button" className="secondary-button pending-quiet-button" onClick={onClearTarget}>
+                      {this.t('查看设备全部记录', 'View all device records')}
+                    </button>
+                  ) : null}
+                </ActionBar>
+              )}
+            />
+          )}
+          {noRecords && !error && !loading && !hasMore && showingHistory && (
+            <EmptyState
+              icon={<History />}
+              title={target ? this.t('当前会话暂无历史发送记录', 'No send history for this conversation') : this.t('暂无历史发送记录', 'No send history yet')}
+              description={this.t('已受理、被拒绝或已取消的消息记录，以及已完成的操作回执会在这里留档备查。', 'Accepted, rejected, or cancelled messages and completed action receipts will appear here for reference.')}
+              action={(
+                <ActionBar align="start" style={{ justifyContent: 'center' }}>
+                  <button
+                    type="button"
+                    className="secondary-button pending-quiet-button"
+                    onClick={() => this.switchView('attention')}
+                  >
+                    {this.t('返回待处理', 'Back to needs attention')}
+                  </button>
+                  {target ? (
+                    <button type="button" className="secondary-button pending-quiet-button" onClick={onClearTarget}>
+                      {this.t('查看设备全部记录', 'View all device records')}
+                    </button>
+                  ) : null}
+                </ActionBar>
+              )}
+            />
+          )}
+          {hasMore && !noRecords && (
+            <ActionBar align="start">
+              <button
+                type="button"
+                className="secondary-button pending-quiet-button"
+                onClick={() => void this.load(true)}
+                disabled={loading || !!busyId}
+              >
+                {loading ? this.t('正在加载更多…', 'Loading more…') : this.t('加载更多记录', 'Load more records')}
+              </button>
+            </ActionBar>
+          )}
           {showingHistory && intents.length > 0 && (
             <details className="pending-receipts">
-              <summary>操作回执（{intents.length}）</summary>
-              <div className="pending-records">{intents.map((intent) => this.renderIntent(intent))}</div>
+              <summary>{this.t(`操作回执（${intents.length}）`, `Action receipts (${intents.length})`)}</summary>
+              <div className="pending-records" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {intents.map((intent) => this.renderIntent(intent))}
+              </div>
             </details>
           )}
         </div>

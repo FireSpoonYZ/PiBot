@@ -1,6 +1,8 @@
 import { useId, useState, type KeyboardEvent } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Loader2 } from 'lucide-react';
+import { ActionBar } from '../components/ui';
 import { mobileHaptic } from '../native/tauri-host';
+import { useNotice } from '../notice';
 import { useText } from '../ui';
 import type { GlobalTasksController } from './useGlobalTasks';
 
@@ -11,6 +13,7 @@ export interface TaskCreateViewProps {
 
 export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
   const t = useText();
+  const { notify } = useNotice();
   const inputId = useId();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -30,6 +33,11 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
     try {
       await controller.createTask({ text: trimmed });
       mobileHaptic('confirm');
+      notify({
+        id: 'task-created',
+        tone: 'success',
+        title: t('已发布任务', 'Task published'),
+      });
       onClose();
     } catch (err) {
       setSubmitError(err instanceof Error && err.message ? err.message : String(err || t('发布任务失败', 'Failed to publish task')));
@@ -50,10 +58,12 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
     <div className="tasks-scroll">
       <div className="tasks-container page-enter">
         <header className="detail-topbar">
-          <button type="button" className="back-btn" onClick={handleBack} disabled={submitting}>
-            <ArrowLeft size={19} aria-hidden="true" />
-            <span>{t('任务列表', 'Tasks')}</span>
-          </button>
+          <ActionBar align="start">
+            <button type="button" className="back-btn" onClick={handleBack} disabled={submitting}>
+              <ArrowLeft size={19} aria-hidden="true" />
+              <span>{t('任务列表', 'Tasks')}</span>
+            </button>
+          </ActionBar>
         </header>
 
         <section className="create-page-card" aria-label={t('新建任务', 'New task')}>
@@ -87,14 +97,26 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
             ) : (
               <span className="create-page-hint">{t('不用选谁来做，写下想法或要求即可交给 Bot 安排', 'No need to pick an owner—describe what you need and a Bot will coordinate it.')}</span>
             )}
-            <button
-              type="button"
-              className="tb-primary-btn"
-              disabled={!hasDraft || submitting}
-              onClick={() => void handleSubmit()}
-            >
-              {submitting ? t('发布中…', 'Publishing…') : t('发布任务', 'Publish task')}
-            </button>
+            <ActionBar align="end">
+              <button
+                type="button"
+                className="tb-secondary-btn"
+                disabled={submitting}
+                onClick={handleBack}
+              >
+                {hasDraft ? t('暂存草稿', 'Save draft') : t('取消', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className="tb-primary-btn"
+                disabled={!hasDraft || submitting}
+                aria-busy={submitting || undefined}
+                onClick={() => void handleSubmit()}
+              >
+                {submitting ? <Loader2 size={15} className="spin" aria-hidden="true" /> : null}
+                <span>{submitting ? t('发布中…', 'Publishing…') : t('发布任务', 'Publish task')}</span>
+              </button>
+            </ActionBar>
           </div>
         </section>
       </div>

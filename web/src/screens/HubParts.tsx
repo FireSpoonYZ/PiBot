@@ -20,10 +20,12 @@ export function HubPrimaryHero({
   onOpenMenu: (position: { x: number; y: number }) => void;
 }) {
   const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
+  const badgeClass = `hub-bot-host-badge ${bot.hostKind === 'remote' ? 'remote' : 'local'}${offline ? ' is-offline' : ''}`;
   return (
     <button
       type="button"
       className="hub-hero-button hub-hero-card"
+      style={{ minWidth: 0, fontVariantNumeric: 'tabular-nums' }}
       aria-label={label}
       {...interactions}
     >
@@ -35,11 +37,33 @@ export function HubPrimaryHero({
         platformBadge={<PlatformLogoIcon platform={bot.platform} size={11} />}
         size={64}
       />
-      <div className="hub-hero-card-text">
-        <span className="hub-hero-name" title={bot.role}>{bot.role}</span>
-        <span className="hub-bot-host-badge local" title={bot.hostLabel}>
-          <PlatformLogoIcon platform={bot.platform} size={12} />
-          <span className="hub-bot-host-text">{bot.hostLabel}</span>
+      <div className="hub-hero-card-text" style={{ minWidth: 0 }}>
+        <span
+          className="hub-hero-name"
+          title={bot.role}
+          style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        >
+          {bot.role}
+        </span>
+        <span
+          className={badgeClass}
+          title={bot.hostLabel}
+          style={{
+            whiteSpace: 'nowrap',
+            flexShrink: 0,
+            maxWidth: '100%',
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+            <PlatformLogoIcon platform={bot.platform} size={12} />
+          </span>
+          <span
+            className="hub-bot-host-text"
+            style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
+            {bot.hostLabel}
+          </span>
         </span>
       </div>
     </button>
@@ -62,10 +86,15 @@ export function HubArchivedRow({
   return (
     <div
       className="hub-bot-row is-archived"
+      style={{ minWidth: 0, fontVariantNumeric: 'tabular-nums' }}
       role="button"
       tabIndex={0}
       {...interactions}
       onKeyDown={e => {
+        if (e.target !== e.currentTarget) {
+          interactions.onKeyDown(e);
+          return;
+        }
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onOpen();

@@ -8,6 +8,7 @@ import { GrokBotAvatar, type GrokAvatarPreset } from './GrokBotAvatar';
 import { BotHost } from './native';
 import { resolveScreenClient, type ScreenViewState, type ScreenViewer } from './screen';
 import type { ShowerCall } from './ShowerPreview';
+import { registerOverlayBackHandler } from './components/ui/overlayStack';
 import { ErrorNotice, errorText, useText } from './ui';
 
 /** 页面转场动画结束后再贴原生画面，避免动画过程中原生 TextureView 位置跳动。 */
@@ -268,26 +269,22 @@ export function BotScreenPanel({
   }, [open]);
 
   useEffect(() => {
-    if (!helpOpen) return;
+    if (!open || !helpOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented) {
         event.preventDefault();
         setHelpOpen(false);
       }
     };
-    const onAppBack = (event: Event) => {
-      if (event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      setHelpOpen(false);
-    };
     document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('app-back', onAppBack, true);
+    const unregisterBack = registerOverlayBackHandler(() => {
+      setHelpOpen(false);
+    });
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('app-back', onAppBack, true);
+      unregisterBack();
     };
-  }, [helpOpen]);
+  }, [open, helpOpen]);
 
   useEffect(() => {
     const stage = stageRef.current;

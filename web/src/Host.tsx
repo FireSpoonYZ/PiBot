@@ -200,7 +200,8 @@ import {
 import { SettingsSheet } from './bot-settings/primitives';
 import { MobileClientUpdatePrompt } from './ClientUpdateSection';
 import './hub/schedules.css';
-import { ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
+import { ActionBar, ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
+import { hasOpenOverlay } from './components/ui/overlayStack';
 import { parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
 import { decideChatAutoScroll, hasIncomingChatContent, type ChatScrollMetrics } from './hub/chatScrollLogic';
 import { useConnectionPhase, useConnectionPhaseContext, type ConnectionPhase } from './connection';
@@ -333,8 +334,30 @@ function buildScopedLiveBinding(
   };
 }
 
+const BOT_SCOPED_SCREENS: ReadonlySet<MobileHubScreen> = new Set([
+  'chat',
+  'bot-profile',
+  'bot-profile-manage',
+  'bot-edit',
+  'bot-avatar',
+  'bot-soul',
+  'bot-skills',
+  'bot-schedules',
+  'bot-screen',
+  'bot-browser',
+  'bot-google-setup',
+]);
+
+function isLocalAndroidBot(
+  bot: Pick<UnifiedBotItem, 'hostKind' | 'platform'> | null | undefined,
+): boolean {
+  return Boolean(bot && (bot.hostKind === 'local' || bot.platform?.toLowerCase() === 'android'));
+}
+
 export interface HostPageProps {
+  /** Called when hardware/gesture Back reaches a root screen (e.g. mobileHide() on Android). */
   onBack?(): void;
+  /** Retained for HostPageProps compatibility with mobile shell callers. */
   persistentPending?: boolean;
   connectionEpoch?: number;
   active?: boolean;
@@ -347,12 +370,15 @@ export interface HostPageProps {
 }
 
 export function HostPage({
+  onBack,
   connectionEpoch = 0,
   active = true,
   getOrCreateRemoteClient,
   onRefreshConnection,
   onOpenSystemSettings,
 }: HostPageProps = {}) {
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
   const t = useText();
   const tRef = useRef(t);
   tRef.current = t;
@@ -371,6 +397,9 @@ export function HostPage({
     typeof window !== 'undefined' ? parseHashToRootEntry(window.location.hash) : { screen: 'hub' },
     { syncHash: active },
   );
+  // Stable bridge so earlier effects/callbacks always route through popScreen().
+  const popScreenRef = useRef<() => boolean>(() => false);
+  const popCurrentScreen = useCallback((): boolean => popScreenRef.current(), []);
   const screen = nav.current.screen;
   const settingsPage: HubSettingsPage =
     nav.current.screen === 'settings' ? (nav.current.settingsPage ?? 'overview') : 'overview';
@@ -1890,7 +1919,7 @@ export function HostPage({
     setBotConfirmModal(null);
     setScheduleDeleteTarget(null);
     if (screen === 'conversation' || screen === 'dm') {
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeSessionKey]);
@@ -1905,7 +1934,7 @@ export function HostPage({
     setGroupCreateAttempt(null);
     setGroupCreateError('');
     if (screen === 'group-create') {
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeAccountKey]);
@@ -3085,7 +3114,10 @@ export function HostPage({
   const openAvatarPicker = (currentPreset: GrokAvatarPreset) => {
     setDraftAvatar({ ...currentPreset });
     setAvatarTab('shape');
-    nav.push({ screen: 'bot-avatar' });
+    nav.push({
+      screen: 'bot-avatar',
+      botKey: screen === 'bot-edit' && editMode === 'create' ? null : (activeBot?.key ?? null),
+    });
   };
 
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
@@ -4024,7 +4056,7 @@ ${newer}` : draftSnapshot;
           if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
             setRoomSettingsOpen(false);
             setScopeConversationTarget(null);
-            if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
           }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
@@ -4061,7 +4093,7 @@ ${newer}` : draftSnapshot;
           if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
             setRoomSettingsOpen(false);
             setScopeConversationTarget(null);
-            if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
           }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
@@ -4077,7 +4109,7 @@ ${newer}` : draftSnapshot;
         });
       }
     },
-    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, t],
+    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, popCurrentScreen, nav.resetTo, t],
   );
 
   const openRoomDeleteConfirm = useCallback(
@@ -4131,7 +4163,7 @@ ${newer}` : draftSnapshot;
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
-              if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+              if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
             }
             setRoomDeleteModal(null);
             refreshRoomConversationsRef.current();
@@ -4146,7 +4178,7 @@ ${newer}` : draftSnapshot;
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
-              if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+              if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
             }
             setRoomDeleteModal(null);
             refreshRoomConversationsRef.current();
@@ -4169,7 +4201,7 @@ ${newer}` : draftSnapshot;
       if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
         setRoomSettingsOpen(false);
         setScopeConversationTarget(null);
-        if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+        if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
       }
       setRoomDeleteModal(null);
       refreshRoomConversationsRef.current();
@@ -4211,7 +4243,7 @@ ${newer}` : draftSnapshot;
           : null,
       );
     }
-  }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, nav.pop, nav.resetTo, t]);
+  }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, popCurrentScreen, nav.resetTo, t]);
 
   const refreshDirectoryAfterConfig = useCallback(() => {
     void syncLocalBots();
@@ -4241,7 +4273,7 @@ ${newer}` : draftSnapshot;
       if (editMode === 'create' && screen === 'bot-soul') {
         setEditInitialSoul(soulDraft);
         setSoulDirty(false);
-        if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+        if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
         return;
       }
       if (!activeBot) return;
@@ -4282,7 +4314,7 @@ ${newer}` : draftSnapshot;
           setSoulDirty(false);
         }
       }
-      if (!nav.pop()) nav.resetTo({ screen: 'hub' });
+      if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
     });
 
 
@@ -5302,7 +5334,7 @@ ${newer}` : draftSnapshot;
     }
     const next = nav.pop();
     if (!next) return false;
-    if (next.botKey && (next.screen === 'bot-profile' || next.screen === 'chat')) {
+    if (next.botKey && BOT_SCOPED_SCREENS.has(next.screen)) {
       setActiveBotKey(next.botKey);
     }
     if (leaving.screen === 'chat' && next.screen === 'tasks' && taskReturnId) {
@@ -5315,6 +5347,7 @@ ${newer}` : draftSnapshot;
     }
     return true;
   }, [nav.pop, nav.stackRef, cancelActiveObservation, taskReturnId, refreshDirectoryAfterConfig]);
+  popScreenRef.current = popScreen;
 
   const openCenterSettings = useCallback(() => {
     saveCurrentChatAnchor();
@@ -5340,8 +5373,10 @@ ${newer}` : draftSnapshot;
   }, [popScreen, nav.resetTo]);
 
   const backFromSettings = useCallback(() => {
-    popScreen();
-  }, [popScreen]);
+    if (!popScreen() && settingsPage !== 'overview') {
+      nav.resetTo({ screen: 'settings', settingsPage: 'overview' });
+    }
+  }, [popScreen, settingsPage, nav.resetTo]);
 
   const backFromProfileManage = useCallback(() => {
     restoreProfileManageFocus.current = true;
@@ -5495,8 +5530,14 @@ ${newer}` : draftSnapshot;
   useEffect(() => {
     if (!active) return;
     const onAppBack = (ev: Event) => {
+      if (ev.defaultPrevented || hasOpenOverlay()) return;
       if (handleStepBack()) {
         ev.preventDefault();
+        return;
+      }
+      if (onBackRef.current) {
+        ev.preventDefault();
+        onBackRef.current();
       }
     };
     window.addEventListener('app-back', onAppBack);
@@ -5955,7 +5996,7 @@ ${newer}` : draftSnapshot;
       botName: activeBot.role,
       hostLabel: activeBot.hostLabel,
       hostPlatform: activeBot.platform,
-      isLocalAndroid: activeBot.hostKind === 'local' && !inTauriUi,
+      isLocalAndroid: isLocalAndroidBot(activeBot),
       connected: botPanelConnected,
       callGoogleSetup,
       callBrowser,
@@ -5974,7 +6015,6 @@ ${newer}` : draftSnapshot;
   }, [
     activeBot,
     remoteIdentity,
-    inTauriUi,
     botPanelConnected,
     callGoogleSetup,
     callBrowser,
@@ -6839,7 +6879,7 @@ ${newer}` : draftSnapshot;
             identity={mobileGoogleContext?.identity}
             botId={activeBot.botId}
             botName={activeBot.role}
-            isLocalAndroid={activeBot.hostKind === 'local' || activeBot.platform?.toLowerCase() === 'android'}
+            isLocalAndroid={isLocalAndroidBot(activeBot)}
             autoStart
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={openBotBrowser}
@@ -7219,7 +7259,7 @@ ${newer}` : draftSnapshot;
             botName={activeBot.role}
             mode="tools"
             hostPlatform={activeBot.platform}
-            isLocalAndroid={activeBot.hostKind === 'local' && !inTauriUi}
+            isLocalAndroid={isLocalAndroidBot(activeBot)}
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={() => {
               setModelTarget(null);
@@ -7543,6 +7583,9 @@ ${newer}` : draftSnapshot;
           }
         }}
         title={t('解散并删除群聊', 'Disband & Delete Group')}
+        overlayClassName="bs-confirm-overlay"
+        className="bs-confirm-dialog"
+        closeDisabled={Boolean(roomDeleteModal?.submitting)}
       >
         {roomDeleteModal && (
           <>
@@ -7555,10 +7598,9 @@ ${newer}` : draftSnapshot;
             {roomDeleteModal.error && (
               <ErrorNotice compact error={roomDeleteModal.error} />
             )}
-            <div className="dialog-actions">
-              <button
-                type="button"
-                className="button secondary-button"
+            <ActionBar align="end" className="ui-confirm-actions">
+              <Button
+                variant="secondary"
                 disabled={roomDeleteModal.submitting}
                 onClick={() => {
                   roomDeleteFetchSeqRef.current += 1;
@@ -7566,21 +7608,21 @@ ${newer}` : draftSnapshot;
                 }}
               >
                 {t('取消', 'Cancel')}
-              </button>
+              </Button>
               {roomDeleteModal.conflictNeedReload && !roomDeleteModal.attempt?.unconfirmed && (
-                <button
-                  type="button"
-                  className="button secondary-button"
+                <Button
+                  variant="secondary"
+                  loading={roomDeleteModal.loadingLatest}
                   disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
                   onClick={() => void loadLatestRoomForDelete(roomDeleteModal.room)}
                 >
                   {t('重新读取', 'Reload')}
-                </button>
+                </Button>
               )}
               {roomDeleteModal.attempt && (
-                <button
-                  type="button"
-                  className="button danger-button"
+                <Button
+                  variant="danger"
+                  loading={roomDeleteModal.submitting}
                   disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
                   onClick={() => {
                     mobileHaptic('confirm');
@@ -7592,9 +7634,9 @@ ${newer}` : draftSnapshot;
                     : roomDeleteModal.attempt.unconfirmed
                       ? t('按原 ID 确认', 'Confirm Original ID')
                       : t('解散并删除群聊', 'Disband & Delete Group')}
-                </button>
+                </Button>
               )}
-            </div>
+            </ActionBar>
           </>
         )}
       </Dialog>

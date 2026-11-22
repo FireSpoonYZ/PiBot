@@ -1,7 +1,9 @@
 import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft, CheckCircle2, ChevronRight, HelpCircle, Loader2, Pencil, Trash2, X } from 'lucide-react';
+import { ActionBar, ConfirmDialog } from '../components/ui';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { mobileHaptic } from '../native/tauri-host';
+import { useNotice } from '../notice';
 import { useText } from '../ui';
 import {
   getStepStatusInfo,
@@ -179,6 +181,7 @@ export function TaskDetailView({
   onJumpToChat,
 }: TaskDetailViewProps) {
   const t = useText();
+  const { notify } = useNotice();
   const titleInputId = useId();
   const reqInputId = useId();
   const logsBoxId = useId();
@@ -193,27 +196,20 @@ export function TaskDetailView({
   const [reloadingEdit, setReloadingEdit] = useState(false);
   const [editConflict, setEditConflict] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [deleteArmed, setDeleteArmed] = useState(false);
-  const [adoptionBusy, setAdoptionBusy] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [adoptionPending, setAdoptionPending] = useState<'keep' | 'redo' | 'dismiss' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const adoptionBusy = adoptionPending !== null;
 
   useEffect(() => {
     setEditMode(initialEditMode);
     setEditDraft(createEditDraft(task));
     setEditConflict(false);
-    setDeleteArmed(false);
+    setDeleteConfirmOpen(false);
     setActionError(null);
     // Reset edit draft only when switching task or initialEditMode prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, initialEditMode]);
-
-  useEffect(() => {
-    if (!deleteArmed) return;
-    const timer = window.setTimeout(() => {
-      setDeleteArmed(false);
-    }, 4000);
-    return () => window.clearTimeout(timer);
-  }, [deleteArmed]);
 
   const counts = useMemo(() => stepCounts(task), [task]);
   const flatSteps = useMemo(() => flattenStepsWithDepth(task.steps), [task.steps]);
@@ -249,7 +245,7 @@ export function TaskDetailView({
   const openEditMode = () => {
     setEditDraft(createEditDraft(task));
     setEditConflict(false);
-    setDeleteArmed(false);
+    setDeleteConfirmOpen(false);
     setActionError(null);
     setEditMode(true);
   };
@@ -262,6 +258,11 @@ export function TaskDetailView({
       const latest = (await controller.getTask(task.id)) ?? task;
       setEditDraft(createEditDraft(latest));
       setEditConflict(false);
+      notify({
+        id: `task-reloaded:${task.id}`,
+        tone: 'info',
+        title: t('已载入最新版本', 'Loaded latest version'),
+      });
     } catch (err) {
       setActionError(
         err instanceof Error && err.message ? err.message : String(err || t('重新载入当前版本失败', 'Failed to reload latest version')),
@@ -372,6 +373,11 @@ export function TaskDetailView({
       mobileHaptic('confirm');
       setEditConflict(false);
       setEditMode(false);
+      notify({
+        id: `task-saved:${task.id}`,
+        tone: 'success',
+        title: t('已保存任务修改', 'Task changes saved'),
+      });
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
         setEditConflict(true);
@@ -387,30 +393,40 @@ export function TaskDetailView({
     }
   };
 
-  const handleDeleteTask = async () => {
+  const handleConfirmDeleteTask = async () => {
     if (deleting || saving) return;
-    if (!deleteArmed) {
-      setDeleteArmed(true);
-      return;
-    }
     setDeleting(true);
     setActionError(null);
     try {
       await controller.deleteTask(task.id);
+      mobileHaptic('confirm');
+      setDeleteConfirmOpen(false);
+      notify({
+        id: `task-deleted:${task.id}`,
+        tone: 'success',
+        title: t('已删除任务', 'Task deleted'),
+      });
       onBack();
     } catch (err) {
+      setDeleteConfirmOpen(false);
       setActionError(err instanceof Error && err.message ? err.message : String(err || t('删除任务失败', 'Failed to delete task')));
       setDeleting(false);
-      setDeleteArmed(false);
     }
   };
 
   const handleAdoptionScope = async (scope: 'keep' | 'redo') => {
     if (adoptionBusy) return;
-    setAdoptionBusy(true);
+    setAdoptionPending(scope);
     setActionError(null);
     try {
       await controller.resolveAdoptionScope(task.id, scope, task.revision);
+      notify({
+        id: `task-adoption-scope:${task.id}`,
+        tone: 'success',
+        title: scope === 'keep'
+          ? t('已确认保留已有结果', 'Confirmed keeping existing results')
+          : t('已确认连同前序重做', 'Confirmed redoing previous steps'),
+      });
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
         void controller.getTask(task.id).catch(() => {});
@@ -421,20 +437,20 @@ export function TaskDetailView({
         );
       }
     } finally {
-      setAdoptionBusy(false);
+      setAdoptionPending(null);
     }
   };
 
   const handleDismissAdoption = async () => {
     if (adoptionBusy) return;
-    setAdoptionBusy(true);
+    setAdoptionPending('dismiss');
     setActionError(null);
     try {
       await controller.dismissAdoption(task.id);
     } catch (err) {
       setActionError(err instanceof Error && err.message ? err.message : String(err || t('收起回执失败', 'Failed to dismiss receipt')));
     } finally {
-      setAdoptionBusy(false);
+      setAdoptionPending(null);
     }
   };
 
@@ -457,24 +473,26 @@ export function TaskDetailView({
           <span className="adoption-short-main">
             <span>{t('此项变更是否保留已完成产出？', 'Keep completed outputs for this change?')}</span>
           </span>
-          <div className="adoption-short-actions">
+          <ActionBar align="end" className="adoption-short-actions">
             <button
               type="button"
               className="mini-pill active"
               disabled={adoptionBusy}
+              aria-busy={adoptionPending === 'keep' || undefined}
               onClick={() => void handleAdoptionScope('keep')}
             >
-              {t('保留已有结果', 'Keep existing results')}
+              {adoptionPending === 'keep' ? t('确认中…', 'Confirming…') : t('保留已有结果', 'Keep existing results')}
             </button>
             <button
               type="button"
               className="mini-pill"
               disabled={adoptionBusy}
+              aria-busy={adoptionPending === 'redo' || undefined}
               onClick={() => void handleAdoptionScope('redo')}
             >
-              {t('连同前序重做', 'Redo previous steps')}
+              {adoptionPending === 'redo' ? t('确认中…', 'Confirming…') : t('连同前序重做', 'Redo previous steps')}
             </button>
-          </div>
+          </ActionBar>
         </div>
       );
     }
@@ -490,7 +508,7 @@ export function TaskDetailView({
           )}
           <span>{text}</span>
         </span>
-        <div className="adoption-short-actions">
+        <ActionBar align="end" className="adoption-short-actions">
           <button
             type="button"
             className="receipt-log-link"
@@ -507,7 +525,7 @@ export function TaskDetailView({
           >
             <X size={13} aria-hidden="true" />
           </button>
-        </div>
+        </ActionBar>
       </div>
     );
   };
@@ -518,19 +536,23 @@ export function TaskDetailView({
     return found?.name || task.pendingPrompt.botName || t('未知 Bot', 'Unknown Bot');
   }, [task.pendingPrompt, bots, t]);
 
+  const taskDisplayTitle = task.title.trim() || t('未命名任务', 'Untitled task');
+
   return (
     <div className="tasks-scroll">
       <div className="tasks-container page-enter">
         <header className="detail-topbar">
           <button type="button" className="back-btn" onClick={onBack}>
             <ArrowLeft size={19} aria-hidden="true" />
-            <span>{t('任务', 'Tasks')}</span>
+            <span>{t('任务列表', 'Tasks')}</span>
           </button>
           {!editMode ? (
-            <button type="button" className="tb-secondary-btn" onClick={openEditMode}>
-              <Pencil size={15} aria-hidden="true" />
-              <span>{t('编辑', 'Edit')}</span>
-            </button>
+            <ActionBar align="end">
+              <button type="button" className="tb-secondary-btn" onClick={openEditMode}>
+                <Pencil size={15} aria-hidden="true" />
+                <span>{t('编辑任务', 'Edit task')}</span>
+              </button>
+            </ActionBar>
           ) : null}
         </header>
 
@@ -547,25 +569,26 @@ export function TaskDetailView({
             <section className="detail-edit-card" aria-label={t('编辑任务要求与子任务', 'Edit task requirements and subtasks')}>
               {editConflict || task.revision !== editDraft.editBaseRevision ? (
                 <div className="detail-conflict-box" role="alert">
-                  <div className="detail-conflict-head">
+                  <div className="detail-conflict-head tabular">
                     <span>
                       {editConflict
                         ? t(`保存冲突（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）：你的修改草稿已保留在下方`, `Save conflict (base v${editDraft.editBaseRevision}, latest v${task.revision}): your draft is preserved below`)
                         : t(`后台已有新进展（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）`, `Updated in background (base v${editDraft.editBaseRevision}, latest v${task.revision})`)}
                     </span>
                   </div>
-                  <p className="detail-conflict-summary">
+                  <p className="detail-conflict-summary tabular">
                     {t('当前最新状态：', 'Latest status: ')}{task.title} · {t(`已完成 ${counts.done}/${counts.total}`, `Done ${counts.done}/${counts.total}`)}
                     {task.logs.length > 0 ? ` · ${task.logs[task.logs.length - 1].text}` : ''}
                   </p>
                   <p className="detail-conflict-note">
                     {t('为防止覆盖 Bot 最新进展，保存会按基准版本拦截；请核对后重新载入当前版本再继续编辑。', 'To avoid overwriting the latest Bot progress, saving is blocked by version mismatch. Reload the latest version to continue editing.')}
                   </p>
-                  <div className="detail-conflict-actions">
+                  <ActionBar align="start" className="detail-conflict-actions">
                     <button
                       type="button"
                       className="mini-pill active"
                       disabled={saving || deleting || reloadingEdit}
+                      aria-busy={reloadingEdit || undefined}
                       onClick={() => void handleReloadLatestForEdit()}
                     >
                       {reloadingEdit ? t('载入中…', 'Reloading…') : t('重新载入当前版本', 'Reload latest version')}
@@ -577,13 +600,13 @@ export function TaskDetailView({
                       onClick={() => {
                         setEditMode(false);
                         setEditConflict(false);
-                        setDeleteArmed(false);
+                        setDeleteConfirmOpen(false);
                         setActionError(null);
                       }}
                     >
                       {t('退出编辑核对详情', 'Exit edit to review')}
                     </button>
-                  </div>
+                  </ActionBar>
                 </div>
               ) : null}
 
@@ -679,7 +702,7 @@ export function TaskDetailView({
                           disabled={saving || deleting}
                           onClick={() => handleToggleStepCancel(idx)}
                         >
-                          {isCancelled ? t('恢复', 'Restore') : t('取消此项', 'Cancel')}
+                          {isCancelled ? t('恢复此项', 'Restore step') : t('取消此项', 'Cancel step')}
                         </button>
                       ) : (
                         <span className="step-status-pill is-done">{t('已完成', 'Done')}</span>
@@ -722,22 +745,22 @@ export function TaskDetailView({
                     disabled={!editDraft.newStepText.trim() || saving || deleting}
                     onClick={handleAddDraftStep}
                   >
-                    {t('+ 添加', '+ Add')}
+                    {t('+ 添加子任务', '+ Add subtask')}
                   </button>
                 </div>
               </div>
 
-              <div className="req-edit-actions">
+              <ActionBar align="between" className="req-edit-actions">
                 <button
                   type="button"
-                  className={`tb-danger-link${deleteArmed ? ' is-armed' : ''}`}
+                  className="tb-danger-link"
                   disabled={saving || deleting}
-                  onClick={() => void handleDeleteTask()}
+                  onClick={() => setDeleteConfirmOpen(true)}
                 >
                   <Trash2 size={14} aria-hidden="true" />
-                  <span>{deleting ? t('删除中…', 'Deleting…') : deleteArmed ? t('再次点击确认删除', 'Tap again to confirm delete') : t('删除任务', 'Delete task')}</span>
+                  <span>{deleting ? t('删除中…', 'Deleting…') : t('删除任务', 'Delete task')}</span>
                 </button>
-                <div className="req-edit-actions-right">
+                <ActionBar align="end" className="req-edit-actions-right">
                   <button
                     type="button"
                     className="tb-secondary-btn"
@@ -745,7 +768,7 @@ export function TaskDetailView({
                     onClick={() => {
                       setEditMode(false);
                       setEditConflict(false);
-                      setDeleteArmed(false);
+                      setDeleteConfirmOpen(false);
                       setActionError(null);
                     }}
                   >
@@ -755,12 +778,14 @@ export function TaskDetailView({
                     type="button"
                     className="tb-primary-btn"
                     disabled={saving || deleting || reloadingEdit}
+                    aria-busy={saving || undefined}
                     onClick={() => void handleSaveEdit()}
                   >
-                    {saving ? t('保存中…', 'Saving…') : t('保存', 'Save')}
+                    {saving ? <Loader2 size={15} className="spin" aria-hidden="true" /> : null}
+                    <span>{saving ? t('保存中…', 'Saving…') : t('保存修改', 'Save changes')}</span>
                   </button>
-                </div>
-              </div>
+                </ActionBar>
+              </ActionBar>
             </section>
           ) : (
             <>
@@ -846,7 +871,7 @@ export function TaskDetailView({
                   <div className="tasks-empty is-compact">
                     {task.status === 'triaging'
                       ? t('正在拆分与安排子任务…', 'Breaking down and assigning subtasks…')
-                      : t('暂无拆分子任务，点右上角「编辑」可手动补充或进入对话协调。', 'No subtasks yet. Tap Edit above to add steps or coordinate in chat.')}
+                      : t('暂无拆分子任务，点右上角「编辑任务」可手动补充或进入对话协调。', 'No subtasks yet. Tap Edit task above to add steps or coordinate in chat.')}
                   </div>
                 ) : (
                   <div className="steps-list">
@@ -951,6 +976,20 @@ export function TaskDetailView({
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title={t('删除任务', 'Delete task')}
+        description={t(`确定要永久删除任务「${taskDisplayTitle}」吗？该任务的全部子任务与进度记录将被一并清除，且无法恢复。`, `Permanently delete task "${taskDisplayTitle}"? All subtasks and progress logs will be removed and cannot be recovered.`)}
+        danger
+        busy={deleting}
+        cancelLabel={t('取消', 'Cancel')}
+        confirmLabel={deleting ? t('删除中…', 'Deleting…') : t('删除任务', 'Delete task')}
+        onCancel={() => {
+          if (!deleting) setDeleteConfirmOpen(false);
+        }}
+        onConfirm={() => void handleConfirmDeleteTask()}
+      />
     </div>
   );
 }

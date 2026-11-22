@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Lock, Pin } from 'lucide-react';
+import { Archive, ArrowLeft, Lock, Pencil, Pin, PinOff, RefreshCw, RotateCcw, Unlock } from 'lucide-react';
 import type { Installation, InstallationSkillFilesResponse } from '../../../center-contract/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotSkillReviewInput } from '../../../host-core/index.js';
 import { centerAdminRequest } from '../bot-settings/centerAdminBroker';
-import { ConfirmDialog } from '../components/ui/dialog';
+import { ActionBar, Button, ConfirmDialog, InlineNotice } from '../components/ui';
 import { useText } from '../ui';
 import './SkillReviewPanel.css';
 
@@ -398,7 +398,7 @@ function LearnedSkillsSession({
   return (
     <section className="skill-review-panel" aria-busy={busy}>
       <header className="skill-review-header">
-        <div>
+        <div className="skill-review-header-copy">
           <h3>{detail ? detail.name : t('已学技能库', 'Learned Skills')}</h3>
           <p className="skill-review-muted">
             {detail
@@ -406,21 +406,48 @@ function LearnedSkillsSession({
               : t('空闲复盘提炼的技能会自动对本 Bot 生效；30 天未用会自动归档，可在中心调整跨 Bot 共享范围。', 'Skills learned during idle reflection auto-apply to this Bot, auto-archive after 30 days unused, and can be shared in Center.')}
           </p>
         </div>
-        <div className="skill-review-header-btns">
+        <ActionBar align="end" className="skill-review-header-btns">
           {detail ? (
-            <button type="button" disabled={busy} onClick={() => reloadDetail(detail.skillId)}>
-              {t('刷新', 'Refresh')}
-            </button>
+            <Button
+              size="sm"
+              variant="secondary"
+              leadingIcon={<RefreshCw aria-hidden="true" />}
+              disabled={busy}
+              onClick={() => reloadDetail(detail.skillId)}
+            >
+              {t('刷新技能', 'Refresh skill')}
+            </Button>
           ) : null}
-          <button type="button" disabled={busy} onClick={loadList}>
-            {detail ? t('返回列表', 'Back') : t('刷新', 'Refresh')}
-          </button>
-        </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            leadingIcon={detail ? <ArrowLeft aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+            disabled={busy}
+            onClick={loadList}
+          >
+            {detail ? t('返回技能列表', 'Back to skill list') : t('刷新列表', 'Refresh list')}
+          </Button>
+        </ActionBar>
       </header>
 
-      {busy ? <p className="skill-review-muted" role="status">{t('正在同步技能数据…', 'Syncing skills…')}</p> : null}
-      {failure ? <p role="alert">{failureText(failure.error, t)}</p> : null}
-      {notice ? <p className="skill-review-notice" role="status">{notice}</p> : null}
+      {failure ? (
+        <InlineNotice
+          tone="error"
+          description={failureText(failure.error, t)}
+          onDismiss={() => setFailure(null)}
+        />
+      ) : busy ? (
+        <InlineNotice
+          tone="info"
+          description={t('正在同步技能数据…', 'Syncing skills…')}
+        />
+      ) : notice ? (
+        <InlineNotice
+          tone="info"
+          description={notice}
+          onDismiss={() => setNotice(null)}
+        />
+      ) : null}
 
       {!detail ? (
         <>
@@ -436,7 +463,7 @@ function LearnedSkillsSession({
                 type="button"
                 role="tab"
                 aria-selected={filter === key}
-                className={filter === key ? 'is-active' : ''}
+                className={`skill-review-tab${filter === key ? ' is-active' : ''}`}
                 onClick={() => setFilter(key)}
               >
                 {label}
@@ -496,61 +523,77 @@ function LearnedSkillsSession({
             </p>
           </div>
 
-          <div className="skill-review-actions">
+          <ActionBar align="start" className="skill-review-actions">
             {editing ? (
               <>
-                <button
-                  type="button"
-                  className="skill-review-primary"
+                <Button
+                  size="sm"
+                  variant="primary"
                   disabled={busy}
                   onClick={() => saveFiles(detail)}
                 >
-                  {t('保存内容', 'Save')}
-                </button>
-                <button
-                  type="button"
+                  {t('保存更改', 'Save changes')}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
                   disabled={busy}
                   onClick={() => {
                     setDraftFiles({ ...detail.files });
                     setEditing(false);
                   }}
                 >
-                  {t('取消编辑', 'Cancel')}
-                </button>
+                  {t('放弃编辑', 'Discard edits')}
+                </Button>
               </>
             ) : (
-              <button
-                type="button"
-                className="skill-review-primary"
+              <Button
+                size="sm"
+                variant={detail.state === 'archived' ? 'secondary' : 'primary'}
+                leadingIcon={<Pencil aria-hidden="true" />}
                 disabled={busy}
                 onClick={() => {
                   setDraftFiles({ ...detail.files });
                   setEditing(true);
                 }}
               >
-                {t('✎ 编辑内容', 'Edit')}
-              </button>
+                {t('编辑技能文件', 'Edit skill files')}
+              </Button>
             )}
             {detail.state !== 'archived' ? (
-              <button type="button" disabled={busy} onClick={() => togglePin(detail)}>
-                {detail.pinned ? t('📌 取消固定', '📌 Unpin') : t('📌 固定不过期', '📌 Pin')}
-              </button>
+              <Button
+                size="sm"
+                variant="secondary"
+                leadingIcon={detail.pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
+                disabled={busy}
+                onClick={() => togglePin(detail)}
+              >
+                {detail.pinned ? t('取消固定技能', 'Unpin skill') : t('固定技能', 'Pin skill')}
+              </Button>
             ) : null}
-            <button type="button" disabled={busy} onClick={() => toggleLock(detail)}>
-              {detail.locked ? t('🔓 解除锁定', '🔓 Unlock') : t('🔒 锁定防改写', '🔒 Lock')}
-            </button>
-            <button
-              type="button"
-              className={detail.state === 'archived' ? 'skill-review-primary' : ''}
+            <Button
+              size="sm"
+              variant="secondary"
+              leadingIcon={detail.locked ? <Unlock aria-hidden="true" /> : <Lock aria-hidden="true" />}
+              disabled={busy}
+              onClick={() => toggleLock(detail)}
+            >
+              {detail.locked ? t('解锁技能', 'Unlock skill') : t('锁定技能', 'Lock skill')}
+            </Button>
+            <Button
+              size="sm"
+              variant={detail.state === 'archived' ? 'primary' : 'secondary'}
+              className={detail.state === 'archived' ? '' : 'skill-review-danger-btn'}
+              leadingIcon={detail.state === 'archived' ? <RotateCcw aria-hidden="true" /> : <Archive aria-hidden="true" />}
               disabled={busy}
               onClick={() => {
                 if (detail.state === 'archived') toggleArchive(detail);
                 else setConfirmArchive(detail);
               }}
             >
-              {detail.state === 'archived' ? t('恢复启用', 'Restore') : t('归档停用', 'Archive')}
-            </button>
-          </div>
+              {detail.state === 'archived' ? t('恢复技能', 'Restore skill') : t('归档技能', 'Archive skill')}
+            </Button>
+          </ActionBar>
 
           <div className="skill-review-file">
             {filePaths.length > 1 ? (
@@ -560,7 +603,7 @@ function LearnedSkillsSession({
                     key={fp}
                     type="button"
                     aria-pressed={selectedFile === fp}
-                    className={selectedFile === fp ? 'is-active' : ''}
+                    className={`skill-review-file-tab${selectedFile === fp ? ' is-active' : ''}`}
                     onClick={() => setSelectedFile(fp)}
                   >
                     <code>{fp}</code>
@@ -591,7 +634,10 @@ function LearnedSkillsSession({
         open={confirmArchive !== null}
         title={t('归档技能？', 'Archive skill?')}
         description={confirmArchive ? t(`归档「${confirmArchive.name}」将从本 Bot 停用并取消共享，后续可随时在此恢复。确认归档吗？`, `Archiving "${confirmArchive.name}" disables it on this Bot and removes sharing. You can restore it here anytime. Continue?`) : ''}
+        confirmLabel={t('归档技能', 'Archive skill')}
+        cancelLabel={t('保留技能', 'Keep skill')}
         danger
+        busy={busy}
         onCancel={() => setConfirmArchive(null)}
         onConfirm={() => {
           const target = confirmArchive;

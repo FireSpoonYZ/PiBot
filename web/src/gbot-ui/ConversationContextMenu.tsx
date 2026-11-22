@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { ActionSheet } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { mobileHaptic } from '../native/tauri-host';
 import { useText } from '../ui';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
@@ -111,6 +112,7 @@ export function ConversationContextMenu({
 
   const close = (restoreFocus = true) => {
     const returnTarget = focusReturnRef.current;
+    focusReturnRef.current = null;
     onCloseRef.current();
     if (restoreFocus) {
       queueMicrotask(() => {
@@ -123,20 +125,26 @@ export function ConversationContextMenu({
   closeRef.current = close;
 
   useEffect(() => {
-    if (!position || useSheet) return;
+    if (!shouldRenderMenu || useSheet) return;
 
     const active = document.activeElement;
-    focusReturnRef.current = active instanceof HTMLElement ? active : null;
+    if (active instanceof HTMLElement) {
+      if (!menuRef.current?.contains(active)) {
+        focusReturnRef.current = active;
+      }
+    } else {
+      focusReturnRef.current = null;
+    }
     const frame = requestAnimationFrame(() => {
       menuRef.current
         ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
         ?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [position, useSheet]);
+  }, [shouldRenderMenu, position, useSheet]);
 
   useEffect(() => {
-    if (!position) return;
+    if (!shouldRenderMenu) return;
 
     const handleForceClose = () => closeRef.current(false);
     window.addEventListener('gbot-close-context-menu', handleForceClose);
@@ -147,6 +155,9 @@ export function ConversationContextMenu({
       };
     }
 
+    const unregisterOverlayBack = registerOverlayBackHandler(() => {
+      closeRef.current(true);
+    });
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
@@ -166,13 +177,14 @@ export function ConversationContextMenu({
     window.addEventListener('resize', handleViewportChange);
     window.addEventListener('scroll', handleViewportChange, true);
     return () => {
+      unregisterOverlayBack();
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleEscape, true);
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('scroll', handleViewportChange, true);
       window.removeEventListener('gbot-close-context-menu', handleForceClose);
     };
-  }, [position, useSheet]);
+  }, [shouldRenderMenu, useSheet]);
 
   // 锚点 span 常驻：position 首次非空即开菜单时 hostRef 已挂载，portal 目标解析不丢。
   const anchor = <span aria-hidden="true" className="gbot-menu-anchor" ref={hostRef} />;

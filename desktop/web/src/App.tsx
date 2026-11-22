@@ -55,10 +55,12 @@ interface ProfileFormState {
   deviceId: string;
 }
 
+type BotInspectorPanel = 'profile' | 'google-setup';
+
 interface PendingBotNavigation {
   deviceId: string;
   botId: string;
-  panel?: 'google-setup';
+  panel?: BotInspectorPanel;
 }
 
 interface AppState {
@@ -399,14 +401,22 @@ class App extends Component<AppProps, AppState> {
     }));
   };
 
+  private openBotConversationPanel(
+    bridge: BotChatsArchiveBridge,
+    target: SendRecordsTarget,
+    panel?: BotInspectorPanel,
+  ): void {
+    (bridge.openConversation as (target: SendRecordsTarget, panel?: BotInspectorPanel) => void)(target, panel);
+  }
+
   private handleOpenBotConversation = (
     deviceId: string,
     botId: string,
-    panel?: 'google-setup',
+    panel?: BotInspectorPanel,
   ): void => {
     const target: SendRecordsTarget = { deviceId, botId };
     if (this.state.archiveBridge?.conversationName(target)) {
-      this.state.archiveBridge.openConversation(target, panel);
+      this.openBotConversationPanel(this.state.archiveBridge, target, panel);
       this.setState({
         view: 'chat',
         returnView: 'chat',
@@ -541,7 +551,7 @@ class App extends Component<AppProps, AppState> {
         this.setState({ pendingBotTarget: undefined });
       } else if (this.state.archiveBridge?.conversationName(this.state.pendingBotTarget)) {
         const { deviceId, botId, panel } = this.state.pendingBotTarget;
-        this.state.archiveBridge.openConversation({ deviceId, botId }, panel);
+        this.openBotConversationPanel(this.state.archiveBridge, { deviceId, botId }, panel);
         this.setState({ pendingBotTarget: undefined });
       } else if (prevState.archiveBridge?.loading && !this.state.archiveBridge?.loading) {
         this.setState({ pendingBotTarget: undefined });
@@ -1103,7 +1113,7 @@ class App extends Component<AppProps, AppState> {
           centerUrl={center?.centerUrl}
           onOpenExternal={() => void openCenterManagement(center?.centerUrl)}
           onOpenExternalUrl={(url) => openCenterManagement(url)}
-          onConfigureBot={(deviceId, botId) => this.handleOpenBotConversation(deviceId, botId)}
+          onConfigureBot={(deviceId, botId) => this.handleOpenBotConversation(deviceId, botId, 'profile')}
           onStartGoogleSetupWizard={
             this.state.archiveBridge
               ? (deviceId, botId) => this.handleOpenBotConversation(deviceId, botId, 'google-setup')

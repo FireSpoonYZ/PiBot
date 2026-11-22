@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { Mic, Plus, RefreshCw, Square, Trash2, X, Zap } from 'lucide-react';
 import {
@@ -55,7 +64,8 @@ import {
   uuid,
   type SlashCommandName,
 } from '../hub/shared';
-import { ConfirmDialog } from '../components/ui';
+import { ActionBar, ConfirmDialog } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import {
   isCoarsePointer,
   useIsCoarsePointer,
@@ -115,20 +125,6 @@ const FLOATING_CONFLICT_CARD_STYLE: CSSProperties = {
   animation: 'grok-pop-up 180ms var(--ease-out) both',
 };
 
-const FLOATING_FILES_ROW_STYLE: CSSProperties = {
-  pointerEvents: 'auto',
-  marginBottom: 0,
-  padding: '6px 10px',
-  maxHeight: 88,
-  overflowY: 'auto',
-  borderRadius: 'var(--radius-md, 14px)',
-  border: '1px solid var(--line)',
-  background: 'color-mix(in srgb, var(--color-surface-2, var(--surface)) 92%, var(--bg))',
-  backdropFilter: 'blur(12px)',
-  boxShadow: '0 4px 14px color-mix(in srgb, var(--color-scrim) 14%, transparent)',
-  animation: 'grok-pop-up 180ms var(--ease-out) both',
-};
-
 const FLOATING_QUEUE_WRAP_STYLE: CSSProperties = {
   pointerEvents: 'auto',
   marginBottom: -6,
@@ -183,6 +179,13 @@ export interface RemotePendingComposerProps {
   taskContext?: RemoteTaskContext;
   onTaskMessageSent?: (rawText: string, capturedContext?: RemoteTaskContext) => void;
   floatingDockContainer?: HTMLElement | null;
+  visible?: boolean;
+  onCloseComposerMenu?: () => void;
+  externalOverlayOpen?: boolean;
+  dismissPopoversSeq?: number;
+  onOpenComposerPopover?: () => void;
+  onPopoverOpenChange?: (open: boolean) => void;
+  onFloatingDockActiveChange?: (active: boolean) => void;
 }
 
 export function RemotePendingComposer({
@@ -223,6 +226,13 @@ export function RemotePendingComposer({
   taskContext,
   onTaskMessageSent,
   floatingDockContainer,
+  visible = true,
+  onCloseComposerMenu,
+  externalOverlayOpen = false,
+  dismissPopoversSeq = 0,
+  onOpenComposerPopover,
+  onPopoverOpenChange,
+  onFloatingDockActiveChange,
 }: RemotePendingComposerProps) {
   const t = useText();
   const { notify, dismiss } = useNotice();
@@ -875,6 +885,122 @@ export function RemotePendingComposer({
     onRun: command => void runCommand(command),
   });
 
+  const [slashDismissedText, setSlashDismissedText] = useState<string | null>(null);
+  useEffect(() => {
+    setSlashDismissedText(null);
+  }, [effectiveText]);
+
+  const slashRef = useRef(slash);
+  slashRef.current = slash;
+  const effectiveTextRef = useRef(effectiveText);
+  effectiveTextRef.current = effectiveText;
+  const composerMenuOpenRef = useRef(composerMenuOpen);
+  composerMenuOpenRef.current = composerMenuOpen;
+  const popoverActionsRef = useRef({
+    onToggleComposerMenu,
+    onCloseComposerMenu,
+    onOpenComposerPopover,
+    onPopoverOpenChange,
+    onFloatingDockActiveChange,
+  });
+  popoverActionsRef.current = {
+    onToggleComposerMenu,
+    onCloseComposerMenu,
+    onOpenComposerPopover,
+    onPopoverOpenChange,
+    onFloatingDockActiveChange,
+  };
+
+  const closeComposerMenu = useCallback(() => {
+    const actions = popoverActionsRef.current;
+    if (actions.onCloseComposerMenu) {
+      actions.onCloseComposerMenu();
+    } else if (composerMenuOpenRef.current) {
+      actions.onToggleComposerMenu();
+    }
+  }, []);
+
+  const dismissSlash = useCallback(() => {
+    setSlashDismissedText(effectiveTextRef.current);
+    slashRef.current.onKeyDown({
+      key: 'Escape',
+      keyCode: 27,
+      nativeEvent: { isComposing: false },
+      preventDefault() {},
+    } as unknown as ReactKeyboardEvent<HTMLTextAreaElement>);
+  }, []);
+
+  const plusMenuVisible = visible && composerMenuOpen && !externalOverlayOpen && !clearConfirmOpen;
+  const slashMenuVisible =
+    visible &&
+    slash.open &&
+    slashDismissedText !== effectiveText &&
+    !composerMenuOpen &&
+    !externalOverlayOpen &&
+    !clearConfirmOpen;
+  const anyComposerPopoverOpen = plusMenuVisible || slashMenuVisible;
+
+  useEffect(() => {
+    if (!visible || externalOverlayOpen || clearConfirmOpen) {
+      if (composerMenuOpenRef.current) closeComposerMenu();
+      if (slashRef.current.open) dismissSlash();
+    }
+  }, [visible, externalOverlayOpen, clearConfirmOpen, closeComposerMenu, dismissSlash]);
+
+  useEffect(() => {
+    if (dismissPopoversSeq <= 0) return;
+    if (composerMenuOpenRef.current) closeComposerMenu();
+    if (slashRef.current.open) dismissSlash();
+  }, [dismissPopoversSeq, closeComposerMenu, dismissSlash]);
+
+  useEffect(() => {
+    if (!slashMenuVisible) return;
+    popoverActionsRef.current.onOpenComposerPopover?.();
+  }, [slashMenuVisible]);
+
+  useEffect(() => {
+    popoverActionsRef.current.onPopoverOpenChange?.(anyComposerPopoverOpen);
+  }, [anyComposerPopoverOpen]);
+
+  useEffect(() => () => {
+    popoverActionsRef.current.onPopoverOpenChange?.(false);
+    popoverActionsRef.current.onFloatingDockActiveChange?.(false);
+  }, []);
+
+  useEffect(() => {
+    if (!plusMenuVisible) return;
+    return registerOverlayBackHandler(() => closeComposerMenu());
+  }, [plusMenuVisible, closeComposerMenu]);
+
+  useEffect(() => {
+    if (!plusMenuVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeComposerMenu();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [plusMenuVisible, closeComposerMenu]);
+
+  useEffect(() => {
+    if (!slashMenuVisible) return;
+    return registerOverlayBackHandler(() => dismissSlash());
+  }, [slashMenuVisible, dismissSlash]);
+
+  useEffect(() => {
+    if (!slashMenuVisible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismissSlash();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [slashMenuVisible, dismissSlash]);
+
   const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
     (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
   const isRemoteSending =
@@ -1023,73 +1149,77 @@ export function RemotePendingComposer({
     }
   };
 
-  const hasFloatingStrips = Boolean(
-    fallbackDraft ||
-    confirmedConflict ||
-    (!editingTurn && drafts.files.length > 0) ||
-    (!editingTurn && queuedStripItems.length > 0),
-  );
+  // Single highest-priority floating status strip above the remote composer:
+  // confirmed draft conflict > retained offline draft > queued turns.
+  const activeFloatingStrip: 'conflict' | 'fallback' | 'queue' | null =
+    confirmedConflict
+      ? 'conflict'
+      : fallbackDraft
+        ? 'fallback'
+        : !editingTurn && queuedStripItems.length > 0
+          ? 'queue'
+          : null;
+  const hasFloatingStrips = activeFloatingStrip !== null;
+
+  useEffect(() => {
+    popoverActionsRef.current.onFloatingDockActiveChange?.(hasFloatingStrips);
+  }, [hasFloatingStrips]);
+
   const mergeIdleLabel = t('合并到草稿', 'Merge into draft');
   const mergeBusyLabel = t('合并中…', 'Merging…');
-  const keepNewerIdleLabel = t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt');
+  const keepNewerIdleLabel = t('保留新版草稿', 'Keep newer draft');
   const keepNewerBusyLabel = t('正在处理…', 'Resolving…');
 
   const floatingStripItems = hasFloatingStrips ? (
     <>
-      {fallbackDraft && (
-        <section className="grok-card-group" role="status" style={FLOATING_CARD_STYLE}>
-          <p>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
-          <button
-            type="button"
-            className="hub-outline-btn"
-            disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)}
-            onClick={() => {
-              const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
-              setTransfer({ source: fallbackDraft, text });
-              drafts.editText(text);
-            }}
-          >
-            <LabelStack
-              active={transfer ? mergeBusyLabel : mergeIdleLabel}
-              labels={[mergeIdleLabel, mergeBusyLabel]}
-            />
-          </button>
-        </section>
-      )}
-      {confirmedConflict && (
+      {activeFloatingStrip === 'conflict' && confirmedConflict && (
         <section className="grok-card-group" aria-label={t('草稿冲突', 'Draft conflict')} style={FLOATING_CONFLICT_CARD_STYLE}>
-          <p>{t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}</p>
+          <p style={{ margin: 0 }}>{t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}</p>
           {confirmedConflict.original.attachments?.length ? (
             <SentAttachments attachments={confirmedConflict.original.attachments} fetcher={remoteFetcher} />
           ) : null}
           <textarea readOnly rows={4} value={confirmedConflict.original.text} aria-label={t('原草稿，可选择复制', 'Original draft, selectable for copying')} style={{ width: '100%' }} />
           {confirmedConflict.original.files.map((file, index) => <div key={`${file.path}:${index}`} className="pre-wrap">{file.name}: {file.path}</div>)}
-          <button type="button" className="hub-outline-btn" disabled={resolvingConflict} onClick={() => void keepNewerDraft()}>
-            <LabelStack
-              active={resolvingConflict ? keepNewerBusyLabel : keepNewerIdleLabel}
-              labels={[keepNewerIdleLabel, keepNewerBusyLabel]}
-            />
-          </button>
+          <ActionBar align="end">
+            <button
+              type="button"
+              className="hub-outline-btn"
+              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+              disabled={resolvingConflict}
+              onClick={() => void keepNewerDraft()}
+            >
+              <LabelStack
+                active={resolvingConflict ? keepNewerBusyLabel : keepNewerIdleLabel}
+                labels={[keepNewerIdleLabel, keepNewerBusyLabel]}
+              />
+            </button>
+          </ActionBar>
         </section>
       )}
-      {!editingTurn && drafts.files.length > 0 && (
-        <div className="grok-composer-files-row" style={FLOATING_FILES_ROW_STYLE}>
-          {drafts.files.map((file, index) => (
-            <span key={`${file.path}:${index}`} className="grok-model-quick-chip active">
-              <span>{file.name}</span>
-              <button
-                type="button"
-                disabled={Boolean(drafts.attempt) || blocked}
-                onClick={() => drafts.removeFile(index)}
-                aria-label={t('移除', 'Remove')}
-              >
-                <X size={12} />
-              </button>
-            </span>
-          ))}
-        </div>
+      {activeFloatingStrip === 'fallback' && fallbackDraft && (
+        <section className="grok-card-group" role="status" style={FLOATING_CARD_STYLE}>
+          <p style={{ margin: 0, overflowWrap: 'anywhere' }}>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
+          <ActionBar align="end">
+            <button
+              type="button"
+              className="hub-outline-btn"
+              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+              disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)}
+              onClick={() => {
+                const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
+                setTransfer({ source: fallbackDraft, text });
+                drafts.editText(text);
+              }}
+            >
+              <LabelStack
+                active={transfer ? mergeBusyLabel : mergeIdleLabel}
+                labels={[mergeIdleLabel, mergeBusyLabel]}
+              />
+            </button>
+          </ActionBar>
+        </section>
       )}
-      {!editingTurn && queuedStripItems.length > 0 ? (
+      {activeFloatingStrip === 'queue' && !editingTurn && queuedStripItems.length > 0 ? (
         <div
           className="remote-composer-queue-float"
           style={floatingDockContainer ? PORTALED_QUEUE_WRAP_STYLE : FLOATING_QUEUE_WRAP_STYLE}
@@ -1114,63 +1244,72 @@ export function RemotePendingComposer({
       {floatingStripItems
         ? floatingDockContainer
           ? createPortal(floatingStripItems, floatingDockContainer)
-          : (
+          : !anyComposerPopoverOpen ? (
               <div className="remote-composer-float-anchor" style={FLOATING_ANCHOR_STYLE}>
                 <div className="remote-composer-floating-stack" style={FLOATING_STACK_STYLE}>
                   {floatingStripItems}
                 </div>
               </div>
-            )
+            ) : null
         : null}
 
-      {slash.open && (
+      {slashMenuVisible && (
         <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
           {slash.matches.map((command, index) => (
             <div
               key={command.name}
               {...slash.optionProps(index)}
               className={`bot-slash-item${index === slash.activeIndex ? ' active' : ''}`}
+              style={{ minWidth: 0 }}
             >
-              <code>{command.name}</code>
-              <span>{t(command.zh, command.en)}</span>
+              <code style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>{command.name}</code>
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {t(command.zh, command.en)}
+              </span>
             </div>
           ))}
         </div>
       )}
 
-      {composerMenuOpen && (
+      {plusMenuVisible && (
         <div className="bot-plus-popover" role="menu">
           <button
             type="button"
             role="menuitem"
+            style={{ whiteSpace: 'nowrap' }}
             disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
             onClick={() => {
-              onToggleComposerMenu();
+              closeComposerMenu();
               pickRemoteImages('photos');
             }}
           >
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
               <rect x="3" y="5" width="18" height="14" rx="2" />
               <circle cx="8.5" cy="10.5" r="1.5" />
               <path d="m21 15-4.5-4.5L9 18" />
             </svg>
-            <span>{t('选择图片', 'Choose image')}</span>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {t('选择图片', 'Choose image')}
+            </span>
           </button>
           {inTauriUi && (
             <button
               type="button"
               role="menuitem"
+              style={{ whiteSpace: 'nowrap' }}
               disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
               onClick={() => {
-                onToggleComposerMenu();
+                closeComposerMenu();
                 pickRemoteImages('camera');
               }}
             >
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
                 <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                 <circle cx="12" cy="13" r="4" />
               </svg>
-              <span>{t('拍照', 'Camera')}</span>
+              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {t('拍照', 'Camera')}
+              </span>
             </button>
           )}
           <div className="composer-menu-separator" role="separator" aria-hidden="true" />
@@ -1178,14 +1317,17 @@ export function RemotePendingComposer({
             type="button"
             role="menuitem"
             className="danger"
+            style={{ whiteSpace: 'nowrap' }}
             disabled={Boolean(editingTurn)}
             onClick={() => {
-              onToggleComposerMenu();
+              closeComposerMenu();
               setClearConfirmOpen(true);
             }}
           >
-            <Trash2 size={18} />
-            <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
+            <Trash2 size={18} style={{ flexShrink: 0 }} aria-hidden="true" />
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {t('清空对话 (/clear)', 'Clear conversation (/clear)')}
+            </span>
           </button>
         </div>
       )}
@@ -1197,6 +1339,32 @@ export function RemotePendingComposer({
             onCancel={() => onCancelEditTurn?.()}
             tr={t}
           />
+        ) : null}
+      </SmoothExpand>
+      <SmoothExpand open={!editingTurn && drafts.files.length > 0}>
+        {!editingTurn && drafts.files.length > 0 ? (
+          <div className="grok-composer-files-row" role="group" aria-label={t('文件路径引用', 'File references')}>
+            {drafts.files.map((file, index) => (
+              <span
+                key={`${file.path}:${index}`}
+                className="grok-model-quick-chip active"
+                style={{ maxWidth: '100%', minWidth: 0, whiteSpace: 'nowrap', flexShrink: 0 }}
+              >
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {file.name}
+                </span>
+                <button
+                  type="button"
+                  style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center' }}
+                  disabled={Boolean(drafts.attempt) || blocked}
+                  onClick={() => drafts.removeFile(index)}
+                  aria-label={t('移除', 'Remove')}
+                >
+                  <X size={12} aria-hidden="true" />
+                </button>
+              </span>
+            ))}
+          </div>
         ) : null}
       </SmoothExpand>
       <SmoothExpand open={effectiveAttachments.length > 0}>
@@ -1225,10 +1393,17 @@ export function RemotePendingComposer({
       <div className="grok-composer-row">
         <button
           type="button"
-          className={`grok-composer-plus-circle${composerMenuOpen ? ' active' : ''}`}
+          className={`grok-composer-plus-circle${plusMenuVisible ? ' active' : ''}`}
           aria-label={t('更多操作', 'More actions')}
-          aria-expanded={composerMenuOpen}
-          onClick={onToggleComposerMenu}
+          aria-haspopup="menu"
+          aria-expanded={plusMenuVisible}
+          onClick={() => {
+            if (!composerMenuOpen) {
+              dismissSlash();
+              onOpenComposerPopover?.();
+            }
+            onToggleComposerMenu();
+          }}
         >
           <Plus size={22} />
         </button>
@@ -1242,7 +1417,12 @@ export function RemotePendingComposer({
             value={effectiveText}
             disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
             {...slash.textareaProps}
+            aria-controls={slashMenuVisible ? slash.listboxId : undefined}
+            aria-expanded={slashMenuVisible}
+            aria-activedescendant={slashMenuVisible ? `${slash.listboxId}-${slash.activeIndex}` : undefined}
             onChange={event => {
+              if (composerMenuOpen) closeComposerMenu();
+              if (externalOverlayOpen) onOpenComposerPopover?.();
               if (editingTurn) onChangeEditTurn?.({ text: event.target.value });
               else drafts.editText(event.target.value);
             }}
@@ -1275,7 +1455,7 @@ export function RemotePendingComposer({
                 void recallRemoteQueuedItem(queuedStripItems[queuedStripItems.length - 1], true);
                 return;
               }
-              if (slash.onKeyDown(e)) return;
+              if (slashMenuVisible && slash.onKeyDown(e)) return;
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault();
                 if (editingTurn) onSubmitEditTurn?.();
@@ -1364,9 +1544,10 @@ export function RemotePendingComposer({
       </div>
       <ConfirmDialog
         open={clearConfirmOpen}
-        title={t('清空对话历史', 'Clear Conversation History')}
-        description={t('确定要清空当前对话记录并重置上下文吗？此操作不可撤销。',
-          'Clear the current conversation history and reset context? This cannot be undone.')}
+        title={t('清空对话', 'Clear conversation')}
+        description={t('将清空当前对话记录并重置上下文，此操作不可撤销。', 'This clears the current conversation history and resets context. This cannot be undone.')}
+        confirmLabel={t('清空对话', 'Clear conversation')}
+        cancelLabel={t('取消', 'Cancel')}
         danger
         onCancel={() => setClearConfirmOpen(false)}
         onConfirm={() => {
