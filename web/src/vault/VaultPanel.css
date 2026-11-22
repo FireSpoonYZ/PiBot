@@ -1,31 +1,182 @@
-.vault-panel { --bs-accent: var(--color-primary, var(--brand, var(--accent))); --bs-card: var(--color-surface-1, var(--surface)); display: grid; gap: 14px; min-width: 0; color: var(--color-text, var(--text)); }
-.vault-panel h3, .vault-panel p { margin: 0; overflow-wrap: anywhere; }
-.vault-panel header { display: grid; gap: 6px; }
-.vault-hint { color: var(--color-text-muted, var(--muted)); font-size: var(--text-sm, .85rem); }
-.vault-actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); }
-.vault-ext-bar { justify-content: space-between; align-items: center; }
-.vault-panel fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 14px; }
-.vault-panel legend { margin-bottom: 14px; font-weight: var(--weight-semibold, 600); }
-.vault-panel label { display: grid; gap: 6px; font-size: var(--text-md, .9rem); }
-.vault-panel .bs-input { border-color: var(--color-line, var(--line)); }
-.vault-permission { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3, 12px); }
-.vault-items { display: grid; gap: var(--space-3, 12px); list-style: none; margin: 0; padding: 0; }
-.vault-items li { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--color-line, var(--line)); border-radius: var(--radius-md, 12px); }
-.vault-items li p { margin-top: var(--space-1, 4px); }
-.vault-panel [role="alert"] { color: var(--color-danger, var(--danger)); }
-.vault-panel-desktop h4 { margin: 0; }
+/* VaultPanel styles unified on Wave 1 tokens & --radius-md (zero color literals). */
+
+.vault-panel {
+  --bs-accent: var(--signal-primary, var(--color-primary, var(--brand, var(--accent))));
+  --bs-card: var(--surface-1, var(--color-surface-1, var(--surface)));
+  --bs-hairline: var(--border-subtle, color-mix(in srgb, var(--color-line, var(--line)) 80%, transparent));
+  --bs-radius: var(--radius-md, 12px);
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.vault-panel h3,
+.vault-panel p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.vault-panel header {
+  display: grid;
+  gap: 6px;
+}
+
+.vault-hint {
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-size: var(--text-sm, 0.8125rem);
+}
+
+.vault-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+.vault-actions button,
+.vault-panel .bs-btn,
+.vault-panel .bs-link {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vault-ext-bar {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.vault-panel fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.vault-panel legend {
+  margin-bottom: 14px;
+  font-weight: var(--weight-semibold, 600);
+}
+
+.vault-panel label {
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-base, 0.875rem);
+}
+
+.vault-panel .bs-input {
+  border-color: var(--border-default, var(--color-line, var(--line)));
+}
+
+.vault-panel .bs-input[aria-invalid="true"] {
+  border-color: var(--state-danger, var(--color-danger, var(--danger)));
+}
+
+.vault-permission {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3, 12px);
+}
+
+.vault-permission > :first-child {
+  min-width: 0;
+}
+
+.vault-items {
+  display: grid;
+  gap: var(--space-3, 12px);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vault-items li {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+}
+
+.vault-items li p {
+  margin-top: var(--space-1, 4px);
+}
+
+.vault-panel [role="alert"] {
+  color: var(--state-danger-ink, var(--state-danger, var(--color-danger, var(--danger))));
+}
+
+.vault-panel-desktop h4 {
+  margin: 0;
+}
+
 .vault-panel-desktop .vault-desktop-tools {
   display: grid;
   gap: var(--space-2, 8px);
   padding-top: var(--space-3, 12px);
-  border-top: 1px solid var(--color-line, var(--line));
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
 }
 
-.vault-header-bar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.vault-header-titles { display: grid; gap: var(--space-1, 4px); min-width: 0; }
-.vault-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); }
-.vault-switch-wrap { display: inline-flex; align-items: center; gap: var(--space-2, 8px); flex-shrink: 0; }
-.vault-form-card { padding: 14px; border: 1px solid var(--color-line, var(--line)); border-radius: var(--radius-md, 14px); background: var(--color-surface-1, var(--surface)); display: grid; gap: var(--space-3, 12px); }
-.vault-global-section { display: grid; gap: var(--space-3, 12px); padding: var(--space-3, 12px) 14px; }
-.vault-delete-confirm { display: grid; gap: var(--space-2, 8px); padding-top: 6px; border-top: 1px solid var(--color-line, var(--line)); }
-.vault-footer-link { display: flex; justify-content: flex-start; padding-top: 2px; }
+.vault-panel .vault-header-bar,
+.vault-header-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vault-header-titles {
+  display: grid;
+  gap: var(--space-1, 4px);
+  min-width: 0;
+}
+
+.vault-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+.vault-switch-wrap {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  flex-shrink: 0;
+}
+
+.vault-form-card {
+  padding: 14px;
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  display: grid;
+  gap: var(--space-3, 12px);
+}
+
+.vault-global-section {
+  display: grid;
+  gap: var(--space-3, 12px);
+  padding: var(--space-3, 12px) 14px;
+}
+
+.vault-delete-confirm {
+  display: grid;
+  gap: var(--space-2, 8px);
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+}
+
+.vault-footer-link {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  padding-top: 2px;
+}

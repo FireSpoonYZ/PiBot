@@ -12,6 +12,13 @@ import type {
   ShowerSession,
   ShowerTarget,
 } from '../../../host-core/index.js';
+import { ConfirmDialog, InlineBanner } from '../../../web/src/components/ui';
+import {
+  hasOpenFloatingPopover,
+  isEventInsideFloatingUi,
+  useTopLayerClose,
+} from '../../../web/src/components/ui/Overlay';
+import { useText } from '../../../web/src/ui';
 import './ShowerPreview.css';
 
 export interface ShowerPreviewProps {
@@ -27,31 +34,7 @@ export interface ShowerPreviewProps {
 }
 
 type KeyModifier = NonNullable<Extract<ShowerInput, { type: 'key' }>['modifiers']>[number];
-
-const PHASE_TEXT: Record<string, string> = {
-  unavailable: '不可用',
-  idle: '未创建',
-  starting: '启动中',
-  'authentication-required': '等待本机认证',
-  ready: '就绪',
-  closed: '已结束',
-  error: '错误',
-};
-
-/** 错误码 → 用户可执行的引导；只描述本机可做的事，不假装已恢复。 */
-const GUIDE: Record<string, string> = {
-  SHOWER_UNAVAILABLE: '该平台当前没有可用桌面环境（依赖缺失或未启用），请查看目标设备文档。',
-  SHOWER_UNSUPPORTED: '目标平台不支持该操作/按键；不会用近似输入替代。',
-  SHOWER_BUSY: '该设备的桌面环境已被其他使用者占用，请稍后重试。',
-  SHOWER_AUTH_REQUIRED: '需要在目标设备本机完成登录/认证（凭据只在本机输入，不经过远程调用），完成后这里会自动刷新。',
-  SHOWER_PERMISSION_REQUIRED: '目标设备缺少所需权限（如 Shizuku/ADB 或系统设置授权），请在本机授权后重试。',
-  SHOWER_SESSION_NOT_FOUND: '会话不存在或已结束，请重新创建环境。',
-  SHOWER_SESSION_MISMATCH: '会话已被替换，旧会话不再操作；等待新画面后重试。',
-  SHOWER_NOT_READY: '环境尚未就绪，等状态变为“就绪”后再输入。',
-  SHOWER_INPUT_FAILED: '输入未生效或结果未确认；为避免重复操作不会自动重放。',
-  SHOWER_FRAME_TOO_LARGE: '画面超出帧预算（应由后端压缩），请重试。',
-  SHOWER_BACKEND_FAILED: '后端失败，请查看目标设备上的运行日志。',
-};
+type TranslateFn = (zh: string, en: string) => string;
 
 /** 键名白名单（协议键名）；不在表内且非字母/数字/F1-F12 的按键不发。 */
 const KEY_NAMES: Record<string, string> = {
@@ -88,13 +71,55 @@ function codeOf(text: string | null | undefined): string | null {
   return m ? m[1] : null;
 }
 
-function guideOf(code: string | null | undefined): string | null {
-  return code ? GUIDE[code] ?? null : null;
+/** 错误码 → 用户可执行的引导；只描述本机可做的事，不假装已恢复。 */
+function guideOf(code: string | null | undefined, t: TranslateFn): string | null {
+  switch (code) {
+    case 'SHOWER_UNAVAILABLE':
+      return t('该平台当前没有可用桌面环境（依赖缺失或未启用），请查看目标设备文档。', 'No desktop environment is available on this platform (missing dependencies or disabled). Check the target device documentation.');
+    case 'SHOWER_UNSUPPORTED':
+      return t('目标平台不支持该操作/按键；不会用近似输入替代。', 'This action or key is not supported on the target platform and will not be approximated.');
+    case 'SHOWER_BUSY':
+      return t('该设备的桌面环境已被其他使用者占用，请稍后重试。', 'This device’s desktop environment is in use by another controller. Try again later.');
+    case 'SHOWER_AUTH_REQUIRED':
+      return t('需要在目标设备本机完成登录/认证（凭据只在本机输入，不经过远程调用），完成后这里会自动刷新。', 'Complete sign-in or authentication locally on the target device (credentials stay local). This view refreshes automatically once done.');
+    case 'SHOWER_PERMISSION_REQUIRED':
+      return t('目标设备缺少所需权限（如 Shizuku/ADB 或系统设置授权），请在本机授权后重试。', 'Required permissions (such as Shizuku/ADB or system access) are missing on the target device. Grant them locally and retry.');
+    case 'SHOWER_SESSION_NOT_FOUND':
+      return t('会话不存在或已结束，请重新创建环境。', 'Session not found or already ended. Start a new desktop environment.');
+    case 'SHOWER_SESSION_MISMATCH':
+      return t('会话已被替换，旧会话不再操作；等待新画面后重试。', 'Session was replaced; actions on the old session were stopped. Wait for the new view and retry.');
+    case 'SHOWER_NOT_READY':
+      return t('环境尚未就绪，等状态变为“就绪”后再输入。', 'Environment is not ready yet. Wait until status is Ready before sending input.');
+    case 'SHOWER_INPUT_FAILED':
+      return t('输入未生效或结果未确认；为避免重复操作不会自动重放。', 'Input did not take effect or could not be confirmed; it will not be replayed automatically.');
+    case 'SHOWER_FRAME_TOO_LARGE':
+      return t('画面超出帧预算（应由后端压缩），请重试。', 'Frame exceeded the size budget (backend compression required). Please retry.');
+    case 'SHOWER_BACKEND_FAILED':
+      return t('后端失败，请查看目标设备上的运行日志。', 'Backend failure. Check the logs on the target device.');
+    default:
+      return null;
+  }
 }
 
-function phaseText(phase: string | null | undefined): string {
-  if (!phase) return '未知';
-  return PHASE_TEXT[phase] ?? phase;
+function phaseText(phase: string | null | undefined, t: TranslateFn): string {
+  switch (phase) {
+    case 'unavailable':
+      return t('不可用', 'Unavailable');
+    case 'idle':
+      return t('未创建', 'Not created');
+    case 'starting':
+      return t('启动中', 'Starting');
+    case 'authentication-required':
+      return t('等待本机认证', 'Waiting for device authentication');
+    case 'ready':
+      return t('就绪', 'Ready');
+    case 'closed':
+      return t('已结束', 'Ended');
+    case 'error':
+      return t('错误', 'Error');
+    default:
+      return phase || t('未知', 'Unknown');
+  }
 }
 
 function clampInt(v: number, min: number, max: number): number {
@@ -165,6 +190,9 @@ function asFrame(v: unknown): ShowerFrame | null {
 }
 
 export function ShowerPreview({ call, target, connected, onClose, variant }: ShowerPreviewProps) {
+  const t = useText();
+  const tRef = useRef(t);
+  tRef.current = t;
   const desktop = variant === 'desktop';
   const botId = target.botId;
   const scopeId = target.scopeId;
@@ -188,6 +216,7 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   /** 全窗口剧场模式（设计 5.5）：portal 到 <body> 的固定舞台；只改展示层，不影响轮询/输入/释放语义。 */
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [releaseConfirmation, setReleaseConfirmation] = useState<string | null>(null);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
   const textInputId = useId();
 
   const epochRef = useRef(0);
@@ -196,10 +225,15 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   /** 实际挂载的图像元素：剧场/分屏切换会重挂载 img，必须随挂载点回调更新，供滚轮原生监听重新绑定。 */
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const theaterRef = useRef<HTMLDivElement | null>(null);
   /** 剧场舞台元素：打开剧场后作为初始聚焦点（onOpenAutoFocus 的 currentTarget 不是 DOM 节点，必须用显式 ref）。 */
   const stageRef = useRef<HTMLDivElement | null>(null);
   /** 分屏头部的「全屏」按钮：剧场关闭后焦点显式还原到它（组件没有 DialogPrimitive.Trigger，Radix 不知道触发者）。 */
   const fullscreenBtnRef = useRef<HTMLButtonElement | null>(null);
+  const theaterExitBtnRef = useRef<HTMLButtonElement | null>(null);
+  const releaseBtnRef = useRef<HTMLButtonElement | null>(null);
+  const createBtnRef = useRef<HTMLButtonElement | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   /** IME 组合中；组合期间的 input 事件不发，组合结束由 compositionend 整段发一次。 */
   const composingRef = useRef(false);
   const dragRef = useRef<{ x: number; y: number; at: number; button: number } | null>(null);
@@ -220,7 +254,14 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   const canForwardEscape = inputEnabled && canKey && supportedKeys.includes('ESCAPE');
   useEffect(() => {
     setReleaseConfirmation(null);
+    setReleaseError(null);
   }, [sessionIdNow, isFullscreen, connected, visible]);
+
+  useTopLayerClose(isFullscreen, {
+    kind: 'modal',
+    getElement: () => theaterRef.current,
+    onClose: () => setIsFullscreen(false),
+  });
   // 严格会话归属：旧会话/旧目标的帧不渲染。
   const liveFrame = frame && session && frame.sessionId === session.sessionId ? frame : null;
   const live = connected && visible && phase === 'ready' && !!liveFrame;
@@ -233,15 +274,15 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   ].filter(Boolean);
 
   const inputHint = !connected
-    ? '离线：预览与输入已停止（不把旧帧当实时画面）。'
+    ? t('离线：预览与输入已停止（不把旧帧当实时画面）。', 'Offline: preview and input stopped (stale frames are hidden).')
     : !visible
-      ? '页面不可见：预览与输入已暂停，返回后自动刷新。'
+      ? t('页面不可见：预览与输入已暂停，返回后自动刷新。', 'Page hidden: preview and input paused; refreshes automatically on return.')
       : !sessionIdNow
-        ? '还没有桌面环境，请先创建。'
+        ? t('还没有桌面环境，请先创建。', 'No desktop environment yet. Start one first.')
         : phase !== 'ready'
-          ? `环境未就绪（${phaseText(phase)}），输入不可用。`
+          ? t(`环境未就绪（${phaseText(phase, t)}），输入不可用。`, `Environment not ready (${phaseText(phase, t)}); input unavailable.`)
           : takeoverSessionId !== sessionIdNow
-            ? '需先点“接管控制”，RPC 返回后才开放输入。'
+            ? t('需先点“接管控制”，RPC 返回后才开放输入。', 'Click "Take over" first; input opens once confirmed.')
             : null;
 
   function beginBusy(kind: NonNullable<typeof busy>): boolean {
@@ -266,7 +307,10 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     try {
       await call('sendShowerInput', { ...base, sessionId: sid, input });
     } catch (e) {
-      if (epoch === epochRef.current) setActionError(`输入未确认：${errText(e)}（不会自动重发）`);
+      if (epoch === epochRef.current) {
+        const t = tRef.current;
+        setActionError(t(`输入未确认：${errText(e)}（不会自动重发）`, `Input unconfirmed: ${errText(e)} (not auto-retried)`));
+      }
     }
   }
 
@@ -317,7 +361,8 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
         const s = asSession(await call('getShowerStatus', base));
         if (stopped || epoch !== epochRef.current) return;
         if (!s) {
-          setPollError('状态响应无法识别');
+          const t = tRef.current;
+          setPollError(t('状态响应无法识别', 'Unrecognized status response'));
           return;
         }
         setSession(s);
@@ -396,30 +441,32 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     void runAction('create', async (seq) => {
       const s = asSession(await call('createShowerSession', base));
       if (seq !== actionSeqRef.current) return;
+      const t = tRef.current;
       if (!s) {
-        setActionError('创建响应无法识别');
+        setActionError(t('创建响应无法识别', 'Unrecognized create response'));
         return;
       }
       setSession(s);
       setNotice(
         s.phase === 'authentication-required'
-          ? '环境等待目标设备本机认证/登录，完成后自动刷新。'
-          : '已请求启动桌面环境。',
+          ? t('环境等待目标设备本机认证/登录，完成后自动刷新。', 'Waiting for local sign-in/authentication on the target device; refreshes automatically once done.')
+          : t('已请求启动桌面环境。', 'Requested desktop environment startup.'),
       );
     });
   }
 
   function refreshFrame(): void {
     void runAction('frame', async (seq) => {
+      const t = tRef.current;
       const sid = sessionIdNow;
       if (!sid) {
-        setActionError('还没有桌面环境，请先创建。');
+        setActionError(t('还没有桌面环境，请先创建。', 'No desktop environment yet. Start one first.'));
         return;
       }
       const f = asFrame(await call('getShowerFrame', { ...base, sessionId: sid }));
       if (seq !== actionSeqRef.current) return;
       if (!f || f.sessionId !== sid) {
-        setActionError('返回帧不属于当前会话，已丢弃。');
+        setActionError(t('返回帧不属于当前会话，已丢弃。', 'Discarded frame from a different session.'));
         return;
       }
       setFrame(f);
@@ -429,20 +476,23 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   // 接管：先 await RPC，成功且会话未变才开放输入；没有交还按钮。
   function takeover(): void {
     void runAction('takeover', async (seq) => {
+      const t = tRef.current;
       const sid = sessionIdNow;
       if (!sid) {
-        setActionError('还没有桌面环境，请先创建。');
+        setActionError(t('还没有桌面环境，请先创建。', 'No desktop environment yet. Start one first.'));
         return;
       }
       const s = asSession(await call('takeoverShower', { ...base, sessionId: sid }));
       if (seq !== actionSeqRef.current) return;
       if (!s || s.sessionId !== sid) {
-        setActionError('接管结果未确认或会话已被替换，输入未开放。');
+        setActionError(t('接管结果未确认或会话已被替换，输入未开放。', 'Takeover was not confirmed or session changed; input remains locked.'));
         return;
       }
       setSession(s);
       setTakeoverSessionId(sid);
-      if (!desktop) setNotice('已接管：输入发往该环境；新回合会重新截图，无需交还。');
+      if (!desktop) {
+        setNotice(t('已接管：输入发往该环境；新回合会重新截图，无需交还。', 'In control: inputs go to this environment; next turn recaptures automatically.'));
+      }
     });
   }
 
@@ -450,11 +500,20 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     void runAction('release', async (seq) => {
       const sid = sessionIdNow;
       if (!sid) return;
-      await call('releaseShowerSession', { ...base, sessionId: sid });
+      setReleaseError(null);
+      try {
+        await call('releaseShowerSession', { ...base, sessionId: sid });
+      } catch (e) {
+        if (seq === actionSeqRef.current) setReleaseError(errText(e));
+        throw e;
+      }
       if (seq !== actionSeqRef.current) return;
+      const t = tRef.current;
+      setReleaseConfirmation(null);
+      setReleaseError(null);
       setTakeoverSessionId(null);
       setFrame(null);
-      setNotice('已结束该桌面环境；再次创建会得到新会话。');
+      setNotice(t('已结束该桌面环境；再次创建会得到新会话。', 'Desktop environment ended; starting again will create a new session.'));
     });
   }
 
@@ -521,12 +580,13 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     // 无修饰的字母/数字走文本与 IME 路径，避免与组合输入冲突。
     if (!combo && !special) return;
     ev.preventDefault();
+    if (name === 'ESCAPE') ev.stopPropagation();
     if (!canKey) {
-      setActionError('SHOWER_UNSUPPORTED: 目标平台不支持按键输入。');
+      setActionError(t('SHOWER_UNSUPPORTED: 目标平台不支持按键输入。', 'SHOWER_UNSUPPORTED: Target platform does not support key input.'));
       return;
     }
     if (!supportedKeys.includes(name)) {
-      setActionError(`SHOWER_UNSUPPORTED: 目标平台不支持按键 ${name}（不用近似键替代）。`);
+      setActionError(t(`SHOWER_UNSUPPORTED: 目标平台不支持按键 ${name}（不用近似键替代）。`, `SHOWER_UNSUPPORTED: Target platform does not support key ${name} (no approximation).`));
       return;
     }
     const modifiers: KeyModifier[] = [];
@@ -547,11 +607,11 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     if (!value) return;
     if (!inputEnabled) return;
     if (!canText) {
-      setActionError('SHOWER_UNSUPPORTED: 目标平台不支持文本输入。');
+      setActionError(t('SHOWER_UNSUPPORTED: 目标平台不支持文本输入。', 'SHOWER_UNSUPPORTED: Target platform does not support text input.'));
       return;
     }
     if (value.length > 1000) {
-      setActionError('文本超过协议上限 1000 字符，未发送。');
+      setActionError(t('文本超过协议上限 1000 字符，未发送。', 'Text exceeds the 1000-character protocol limit and was not sent.'));
       return;
     }
     void sendInput({ type: 'text', text: value });
@@ -587,20 +647,30 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     <div
       className="shower-status"
       aria-live="polite"
-      title={session?.updatedAt ? `状态更新 ${formatTs(session.updatedAt)}` : undefined}
+      title={session?.updatedAt ? t(`状态更新 ${formatTs(session.updatedAt)}`, `Status updated ${formatTs(session.updatedAt)}`) : undefined}
     >
       <span className={`shower-dot ${statusClass}`} aria-hidden="true" />
       {!connected ? (
-        <span className="shower-offline">{desktop ? '目标设备离线' : '离线：已停止轮询，不显示实时画面。'}</span>
+        <span className="shower-offline">
+          {desktop ? t('目标设备离线', 'Target device offline') : t('离线：已停止轮询，不显示实时画面。', 'Offline: polling stopped; live view hidden.')}
+        </span>
       ) : desktop ? (
-        <span>{phase === 'ready'
-          ? takenOver ? '已接管' : live ? '正在查看桌面' : '等待桌面画面'
-          : phase === null ? '正在读取桌面状态…' : phaseText(phase)}</span>
-      ) : (
         <span>
-          {phaseText(phase)}
+          {phase === 'ready'
+            ? takenOver
+              ? t('已接管', 'In control')
+              : live
+                ? t('正在查看桌面', 'Viewing desktop')
+                : t('等待桌面画面', 'Waiting for desktop frame')
+            : phase === null
+              ? t('正在读取桌面状态…', 'Loading desktop status…')
+              : phaseText(phase, t)}
+        </span>
+      ) : (
+        <span className="tabular-nums">
+          {phaseText(phase, t)}
           {session ? ` · ${session.platform} · ${session.width}×${session.height}` : ''}
-          {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
+          {sessionIdNow ? t(` · 会话 ${shortId(sessionIdNow)}`, ` · Session ${shortId(sessionIdNow)}`) : t(' · 无环境', ' · No environment')}
         </span>
       )}
     </div>
@@ -609,54 +679,121 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   const capabilitiesBlock = capabilities ? (
     <div className="shower-caps">
       <span>
-        输入 {inputKinds.length ? inputKinds.join('/') : '无'} · 启动{' '}
-        {capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : '无'} · 原生预览{' '}
-        {capabilities.nativePreview ? '支持' : '不支持'}
+        {t(`输入 ${inputKinds.length ? inputKinds.join('/') : '无'} · 启动 ${capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : '无'} · 原生预览 ${capabilities.nativePreview ? '支持' : '不支持'}`, `Input ${inputKinds.length ? inputKinds.join('/') : 'none'} · Launch ${capabilities.launchKinds.length ? capabilities.launchKinds.join('/') : 'none'} · Native preview ${capabilities.nativePreview ? 'supported' : 'unsupported'}`)}
       </span>
-      {unsupported.length ? <span className="shower-unsupported">不支持：{unsupported.join('/')}</span> : null}
+      {unsupported.length ? (
+        <span className="shower-unsupported">
+          {t(`不支持：${unsupported.join('/')}`, `Unsupported: ${unsupported.join('/')}`)}
+        </span>
+      ) : null}
     </div>
+  ) : null;
+
+  const offlineBanner = !connected ? (
+    <InlineBanner
+      tone="attention"
+      compact
+      role="status"
+      title={desktop ? t('目标设备离线', 'Target device offline') : t('离线：已停止轮询，不显示实时画面。', 'Offline: polling stopped; live view hidden.')}
+      detail={t('预览与输入已暂停，设备重新连接后自动恢复。', 'Preview and input are paused and resume automatically after reconnecting.')}
+    />
   ) : null;
 
   const phaseGuideBlock = (
     <>
       {phase === 'authentication-required' ? (
-        <div className="shower-guide">等待目标设备本机认证/登录：{guideOf('SHOWER_AUTH_REQUIRED')}</div>
+        <InlineBanner
+          tone="attention"
+          compact
+          role="status"
+          title={t('等待目标设备本机认证/登录', 'Waiting for local sign-in / authentication on target device')}
+          detail={guideOf('SHOWER_AUTH_REQUIRED', t) ?? undefined}
+        />
       ) : null}
-      {phase === 'unavailable' ? <div className="shower-guide">{guideOf('SHOWER_UNAVAILABLE')}</div> : null}
+      {phase === 'unavailable' ? (
+        <InlineBanner
+          tone="attention"
+          compact
+          role="status"
+          title={t('当前平台没有可用桌面环境', 'Desktop environment unavailable on this platform')}
+          detail={guideOf('SHOWER_UNAVAILABLE', t) ?? undefined}
+        />
+      ) : null}
     </>
   );
 
-  const desktopIssue = actionError ? guideOf(actionCode) ?? '桌面操作未完成。可展开诊断查看原因。'
+  const desktopIssue = actionError
+    ? guideOf(actionCode, t) ?? t('桌面操作未完成。可展开诊断查看原因。', 'Desktop action did not complete. Expand diagnostics for details.')
     : sessionCode && phase !== 'authentication-required' && phase !== 'unavailable'
-      ? guideOf(sessionCode) ?? '桌面环境遇到问题。可展开诊断查看原因。'
-      : pollError ? guideOf(pollCode) ?? '暂时无法读取画面。可展开诊断查看原因。' : null;
+      ? guideOf(sessionCode, t) ?? t('桌面环境遇到问题。可展开诊断查看原因。', 'The desktop environment encountered an error. Expand diagnostics for details.')
+      : pollError
+        ? guideOf(pollCode, t) ?? t('暂时无法读取画面。可展开诊断查看原因。', 'Unable to read desktop frame right now. Expand diagnostics for details.')
+        : null;
+
   const alertBlock = desktop ? (
     <>
-      {desktopIssue ? <div className="error-banner" role="alert">{desktopIssue}</div> : null}
-      {notice ? <div className="shower-notice" role="status">{notice}</div> : null}
+      {desktopIssue ? (
+        <InlineBanner
+          tone="danger"
+          compact
+          role="alert"
+          title={desktopIssue}
+          onDismiss={actionError ? () => setActionError(null) : undefined}
+          dismissLabel={t('关闭错误提示', 'Dismiss error')}
+        />
+      ) : null}
+      {notice ? (
+        <InlineBanner
+          tone="live"
+          compact
+          role="status"
+          title={notice}
+          onDismiss={() => setNotice(null)}
+          dismissLabel={t('关闭提示', 'Dismiss notice')}
+        />
+      ) : null}
     </>
   ) : (
     <>
       {pollError ? (
-        <div className="error-banner" role="alert">
-          {pollError}
-          {guideOf(pollCode) ? <div className="shower-guide">{guideOf(pollCode)}</div> : null}
-        </div>
+        <InlineBanner
+          tone="danger"
+          compact
+          role="alert"
+          title={pollError}
+          detail={guideOf(pollCode, t) ?? undefined}
+        />
       ) : null}
       {sessionCode ? (
-        <div className="error-banner" role="alert">
-          {sessionCode}
-          {session?.error?.message ? `: ${session.error.message}` : ''}
-          {guideOf(sessionCode) ? <div className="shower-guide">{guideOf(sessionCode)}</div> : null}
-        </div>
+        <InlineBanner
+          tone="danger"
+          compact
+          role="alert"
+          title={session?.error?.message ? `${sessionCode}: ${session.error.message}` : sessionCode}
+          detail={guideOf(sessionCode, t) ?? undefined}
+        />
       ) : null}
       {actionError ? (
-        <div className="error-banner" role="alert">
-          {actionError}
-          {guideOf(actionCode) ? <div className="shower-guide">{guideOf(actionCode)}</div> : null}
-        </div>
+        <InlineBanner
+          tone="danger"
+          compact
+          role="alert"
+          title={actionError}
+          detail={guideOf(actionCode, t) ?? undefined}
+          onDismiss={() => setActionError(null)}
+          dismissLabel={t('关闭错误提示', 'Dismiss error')}
+        />
       ) : null}
-      {notice ? <div className="shower-notice" aria-live="polite">{notice}</div> : null}
+      {notice ? (
+        <InlineBanner
+          tone="live"
+          compact
+          role="status"
+          title={notice}
+          onDismiss={() => setNotice(null)}
+          dismissLabel={t('关闭提示', 'Dismiss notice')}
+        />
+      ) : null}
     </>
   );
 
@@ -665,7 +802,7 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
       ref={setImgEl}
       className={`shower-frame ${inputEnabled ? 'interactive' : ''}`}
       src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
-      alt="桌面环境画面"
+      alt={t('桌面环境画面', 'Desktop environment view')}
       draggable={false}
       onPointerDown={onPointerDown}
       onPointerUp={onPointerUp}
@@ -679,30 +816,37 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
       <Monitor size={26} aria-hidden="true" />
       <span>
         {!connected
-          ? '离线：不显示旧画面。'
+          ? t('离线：不显示旧画面。', 'Offline: stale frame hidden.')
           : phase === 'starting'
-            ? '环境启动中…'
+            ? t('环境启动中…', 'Starting environment…')
             : phase === 'authentication-required'
-              ? '等待目标设备本机认证…'
-              : '暂无画面'}
+              ? t('等待目标设备本机认证…', 'Waiting for local authentication on target device…')
+              : t('暂无画面', 'No frame yet')}
       </span>
     </div>
   );
 
   const metaBlock = live && liveFrame ? (
-    <div className="shower-meta">
-      实时 · 帧 {formatTs(liveFrame.capturedAt)} · {liveFrame.imageWidth}×{liveFrame.imageHeight} → 源{' '}
-      {liveFrame.width}×{liveFrame.height}
+    <div className="shower-meta tabular-nums">
+      {t(`实时 · 帧 ${formatTs(liveFrame.capturedAt)} · ${liveFrame.imageWidth}×${liveFrame.imageHeight} → 源 ${liveFrame.width}×${liveFrame.height}`, `Live · Frame ${formatTs(liveFrame.capturedAt)} · ${liveFrame.imageWidth}×${liveFrame.imageHeight} → Source ${liveFrame.width}×${liveFrame.height}`)}
     </div>
   ) : null;
 
   const diagnosticsBlock = desktop ? (
     <details className="shower-diagnostics">
-      <summary>桌面诊断</summary>
+      <summary>{t('桌面诊断', 'Desktop diagnostics')}</summary>
       <div className="shower-diagnostics-body">
-        <span>智能体 {botId}{scopeId ? ` · 对话 ${scopeId}` : ''}</span>
-        {session ? <span>{session.platform} · {session.width}×{session.height} · 更新于 {formatTs(session.updatedAt)}</span> : null}
-        {sessionIdNow ? <span>会话 {sessionIdNow}</span> : null}
+        <span>
+          {scopeId
+            ? t(`智能体 ${botId} · 对话 ${scopeId}`, `Bot ${botId} · Scope ${scopeId}`)
+            : t(`智能体 ${botId}`, `Bot ${botId}`)}
+        </span>
+        {session ? (
+          <span className="tabular-nums">
+            {t(`${session.platform} · ${session.width}×${session.height} · 更新于 ${formatTs(session.updatedAt)}`, `${session.platform} · ${session.width}×${session.height} · Updated ${formatTs(session.updatedAt)}`)}
+          </span>
+        ) : null}
+        {sessionIdNow ? <span>{t(`会话 ${sessionIdNow}`, `Session ${sessionIdNow}`)}</span> : null}
         {capabilitiesBlock}
         {metaBlock}
         {pollError ? <span>{pollError}</span> : null}
@@ -710,9 +854,17 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
         {actionError ? <span>{actionError}</span> : null}
         {connected && sessionIdNow && phase === 'ready' ? (
           <div className="shower-controls">
-            <button type="button" onClick={refreshFrame} disabled={busy !== null}>刷新画面</button>
-            {takenOver ? <button type="button" onClick={takeover} disabled={busy !== null}>重新接管</button> : null}
-            {takenOver ? <span className="hint">重新接管也会中断当前回合。</span> : null}
+            <button type="button" onClick={refreshFrame} disabled={busy !== null}>
+              {t('刷新画面', 'Refresh frame')}
+            </button>
+            {takenOver ? (
+              <button type="button" onClick={takeover} disabled={busy !== null}>
+                {t('重新接管', 'Take over again')}
+              </button>
+            ) : null}
+            {takenOver ? (
+              <span className="hint">{t('重新接管也会中断当前回合。', 'Taking over again will also interrupt the current turn.')}</span>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -720,24 +872,24 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   ) : null;
 
   const canStart = phase === 'idle' || phase === 'closed' || phase === 'error' ||
-    (!sessionIdNow && (phase === 'unavailable' || phase === null && !!pollError));
+    (!sessionIdNow && (phase === 'unavailable' || (phase === null && !!pollError)));
   const controlsBlock = desktop ? (
     <div className="shower-controls">
       {connected && (canStart || busy === 'create') ? (
-        <button type="button" className="primary" onClick={createSession} disabled={busy !== null}>
-          {busy === 'create' ? '启动中…' : '启动桌面'}
+        <button ref={createBtnRef} type="button" className="primary" onClick={createSession} disabled={busy !== null}>
+          {busy === 'create' ? t('启动中…', 'Starting…') : t('启动桌面', 'Start desktop')}
         </button>
       ) : connected && sessionIdNow && phase === 'ready' && !takenOver ? (
         live || busy === 'takeover' ? (
           <>
             <button type="button" className="primary" onClick={takeover} disabled={busy !== null}>
-              {busy === 'takeover' ? '接管中…' : '接管控制'}
+              {busy === 'takeover' ? t('接管中…', 'Taking over…') : t('接管控制', 'Take over')}
             </button>
-            <span className="hint">接管会中断这个智能体正在运行的回合。</span>
+            <span className="hint">{t('接管会中断这个智能体正在运行的回合。', 'Taking over interrupts this Bot’s running turn.')}</span>
           </>
         ) : (
           <button type="button" className="primary" onClick={refreshFrame} disabled={busy !== null}>
-            {busy === 'frame' ? '读取画面中…' : '查看画面'}
+            {busy === 'frame' ? t('读取画面中…', 'Loading frame…') : t('查看画面', 'View frame')}
           </button>
         )
       ) : null}
@@ -745,23 +897,28 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   ) : (
     <div className="shower-controls">
       <button
+        ref={createBtnRef}
         type="button"
         onClick={createSession}
         disabled={!connected || busy !== null || (!!sessionIdNow && phase !== 'closed' && phase !== 'error' && phase !== 'idle')}
       >
-        {busy === 'create' ? '创建中…' : '创建/启动环境'}
+        {busy === 'create' ? t('创建中…', 'Creating…') : t('创建/启动环境', 'Create / Start')}
       </button>
       <button type="button" onClick={refreshFrame} disabled={!connected || !sessionIdNow || busy !== null}>
-        {busy === 'frame' ? '刷新中…' : '刷新画面'}
+        {busy === 'frame' ? t('刷新中…', 'Refreshing…') : t('刷新画面', 'Refresh frame')}
       </button>
       <button
         type="button"
         className={takenOver ? 'taken-over' : 'primary'}
         onClick={takeover}
         disabled={!connected || !sessionIdNow || phase !== 'ready' || busy !== null}
-        title="调用 takeoverShower：先中止当前回合，返回后才开放输入"
+        title={t('调用 takeoverShower：先中止当前回合，返回后才开放输入', 'Calls takeoverShower: interrupts the active turn and enables input once confirmed')}
       >
-        {busy === 'takeover' ? '接管中…' : takenOver ? '已接管 · 重新接管' : '接管控制'}
+        {busy === 'takeover'
+          ? t('接管中…', 'Taking over…')
+          : takenOver
+            ? t('已接管 · 重新接管', 'In control · Take over again')
+            : t('接管控制', 'Take over')}
       </button>
     </div>
   );
@@ -769,7 +926,9 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   const inputBlock = (
     <div className="shower-input">
       <label className="shower-input-label" htmlFor={textInputId}>
-        {desktop ? '输入到远端桌面' : '人工输入（提交即发送；特殊键/组合键走按键）'}
+        {desktop
+          ? t('输入到远端桌面', 'Type into remote desktop')
+          : t('人工输入（提交即发送；特殊键/组合键走按键）', 'Manual input (sent on commit; special & combo keys send key events)')}
       </label>
       <input
         id={textInputId}
@@ -780,7 +939,7 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
         onCompositionEnd={onTextCompositionEnd}
         onKeyDown={onKeyDown}
         disabled={!inputEnabled}
-        placeholder={inputEnabled ? '输入文本或按键…' : '接管成功后可用'}
+        placeholder={inputEnabled ? t('输入文本或按键…', 'Type text or press keys…') : t('接管成功后可用', 'Available after takeover')}
         autoComplete="off"
         spellCheck={false}
       />
@@ -788,59 +947,62 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
     </div>
   );
 
+  const releaseConfirmOpen =
+    releaseConfirmation !== null && releaseConfirmation === sessionIdNow && connected && phase !== 'closed';
+
   const releaseBlock = desktop ? (
     connected && sessionIdNow && phase !== 'closed' ? (
-      releaseConfirmation === sessionIdNow ? (
-        <div className="shower-confirm-end" role="group" aria-label="确认结束桌面环境">
-          <p>结束后会关闭目标设备上的当前桌面环境。</p>
-          <button type="button" className="shower-release" disabled={busy !== null} onClick={() => {
-            if (releaseConfirmation !== sessionIdNow) return;
-            setReleaseConfirmation(null);
-            releaseSession();
-          }}>确认结束</button>
-          <button type="button" onClick={() => setReleaseConfirmation(null)}>取消</button>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="shower-release"
-          onClick={() => setReleaseConfirmation(sessionIdNow)}
-          disabled={busy !== null}
-        >
-          {busy === 'release' ? '结束中…' : '结束桌面环境'}
-        </button>
-      )
+      <button
+        ref={releaseBtnRef}
+        type="button"
+        className="shower-release"
+        onClick={() => {
+          setReleaseError(null);
+          setReleaseConfirmation(sessionIdNow);
+        }}
+        disabled={busy !== null}
+      >
+        {busy === 'release' ? t('结束中…', 'Ending…') : t('结束桌面环境', 'End desktop environment')}
+      </button>
     ) : null
   ) : (
     <>
       <button
+        ref={releaseBtnRef}
         type="button"
         className="shower-release"
-        onClick={releaseSession}
+        onClick={() => {
+          if (sessionIdNow) {
+            setReleaseError(null);
+            setReleaseConfirmation(sessionIdNow);
+          }
+        }}
         disabled={!connected || !sessionIdNow || busy !== null}
-        title="显式结束该桌面环境（与关闭预览不同）"
+        title={t('显式结束该桌面环境（与关闭预览不同）', 'Explicitly end this desktop environment (closing preview keeps it running)')}
       >
-        {busy === 'release' ? '结束中…' : '结束桌面环境（释放会话）'}
+        {busy === 'release' ? t('结束中…', 'Ending…') : t('结束桌面环境（释放会话）', 'End desktop environment (release session)')}
       </button>
-      <span className="hint">关闭预览不释放环境。</span>
+      <span className="hint">{t('关闭预览不释放环境。', 'Closing preview does not end the environment.')}</span>
     </>
   );
 
   /**
    * 剧场 Escape：接管后输入通道开放（inputEnabled）时，Esc 属于必须发给远端的按键——
-   * 输入框转发 ESCAPE，桌面版也从舞台转发设备支持的 Escape。
+   * 输入框转发 ESCAPE，舞台也转发设备支持的 Escape。
    * 只有未接管且焦点在非输入控件（顶栏按钮/舞台空白）时 Esc 才关闭剧场。Radix 自身的 Esc→关闭
    * 在 Content.onEscapeKeyDown 里按同一条件拦截。
    */
   function onTheaterEscapeKey(ev: KeyboardEvent<HTMLElement>): void {
     if (ev.key !== 'Escape') return;
+    if (hasOpenFloatingPopover(theaterRef.current)) return;
     // 焦点在接管输入框时不处理：留给 onKeyDown 的远端 ESCAPE 发送路径。
     if ((ev.target as HTMLElement | null)?.tagName === 'INPUT') return;
     if (inputEnabled) {
-      if (desktop && canForwardEscape) onKeyDown(ev);
+      if (canForwardEscape) onKeyDown(ev);
       return;
     }
     ev.preventDefault();
+    ev.stopPropagation();
     setIsFullscreen(false);
   }
 
@@ -849,15 +1011,35 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
   const theater = (
     <DialogPrimitive.Root
       open={isFullscreen}
-      onOpenChange={(open) => { if (!open) setIsFullscreen(false); }}
+      onOpenChange={(open) => {
+        if (!open) setIsFullscreen(false);
+      }}
     >
       <DialogPrimitive.Portal>
         <DialogPrimitive.Content
+          ref={theaterRef}
           className={desktop ? 'shower-theater shower-desktop' : 'shower-theater'}
           data-shower-overlay
-          aria-label="桌面环境全窗口剧场"
+          data-shower-takeover={inputEnabled ? 'true' : undefined}
+          data-ui-dialog={isFullscreen ? 'open' : undefined}
+          aria-label={t('桌面环境全窗口剧场', 'Desktop environment fullscreen theater')}
           onKeyDown={onTheaterEscapeKey}
-          onEscapeKeyDown={(e) => { if (inputEnabled) e.preventDefault(); }}
+          onPointerDownOutside={(event) => {
+            if (isEventInsideFloatingUi(event)) event.preventDefault();
+          }}
+          onFocusOutside={(event) => {
+            if (isEventInsideFloatingUi(event)) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            if (isEventInsideFloatingUi(event)) event.preventDefault();
+          }}
+          onEscapeKeyDown={(e) => {
+            if (inputEnabled || hasOpenFloatingPopover(theaterRef.current)) {
+              e.preventDefault();
+              return;
+            }
+            e.stopPropagation();
+          }}
           onOpenAutoFocus={(e) => {
             e.preventDefault();
             if (desktop && inputEnabled && inputRef.current) inputRef.current.focus();
@@ -870,71 +1052,84 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
             fullscreenBtnRef.current?.focus();
           }}
         >
-          <DialogPrimitive.Title className="sr-only">桌面环境全窗口剧场</DialogPrimitive.Title>
+          <DialogPrimitive.Title className="sr-only">
+            {t('桌面环境全窗口剧场', 'Desktop environment fullscreen theater')}
+          </DialogPrimitive.Title>
           <DialogPrimitive.Description className="sr-only">
-            虚拟桌面画面与接管输入；未接管时 Esc 返回分屏，接管后 Esc 发往远端。
+            {t('虚拟桌面画面与接管输入；未接管时 Esc 返回分屏，接管后 Esc 发往远端。', 'Virtual desktop view and takeover input. Press Esc to exit fullscreen when viewing, or send Esc to the remote desktop while in control.')}
           </DialogPrimitive.Description>
-      <header className="shower-theater-top">
-        <button
-          type="button"
-          className="icon-button"
-          onClick={() => setIsFullscreen(false)}
-          title={desktop && inputEnabled ? '返回分屏' : '返回分屏（Esc）'}
-        >
-          <Minimize2 size={14} aria-hidden="true" />
-          返回分屏
-        </button>
-        <div className="shower-theater-title">
-          <Monitor size={15} aria-hidden="true" />
-          {desktop ? '虚拟桌面' : shortId(botId)}
-          {!desktop ? <span className="shower-sub">
-            {scopeId ? `scope ${shortId(scopeId)}` : '主会话'}
-            {sessionIdNow ? ` · 会话 ${shortId(sessionIdNow)}` : ' · 无环境'}
-          </span> : null}
-        </div>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onClose}
-          title="关闭预览（只停轮询，不释放环境）"
-          aria-label="关闭预览"
-        >
-          <X size={15} aria-hidden="true" />
-        </button>
-      </header>
-      {statusBlock}
-      <div className="shower-theater-alerts">
-        {phaseGuideBlock}
-        {alertBlock}
-      </div>
-      <div className="shower-theater-stage" ref={stageRef} tabIndex={-1}>
-        {frameBlock}
-      </div>
-      {!desktop ? metaBlock : null}
-      <div className="shower-theater-bar">
-        {controlsBlock}
-        {desktop ? (inputEnabled && (canText || canKey) ? inputBlock : null) : <input
-          id={`${textInputId}-theater`}
-          ref={inputRef}
-          className="shower-text"
-          onChange={onTextChange}
-          onCompositionStart={onTextCompositionStart}
-          onCompositionEnd={onTextCompositionEnd}
-          onKeyDown={onKeyDown}
-          disabled={!inputEnabled}
-          placeholder={inputEnabled ? '输入文本或按键…' : '接管成功后可用'}
-          autoComplete="off"
-          spellCheck={false}
-          aria-label="人工输入（提交即发送；特殊键/组合键走按键）"
-        />}
-        {desktop && inputEnabled ? (
-          <span className="hint">
-            {canForwardEscape ? 'Esc 发往远端。' : ''}点击「返回分屏」退出全屏。
-          </span>
-        ) : null}
-        {releaseBlock}
-        {diagnosticsBlock}
-      </div>
+          <header className="shower-theater-top">
+            <button
+              ref={theaterExitBtnRef}
+              type="button"
+              className="icon-button"
+              onClick={() => setIsFullscreen(false)}
+              title={inputEnabled ? t('返回分屏', 'Exit fullscreen') : t('返回分屏（Esc）', 'Exit fullscreen (Esc)')}
+              aria-label={t('返回分屏', 'Exit fullscreen')}
+            >
+              <Minimize2 size={14} aria-hidden="true" />
+              {t('返回分屏', 'Exit fullscreen')}
+            </button>
+            <div className="shower-theater-title">
+              <Monitor size={15} aria-hidden="true" />
+              {desktop ? t('虚拟桌面', 'Virtual desktop') : shortId(botId)}
+              {!desktop ? (
+                <span className="shower-sub">
+                  {scopeId ? `scope ${shortId(scopeId)}` : t('主会话', 'Primary session')}
+                  {sessionIdNow ? t(` · 会话 ${shortId(sessionIdNow)}`, ` · Session ${shortId(sessionIdNow)}`) : t(' · 无环境', ' · No environment')}
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={onClose}
+              title={t('关闭预览（只停轮询，不释放环境）', 'Close preview (stops polling without ending the environment)')}
+              aria-label={t('关闭预览', 'Close preview')}
+            >
+              <X size={15} aria-hidden="true" />
+            </button>
+          </header>
+          {statusBlock}
+          <div className="shower-theater-alerts">
+            {offlineBanner}
+            {phaseGuideBlock}
+            {alertBlock}
+          </div>
+          <div className="shower-theater-stage" ref={stageRef} tabIndex={-1}>
+            {frameBlock}
+          </div>
+          {!desktop ? metaBlock : null}
+          <div className="shower-theater-bar">
+            {controlsBlock}
+            {desktop ? (
+              inputEnabled && (canText || canKey) ? inputBlock : null
+            ) : (
+              <input
+                id={`${textInputId}-theater`}
+                ref={inputRef}
+                className="shower-text"
+                onChange={onTextChange}
+                onCompositionStart={onTextCompositionStart}
+                onCompositionEnd={onTextCompositionEnd}
+                onKeyDown={onKeyDown}
+                disabled={!inputEnabled}
+                placeholder={inputEnabled ? t('输入文本或按键…', 'Type text or press keys…') : t('接管成功后可用', 'Available after takeover')}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={t('人工输入（提交即发送；特殊键/组合键走按键）', 'Manual input (sent on commit; special & combo keys send key events)')}
+              />
+            )}
+            {inputEnabled ? (
+              <span className="hint">
+                {canForwardEscape
+                  ? t('Esc 发往远端。点击「返回分屏」退出全屏。', 'Esc is sent to the remote desktop. Click "Exit fullscreen" to leave.')
+                  : t('点击「返回分屏」退出全屏。', 'Click "Exit fullscreen" to leave.')}
+              </span>
+            ) : null}
+            {releaseBlock}
+            {diagnosticsBlock}
+          </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
@@ -942,20 +1137,26 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
 
   return (
     <>
-      <section className={desktop ? 'shower-preview shower-desktop' : 'shower-preview'} aria-label="桌面环境预览">
+      <section
+        className={desktop ? 'shower-preview shower-desktop' : 'shower-preview'}
+        data-shower-takeover={inputEnabled ? 'true' : undefined}
+        aria-label={t('桌面环境预览', 'Desktop environment preview')}
+      >
         <header className="shower-head">
           <div className="shower-head-text">
             <div className="shower-title">
               <Monitor size={14} aria-hidden="true" />
-              虚拟桌面
+              {t('虚拟桌面', 'Virtual desktop')}
             </div>
-            {!desktop ? <div
-              className="shower-sub"
-              title={`${botId}${scopeId ? ` · scope ${scopeId}` : ''}`}
-            >
-              {shortId(botId)}
-              {scopeId ? ` · scope ${shortId(scopeId)}` : ' · 主会话'}
-            </div> : null}
+            {!desktop ? (
+              <div
+                className="shower-sub"
+                title={`${botId}${scopeId ? ` · scope ${scopeId}` : ''}`}
+              >
+                {shortId(botId)}
+                {scopeId ? ` · scope ${shortId(scopeId)}` : t(' · 主会话', ' · Primary session')}
+              </div>
+            ) : null}
           </div>
           <div className="shower-head-actions">
             <button
@@ -963,18 +1164,19 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
               className="icon-button"
               ref={fullscreenBtnRef}
               onClick={() => setIsFullscreen(true)}
-              title="全窗口剧场模式"
-              aria-label="进入全窗口剧场模式"
+              title={t('全窗口剧场模式', 'Fullscreen theater mode')}
+              aria-label={t('进入全窗口剧场模式', 'Enter fullscreen theater mode')}
             >
               <Maximize2 size={14} aria-hidden="true" />
-              全屏
+              {t('全屏', 'Fullscreen')}
             </button>
             <button
+              ref={closeBtnRef}
               type="button"
               className="icon-button"
               onClick={onClose}
-              title="关闭预览（只停轮询，不释放环境）"
-              aria-label="关闭预览"
+              title={t('关闭预览（只停轮询，不释放环境）', 'Close preview (stops polling without ending the environment)')}
+              aria-label={t('关闭预览', 'Close preview')}
             >
               <X size={15} aria-hidden="true" />
             </button>
@@ -983,6 +1185,7 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
 
         {statusBlock}
         {!desktop ? capabilitiesBlock : null}
+        {offlineBanner}
         {phaseGuideBlock}
         {alertBlock}
 
@@ -1001,10 +1204,47 @@ export function ShowerPreview({ call, target, connected, onClose, variant }: Sho
             </div>
           </>
         ) : (
-          <div className="shower-empty" role="status">{desktop ? '全屏预览已开启。' : '剧场模式已开启（Esc 或「返回分屏」退出）。'}</div>
+          <div className="shower-empty" role="status">
+            {desktop
+              ? t('全屏预览已开启。', 'Fullscreen preview is open.')
+              : t('剧场模式已开启（Esc 或「返回分屏」退出）。', 'Theater mode is open (press Esc or click "Exit fullscreen" to leave).')}
+          </div>
         )}
       </section>
       {theater}
+      <ConfirmDialog
+        open={releaseConfirmOpen}
+        title={t('结束当前桌面环境？', 'End current desktop environment?')}
+        description={t('结束桌面环境会立即关闭目标设备上的当前虚拟桌面并释放会话，未保存的应用状态会丢失；再次启动将创建全新会话。仅想退出查看请使用「关闭预览」。', 'Ending this desktop environment immediately closes the active virtual desktop on the target device and releases the session. Any unsaved app state will be lost, and starting again creates a fresh session. To only stop viewing, close the preview instead.')}
+        danger
+        busy={busy === 'release'}
+        error={releaseError}
+        confirmLabel={busy === 'release' ? t('结束中…', 'Ending…') : t('结束桌面环境', 'End desktop environment')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => {
+          if (busy !== 'release') {
+            setReleaseConfirmation(null);
+            setReleaseError(null);
+          }
+        }}
+        onConfirm={() => {
+          if (releaseConfirmation !== sessionIdNow || busy !== null) return;
+          setReleaseError(null);
+          releaseSession();
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const candidates = [
+            releaseBtnRef.current,
+            isFullscreen ? theaterExitBtnRef.current : null,
+            createBtnRef.current,
+            fullscreenBtnRef.current,
+            closeBtnRef.current,
+          ];
+          const next = candidates.find(el => el && el.isConnected && !el.disabled);
+          next?.focus({ preventScroll: true });
+        }}
+      />
     </>
   );
 }

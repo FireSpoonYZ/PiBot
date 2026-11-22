@@ -174,7 +174,7 @@ export interface CenterTransport {
   ): Promise<T>;
 }
 
-export type CenterAdminTab = 'providers' | 'capabilities' | 'google' | 'devices' | 'vault' | 'ops';
+export type CenterAdminTab = 'providers' | 'devices' | 'capabilities' | 'google' | 'vault' | 'webhooks' | 'releases';
 
 export interface CenterAdminPanelProps {
   transport: CenterTransport;

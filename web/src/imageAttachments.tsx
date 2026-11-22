@@ -6,6 +6,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import * as Dialog from '@radix-ui/react-dialog';
 import type { ImageAttachment, ImageAttachmentData } from '../../host-core/index.js';
 import { useText } from './ui';
+import {
+  hasOpenFloatingPopover,
+  isEventInsideFloatingUi,
+  useTopLayerClose,
+} from './components/ui/Overlay';
 
 export type { ImageAttachment, ImageAttachmentData };
 
@@ -355,6 +360,19 @@ export function resolveSentAttachmentBoxStyle(
   };
 }
 
+const IMAGE_OUTLINE_STYLE: CSSProperties = {
+  outline: '1px solid var(--image-outline)',
+  outlineOffset: '-1px',
+};
+
+const LIGHTBOX_OVERLAY_STYLE: CSSProperties = {
+  zIndex: 'var(--z-lightbox, 450)',
+};
+
+const LIGHTBOX_CONTENT_STYLE: CSSProperties = {
+  zIndex: 'calc(var(--z-lightbox, 450) + 1)',
+};
+
 /** 缩略图：上传后/历史中的 ImageAttachment 元数据，点击放大；失败显示可读错误。 */
 export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, sent = false, t }: {
   attachment: ImageAttachment;
@@ -367,24 +385,41 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
 }) {
   const cache = useAttachmentImageCache(fetcher, t);
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const url = cache.urlFor(attachment.id);
   const error = cache.errorFor(attachment.id);
+  const isLightboxOpen = open && Boolean(url);
 
   useEffect(() => {
     cache.ensure(attachment.id);
   }, [cache, attachment.id]);
+
+  // Intercept Android hardware / gesture back button via unified LIFO stack.
+  useTopLayerClose(isLightboxOpen, {
+    kind: 'modal',
+    getElement: () => contentRef.current,
+    onClose: () => setOpen(false),
+  });
 
   const alt = attachment.name || t('图片附件', 'Image attachment');
   const validDims = hasValidImageDimensions(attachment.width, attachment.height);
   const placeholderStyle = sent
     ? resolveSentAttachmentBoxStyle(attachment.width, attachment.height)
     : undefined;
-  const loadedImageStyle = sent
-    ? resolveSentAttachmentBoxStyle(attachment.width, attachment.height, { forLoadedImage: true })
-    : undefined;
+  const loadedImageStyle: CSSProperties = sent
+    ? {
+        ...resolveSentAttachmentBoxStyle(attachment.width, attachment.height, { forLoadedImage: true }),
+        ...IMAGE_OUTLINE_STYLE,
+      }
+    : IMAGE_OUTLINE_STYLE;
+  const lightboxDescription = validDims
+    ? t(`全屏图片预览，尺寸 ${attachment.width} × ${attachment.height}。按 Escape 或点击背景关闭。`, `Full-screen image preview (${attachment.width} × ${attachment.height}). Press Escape or click backdrop to close.`)
+    : t('全屏图片预览。按 Escape 或点击背景关闭。', 'Full-screen image preview. Press Escape or click backdrop to close.');
   return (
     <span className="image-attachment" data-attachment-id={attachment.id}>
       <button
+        ref={triggerRef}
         type="button"
         className="image-attachment-open"
         data-loaded={url ? 'true' : undefined}
@@ -436,18 +471,46 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
           </svg>
         </button>
       ) : null}
-      <Dialog.Root open={open && Boolean(url)} onOpenChange={setOpen}>
+      <Dialog.Root open={isLightboxOpen} onOpenChange={setOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className="image-attachment-viewer" />
+          <Dialog.Overlay
+            className="image-attachment-viewer"
+            style={LIGHTBOX_OVERLAY_STYLE}
+          />
           <Dialog.Content
+            ref={contentRef}
+            data-ui-dialog={isLightboxOpen ? 'open' : undefined}
             className="image-attachment-viewer-content"
-            aria-describedby={undefined}
+            style={LIGHTBOX_CONTENT_STYLE}
+            onPointerDownOutside={(event) => {
+              if (isEventInsideFloatingUi(event)) event.preventDefault();
+            }}
+            onFocusOutside={(event) => {
+              if (isEventInsideFloatingUi(event)) event.preventDefault();
+            }}
+            onInteractOutside={(event) => {
+              if (isEventInsideFloatingUi(event)) event.preventDefault();
+            }}
+            onEscapeKeyDown={(event) => {
+              if (hasOpenFloatingPopover(contentRef.current)) {
+                event.preventDefault();
+                return;
+              }
+              event.stopPropagation();
+            }}
+            onCloseAutoFocus={(event) => {
+              if (triggerRef.current?.isConnected) {
+                event.preventDefault();
+                triggerRef.current.focus({ preventScroll: true });
+              }
+            }}
             onClick={(e) => {
               if (e.target === e.currentTarget) setOpen(false);
             }}
           >
             <Dialog.Title className="sr-only">{alt}</Dialog.Title>
-            {url ? <img src={url} alt={alt} /> : null}
+            <Dialog.Description className="sr-only">{lightboxDescription}</Dialog.Description>
+            {url ? <img src={url} alt={alt} style={IMAGE_OUTLINE_STYLE} /> : null}
             <Dialog.Close asChild>
               <button
                 type="button"

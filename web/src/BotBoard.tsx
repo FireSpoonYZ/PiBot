@@ -3,6 +3,7 @@ import { ArrowLeft, ChevronRight, PanelLeft, Search, X } from 'lucide-react';
 import type { BotBoardItem } from '../../host-core/index.js';
 import { formatWorkingElapsed, GrokBotAvatar } from './GrokBotAvatar';
 import { botActivityText, isBotActivityBusy, parseBotActivityStartedAt } from './botActivity';
+import { Button, InlineBanner } from './components/ui';
 import { useText } from './ui';
 import { botBoardBucket, isBotBoardInterrupted, type BoardBucket, type BotBoardState, type BotBoardTarget } from './useBotBoard';
 import './BotBoard.css';
@@ -41,13 +42,15 @@ function localizeBoardError(message: string | undefined, t: (zh: string, en: str
   return message;
 }
 
-export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMobileDrawer, loading, error, variant = 'mobile' }: {
+export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMobileDrawer, onRetry, hasUpdate = false, loading, error, variant = 'mobile' }: {
   targets: BotBoardTarget[];
   board: BotBoardState;
   onOpen: (target: BotBoardTarget, questionnaire?: { conversationId: string; requestId: string }) => void;
   onOpenTask?: (taskId: string) => void;
   onBack?: () => void;
   onOpenMobileDrawer?: () => void;
+  onRetry?: () => void;
+  hasUpdate?: boolean;
   loading?: boolean;
   error?: string | null;
   variant?: 'desktop' | 'mobile';
@@ -60,7 +63,7 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
 
   const columns: { key: BoardBucket; label: string }[] = [
     { key: 'attention', label: t('需要你', 'Needs you') },
-    { key: 'working', label: desktop ? t('进行中', 'In progress') : t('工作中', 'Working') },
+    { key: 'working', label: t('工作中', 'Working') },
     { key: 'review', label: t('待查看', 'Ready to review') },
     { key: 'idle', label: t('空闲', 'Idle') },
     { key: 'offline', label: t('离线', 'Offline') },
@@ -381,8 +384,14 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
         <header className="bot-board-header">
           <div className="bot-board-header-left">
             {onOpenMobileDrawer ? (
-              <button type="button" onClick={onOpenMobileDrawer} aria-label={t('打开侧边栏', 'Open sidebar')}>
+              <button
+                type="button"
+                className="bot-board-drawer-btn"
+                onClick={onOpenMobileDrawer}
+                aria-label={hasUpdate ? t('打开侧边栏（有可用更新）', 'Open sidebar (update available)') : t('打开侧边栏', 'Open sidebar')}
+              >
                 <PanelLeft size={20} aria-hidden="true" />
+                {hasUpdate ? <span className="hub-drawer-update-dot" aria-hidden="true" /> : null}
               </button>
             ) : onBack ? (
               <button type="button" onClick={onBack} aria-label={t('返回', 'Back')}>
@@ -392,93 +401,129 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
             <h1>{t('Bot 看板', 'Bot Board')}</h1>
           </div>
           {targets.length > 0 && (
-            <span className="bot-board-total" aria-label={t(`共 ${targets.length} 个 Bot`, `${targets.length} bots total`)}>
+            <span className="bot-board-total tabular-nums" aria-label={t(`共 ${targets.length} 个 Bot`, `${targets.length} bots total`)}>
               {t(`共 ${targets.length} 个`, `${targets.length} total`)}
             </span>
           )}
         </header>
 
-        <div className="bot-board-toolbar">
-          <div className="bot-board-search">
-            <Search size={16} className="bot-board-search-icon" aria-hidden="true" />
-            <input
-              type="search"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder={t('搜索 Bot、设备或摘要', 'Search bots, devices, or summaries')}
-              aria-label={t('搜索 Bot、设备或摘要', 'Search bots, devices, or summaries')}
-            />
-            {query && (
-              <button
-                type="button"
-                className="bot-board-search-clear"
-                onClick={() => setQuery('')}
-                aria-label={t('清空搜索', 'Clear search')}
-              >
-                <X size={13} aria-hidden="true" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        <nav className="bot-board-filters" aria-label={t('状态筛选', 'Filter by status')}>
-          {filterChips.map(c => (
-            <button
-              key={c.key}
-              type="button"
-              className={c.key !== 'all' && c.count === 0 ? 'is-zero' : undefined}
-              aria-pressed={filter === c.key}
-              onClick={() => setFilter(c.key)}
-            >
-              <span>{c.label}</span>{' '}
-              <span className="bot-board-filter-count">{c.count}</span>
-            </button>
-          ))}
-        </nav>
-
-        {error && <p role="alert" className="bot-board-alert">{t(`目录读取失败：${error}`, `Failed to load directory: ${error}`)}</p>}
-        {storageErrorText && <p role="alert" className="bot-board-alert">{storageErrorText}</p>}
-        {filtered.some(r => r.stale && r.item) && (
-          <p className="bot-board-snapshot-note">
-            {t('以下保留最后一次读取的状态，请留意更新时间。', 'Showing the last fetched status; check the update timestamp.')}
-          </p>
-        )}
-
-        {!targets.length && (
-          <p className="bot-board-empty-state" role="status">
-            {loading
-              ? t('正在加载 Bot 目录…', 'Loading Bot directory…')
-              : error
-                ? t('目录暂不可用，请恢复连接后重试。', 'Directory unavailable. Restore connection and retry.')
-                : t('还没有 Bot，请先在对话页创建。', 'No Bots yet. Create one in chat first.')}
-          </p>
-        )}
-
-        {showFilterEmpty && (
-          <p className="bot-board-empty-state" role="status">{filterEmptyText}</p>
-        )}
-
-        {!desktop && unknownSection}
-
-        {visibleGroups.length > 0 && (
-          <div className="bot-board-groups">
-            {visibleGroups.map(column => renderGroup(column, cardsByBucket.get(column.key) ?? []))}
-          </div>
-        )}
-
-        {desktop && unknownSection}
-
-        {collapseOtherOnDesktop && (
-          <details className="bot-board-other" open={q ? true : undefined}>
-            <summary>
-              <ChevronRight size={15} className="bot-board-other-chevron" aria-hidden="true" />
-              <span>{otherSummary}</span>
-            </summary>
-            <div className="bot-board-groups">
-              {otherColumns.map(column => renderGroup(column, cardsByBucket.get(column.key) ?? []))}
+        <div className="bot-board-body">
+          <div className="bot-board-toolbar">
+            <div className="bot-board-search">
+              <Search size={16} className="bot-board-search-icon" aria-hidden="true" />
+              <input
+                type="search"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder={t('搜索 Bot、设备或摘要', 'Search bots, devices, or summaries')}
+                aria-label={t('搜索 Bot、设备或摘要', 'Search bots, devices, or summaries')}
+              />
+              {query && (
+                <button
+                  type="button"
+                  className="bot-board-search-clear"
+                  onClick={() => setQuery('')}
+                  aria-label={t('清空搜索', 'Clear search')}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              )}
             </div>
-          </details>
-        )}
+          </div>
+
+          <nav className="bot-board-filters" aria-label={t('状态筛选', 'Filter by status')}>
+            {filterChips.map(c => (
+              <button
+                key={c.key}
+                type="button"
+                className={c.key !== 'all' && c.count === 0 ? 'is-zero' : undefined}
+                aria-pressed={filter === c.key}
+                onClick={() => setFilter(c.key)}
+              >
+                <span>{c.label}</span>{' '}
+                <span className="bot-board-filter-count tabular-nums">{c.count}</span>
+              </button>
+            ))}
+          </nav>
+
+          {error && (
+            <InlineBanner
+              tone="danger"
+              role="alert"
+              className="bot-board-banner"
+              title={t('目录读取失败', 'Failed to load directory')}
+              detail={error}
+              actions={
+                onRetry ? (
+                  <Button variant="secondary" size="sm" onClick={onRetry}>
+                    {t('重试', 'Retry')}
+                  </Button>
+                ) : undefined
+              }
+            />
+          )}
+          {storageErrorText && storageErrorText !== error && (
+            <InlineBanner
+              tone="attention"
+              role="status"
+              compact
+              className="bot-board-banner"
+              title={storageErrorText}
+              actions={
+                onRetry ? (
+                  <Button variant="secondary" size="sm" onClick={onRetry}>
+                    {t('重试', 'Retry')}
+                  </Button>
+                ) : undefined
+              }
+            />
+          )}
+          {filtered.some(r => r.stale && r.item) && (
+            <InlineBanner
+              tone="neutral"
+              role="status"
+              compact
+              className="bot-board-banner"
+              title={t('以下保留最后一次读取的状态，请留意更新时间。', 'Showing the last fetched status; check the update timestamp.')}
+            />
+          )}
+
+          {!targets.length && (
+            <p className="bot-board-empty-state" role="status">
+              {loading
+                ? t('正在加载 Bot 目录…', 'Loading Bot directory…')
+                : error
+                  ? t('目录暂不可用，请恢复连接后重试。', 'Directory unavailable. Restore connection and retry.')
+                  : t('还没有 Bot，请先在对话页创建。', 'No Bots yet. Create one in chat first.')}
+            </p>
+          )}
+
+          {showFilterEmpty && (
+            <p className="bot-board-empty-state" role="status">{filterEmptyText}</p>
+          )}
+
+          {!desktop && unknownSection}
+
+          {visibleGroups.length > 0 && (
+            <div className="bot-board-groups">
+              {visibleGroups.map(column => renderGroup(column, cardsByBucket.get(column.key) ?? []))}
+            </div>
+          )}
+
+          {desktop && unknownSection}
+
+          {collapseOtherOnDesktop && (
+            <details className="bot-board-other" open={q ? true : undefined}>
+              <summary>
+                <ChevronRight size={15} className="bot-board-other-chevron" aria-hidden="true" />
+                <span>{otherSummary}</span>
+              </summary>
+              <div className="bot-board-groups">
+                {otherColumns.map(column => renderGroup(column, cardsByBucket.get(column.key) ?? []))}
+              </div>
+            </details>
+          )}
+        </div>
       </div>
     </section>
   );

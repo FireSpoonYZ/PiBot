@@ -1,3 +1,14 @@
-.send-button-spinner { animation: spin .8s linear infinite; }
-.composer-send[aria-busy="true"]:disabled, .grok-composer-action-pill[aria-busy="true"]:disabled { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .send-button-spinner { animation: none; } }
+.send-button-spinner {
+  animation: spin 800ms linear infinite;
+}
+
+.composer-send[aria-busy="true"]:disabled,
+.grok-composer-action-pill[aria-busy="true"]:disabled {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .send-button-spinner {
+    animation: none;
+  }
+}

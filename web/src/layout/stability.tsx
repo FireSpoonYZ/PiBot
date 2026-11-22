@@ -1,6 +1,7 @@
 import {
   useEffect,
   useLayoutEffect,
+  useRef,
   type AriaRole,
   type CSSProperties,
   type ReactNode,
@@ -370,9 +371,22 @@ export interface SmoothExpandProps {
  * (composer strips, attachments, quotes, recording bars, disclosures).
  */
 export function SmoothExpand({ open, className, children }: SmoothExpandProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useIsomorphicLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    (el as HTMLDivElement & { inert?: boolean }).inert = !open;
+    if (!open) {
+      el.setAttribute('inert', '');
+    } else {
+      el.removeAttribute('inert');
+    }
+  }, [open]);
+
   const cls = [open ? 'smooth-expand' : 'smooth-collapse', className ?? ''].filter(Boolean).join(' ');
   return (
-    <div className={cls} data-collapsed={open ? undefined : 'true'} aria-hidden={!open || undefined}>
+    <div ref={ref} className={cls} data-collapsed={open ? undefined : 'true'} aria-hidden={!open || undefined}>
       {children}
     </div>
   );

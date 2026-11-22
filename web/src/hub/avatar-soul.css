@@ -1,6 +1,6 @@
 /* avatar-soul lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
-/* 18 个形状改 6 列 3 行；格子触控区域保持 >=44px。 */
+/* 18 shapes in 6x3 grid with >=44px touch targets. */
 .grok-shapes-grid {
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--space-2);
@@ -13,12 +13,14 @@
   border-radius: var(--radius-md);
 }
 .grok-shape-cell:focus-visible,
-.grok-color-swatch:focus-visible {
-  outline: 2px solid var(--color-primary);
+.grok-expression-cell:focus-visible,
+.grok-color-swatch:focus-visible,
+.grok-segmented-tabs button:focus-visible {
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
 }
 
-/* 灰色留给离线状态，10 个可选颜色分为两行。 */
+/* 10 selectable colors in 2 rows of 5 (gray reserved for offline). */
 .grok-colors-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -34,7 +36,7 @@
   min-height: var(--tap-min);
 }
 
-/* 活动指示与头像交互控件：扩展点击区至 >=44px 并补齐焦点态。 */
+/* Activity indicator and mascot interactive controls: >=44px hit area + focus ring. */
 .sand-grok-bot-mark.is-interactive::before,
 .sand-activity-learn-link::before,
 .sand-activity-detail-toggle::before {
@@ -57,12 +59,12 @@
 .sand-grok-bot-mark.is-interactive:focus-visible,
 .sand-activity-learn-link:focus-visible,
 .sand-activity-detail-toggle:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
-/* 灵魂文档编辑器布局（替换原内联样式）。 */
+/* Persona (SOUL.md) editor layout. */
 .avatar-soul-card {
   padding: var(--space-4);
 }
@@ -77,13 +79,30 @@
   gap: var(--space-1) var(--space-3);
   margin-top: var(--space-3);
   font-size: var(--text-xs);
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
+}
+.soul-meta-count {
+  font-variant-numeric: tabular-nums;
 }
 .soul-meta-limit {
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
   margin-right: var(--space-2);
 }
 .soul-meta-limit.over {
-  color: var(--color-danger);
+  color: var(--state-danger);
   font-weight: var(--weight-semibold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grok-shape-cell,
+  .grok-expression-cell,
+  .grok-color-swatch,
+  .grok-segmented-tabs button {
+    transition: none;
+  }
+
+  .grok-shape-cell:active,
+  .grok-color-swatch:active {
+    transform: none;
+  }
 }

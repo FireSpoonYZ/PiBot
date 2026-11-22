@@ -79,9 +79,20 @@ export function MessageAttribution({ attribution, className }: MessageAttributio
       data-user={isUser ? 'true' : undefined}
     >
       <span className="msg-attr-sender">{sender}</span>
+      <span className="msg-attr-sep" aria-hidden="true">·</span>
       <span className="msg-attr-channel">{channel}</span>
-      {directionOutgoing ? <span className="msg-attr-dir">{t('发出', 'out')}</span> : null}
-      {categoryLabel ? <span className="msg-attr-category">{categoryLabel}</span> : null}
+      {directionOutgoing ? (
+        <>
+          <span className="msg-attr-sep" aria-hidden="true">·</span>
+          <span className="msg-attr-dir">{t('发出', 'out')}</span>
+        </>
+      ) : null}
+      {categoryLabel ? (
+        <>
+          <span className="msg-attr-sep" aria-hidden="true">·</span>
+          <span className="msg-attr-category">{categoryLabel}</span>
+        </>
+      ) : null}
     </span>
   );
 }

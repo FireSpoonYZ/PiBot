@@ -18,15 +18,17 @@ export interface LocalShowerPreviewProps {
   onClose(): void;
   /** 省略时走本机 BotHost.call；远程 Bot 由 Host 注入既有 remote 面板的 call。 */
   call?: ShowerCall;
+  variant?: 'desktop';
 }
 
-export function ShowerPreview({ target, connected, onClose, call }: LocalShowerPreviewProps) {
+export function ShowerPreview({ target, connected, onClose, call, variant }: LocalShowerPreviewProps) {
   return (
     <SharedShowerPreview
       call={call ?? callLocalHost}
       target={target}
       connected={connected}
       onClose={onClose}
+      variant={variant}
     />
   );
 }

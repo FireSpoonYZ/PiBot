@@ -357,6 +357,11 @@ fn cmd_status(paths: &HostPaths) -> AppResult<Value> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         "autostartScope": if cfg!(any(windows, target_os = "macos")) { "user-login" } else { "system-boot" },
+        "serviceRegistered": autostart
+            .as_ref()
+            .ok()
+            .and_then(|status| status.get("serviceRegistered").or_else(|| status.get("installed")))
+            .and_then(Value::as_bool),
         "hostHome": paths.home.display().to_string(),
         "logFile": paths.log.display().to_string(),
     });

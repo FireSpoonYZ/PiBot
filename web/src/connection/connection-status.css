@@ -1,0 +1,247 @@
+/* Shared ConnectionStatusPopover Styles (Android + Desktop).
+ * Quiet when online; compact semantic pill + origin-aware focus-managed popover when non-online.
+ * Zero raw color literals; consumes canonical design-system tokens.
+ */
+
+@keyframes conn-status-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes conn-dot-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.conn-status-pill {
+  --conn-dot: var(--state-live, var(--color-success, var(--ok)));
+  --conn-bg: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  --conn-border: var(--border-default, var(--color-line, var(--line)));
+  --conn-ink: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  max-width: 180px;
+  padding: 0 10px;
+  border: 1px solid var(--conn-border);
+  border-radius: var(--radius-full, 999px);
+  background: var(--conn-bg);
+  color: var(--conn-ink);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.conn-status-pill::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+.conn-status-pill.is-compact {
+  min-height: 24px;
+  padding: 0 8px;
+  gap: 5px;
+}
+
+.conn-status-pill.is-online {
+  --conn-dot: var(--state-live, var(--color-success, var(--ok)));
+  --conn-bg: var(--state-live-soft, var(--ok-soft));
+  --conn-border: var(--state-live-border, var(--border-default));
+  --conn-ink: var(--state-live-ink, var(--ink-primary));
+}
+
+.conn-status-pill.is-connecting {
+  --conn-dot: var(--state-attention, var(--color-warning, var(--warn)));
+  --conn-bg: var(--state-attention-soft, var(--warn-soft));
+  --conn-border: var(--state-attention-border, var(--border-default));
+  --conn-ink: var(--state-attention-ink, var(--ink-primary));
+}
+
+.conn-status-pill.is-offline {
+  --conn-dot: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  --conn-bg: var(--surface-1, var(--color-surface-1, var(--surface)));
+  --conn-border: var(--border-default, var(--color-line, var(--line)));
+  --conn-ink: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+}
+
+.conn-status-pill.is-error {
+  --conn-dot: var(--state-danger, var(--color-danger, var(--danger)));
+  --conn-bg: var(--state-danger-soft, var(--danger-soft));
+  --conn-border: var(--state-danger-border, var(--border-default));
+  --conn-ink: var(--state-danger-ink, var(--ink-primary));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .conn-status-pill:hover {
+    border-color: var(--border-strong, var(--color-line, var(--line)));
+  }
+}
+
+.conn-status-pill:active {
+  transform: scale(0.97);
+}
+
+.conn-status-pill:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
+.conn-status-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--conn-dot);
+}
+
+.conn-status-dot.is-online { background: var(--state-live, var(--color-success, var(--ok))); }
+.conn-status-dot.is-connecting {
+  background: var(--state-attention, var(--color-warning, var(--warn)));
+  animation: conn-dot-pulse 1.4s ease-in-out infinite;
+}
+.conn-status-dot.is-offline { background: var(--ink-tertiary, var(--color-text-subtle, var(--muted))); }
+.conn-status-dot.is-error { background: var(--state-danger, var(--color-danger, var(--danger))); }
+
+.conn-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Popover Dialog                                                      */
+/* ------------------------------------------------------------------ */
+
+.conn-status-popover {
+  z-index: 425;
+  pointer-events: auto;
+  width: min(312px, calc(100vw - 20px));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md, 12px);
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-overlay, var(--color-surface-2, var(--bg)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  box-shadow: var(--shadow-popover);
+  outline: none;
+  overscroll-behavior: contain;
+  animation: conn-status-pop-in 160ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) both;
+}
+
+.conn-status-popover:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: -2px;
+}
+
+.conn-status-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+}
+
+.conn-status-popover-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.conn-status-popover-title {
+  margin: 0;
+  font-size: var(--text-base, 0.875rem);
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.35;
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-status-popover-endpoint {
+  padding: 4px 8px;
+  border-radius: var(--radius-xs, 6px);
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-inset, var(--color-surface-1, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-status-popover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.conn-status-popover-reason {
+  margin: 0;
+  font-size: var(--text-sm, 0.8125rem);
+  line-height: 1.5;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.conn-status-popover-sub {
+  margin: 0;
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.45;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.conn-status-popover-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  padding-top: var(--space-2, 8px);
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-status-pill,
+  .conn-status-popover {
+    transition: none;
+    animation: none;
+  }
+
+  .conn-status-dot.is-connecting {
+    animation: none;
+  }
+}

@@ -71,17 +71,6 @@ export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: bo
     };
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    const handleBack = (event: Event) => {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      setDismissedRelease(releaseKey);
-    };
-    window.addEventListener('app-back', handleBack, true);
-    return () => window.removeEventListener('app-back', handleBack, true);
-  }, [open, releaseKey]);
-
   return (
     <Dialog open={open} onOpenChange={next => { if (!next) dismiss(); }} title={t('发现新版本', 'Update available')}>
       <p className="secondary">

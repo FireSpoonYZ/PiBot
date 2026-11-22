@@ -1,4 +1,4 @@
-import { useId, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { useId, useRef, useState, type Dispatch, type KeyboardEvent, type RefObject, type SetStateAction } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -46,7 +46,7 @@ import {
   type BotScheduleTask,
   type UnifiedBotItem,
 } from '../hub/shared';
-import { Dialog, Switch } from '../components/ui';
+import { Button, ConfirmDialog, InlineBanner, Skeleton as UiSkeleton, Switch } from '../components/ui';
 import type { ActionController, MobileBotItem } from './types';
 
 export interface BotProfileScreenProps {
@@ -121,7 +121,9 @@ export function BotProfileScreen({
         >
           <ArrowLeft size={20} />
         </button>
-        <h2 className="grok-subpage-header-title">{t('Bot 资料', 'Bot profile')}</h2>
+        <h2 className="grok-subpage-header-title">
+          {activeBot.role ? t(`${activeBot.role} · 资料`, `${activeBot.role} · Profile`) : t('Bot 资料', 'Bot profile')}
+        </h2>
         <button
           type="button"
           className="grok-done-pill-btn"
@@ -129,8 +131,8 @@ export function BotProfileScreen({
           onClick={onSave}
         >
           <LabelStack
-            active={actionBusy ? t('保存中', 'Saving') : t('保存', 'Save')}
-            labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+            active={actionBusy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
+            labels={[t('保存中…', 'Saving…'), t('保存', 'Save')]}
           />
         </button>
       </header>
@@ -345,7 +347,7 @@ export function BotProfileManageScreen({
         >
           <ArrowLeft size={20} />
         </button>
-        <h2 className="grok-subpage-header-title">{t('管理 Bot', 'Manage bot')}</h2>
+        <h2 className="grok-subpage-header-title">{t(`${activeBot.role} · 管理`, `${activeBot.role} · Manage`)}</h2>
         <span className="grok-topbar-spacer" aria-hidden="true" />
       </header>
 
@@ -523,6 +525,30 @@ export function BotAvatarScreen({
   onDone,
 }: BotAvatarScreenProps) {
   const t = useText();
+  const baseId = useId();
+  const shapeTabId = `${baseId}-shape-tab`;
+  const exprTabId = `${baseId}-expr-tab`;
+  const shapePanelId = `${baseId}-shape-panel`;
+  const exprPanelId = `${baseId}-expr-panel`;
+  const shapeTabRef = useRef<HTMLButtonElement>(null);
+  const exprTabRef = useRef<HTMLButtonElement>(null);
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    let nextTab: 'shape' | 'expression' | null = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      nextTab = avatarTab === 'shape' ? 'expression' : 'shape';
+    } else if (event.key === 'Home') {
+      nextTab = 'shape';
+    } else if (event.key === 'End') {
+      nextTab = 'expression';
+    }
+    if (!nextTab) return;
+    event.preventDefault();
+    onChangeAvatarTab(nextTab);
+    requestAnimationFrame(() => {
+      (nextTab === 'shape' ? shapeTabRef : exprTabRef).current?.focus();
+    });
+  };
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -533,9 +559,11 @@ export function BotAvatarScreen({
           aria-label={t('返回', 'Back')}
           onClick={onBack}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
-        <h2 className="grok-subpage-header-title">{t('头像', 'Avatar')}</h2>
+        <h2 className="grok-subpage-header-title">
+          {activeBot ? t(`${activeBot.role} · 头像`, `${activeBot.role} · Avatar`) : t('选择头像', 'Choose avatar')}
+        </h2>
         <button
           type="button"
           className="grok-done-pill-btn"
@@ -547,29 +575,43 @@ export function BotAvatarScreen({
       </header>
 
       <div className="grok-subpage-scroll">
-        {/* Top Segmented Tabs (15848.jpg) */}
-        <div className="grok-segmented-tabs" role="tablist">
+        {/* Top Segmented Tabs */}
+        <div
+          className="grok-segmented-tabs"
+          role="tablist"
+          aria-label={t('头像样式选项', 'Avatar style options')}
+        >
           <button
+            ref={shapeTabRef}
+            id={shapeTabId}
             type="button"
             role="tab"
             aria-selected={avatarTab === 'shape'}
+            aria-controls={shapePanelId}
+            tabIndex={avatarTab === 'shape' ? 0 : -1}
             className={avatarTab === 'shape' ? 'active' : ''}
             onClick={() => onChangeAvatarTab('shape')}
+            onKeyDown={handleTabKeyDown}
           >
             {t('形状', 'Shape')}
           </button>
           <button
+            ref={exprTabRef}
+            id={exprTabId}
             type="button"
             role="tab"
             aria-selected={avatarTab === 'expression'}
+            aria-controls={exprPanelId}
+            tabIndex={avatarTab === 'expression' ? 0 : -1}
             className={avatarTab === 'expression' ? 'active' : ''}
             onClick={() => onChangeAvatarTab('expression')}
+            onKeyDown={handleTabKeyDown}
           >
             {t('表情', 'Expression')}
           </button>
         </div>
 
-        {/* Large Centered Live Preview (15848.jpg) */}
+        {/* Large Centered Live Preview */}
         <div className="grok-avatar-big-preview">
           <GrokBotAvatar preset={draftAvatar} size={118} />
         </div>
@@ -577,7 +619,12 @@ export function BotAvatarScreen({
         {/* Avatar shapes, expressions and online colors. */}
         <section className="grok-avatar-card">
           {avatarTab === 'shape' ? (
-            <div className="grok-shapes-grid">
+            <div
+              id={shapePanelId}
+              role="tabpanel"
+              aria-labelledby={shapeTabId}
+              className="grok-shapes-grid"
+            >
               {GROK_SHAPE_ORDER.map(item => {
                 const selected = draftAvatar.shape === item.shape;
                 const itemPreset: GrokAvatarPreset = {
@@ -599,7 +646,7 @@ export function BotAvatarScreen({
                         rotation: item.rotation,
                       }))
                     }
-                    aria-label={t(item.labelZh, item.labelEn)}
+                    aria-label={t(`形状：${item.labelZh}`, `Shape: ${item.labelEn}`)}
                     aria-pressed={selected}
                   >
                     <GrokBotAvatar preset={itemPreset} size={46} />
@@ -608,7 +655,12 @@ export function BotAvatarScreen({
               })}
             </div>
           ) : (
-            <div className="grok-expressions-grid">
+            <div
+              id={exprPanelId}
+              role="tabpanel"
+              aria-labelledby={exprTabId}
+              className="grok-expressions-grid"
+            >
               {GROK_EXPRESSION_LIST.map(expr => {
                 const selected = draftAvatar.expressionIndex === expr.index;
                 const exprPreset: GrokAvatarPreset = {
@@ -626,6 +678,7 @@ export function BotAvatarScreen({
                         expressionIndex: expr.index,
                       }))
                     }
+                    aria-label={t(`表情：${expr.labelZh}`, `Expression: ${expr.labelEn}`)}
                     aria-pressed={selected}
                   >
                     <GrokBotAvatar preset={exprPreset} size={52} />
@@ -636,8 +689,8 @@ export function BotAvatarScreen({
             </div>
           )}
 
-          {/* 11 Color Swatches (15848.jpg) */}
-          <div className="grok-colors-grid">
+          {/* Selectable Color Swatches */}
+          <div className="grok-colors-grid" role="group" aria-label={t('选择颜色', 'Choose color')}>
             {GROK_COLOR_PALETTE.map(c => {
               const selected = draftAvatar.color.toLowerCase() === c.hex.toLowerCase();
               return (
@@ -652,7 +705,8 @@ export function BotAvatarScreen({
                       color: c.hex,
                     }))
                   }
-                  aria-label={t(c.labelZh, c.labelEn)}
+                  aria-label={t(`颜色：${c.labelZh}`, `Color: ${c.labelEn}`)}
+                  title={t(c.labelZh, c.labelEn)}
                   aria-pressed={selected}
                 >
                   <span style={{ backgroundColor: c.hex }} />
@@ -693,6 +747,9 @@ export interface BotSoulScreenProps {
   soulSaved: boolean;
   soulDraftBytes: number;
   soulByteRatio: number;
+  soulLoading?: boolean;
+  soulError?: string;
+  onRetryLoad?: () => void;
   action: ActionController;
   onBack(): void;
   onSave(): void;
@@ -708,12 +765,18 @@ export function BotSoulScreen({
   soulSaved,
   soulDraftBytes,
   soulByteRatio,
+  soulLoading = false,
+  soulError = '',
+  onRetryLoad,
   action,
   onBack,
   onSave,
   onReload,
 }: BotSoulScreenProps) {
   const t = useText();
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const initialLoading = soulLoading && !soulDraft && !soulDirty;
+  const initialLoadFailed = Boolean(soulError) && !soulDraft && !soulDirty && !soulLoading;
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -724,112 +787,152 @@ export function BotSoulScreen({
           aria-label={t('返回', 'Back')}
           onClick={onBack}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
-        <h2 className="grok-subpage-header-title">{t('灵魂文档', 'Soul Document')}</h2>
+        <h2 className="grok-subpage-header-title">
+          {activeBot ? t(`${activeBot.role} · 人设`, `${activeBot.role} · Persona`) : t('人设', 'Persona')}
+        </h2>
         <button
           type="button"
           className="grok-done-pill-btn"
-          disabled={action.busy || soulDraftBytes > SOUL_MAX_BYTES}
+          disabled={action.busy || initialLoading || initialLoadFailed || soulDraftBytes > SOUL_MAX_BYTES}
           onClick={onSave}
         >
           <LabelStack
-            active={action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
-            labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+            active={action.busy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
+            labels={[t('保存中…', 'Saving…'), t('保存', 'Save')]}
           />
         </button>
       </header>
 
       <div className="grok-subpage-scroll">
-        <div className="soul-snippet-bar">
-          {SOUL_SNIPPETS.map(item => (
-            <button
-              key={item.zh}
-              type="button"
-              className="snippet-chip"
-              onClick={() => {
-                setSoulDraft(prev => (prev ? prev.trimEnd() + '\n' : '') + item.text.trimStart());
-                setSoulDirty(true);
-              }}
-            >
-              {t(item.zh, item.en)}
-            </button>
-          ))}
-          {soulDraft.length > 0 && (
-            <button
-              type="button"
-              className="snippet-chip danger"
-              onClick={() => {
-                setSoulDraft('');
-                setSoulDirty(true);
-              }}
-            >
-              {t('清空', 'Clear')}
-            </button>
-          )}
-        </div>
-
-        <section className="grok-card-group avatar-soul-card">
-          <textarea
-            className="grok-soul-textarea"
-            rows={14}
-            spellCheck={false}
-            value={soulDraft}
-            onChange={e => {
-              setSoulDraft(e.target.value);
-              setSoulDirty(true);
-            }}
-            placeholder={t('# 核心人设\n在这里编写 Bot 的身份、说话语气、专业领域和行为边界…',
-              '# Core Persona\nWrite the Bot identity, tone, expertise, and boundaries here…')}
+        {soulError ? (
+          <InlineBanner
+            tone="danger"
+            title={t('人设加载失败', 'Failed to load persona')}
+            detail={soulError}
+            actions={
+              activeBot ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => (onRetryLoad ? onRetryLoad() : onReload(activeBot))}
+                >
+                  {t('重试', 'Retry')}
+                </Button>
+              ) : undefined
+            }
           />
-          <div className="soul-meta-row">
-            <span className="soul-meta-status">
-              {soulSaved ? t('已保存', 'Saved') : t('未保存修改', 'Unsaved changes')}
-            </span>
-            <span className="soul-meta-count">
-              {soulByteRatio > 0.8 && (
-                <span className={`soul-meta-limit${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}>
-                  {soulDraftBytes > SOUL_MAX_BYTES
-                    ? t('超出上限', 'Over limit')
-                    : t('接近上限', 'Near limit')}
-                </span>
-              )}
-              {t(`${soulDraft.length} 字`, `${soulDraft.length} chars`)}
-            </span>
-          </div>
-          {soulByteRatio > 0.8 && (
-            <div className="soul-byte-progress">
-              <div className="soul-byte-bar">
-                <div
-                  className={`soul-byte-fill${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}
-                  style={{ width: `${Math.min(100, Math.round(soulByteRatio * 100))}%` }}
-                />
-              </div>
-            </div>
-          )}
-        </section>
-        <p className="grok-card-footnote">
-          {t('定义该 Bot 的人设、语气风格与行动准则，每次对话会自动生效。',
-            'Defines the persona, tone, and principles automatically applied in every conversation.')}
-        </p>
+        ) : null}
 
-        {soulDirty && activeBot && (
-          <section className="grok-card-group">
-            <button
-              type="button"
-              className="grok-card-row"
-              onClick={() => onReload(activeBot)}
-            >
-              <RefreshCw size={18} className="grok-row-icon" />
-              <span className="grok-row-label">{t('放弃未保存修改', 'Discard unsaved changes')}</span>
-            </button>
+        {initialLoading ? (
+          <section className="grok-card-group profile-loading-card">
+            <UiSkeleton lines={5} label={t('正在加载人设…', 'Loading persona…')} />
           </section>
-        )}
+        ) : !initialLoadFailed ? (
+          <>
+            <div className="soul-snippet-bar">
+              {SOUL_SNIPPETS.map(item => (
+                <button
+                  key={item.zh}
+                  type="button"
+                  className="snippet-chip"
+                  onClick={() => {
+                    setSoulDraft(prev => (prev ? prev.trimEnd() + '\n' : '') + item.text.trimStart());
+                    setSoulDirty(true);
+                  }}
+                >
+                  {t(item.zh, item.en)}
+                </button>
+              ))}
+              {soulDraft.length > 0 && (
+                <button
+                  type="button"
+                  className="snippet-chip danger"
+                  disabled={action.busy}
+                  onClick={() => setClearConfirmOpen(true)}
+                >
+                  {t('清空', 'Clear')}
+                </button>
+              )}
+            </div>
+
+            <section className="grok-card-group avatar-soul-card">
+              <textarea
+                className="grok-soul-textarea"
+                rows={14}
+                spellCheck={false}
+                aria-label={t('核心人设内容', 'Persona instructions')}
+                value={soulDraft}
+                onChange={e => {
+                  setSoulDraft(e.target.value);
+                  setSoulDirty(true);
+                }}
+                placeholder={t('# 核心人设\n在这里编写 Bot 的身份、说话语气、专业领域和行为边界…', '# Core Persona\nWrite the Bot identity, tone, expertise, and boundaries here…')}
+              />
+              <div className="soul-meta-row">
+                <span className="soul-meta-status">
+                  {soulSaved ? t('已保存', 'Saved') : t('未保存修改', 'Unsaved changes')}
+                </span>
+                <span className="soul-meta-count">
+                  {soulByteRatio > 0.8 && (
+                    <span className={`soul-meta-limit${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}>
+                      {soulDraftBytes > SOUL_MAX_BYTES
+                        ? t('超出上限', 'Over limit')
+                        : t('接近上限', 'Near limit')}
+                    </span>
+                  )}
+                  {t(`${soulDraft.length} 字`, `${soulDraft.length} chars`)}
+                </span>
+              </div>
+              {soulByteRatio > 0.8 && (
+                <div className="soul-byte-progress">
+                  <div className="soul-byte-bar">
+                    <div
+                      className={`soul-byte-fill${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}
+                      style={{ width: `${Math.min(100, Math.round(soulByteRatio * 100))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </section>
+            <p className="grok-card-footnote">
+              {t('定义该 Bot 的人设、语气风格与行动准则，每次对话会自动生效。', 'Defines the persona, tone, and principles automatically applied in every conversation.')}
+            </p>
+
+            {soulDirty && activeBot && (
+              <section className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => onReload(activeBot)}
+                >
+                  <RefreshCw size={18} className="grok-row-icon" aria-hidden="true" />
+                  <span className="grok-row-label">{t('放弃未保存修改', 'Discard unsaved changes')}</span>
+                </button>
+              </section>
+            )}
+          </>
+        ) : null}
 
         <ReservedSlot minHeight={52} align="start">
           <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
         </ReservedSlot>
       </div>
+      <ConfirmDialog
+        open={clearConfirmOpen && soulDraft.length > 0}
+        title={t('清空人设内容？', 'Clear persona draft?')}
+        description={t('将清空当前编辑器中的全部人设内容，保存前仍可通过「放弃未保存修改」恢复。', 'This will clear all persona text in the editor. You can still discard unsaved changes before saving.')}
+        danger
+        confirmLabel={t('清空', 'Clear')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => setClearConfirmOpen(false)}
+        onConfirm={() => {
+          setClearConfirmOpen(false);
+          setSoulDraft('');
+          setSoulDirty(true);
+        }}
+      />
     </main>
   );
 }
@@ -840,6 +943,9 @@ export interface BotSchedulesScreenProps {
   botScheduleState: BotScheduleState & { botKey?: string };
   scheduleTasks: BotScheduleTask[];
   scheduleError?: string;
+  schedulesLoading?: boolean;
+  schedulesLoadError?: string;
+  onRetryLoad?: () => void;
   scheduleOffline: boolean;
   scheduleFilter: 'all' | 'enabled' | 'paused';
   onChangeScheduleFilter(next: 'all' | 'enabled' | 'paused'): void;
@@ -867,6 +973,9 @@ export function BotSchedulesScreen({
   botScheduleState,
   scheduleTasks,
   scheduleError,
+  schedulesLoading = false,
+  schedulesLoadError = '',
+  onRetryLoad,
   scheduleOffline,
   scheduleFilter,
   onChangeScheduleFilter,
@@ -889,6 +998,10 @@ export function BotSchedulesScreen({
 }: BotSchedulesScreenProps) {
   const t = useText();
   const schedulePromptId = useId();
+  const scheduleRepeatId = useId();
+  const hasLoadedBotSchedules = botScheduleState.botKey === activeBot.key;
+  const initialSchedulesLoading = schedulesLoading && !hasLoadedBotSchedules;
+  const initialSchedulesFailed = Boolean(schedulesLoadError) && !hasLoadedBotSchedules && !schedulesLoading;
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -905,14 +1018,14 @@ export function BotSchedulesScreen({
             }
           }}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
         <h2 className="grok-subpage-header-title">
           {scheduleEditing
             ? scheduleDraft.id
-              ? t('编辑定时任务', 'Edit Schedule')
-              : t('新建定时任务', 'New Schedule')
-            : t(`定时任务 · ${botDisplayName}`, `Schedules · ${botDisplayName}`)}
+              ? t(`${botDisplayName} · 编辑定时任务`, `${botDisplayName} · Edit schedule`)
+              : t(`${botDisplayName} · 新建定时任务`, `${botDisplayName} · New schedule`)
+            : t(`${botDisplayName} · 定时任务`, `${botDisplayName} · Schedules`)}
         </h2>
         {scheduleEditing ? (
           <button
@@ -922,8 +1035,8 @@ export function BotSchedulesScreen({
             onClick={onSaveSchedule}
           >
             <LabelStack
-              active={action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
-              labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+              active={action.busy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
+              labels={[t('保存中…', 'Saving…'), t('保存', 'Save')]}
             />
           </button>
         ) : (
@@ -933,7 +1046,7 @@ export function BotSchedulesScreen({
             disabled={action.busy || scheduleOffline}
             onClick={onOpenCreate}
           >
-            <Plus size={16} className="grok-icon-mr-4" />
+            <Plus size={16} className="grok-icon-mr-4" aria-hidden="true" />
             {t('新建', 'New')}
           </button>
         )}
@@ -963,29 +1076,47 @@ export function BotSchedulesScreen({
           )}
 
           {scheduleOffline && (
-            <p className="grok-card-footnote" role="status">{t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}</p>
+            <InlineBanner
+              tone="neutral"
+              compact
+              role="status"
+              title={t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}
+            />
           )}
 
-          {botScheduleState.botKey === activeBot.key && !botScheduleState.exactAlarmGranted && (
-            <section className="grok-card-group grok-schedule-permission-banner">
-              <div className="grok-schedule-permission-text">
-                <strong>{t('精确闹钟权限未开启', 'Exact Alarm Permission Needed')}</strong>
-                <span>
-                  {t('开启后可保证定时任务在锁屏与后台状态下准点唤醒该 Bot 执行。',
-                    'Grant exact alarm permission for punctual background execution.')}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="grok-done-pill-btn"
-                onClick={onRequestExactAlarm}
-              >
-                {t('去授权', 'Grant')}
-              </button>
+          {schedulesLoadError ? (
+            <InlineBanner
+              tone="danger"
+              title={t('定时任务加载失败', 'Failed to load schedules')}
+              detail={schedulesLoadError}
+              actions={
+                onRetryLoad ? (
+                  <Button variant="secondary" size="sm" onClick={onRetryLoad}>
+                    {t('重试', 'Retry')}
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : null}
+
+          {hasLoadedBotSchedules && !botScheduleState.exactAlarmGranted && (
+            <InlineBanner
+              tone="attention"
+              title={t('精确闹钟权限未开启', 'Exact alarm permission needed')}
+              detail={t('开启后可保证定时任务在锁屏与后台状态下准点唤醒该 Bot 执行。', 'Grant exact alarm permission for punctual background execution.')}
+              actions={
+                <Button variant="primary" size="sm" onClick={onRequestExactAlarm}>
+                  {t('去授权', 'Grant')}
+                </Button>
+              }
+            />
+          )}
+
+          {initialSchedulesLoading ? (
+            <section className="grok-card-group profile-loading-card">
+              <UiSkeleton lines={3} label={t('正在加载定时任务…', 'Loading schedules…')} />
             </section>
-          )}
-
-          {(() => {
+          ) : initialSchedulesFailed ? null : (() => {
             const filteredTasks = scheduleTasks.filter(task => {
               if (scheduleFilter === 'enabled') return task.enabled !== false;
               if (scheduleFilter === 'paused') return task.enabled === false;
@@ -995,9 +1126,9 @@ export function BotSchedulesScreen({
             if (filteredTasks.length === 0) {
               return (
                 <section className="grok-card-group grok-schedule-empty">
-                  <Clock size={32} className="grok-row-icon" />
+                  <Clock size={32} className="grok-row-icon" aria-hidden="true" />
                   <h4>
-                    {scheduleOffline && botScheduleState.botKey !== activeBot.key
+                    {scheduleOffline && !hasLoadedBotSchedules
                       ? t('暂无可查看的任务记录', 'No schedule records available')
                       : scheduleFilter === 'enabled'
                         ? t('暂无已开启的定时任务', 'No active schedules')
@@ -1006,8 +1137,7 @@ export function BotSchedulesScreen({
                           : t(`还没有为「${botDisplayName}」设置定时任务`, `No schedules for ${botDisplayName}`)}
                   </h4>
                   <p>
-                    {t('定时任务到点后会自动唤醒该 Bot 执行指令（例如：每日早报汇总、待办提醒、定时巡检）。',
-                      'Scheduled tasks wake this Bot at the specified time to run your prompt automatically.')}
+                    {t('定时任务到点后会自动唤醒该 Bot 执行指令（例如：每日早报汇总、待办提醒、定时巡检）。', 'Scheduled tasks wake this Bot at the specified time to run your prompt automatically.')}
                   </p>
                   <button
                     type="button"
@@ -1015,7 +1145,7 @@ export function BotSchedulesScreen({
                     disabled={action.busy || scheduleOffline}
                     onClick={onOpenCreate}
                   >
-                    <Plus size={16} className="grok-icon-mr-4" />
+                    <Plus size={16} className="grok-icon-mr-4" aria-hidden="true" />
                     {t('新建定时任务', 'Create Schedule')}
                   </button>
                 </section>
@@ -1084,7 +1214,7 @@ export function BotSchedulesScreen({
           )}
           {/* Time & Repeat Section */}
           <div className="grok-field-section">
-            <label className="grok-section-label">{t('执行时间与周期', 'Time & Recurrence')}</label>
+            <h3 className="grok-section-label">{t('执行时间与周期', 'Time & Recurrence')}</h3>
             <section className="grok-card-group">
               <label className="grok-card-row grok-input-row">
                 <span className="grok-input-label">{t('触发时间', 'Time')}</span>
@@ -1097,9 +1227,11 @@ export function BotSchedulesScreen({
               </label>
 
               <div className="grok-card-row no-active">
-                <span className="grok-row-label">{t('重复周期', 'Repeat')}</span>
-                <label className="grok-select-wrap">
+                <label className="grok-row-label" htmlFor={scheduleRepeatId}>{t('重复周期', 'Repeat')}</label>
+                <span className="grok-select-wrap">
                   <select
+                    id={scheduleRepeatId}
+                    aria-label={t('重复周期', 'Repeat')}
                     value={
                       scheduleDraft.repeat === 'weekly' && !scheduleCustomWeekdays
                         ? scheduleDraft.weekdays.length === 5 &&
@@ -1157,8 +1289,8 @@ export function BotSchedulesScreen({
                     <option value="monthly">{t('每月固定日期', 'Monthly')}</option>
                     <option value="once">{t('仅一次', 'Once')}</option>
                   </select>
-                  <ChevronsUpDown size={15} />
-                </label>
+                  <ChevronsUpDown size={15} aria-hidden="true" />
+                </span>
               </div>
 
               {scheduleDraft.repeat === 'once' && (
@@ -1238,7 +1370,7 @@ export function BotSchedulesScreen({
 
           {/* Task Content Section */}
           <div className="grok-field-section">
-            <label className="grok-section-label">{t('任务标题与执行指令', 'Task Title & Prompt')}</label>
+            <h3 className="grok-section-label">{t('任务标题与执行指令', 'Task Title & Prompt')}</h3>
             <section className="grok-card-group">
               <label className="grok-card-row grok-input-row">
                 <span className="grok-input-label">{t('任务名称', 'Title')}</span>
@@ -1272,7 +1404,7 @@ export function BotSchedulesScreen({
 
           {/* Reminder & Lifecycle Section */}
           <div className="grok-field-section">
-            <label className="grok-section-label">{t('提醒方式与状态', 'Notification & Status')}</label>
+            <h3 className="grok-section-label">{t('提醒方式与状态', 'Notification & Status')}</h3>
             <section className="grok-card-group">
               <div className="grok-card-row no-active">
                 <span className="grok-row-label">{t('强提醒模式（响铃与弹窗）', 'Alarm Mode (Ring & Alert)')}</span>
@@ -1341,37 +1473,28 @@ export function BotSchedulesScreen({
           </ReservedSlot>
         </div>
       )}
-      <Dialog
+      <ConfirmDialog
         open={scheduleDeleteTarget !== null}
-        onOpenChange={open => { if (!open && !action.busy) setScheduleDeleteTarget(null); }}
         title={t('删除定时任务', 'Delete schedule')}
-      >
-        <p className="secondary">{t('确定删除这个定时任务？', 'Delete this scheduled task?')}</p>
-        <ReservedSlot minHeight={48} align="start">
-          <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
-        </ReservedSlot>
-        <div className="dialog-actions">
-          <button type="button" className="button secondary-button" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
-            {t('取消', 'Cancel')}
-          </button>
-          <button
-            type="button"
-            className="button danger-button"
-            disabled={action.busy || scheduleOffline}
-            onClick={() => {
-              if (scheduleDeleteTarget) {
-                mobileHaptic('confirm');
-                onDeleteSchedule(scheduleDeleteTarget);
-              }
-            }}
-          >
-            <LabelStack
-              active={action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
-              labels={[t('删除中…', 'Deleting…'), t('确认删除', 'Delete schedule')]}
-            />
-          </button>
-        </div>
-      </Dialog>
+        description={
+          scheduleDeleteTarget
+            ? t(`确定要删除定时任务「${scheduleDeleteTarget.title?.trim() || t('未命名定时任务', 'Untitled schedule')}」吗？此操作不可恢复。`, `Delete schedule "${scheduleDeleteTarget.title?.trim() || t('未命名定时任务', 'Untitled schedule')}"? This cannot be undone.`)
+            : ''
+        }
+        danger
+        confirmLabel={t('删除定时任务', 'Delete schedule')}
+        cancelLabel={t('取消', 'Cancel')}
+        onCancel={() => {
+          if (!action.busy) setScheduleDeleteTarget(null);
+        }}
+        onConfirm={() => {
+          if (!scheduleDeleteTarget || action.busy || scheduleOffline) return;
+          mobileHaptic('confirm');
+          const target = scheduleDeleteTarget;
+          setScheduleDeleteTarget(null);
+          onDeleteSchedule(target);
+        }}
+      />
     </main>
   );
 }

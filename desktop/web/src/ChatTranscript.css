@@ -1,9 +1,6 @@
-/* ChatTranscript（桌面端合并对话流）模块样式。
- * 仅服务 desktop/web/src/ChatTranscript.tsx；全部新规则以 .desktop-shell 作用域限定，
- * 不影响 Android/mobile 共享组件。共享类（.bot-chat-* / .markdown / .tp-* /
- * .sand-activity-* / .grok-bot-*）主要由 app.css 设计系统承载，这里只补
- * 本组件渲染所需的最小呈现。 */
-@import "katex/dist/katex.min.css";
+/* ChatTranscript (desktop merged conversation transcript) styles.
+ * Scoped under .desktop-shell; consumes canonical Wave 1 design tokens with desktop
+ * legacy fallbacks (zero raw hex/rgb/hsl). KaTeX CSS is imported once in app.css. */
 
 .desktop-shell .desktop-transcript {
   flex: 1;
@@ -11,29 +8,33 @@
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 16px 20px 8px;
+  padding: var(--space-4, 16px) var(--space-5, 20px) var(--space-2, 8px);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  font-size: 15px;
+  gap: var(--space-4, 16px);
+  font-family: var(--font-sans);
+  font-size: var(--text-md, 0.9375rem);
   line-height: 1.65;
+  color: var(--ink-primary, var(--text));
 }
 
-/* 顶部历史分页区 */
+/* Top history pagination bar */
 .desktop-shell .desktop-transcript-pager {
   flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding-bottom: 4px;
-}
-.desktop-shell .desktop-transcript-pager-status {
-  font-size: 12px;
-  color: var(--muted);
+  padding-bottom: var(--space-1, 4px);
 }
 
-/* 空状态 */
+.desktop-shell .desktop-transcript-pager-status {
+  font-size: var(--text-xs, 0.75rem);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary, var(--muted));
+}
+
+/* Empty state */
 .desktop-shell .desktop-transcript-empty {
   flex: 1;
   min-height: 240px;
@@ -43,31 +44,41 @@
   justify-content: center;
   gap: 10px;
   text-align: center;
-  color: var(--muted);
+  color: var(--ink-secondary, var(--muted));
 }
+
 .desktop-shell .desktop-transcript-empty h2 {
   margin: 0;
-  color: var(--text);
+  color: var(--ink-primary, var(--text));
 }
-.desktop-shell .desktop-transcript-empty p { margin: 0; max-width: 420px; }
-.desktop-shell .desktop-transcript-empty-search { font-size: 12.5px; }
+
+.desktop-shell .desktop-transcript-empty p {
+  margin: 0;
+  max-width: 420px;
+}
+
+.desktop-shell .desktop-transcript-empty-search {
+  font-size: var(--text-sm, 0.8125rem);
+}
+
 .desktop-shell .desktop-transcript-empty-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-2, 8px);
+  margin-top: var(--space-2, 8px);
 }
+
 .desktop-shell .desktop-transcript-empty-actions button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   padding: 7px 14px;
-  font-size: 13px;
+  font-size: var(--text-sm, 0.8125rem);
 }
 
-/* 轮次气泡：回复靠左，用户消息靠右。 */
+/* Turn layout: calm open 68ch editorial assistant blocks; compact right-aligned mineral user blocks. */
 .desktop-shell .desktop-transcript .bot-chat-turn {
   width: 100%;
   display: flex;
@@ -75,245 +86,361 @@
   align-items: flex-start;
   min-width: 0;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble {
+  --table-edge-bg: var(--ground, var(--bg));
   align-self: flex-start;
-  max-width: min(780px, 100%);
+  max-width: min(68ch, 100%);
   width: 100%;
   min-width: 0;
+  padding: var(--space-1, 4px) 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-primary, var(--text));
+  box-shadow: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2, 8px);
   overflow-wrap: anywhere;
 }
+
+.desktop-shell .desktop-transcript .bot-chat-bubble:has(.table-scroll) {
+  max-width: min(820px, 100%);
+}
+
 .desktop-shell .desktop-transcript .bot-chat-bubble > * {
   min-width: 0;
   max-width: 100%;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.user {
+  --table-edge-bg: var(--surface-1, var(--surface));
   align-self: flex-end;
   width: auto;
   min-width: 0;
-  max-width: min(78%, 620px);
-  background: var(--brand, var(--accent));
-  color: #fff;
-  border-radius: 20px 20px 6px 20px;
+  max-width: min(74%, 560px);
+  background: var(--surface-1, var(--surface));
+  color: var(--ink-primary, var(--text));
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  border-radius: var(--radius-md, 12px);
+  box-shadow: none;
   padding: 10px 14px;
   white-space: pre-wrap;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-target {
-  outline: 2px solid var(--accent);
+  outline: 1.5px solid var(--signal-primary, var(--accent));
   outline-offset: 2px;
+  border-radius: var(--radius-md, 12px);
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-after {
   opacity: 0.45;
-  transition: opacity 160ms ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.user.is-peer {
-  --table-edge-bg: var(--surface);
+  --table-edge-bg: var(--surface-1, var(--surface));
   align-self: flex-start;
-  max-width: min(82%, 680px);
-  background: color-mix(in srgb, var(--surface) 84%, var(--bg, transparent));
-  color: var(--text);
-  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
-  border-radius: 16px 16px 16px 6px;
+  max-width: min(78%, 620px);
+  background: var(--surface-1, var(--surface));
+  color: var(--ink-primary, var(--text));
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  border-radius: var(--radius-md, 12px);
+  box-shadow: none;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.streaming {
   opacity: 0.96;
 }
 
-/* 思考过程折叠块 */
+/* Thinking disclosure block */
 .desktop-shell .desktop-transcript .bot-chat-thinking {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-inset, var(--surface));
   overflow: hidden;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-thinking > summary {
   cursor: pointer;
   list-style: none;
-  padding: 7px 12px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--muted);
+  padding: 7px var(--space-3, 12px);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-secondary, var(--muted));
   user-select: none;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-thinking > summary::before {
   content: '▸';
   display: inline-block;
   margin-right: 6px;
-  transition: transform 0.15s ease;
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-thinking[open] > summary::before {
   transform: rotate(90deg);
 }
+
 .desktop-shell .desktop-transcript .bot-chat-thinking > pre {
   margin: 0;
-  padding: 8px 12px 10px;
-  border-top: 1px solid var(--line);
-  font-family: var(--mono, ui-monospace, Consolas, monospace);
-  font-size: 12.5px;
+  padding: var(--space-2, 8px) var(--space-3, 12px) 10px;
+  border-top: 1px solid var(--border-subtle, var(--line-subtle));
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
   line-height: 1.55;
-  color: var(--muted);
+  color: var(--ink-secondary, var(--muted));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 320px;
   overflow-y: auto;
 }
 
-/* 工具调用步骤胶囊流 */
+/* Legacy tool chip fallback (if rendered) */
 .desktop-shell .desktop-transcript .bot-chat-tools {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   min-width: 0;
   max-width: 100%;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-tool-wrap {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1, 4px);
   min-width: 0;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-tool-chip {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   align-self: flex-start;
   max-width: 100%;
-  padding: 5px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  font-size: 12.5px;
+  padding: 5px var(--space-3, 12px);
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  background: var(--surface-1, var(--surface));
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
   font-variant-numeric: tabular-nums;
-  color: var(--text);
+  color: var(--ink-primary, var(--text));
 }
+
 .desktop-shell .desktop-transcript .bot-tool-step-icon {
   display: inline-flex;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   flex: none;
 }
-.desktop-shell .desktop-transcript .bot-tool-step-icon svg { width: 16px; height: 16px; }
+
+.desktop-shell .desktop-transcript .bot-tool-step-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
 .desktop-shell .desktop-transcript .bot-chat-tool-chip.is-running {
-  border-color: var(--accent);
-  color: var(--accent-strong, var(--accent));
-  background: var(--accent-soft);
+  border-color: var(--signal-primary-border, var(--accent));
+  color: var(--signal-primary, var(--accent));
+  background: var(--signal-primary-soft, var(--accent-soft));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-tool-chip.is-running .bot-tool-step-icon {
-  animation: desktop-transcript-spin 1s linear infinite;
+  animation: desktop-transcript-spin 900ms linear infinite;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-tool-chip.is-done {
-  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
-  color: var(--ok);
+  border-color: var(--state-live-border, var(--line));
+  color: var(--state-live, var(--ok));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-tool-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
-  color: var(--danger);
+  border-color: var(--state-danger-border, var(--line));
+  color: var(--state-danger, var(--danger));
 }
+
 .desktop-shell .desktop-transcript .bot-tool-step-name {
   min-width: 0;
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium, 500);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .desktop-shell .desktop-transcript .bot-tool-step-state {
-  color: var(--muted);
-  font-size: 12px;
+  color: var(--ink-tertiary, var(--muted));
+  font-size: var(--text-xs, 0.75rem);
 }
+
 @keyframes desktop-transcript-spin {
   to { transform: rotate(360deg); }
 }
 
-/* 轮次耗时角标与操作 */
+/* Turn metadata: proportional font + tabular-nums + fine-pointer hover-gated actions. */
 .desktop-shell .desktop-transcript .bot-chat-turn-meta {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
   align-self: flex-start;
-  gap: 4px 8px;
+  gap: var(--space-1, 4px) var(--space-2, 8px);
   margin-top: 5px;
-  font-size: 12px;
-  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.35;
+  color: var(--ink-tertiary, var(--muted));
   font-variant-numeric: tabular-nums;
   user-select: none;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble.user:not(.is-peer) + .bot-chat-turn-meta {
   align-self: flex-end;
 }
-.desktop-shell .desktop-transcript .bot-chat-turn-clock { width: 14px; height: 14px; }
+
+.desktop-shell .desktop-transcript .bot-chat-turn-clock {
+  width: 13px;
+  height: 13px;
+}
+
 .desktop-shell .desktop-transcript .bot-chat-turn-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-height: 0;
-  padding: 2px 4px;
+  padding: 2px var(--space-1, 4px);
   margin: -2px 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs, 6px);
   background: transparent;
   color: inherit;
   line-height: 1;
+  cursor: pointer;
 }
-.desktop-shell .desktop-transcript .bot-chat-turn-action:hover:not(:disabled),
-.desktop-shell .desktop-transcript .bot-chat-turn-action:focus-visible {
-  color: var(--text);
-  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .desktop-transcript .bot-chat-turn .bot-chat-turn-action {
+    opacity: 0;
+    transition:
+      opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+      background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+      color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+  }
+
+  .desktop-shell .desktop-transcript .bot-chat-turn:hover .bot-chat-turn-action,
+  .desktop-shell .desktop-transcript .bot-chat-turn:focus-within .bot-chat-turn-action,
+  .desktop-shell .desktop-transcript .bot-chat-turn .bot-chat-turn-action:focus-visible,
+  .desktop-shell .desktop-transcript .bot-chat-turn .bot-chat-turn-copy[data-copied],
+  .desktop-shell .desktop-transcript .bot-chat-turn .bot-chat-turn-copy[data-copy-error] {
+    opacity: 1;
+  }
+
+  .desktop-shell .desktop-transcript .bot-chat-turn-action:hover:not(:disabled) {
+    color: var(--ink-primary, var(--text));
+    background: var(--surface-1, var(--surface));
+  }
 }
+
 .desktop-shell .desktop-transcript .bot-chat-turn-action:focus-visible {
-  outline: 2px solid var(--accent);
+  color: var(--ink-primary, var(--text));
+  background: var(--surface-1, var(--surface));
+  outline: 2px solid var(--signal-primary, var(--accent));
   outline-offset: 2px;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-turn-copy[data-copied] {
-  color: var(--accent, var(--brand));
+  color: var(--signal-primary, var(--accent));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-turn-copy[data-copy-error] {
-  color: var(--danger);
+  color: var(--state-danger, var(--danger));
 }
+
 .desktop-shell .desktop-transcript .bot-chat-turn-action-icon {
   width: 13px;
   height: 13px;
   flex-shrink: 0;
 }
 
-/* Markdown 最小呈现（设计系统另有完整 .markdown 规则时可叠加覆盖） */
-.desktop-shell .desktop-transcript .markdown { min-width: 0; }
-.desktop-shell .desktop-transcript .markdown > :first-child { margin-top: 0; }
-.desktop-shell .desktop-transcript .markdown > :last-child { margin-bottom: 0; }
-.desktop-shell .desktop-transcript .markdown p { margin: 0 0 10px; }
-.desktop-shell .desktop-transcript .markdown a { color: var(--brand, var(--accent)); }
+/* Sent image outline & lightbox z-index parity on desktop. */
+.desktop-shell .desktop-transcript .image-attachment-open[data-loaded="true"] {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md, 12px);
+}
+
+.desktop-shell .desktop-transcript .image-attachment-open[data-loaded="true"]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--image-outline, var(--border-subtle, var(--line-subtle)));
+  pointer-events: none;
+}
+
+/* Markdown baseline inside desktop transcript */
+.desktop-shell .desktop-transcript .markdown {
+  min-width: 0;
+}
+
+.desktop-shell .desktop-transcript .markdown > :first-child {
+  margin-top: 0;
+}
+
+.desktop-shell .desktop-transcript .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.desktop-shell .desktop-transcript .markdown p {
+  margin: 0 0 10px;
+}
+
+.desktop-shell .desktop-transcript .markdown a {
+  color: var(--signal-primary, var(--brand, var(--accent)));
+}
+
 .desktop-shell .desktop-transcript .markdown pre {
   max-width: 100%;
   margin: 0 0 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  font-family: var(--mono, ui-monospace, Consolas, monospace);
-  font-size: 12.5px;
+  padding: 10px var(--space-3, 12px);
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  background: var(--surface-inset, var(--surface));
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
   line-height: 1.55;
   overflow-x: auto;
 }
+
 .desktop-shell .desktop-transcript .markdown code {
-  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 0.92em;
 }
-.desktop-shell .desktop-transcript .katex-display { max-width: 100%; overflow-x: auto; }
 
-/* 融合工作槽与失败详情 */
+.desktop-shell .desktop-transcript .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Fused working slot & failure detail */
 .desktop-shell .desktop-transcript .sand-activity-slot,
 .desktop-shell .desktop-transcript .sand-activity-mark {
   min-width: 0;
   max-width: 100%;
 }
+
 .desktop-shell .desktop-transcript .sand-activity-slot.is-inline {
   animation: none;
-  padding: 4px 2px 2px;
+  padding: var(--space-1, 4px) 2px 2px;
 }
+
 .desktop-shell .desktop-transcript .bot-chat-bubble + .sand-activity-slot.is-inline {
-  margin-top: 4px;
+  margin-top: var(--space-1, 4px);
 }
+
 .desktop-shell .desktop-transcript .sand-activity-detail-toggle {
   display: inline-flex;
   align-items: center;
@@ -322,44 +449,64 @@
   min-height: 0;
   padding: 2px 6px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-xs, 6px);
   background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
+  color: var(--ink-secondary, var(--muted));
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
   cursor: pointer;
 }
-.desktop-shell .desktop-transcript .sand-activity-detail-toggle:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .desktop-transcript .sand-activity-detail-toggle:hover {
+    color: var(--ink-primary, var(--text));
+    background: var(--surface-1, var(--surface));
+  }
 }
+
 .desktop-shell .desktop-transcript .sand-activity-detail-toggle:focus-visible {
-  outline: 2px solid var(--brand, var(--accent));
+  outline: 2px solid var(--signal-primary, var(--accent));
   outline-offset: 2px;
 }
+
 .desktop-shell .desktop-transcript .sand-activity-detail-toggle svg {
-  transition: transform 140ms ease;
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
+
 .desktop-shell .desktop-transcript .sand-activity-detail-toggle[aria-expanded="true"] svg {
   transform: rotate(180deg);
 }
+
 .desktop-shell .desktop-transcript .sand-activity-failure-detail {
-  margin: 4px 0 0 46px;
-  padding: 8px 10px;
+  margin: var(--space-1, 4px) 0 0 46px;
+  padding: var(--space-2, 8px) 10px;
   max-width: calc(100% - 46px);
   min-width: 0;
   max-height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle, var(--line-subtle));
+  border-radius: var(--radius-sm, 8px);
   box-shadow: none;
-  background: var(--surface);
-  color: var(--muted);
-  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
-  font-size: 12px;
+  background: var(--surface-inset, var(--surface));
+  color: var(--ink-secondary, var(--muted));
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-after,
+  .desktop-shell .desktop-transcript .bot-chat-thinking > summary::before,
+  .desktop-shell .desktop-transcript .bot-chat-turn .bot-chat-turn-action,
+  .desktop-shell .desktop-transcript .sand-activity-detail-toggle svg {
+    transition: none;
+  }
+
+  .desktop-shell .desktop-transcript .bot-chat-tool-chip.is-running .bot-tool-step-icon {
+    animation: none;
+  }
 }

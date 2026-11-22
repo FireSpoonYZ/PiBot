@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="clipboard_sync_scan_prompt">对准剪贴板同步设置里显示的邀请二维码</string>
     <string name="clipboard_share_title">发送到 PiBot 同步组</string>
     <string name="clipboard_share_confirm">将以下文本发送到当前剪贴板同步组？\n\n%1$s</string>
     <string name="clipboard_share_send">发送</string>

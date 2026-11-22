@@ -1,17 +1,16 @@
 import { Archive, ArrowLeft, Globe } from 'lucide-react';
-import { mobileHaptic } from '../native/tauri-host';
 import { Scopes, type ScopeBotInfo } from '../../../desktop/web/src/Scopes';
 import type { RoomApiResolver, ScopeReadApi } from '../../../desktop/web/src/scope-api';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { DevicesDirectoryItem, MessageMember } from '../../../host-core/index.js';
 import type { ScopeConversation, ScopeConversationSource } from '../gbot-ui';
 import { BotSkillsPage } from '../bot-settings/BotSkillsPage';
-import { Section } from '../bot-settings/primitives';
 import { SkillReviewPanel, type SkillReviewCall } from '../learning/SkillReviewPanel';
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { ErrorNotice, useText } from '../ui';
 import { ReservedSlot } from '../layout';
+import { Button, InlineBanner, Skeleton } from '../components/ui';
 import {
   PlatformLogoIcon,
   formatArchivedRemainingDays,
@@ -229,7 +228,7 @@ export function BotSkillsScreen({
   const skillsDeviceId = activeBot.hostKind === 'local' ? localDeviceId : activeBot.hostId;
 
   return (
-    <main className="grok-subpage grok-page-enter hst-settings" aria-label={t('技能管理', 'Skills')}>
+    <main className="grok-subpage grok-page-enter bot-skills-page" aria-label={t(`${activeBot.role} · 技能`, `${activeBot.role} · Skills`)}>
       <header className="grok-subpage-topbar">
         <button
           type="button"
@@ -237,13 +236,13 @@ export function BotSkillsScreen({
           onClick={onBack}
           aria-label={t('返回', 'Back')}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
         <h2 className="grok-subpage-header-title">{t(`${activeBot.role} · 技能`, `${activeBot.role} · Skills`)}</h2>
         <span className="grok-topbar-spacer" aria-hidden="true" />
       </header>
       <div className="grok-subpage-scroll">
-        <div className="hst-form">
+        <div className="bot-skills-body">
           {remoteConnected && remoteIdentity && remoteApi && skillsDeviceId ? (
             <BotSkillsPage
               key={`${activeCenter}|${activeBot.key}|${remoteIdentity.generation}`}
@@ -255,25 +254,23 @@ export function BotSkillsScreen({
             />
           ) : (
             <>
-              <Section title={t('中心技能目录', 'Center Skills')}>
-                <div className="hst-row-static">
-                  <span className="bs-row-sub">
-                    {t('连接中心后可查看所有可用技能、一键新建技能并在线编辑 SKILL.md 及附属文件。',
-                      'Connect to the center to browse skills, create new ones, and edit SKILL.md inline.')}
-                  </span>
-                </div>
-                <div className="hst-actions">
-                  <button type="button" className="hst-btn is-primary" onClick={onOpenCenterSettings}>
+              <InlineBanner
+                tone="info"
+                title={t('中心技能目录', 'Center Skills')}
+                detail={t('连接中心后可查看所有可用技能、一键新建技能并在线编辑 SKILL.md 及附属文件。', 'Connect to the center to browse skills, create new ones, and edit SKILL.md inline.')}
+                actions={
+                  <Button variant="primary" size="sm" onClick={onOpenCenterSettings}>
                     {t('去连接中心', 'Connect to center')}
-                  </button>
-                </div>
-              </Section>
+                  </Button>
+                }
+              />
               {botPanelConnected && (
-                <Section title={t('本机已学技能', 'Local Learned Skills')} bare>
-                  <div className="bs-card">
+                <section className="grok-field-section">
+                  <h3 className="grok-section-label">{t('本机已学技能', 'Local Learned Skills')}</h3>
+                  <div className="grok-card-group bot-skills-review-card">
                     <SkillReviewPanel key={botPanelIdentityKey} connected={botPanelConnected} call={callSkillReview} />
                   </div>
-                </Section>
+                </section>
               )}
             </>
           )}
@@ -287,6 +284,7 @@ export interface ArchivedBotsScreenProps {
   archivedBots: UnifiedBotItem[];
   hasRemoteConfigured: boolean;
   action: ActionController;
+  loading?: boolean;
   onBack(): void;
   onOpenBotChat(bot: UnifiedBotItem): void;
   onOpenContextMenu(menu: HubContextMenuState): void;
@@ -298,6 +296,7 @@ export function ArchivedBotsScreen({
   archivedBots,
   hasRemoteConfigured,
   action,
+  loading = false,
   onBack,
   onOpenBotChat,
   onOpenContextMenu,
@@ -315,30 +314,34 @@ export function ArchivedBotsScreen({
           onClick={onBack}
           aria-label={t('返回', 'Back')}
         >
-          <ArrowLeft size={20} />
+          <ArrowLeft size={20} aria-hidden="true" />
         </button>
         <h2 className="grok-subpage-header-title">
-          {t(`已归档 Bot (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}
+          {loading && archivedBots.length === 0
+            ? t('已归档 Bot', 'Archived Bots')
+            : t(`已归档 Bot (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}
         </h2>
-        <span className="grok-topbar-spacer" />
+        <span className="grok-topbar-spacer" aria-hidden="true" />
       </header>
 
       <div className="grok-subpage-scroll">
         <p className="grok-card-footnote grok-footnote-mt-2">
-          {t('已归档的 Bot 保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。',
-            'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.')}
+          {t('已归档的 Bot 保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。', 'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.')}
         </p>
         <ReservedSlot minHeight={48} align="start">
           <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
         </ReservedSlot>
 
-        {archivedBots.length === 0 ? (
-          <section className="grok-card-group grok-schedule-empty">
-            <Archive size={28} className="grok-row-icon" />
+        {loading && archivedBots.length === 0 ? (
+          <section className="grok-card-group archived-skeleton-list">
+            <Skeleton lines={3} label={t('正在加载已归档 Bot…', 'Loading archived bots…')} />
+          </section>
+        ) : archivedBots.length === 0 ? (
+          <section className="grok-card-group grok-schedule-empty" role="status">
+            <Archive size={28} className="grok-row-icon" aria-hidden="true" />
             <h4>{t('暂无已归档 Bot', 'No Archived Bots')}</h4>
             <p>
-              {t('归档后的 Bot 会收纳在此处并保留 14 天，不会继续显示在主页列表中。',
-                'Archived bots are kept here for 14 days and hidden from the main Hub list.')}
+              {t('归档后的 Bot 会收纳在此处并保留 14 天，不会继续显示在主页列表中。', 'Archived bots are kept here for 14 days and hidden from the main Hub list.')}
             </p>
           </section>
         ) : (
@@ -349,55 +352,60 @@ export function ArchivedBotsScreen({
               return (
                 <HubArchivedRow
                   key={item.key}
+                  className="archived-bot-row"
                   onOpen={() => onOpenBotChat(item)}
-                  onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
+                  onOpenMenu={(position) => onOpenContextMenu({ ...position, bot: item })}
                 >
-                  <div className="hub-bot-avatar-col">
+                  <div className="archived-bot-avatar">
                     <GrokBotAvatar
                       preset={preset}
                       platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
-                      size={46}
+                      size={44}
                     />
                   </div>
-                  <div className="hub-bot-content-col">
-                    <div className="hub-bot-title-line">
-                      <span className="hub-bot-title">{item.role}</span>
+                  <div className="archived-bot-content">
+                    <div className="archived-bot-line-1">
+                      <span className="archived-bot-name">{item.role}</span>
                       {hasRemoteConfigured && (
                         <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
                           <PlatformLogoIcon platform={item.platform} size={11} />
                           <span className="hub-bot-host-text">{item.hostLabel}</span>
                         </span>
                       )}
-                      <span className="hub-bot-time grok-archived-ttl-pill">
-                        {t(`剩余 ${daysLeft} 天（共 14 天）`, `${daysLeft}d / 14d left`)}
+                      <span className="grok-archived-ttl-pill archived-bot-ttl">
+                        {t(`剩余 ${daysLeft} 天`, `${daysLeft}d left`)}
                       </span>
                     </div>
-                    <div className="hub-bot-subtitle-line grok-archived-subtitle-gap">
-                      <span className="hub-bot-snippet">
-                        {item.lastPreview || item.description || t('点击查看只读历史 · 14 天后自动清理', 'Tap for read-only history · 14d auto-delete')}
+                    <div className="archived-bot-line-2">
+                      <span className="archived-bot-snippet">
+                        {item.lastPreview || item.description || t('只读历史 · 14 天后自动清理', 'Read-only history · auto-deletes in 14d')}
                       </span>
-                      <button
-                        type="button"
-                        className="hub-outline-btn grok-archived-btn-sm"
-                        disabled={action.busy}
-                        onClick={e => {
-                          e.stopPropagation();
-                          onUnarchive(item);
-                        }}
-                      >
-                        {t('恢复', 'Restore')}
-                      </button>
-                      <button
-                        type="button"
-                        className="hub-outline-btn danger grok-archived-btn-sm"
-                        disabled={action.busy}
-                        onClick={e => {
-                          e.stopPropagation();
-                          onRequestDelete(item);
-                        }}
-                      >
-                        {t('永久删除 Bot', 'Permanently Delete')}
-                      </button>
+                      <div className="archived-bot-actions">
+                        <button
+                          type="button"
+                          className="hub-outline-btn grok-archived-btn-sm"
+                          disabled={action.busy}
+                          aria-label={t(`恢复 ${item.role}`, `Restore ${item.role}`)}
+                          onClick={e => {
+                            e.stopPropagation();
+                            onUnarchive(item);
+                          }}
+                        >
+                          {t('恢复', 'Restore')}
+                        </button>
+                        <button
+                          type="button"
+                          className="hub-outline-btn danger grok-archived-btn-sm"
+                          disabled={action.busy}
+                          aria-label={t(`永久删除 ${item.role}`, `Permanently delete ${item.role}`)}
+                          onClick={e => {
+                            e.stopPropagation();
+                            onRequestDelete(item);
+                          }}
+                        >
+                          {t('删除', 'Delete')}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </HubArchivedRow>

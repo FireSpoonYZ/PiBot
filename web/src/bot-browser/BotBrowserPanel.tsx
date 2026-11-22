@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CompositionEvent, FormEvent, KeyboardEvent } from 'react';
 import {
-  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Bot,
@@ -11,7 +10,6 @@ import {
   Ellipsis,
   ExternalLink,
   Globe,
-  Info,
   Loader2,
   Lock,
   Maximize2,
@@ -24,6 +22,8 @@ import {
   X,
 } from 'lucide-react';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { InlineBanner, PopoverMenu, type PopoverMenuItem } from '../components/ui';
+import { useExternalOverlayPresent, useTopLayerClose } from '../components/ui/Overlay';
 import type { GoogleSignInRejectionContext } from '../google/currentGoogleSetup';
 import { useText } from '../ui';
 import { BotBrowserViewport } from './BotBrowserViewport';
@@ -167,6 +167,7 @@ export function BotBrowserPanel({
   className,
 }: BotBrowserPanelProps) {
   const t = useText();
+  const addressErrorId = useId();
 
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(readIsMobileViewport);
   const [pageVisible, setPageVisible] = useState<boolean>(readDocumentVisible);
@@ -204,11 +205,12 @@ export function BotBrowserPanel({
 
   const [urlDraft, setUrlDraft] = useState('');
   const [urlEditing, setUrlEditing] = useState(false);
+  const [urlError, setUrlError] = useState<string | null>(null);
   const [preferredZoom, setPreferredZoom] = useState<number | null>(null);
 
   const panelRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
-  const moreRef = useRef<HTMLDetailsElement | null>(null);
+  const addressInputRef = useRef<HTMLInputElement | null>(null);
   const remoteInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const externalGuideRequestRef = useRef<symbol | null>(null);
@@ -263,12 +265,19 @@ export function BotBrowserPanel({
       ? { botId, deviceId, sessionId: nativeSessionId, pageId: nativePageId, lease: nativeLease, rendererId: nativeRendererId }
       : null,
   [botId, deviceId, canPresentNative, nativePageId, nativeSessionId, nativeRendererId, nativeLease]);
+  const externalOverlayVisible = useExternalOverlayPresent(canPresentNative, panelRef);
   const nativeReady = useNativeBrowserPresentation({
     presenter: nativePresenter,
     target: nativeTarget,
     stage: nativeStage,
     requestRef,
-    suspended: moreOpen || preemptConfirmOpen || externalConfirmOpen || externalGuideOpening || pendingAction !== null,
+    suspended:
+      moreOpen ||
+      preemptConfirmOpen ||
+      externalConfirmOpen ||
+      externalGuideOpening ||
+      pendingAction !== null ||
+      externalOverlayVisible,
     attempt: nativeAttempt,
   });
   const nativeReadyRef = useRef(nativeReady);
@@ -301,17 +310,6 @@ export function BotBrowserPanel({
     document.addEventListener('visibilitychange', onVisibilityChange);
     onVisibilityChange();
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, []);
-
-  useEffect(() => {
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const menu = moreRef.current;
-      if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) {
-        menu.open = false;
-      }
-    };
-    document.addEventListener('pointerdown', closeOnOutsidePointer);
-    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
   }, []);
 
   // Accessibility focus management when entering mobile fullscreen dialog.
@@ -503,10 +501,10 @@ export function BotBrowserPanel({
     setStreamBlocked(null);
     setErrorBanner(null);
     setNoticeBanner(null);
+    setUrlError(null);
     setPreemptConfirmOpen(false);
     setExternalConfirmOpen(false);
     setExternalGuideOpening(false);
-    if (moreRef.current) moreRef.current.open = false;
     setMoreOpen(false);
     setUrlDraft('');
     setUrlEditing(false);
@@ -1246,6 +1244,7 @@ export function BotBrowserPanel({
     if (!canSendInput || ev.nativeEvent.isComposing) return;
     if (ev.key === 'Enter' || ev.key === 'Tab' || ev.key === 'Escape') {
       ev.preventDefault();
+      if (ev.key === 'Escape') ev.stopPropagation();
       handleInput({ kind: 'key', key: ev.key });
     } else if (ev.key === 'Backspace' && ev.currentTarget.value.length === 0) {
       ev.preventDefault();
@@ -1266,13 +1265,15 @@ export function BotBrowserPanel({
     if (!canNavigate) return;
     const normalized = normalizeNavigateUrl(urlDraft);
     if (!normalized.ok) {
-      setErrorBanner(
-        normalized.reason === 'disallowed_scheme'
-          ? t('仅支持 http:// 或 https:// 网址。', 'Only http:// and https:// URLs are allowed.')
-          : t('请输入有效的网址。', 'Enter a valid web address.'),
-      );
+      const msg = normalized.reason === 'disallowed_scheme'
+        ? t('仅支持 http:// 或 https:// 网址。', 'Only http:// and https:// URLs are allowed.')
+        : t('请输入有效的网址。', 'Enter a valid web address.');
+      setUrlError(msg);
+      setErrorBanner(msg);
       return;
     }
+    setUrlError(null);
+    setErrorBanner(null);
     setUrlEditing(false);
     setUrlDraft(normalized.url);
     void runPageAction('navigating', 'navigate', { url: normalized.url });
@@ -1335,13 +1336,16 @@ export function BotBrowserPanel({
   };
 
   const handlePanelKeyDown = (ev: KeyboardEvent<HTMLElement>) => {
-    if (ev.key === 'Escape' && moreRef.current?.open) {
-      ev.preventDefault();
-      moreRef.current.open = false;
-      moreRef.current.querySelector('summary')?.focus();
-      return;
-    }
-    if (ev.key === 'Escape' && resolvedMode === 'fullscreen' && onClose) {
+    if (ev.defaultPrevented) return;
+    if (
+      ev.key === 'Escape' &&
+      resolvedMode === 'fullscreen' &&
+      onClose &&
+      !moreOpen &&
+      !preemptConfirmOpen &&
+      !externalConfirmOpen &&
+      !urlEditing
+    ) {
       // Only close fullscreen drawer on Escape when remote canvas/input isn't consuming Escape.
       const target = ev.target as HTMLElement | null;
       const isRemoteInput = Boolean(
@@ -1349,6 +1353,7 @@ export function BotBrowserPanel({
       );
       if (!isRemoteInput) {
         ev.preventDefault();
+        ev.stopPropagation();
         onClose();
       }
     }
@@ -1363,6 +1368,31 @@ export function BotBrowserPanel({
 
   const isHeld = view?.phase === 'held';
   const isOtherHolder = Boolean(view?.phase === 'human' && !isHolder);
+
+  // LIFO Escape & Android app-back dismissal for local browser inline confirmations & URL editing
+  // BEFORE exiting the fullscreen browser panel or desktop browser dialog.
+  useTopLayerClose(urlEditing, {
+    kind: 'floating',
+    getElement: () => addressInputRef.current,
+    onClose: () => {
+      setUrlEditing(false);
+      setUrlError(null);
+      setUrlDraft(activeTabOf(viewRef.current)?.url ?? '');
+      addressInputRef.current?.blur();
+    },
+  });
+
+  useTopLayerClose(preemptConfirmOpen && isOtherHolder, {
+    kind: 'floating',
+    getElement: () => panelRef.current,
+    onClose: () => setPreemptConfirmOpen(false),
+  });
+
+  useTopLayerClose(externalConfirmOpen, {
+    kind: 'floating',
+    getElement: () => panelRef.current,
+    onClose: () => setExternalConfirmOpen(false),
+  });
   const isTaking = pendingAction === 'taking' || view?.phase === 'taking';
   const isConnectingSharedInput = pendingAction === 'sharing' ||
     Boolean(sharedPage && attemptedSharedPage !== sharedPage && pendingAction === null);
@@ -1570,10 +1600,75 @@ export function BotBrowserPanel({
     </button>
   ) : null;
 
+  const showReleaseMenuItem = (isHolder && view?.phase === 'human') || !connected || canRetry;
+  const effectivePlacement = hasOpenBrowserPage ? view?.renderPlacement ?? 'server' : browserPlacement?.value ?? 'server';
+  const moreMenuItems: PopoverMenuItem[] = [
+    ...(browserPlacement
+      ? [
+          {
+            key: 'placement-client',
+            label:
+              hasOpenBrowserPage && view?.renderPlacement === 'client' && !view.rendererId
+                ? t('网页运行位置：其他客户端', 'Run webpages on: Another client')
+                : t('网页运行位置：当前客户端', 'Run webpages on: This device'),
+            checked: effectivePlacement === 'client',
+            disabled: !canChangeBrowserPlacement,
+            onSelect: () => {
+              if (canChangeBrowserPlacement) browserPlacement.set('client');
+            },
+          },
+          {
+            key: 'placement-server',
+            label: t('网页运行位置：Bot 所在设备', 'Run webpages on: Bot host'),
+            checked: effectivePlacement === 'server',
+            disabled: !canChangeBrowserPlacement,
+            onSelect: () => {
+              if (canChangeBrowserPlacement) browserPlacement.set('server');
+            },
+          },
+          ...(hasOpenBrowserPage
+            ? [
+                {
+                  key: 'placement-hint',
+                  label: t('关闭所有标签页后可切换运行位置', 'Close all tabs to change placement'),
+                  disabled: true,
+                  onSelect: () => {},
+                },
+              ]
+            : []),
+        ]
+      : []),
+    ...(showReleaseMenuItem
+      ? [
+          {
+            key: 'release',
+            separatorBefore: Boolean(browserPlacement),
+            icon: <Square size={15} aria-hidden="true" />,
+            label: view?.sharedInput ? t('关闭浏览器会话', 'Close browser session') : t('释放控制权', 'Release control'),
+            disabled: pendingAction !== null,
+            onSelect: () => {
+              void handleRelease(false);
+            },
+          },
+        ]
+      : []),
+    {
+      key: 'external-guide',
+      separatorBefore: !showReleaseMenuItem && Boolean(browserPlacement),
+      icon: <ExternalLink size={15} aria-hidden="true" />,
+      label: t('切换外置引导', 'Use external browser'),
+      disabled: externalGuideOpening,
+      onSelect: () => {
+        handleRequestExternalGuide();
+      },
+    },
+  ];
+
   return (
     <section
       ref={panelRef}
       className={panelClasses}
+      data-browser-overlay={resolvedMode === 'fullscreen' ? 'true' : undefined}
       role={resolvedMode === 'fullscreen' ? 'dialog' : 'region'}
       aria-modal={resolvedMode === 'fullscreen' ? true : undefined}
       aria-label={
@@ -1628,72 +1723,25 @@ export function BotBrowserPanel({
               <RefreshCw size={16} aria-hidden="true" />
             </button>
           ) : null}
-          <details
-            ref={moreRef}
-            className="bb-more"
-            onToggle={event => setMoreOpen(event.currentTarget.open)}
-            onBlur={(event) => {
-              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) {
-                event.currentTarget.open = false;
-              }
-            }}
-          >
-            <summary className="bb-icon-btn" aria-label={t('更多浏览器操作', 'More browser actions')} title={t('更多操作', 'More actions')}>
-              <Ellipsis size={20} aria-hidden="true" />
-            </summary>
-            <div className="bb-more-actions">
-              {browserPlacement ? (
-                <div className="bb-placement">
-                  <label>
-                    <span>{t('网页运行位置', 'Run webpages on')}</span>
-                    <select
-                      value={hasOpenBrowserPage ? view?.renderPlacement ?? 'server' : browserPlacement.value}
-                      disabled={!canChangeBrowserPlacement}
-                      onChange={event => {
-                        if (canChangeBrowserPlacement) browserPlacement.set(event.currentTarget.value === 'client' ? 'client' : 'server');
-                      }}
-                    >
-                      <option value="client">
-                        {hasOpenBrowserPage && view?.renderPlacement === 'client' && !view.rendererId
-                          ? t('其他客户端', 'Another client')
-                          : t('当前客户端', 'This device')}
-                      </option>
-                      <option value="server">{t('Bot 所在设备', 'Bot host')}</option>
-                    </select>
-                  </label>
-                  {hasOpenBrowserPage ? (
-                    <small>{t('关闭所有标签页后可切换。', 'Close all tabs to change this setting.')}</small>
-                  ) : null}
-                </div>
-              ) : null}
-              {(isHolder && view?.phase === 'human') || !connected || canRetry ? (
-                <button
-                  type="button"
-                  className="bb-btn bb-btn--ghost"
-                  disabled={pendingAction !== null}
-                  onClick={() => {
-                    if (moreRef.current) moreRef.current.open = false;
-                    void handleRelease(false);
-                  }}
-                >
-                  <Square size={16} aria-hidden="true" />
-                  {view?.sharedInput ? t('关闭浏览器会话', 'Close browser session') : t('释放控制权', 'Release control')}
-                </button>
-              ) : null}
+          <PopoverMenu
+            open={moreOpen}
+            onOpenChange={setMoreOpen}
+            align="end"
+            side="bottom"
+            ariaLabel={t('更多浏览器操作', 'More browser actions')}
+            items={moreMenuItems}
+            trigger={({ triggerProps }) => (
               <button
                 type="button"
-                className="bb-btn bb-btn--ghost"
-                disabled={externalGuideOpening}
-                onClick={() => {
-                  if (moreRef.current) moreRef.current.open = false;
-                  handleRequestExternalGuide();
-                }}
+                className={`bb-icon-btn${moreOpen ? ' is-open' : ''}`}
+                aria-label={t('更多浏览器操作', 'More browser actions')}
+                title={t('更多操作', 'More actions')}
+                {...triggerProps}
               >
-                <ExternalLink size={16} aria-hidden="true" />
-                {t('切换外置引导', 'Use external browser')}
+                <Ellipsis size={20} aria-hidden="true" />
               </button>
-            </div>
-          </details>
+            )}
+          />
           {mode === 'auto' && !isMobileViewport ? (
             <button
               type="button"
@@ -1802,16 +1850,19 @@ export function BotBrowserPanel({
               ))}
             </div>
 
-            <form className="bb-address-form" onSubmit={handleUrlSubmit}>
+            <form className={`bb-address-form${urlError ? ' is-invalid' : ''}`} onSubmit={handleUrlSubmit} noValidate>
               <span className="bb-address-lock" aria-hidden="true">
                 {urlMeta.isSecure ? <Lock size={16} /> : <Globe size={16} />}
               </span>
               <input
+                ref={addressInputRef}
                 type="text"
                 className="bb-address-input"
                 value={urlDraft}
                 readOnly={!canNavigate}
                 aria-label={t('当前网页地址', 'Current page URL')}
+                aria-invalid={Boolean(urlError) || undefined}
+                aria-describedby={urlError && errorBanner ? addressErrorId : undefined}
                 placeholder={t('输入网址并回车…', 'Enter URL and press Enter…')}
                 onFocus={() => {
                   if (canNavigate) setUrlEditing(true);
@@ -1820,8 +1871,21 @@ export function BotBrowserPanel({
                   setUrlEditing(false);
                   setUrlDraft(currentTab?.url ?? '');
                 }}
-                onChange={(ev) => setUrlDraft(ev.target.value)}
+                onChange={(ev) => {
+                  setUrlDraft(ev.target.value);
+                  if (urlError) setUrlError(null);
+                }}
               />
+              {canNavigate ? (
+                <button
+                  type="submit"
+                  className="bb-address-submit"
+                  aria-label={t('前往该网址', 'Go to URL')}
+                  title={t('前往', 'Go')}
+                >
+                  <ArrowRight size={16} aria-hidden="true" />
+                </button>
+              ) : null}
             </form>
 
             {liveFrame ? (
@@ -1861,50 +1925,48 @@ export function BotBrowserPanel({
         </div>
       ) : null}
 
-      {/* Contextual banners — shown only when actionable */}
+      {/* Contextual banners — unified on InlineBanner */}
       <div className="bb-banners">
         {connected && clientUnavailableKind !== null ? (
-          <div className="bb-banner bb-banner--warn" role="status">
-            <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {clientUnavailableKind === 'window-closed'
-                  ? t('桌面浏览器窗口已关闭，当前已停止共享。', 'The desktop browser window was closed and sharing has stopped.')
-                  : t('桌面浏览器暂未连上，正在等待恢复连接。', 'The desktop browser is temporarily disconnected and waiting to reconnect.')}
-              </div>
-              <div className="bb-banner-sub">
-                {clientUnavailableKind === 'window-closed'
-                  ? t('重新打开 Pi Bot 桌面窗口后，可开始新的共享会话。', 'Reopen the Pi Bot desktop window to start a new sharing session.')
-                  : t('如果桌面窗口仍开着，短暂断线后会重新连接到原页面。', 'If the desktop window is still open, a brief interruption will reconnect to the same page.')}
-              </div>
-            </div>
-          </div>
+          <InlineBanner
+            tone="attention"
+            role="status"
+            compact
+            title={
+              clientUnavailableKind === 'window-closed'
+                ? t('桌面浏览器窗口已关闭，当前已停止共享。', 'The desktop browser window was closed and sharing has stopped.')
+                : t('桌面浏览器暂未连上，正在等待恢复连接。', 'The desktop browser is temporarily disconnected and waiting to reconnect.')
+            }
+            detail={
+              clientUnavailableKind === 'window-closed'
+                ? t('重新打开 Pi Bot 桌面窗口后，可开始新的共享会话。', 'Reopen the Pi Bot desktop window to start a new sharing session.')
+                : t('如果桌面窗口仍开着，短暂断线后会重新连接到原页面。', 'If the desktop window is still open, a brief interruption will reconnect to the same page.')
+            }
+          />
         ) : null}
 
         {view?.attentionRequested && view.attentionMessage && view.phase === 'bot' && isAvailableInteractive && !signInTakeover ? (
-          <div className="bb-banner bb-banner--warn" role="status">
-            <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {view.attentionMessage}
-              </div>
-            </div>
-          </div>
+          <InlineBanner
+            tone="attention"
+            role="status"
+            compact
+            title={view.attentionMessage}
+          />
         ) : null}
 
         {isHeld ? (
-          <div className="bb-banner bb-banner--warn" role="status">
-            <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {urlMeta.isGoogleSignInRejected
-                  ? t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')
-                  : view?.attentionMessage || t('浏览器已暂停，请选择如何继续。', 'Browser paused. Choose how to continue.')}
-              </div>
-              {currentTab?.url && !isSensitive ? (
-                <div className="bb-banner-sub">{urlMeta.displayHost || currentTab.url}</div>
-              ) : null}
-              <div className="bb-banner-actions">
+          <InlineBanner
+            tone="attention"
+            role="status"
+            compact
+            title={
+              urlMeta.isGoogleSignInRejected
+                ? t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')
+                : view?.attentionMessage || t('浏览器已暂停，请选择如何继续。', 'Browser paused. Choose how to continue.')
+            }
+            detail={currentTab?.url && !isSensitive ? (urlMeta.displayHost || currentTab.url) : undefined}
+            actions={
+              <>
                 {externalRecoveryButton}
                 <button
                   type="button"
@@ -1930,30 +1992,33 @@ export function BotBrowserPanel({
                 >
                   {t('中止任务', 'Cancel task')}
                 </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+          />
         ) : null}
 
         {externalRecoveryButton && !isHeld ? (
-          <div className="bb-banner bb-banner--notice" role="status">
-            <div className="bb-banner-body">
-              {urlMeta.isGoogleSignInRejected ? (
-                <div className="bb-banner-title">{t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')}</div>
-              ) : null}
-              <div className="bb-banner-actions">{externalRecoveryButton}</div>
-            </div>
-          </div>
+          <InlineBanner
+            tone={urlMeta.isGoogleSignInRejected ? 'attention' : 'neutral'}
+            role="status"
+            compact
+            title={
+              urlMeta.isGoogleSignInRejected
+                ? t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')
+                : t('可改用系统浏览器继续当前页面。', 'Continue this page in your system browser.')
+            }
+            actions={externalRecoveryButton}
+          />
         ) : null}
 
         {preemptConfirmOpen && isOtherHolder ? (
-          <div className="bb-banner bb-banner--info" role="alertdialog" aria-label={t('确认切换控制权', 'Confirm takeover switch')}>
-            <Info size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {t(`确定将控制权从「${view?.holderLabel || '另一台设备'}」切换到本机？原设备将立即转为只读。`, `Move control from ${view?.holderLabel || 'the other device'} to here? The other view will become read-only.`)}
-              </div>
-              <div className="bb-banner-actions">
+          <InlineBanner
+            tone="info"
+            role="alert"
+            compact
+            title={t(`确定将控制权从「${view?.holderLabel || '另一台设备'}」切换到本机？原设备将立即转为只读。`, `Move control from ${view?.holderLabel || 'the other device'} to here? The other view will become read-only.`)}
+            actions={
+              <>
                 <button
                   type="button"
                   className="bb-btn bb-btn--primary bb-btn--sm"
@@ -1969,21 +2034,24 @@ export function BotBrowserPanel({
                 >
                   {t('取消', 'Cancel')}
                 </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+          />
         ) : null}
 
         {externalConfirmOpen ? (
-          <div className="bb-banner bb-banner--info" role="alertdialog" aria-label={t('确认切换外部浏览器指导', 'Confirm external browser guide')}>
-            <ExternalLink size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">
-              <div className="bb-banner-title">
-                {urlMeta.isGoogleSignInRejected
-                  ? t('登录后，返回 Pi Bot 继续当前步骤。', 'After signing in, return to Pi Bot to continue the current step.')
-                  : t('将在你的系统浏览器中打开新页面，不继承当前表单已填内容。确认切换？', 'This opens a fresh session in your system browser and does not carry over filled form fields. Continue?')}
-              </div>
-              <div className="bb-banner-actions">
+          <InlineBanner
+            tone="info"
+            role="alert"
+            compact
+            icon={<ExternalLink size={16} aria-hidden="true" />}
+            title={
+              urlMeta.isGoogleSignInRejected
+                ? t('登录后，返回 Pi Bot 继续当前步骤。', 'After signing in, return to Pi Bot to continue the current step.')
+                : t('将在你的系统浏览器中打开新页面，不继承当前表单已填内容。确认切换？', 'This opens a fresh session in your system browser and does not carry over filled form fields. Continue?')
+            }
+            actions={
+              <>
                 <button
                   type="button"
                   className="bb-btn bb-btn--primary bb-btn--sm"
@@ -1998,39 +2066,36 @@ export function BotBrowserPanel({
                 >
                   {t('留在当前页', 'Stay here')}
                 </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+          />
         ) : null}
 
         {errorBanner ? (
-          <div className="bb-banner bb-banner--danger" role="alert">
-            <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">{errorBanner}</div>
-            <button
-              type="button"
-                className="bb-icon-btn"
-              aria-label={t('关闭错误提示', 'Dismiss error')}
-              onClick={() => setErrorBanner(null)}
-            >
-              <X size={13} aria-hidden="true" />
-            </button>
+          <div id={urlError ? addressErrorId : undefined} className="bb-banner-slot">
+            <InlineBanner
+              tone="danger"
+              role="alert"
+              compact
+              title={errorBanner}
+              onDismiss={() => {
+                setErrorBanner(null);
+                setUrlError(null);
+              }}
+              dismissLabel={t('关闭错误提示', 'Dismiss error')}
+            />
           </div>
         ) : null}
 
         {noticeBanner && !errorBanner ? (
-          <div className="bb-banner bb-banner--notice" role="status" aria-live="polite">
-            <Info size={14} className="bb-banner-icon" aria-hidden="true" />
-            <div className="bb-banner-body">{noticeBanner}</div>
-            <button
-              type="button"
-                className="bb-icon-btn"
-              aria-label={t('关闭提示', 'Dismiss notice')}
-              onClick={() => setNoticeBanner(null)}
-            >
-              <X size={13} aria-hidden="true" />
-            </button>
-          </div>
+          <InlineBanner
+            tone="neutral"
+            role="status"
+            compact
+            title={noticeBanner}
+            onDismiss={() => setNoticeBanner(null)}
+            dismissLabel={t('关闭提示', 'Dismiss notice')}
+          />
         ) : null}
       </div>
 
@@ -2043,8 +2108,97 @@ export function BotBrowserPanel({
             zoom={zoom}
             onZoomChange={setPreferredZoom}
             onInput={handleInput}
-            onExitStageFocus={() => closeBtnRef.current?.focus({ preventScroll: true })}
+            onExitStageFocus={() => {
+              const fallback = closeBtnRef.current ?? remoteInputRef.current ?? panelRef.current;
+              fallback?.focus({ preventScroll: true });
+            }}
           />
+        ) : !nativeReady ? (
+          <div className="bb-viewport-empty" role="status">
+            <div className="bb-viewport-empty-icon" aria-hidden="true">
+              {!connected ? (
+                <Globe size={24} />
+              ) : !view && loadingStatus ? (
+                <Loader2 size={24} className="bb-spin" />
+              ) : frameRestricted ? (
+                <Lock size={24} />
+              ) : canShowStream && view?.pageId ? (
+                <Loader2 size={24} className="bb-spin" />
+              ) : (
+                <Globe size={24} />
+              )}
+            </div>
+            <p className="bb-viewport-empty-title">
+              {!connected
+                ? t('连接已断开', 'Connection lost')
+                : !view && loadingStatus
+                  ? t('正在连接浏览器…', 'Connecting to browser…')
+                  : clientUnavailableKind === 'window-closed'
+                    ? t('桌面浏览器窗口已关闭', 'Desktop browser window closed')
+                    : clientUnavailableKind === 'disconnected'
+                      ? t('桌面浏览器暂未连上', 'Desktop browser disconnected')
+                      : frameRestricted
+                        ? t('当前页面受敏感保护', 'Sensitive page hidden')
+                        : !view || !view.available || !view.canStreamInteract || streamDegraded
+                          ? (streamDegraded ? t('实时画面暂时不可用', 'Live stream temporarily unavailable') : t('实时浏览不可用', 'Live view unavailable'))
+                          : !view.pageId && view.tabs.length === 0
+                            ? t('当前没有打开的标签页', 'No open tabs')
+                            : t('正在获取画面…', 'Loading live view…')}
+            </p>
+            <p className="bb-viewport-empty-desc">
+              {!connected
+                ? t('预览与操作已暂停，网络恢复后将自动重连。', 'Live view and input are paused until the connection returns.')
+                : !view && loadingStatus
+                  ? t('正在读取目标设备浏览器状态，请稍候。', 'Reading browser status from the target device.')
+                  : clientUnavailableKind === 'window-closed'
+                    ? t('重新打开 Pi Bot 桌面窗口后，可点击重试恢复查看。', 'Reopen the Pi Bot desktop window, then retry to restore live view.')
+                    : clientUnavailableKind === 'disconnected'
+                      ? t('正在等待桌面端恢复连接，或手动重试检查状态。', 'Waiting for the desktop window to reconnect, or retry now.')
+                      : frameRestricted
+                        ? (signInTakeover ? t('接管此页后可在本机查看画面并完成登录。', 'Take over this page to view it privately and finish signing in.') : t('为保护账号与凭据隐私，只读视图已隐藏画面。', 'Live preview is hidden in read-only view to protect sensitive content.'))
+                        : !view || !view.available || !view.canStreamInteract || streamDegraded
+                          ? (view?.reason || t('可重试恢复画面，或改用系统浏览器继续。', 'Retry to restore live view, or continue in your system browser.'))
+                          : !view.pageId && view.tabs.length === 0
+                            ? t('新建标签页，或等待 Bot 打开网页。', 'Open a new tab, or wait for the Bot to navigate to a page.')
+                            : t('请稍候，画面加载完成后将自动显示。', 'Please wait — the live view will appear automatically.')}
+            </p>
+            <div className="bb-viewport-empty-actions">
+              {signInTakeover ? (
+                <button
+                  type="button"
+                  className="bb-btn bb-btn--primary"
+                  disabled={pendingAction !== null}
+                  onClick={() => void handleTakeover()}
+                >
+                  <Unlock size={14} aria-hidden="true" />
+                  <span>{t('接管并登录', 'Take over and sign in')}</span>
+                </button>
+              ) : null}
+              {canRetry ? (
+                <button
+                  type="button"
+                  className="bb-btn bb-btn--secondary"
+                  disabled={pendingAction !== null}
+                  onClick={handleRetry}
+                >
+                  <RefreshCw size={14} aria-hidden="true" />
+                  <span>{t('重试连接', 'Retry')}</span>
+                </button>
+              ) : null}
+              {connected && view?.available && !view.pageId && view.tabs.length === 0 && !isOtherHolder ? (
+                <button
+                  type="button"
+                  className="bb-btn bb-btn--primary"
+                  disabled={pendingAction !== null}
+                  onClick={() => void runPageAction('tab', 'open', { pageId: null })}
+                >
+                  <Plus size={15} aria-hidden="true" />
+                  <span>{t('新建标签页', 'New tab')}</span>
+                </button>
+              ) : null}
+              {!signInTakeover && showExternalRecovery ? externalRecoveryButton : null}
+            </div>
+          </div>
         ) : null}
       </div>
 
@@ -2055,6 +2209,7 @@ export function BotBrowserPanel({
             ref={remoteInputRef}
             type="text"
             className="bb-remote-input"
+            maxLength={MAX_TEXT_INPUT_LENGTH}
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}

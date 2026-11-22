@@ -1,8 +1,10 @@
+/* SkillReviewPanel styles on Wave 1 tokens (zero color literals). */
+
 .skill-review-panel {
   display: grid;
   min-width: 0;
   gap: var(--space-3, 12px);
-  color: var(--color-text, var(--text));
+  color: var(--ink-primary, var(--color-text, var(--text)));
 }
 
 .skill-review-panel :is(h3, p, figure) {
@@ -30,17 +32,15 @@
   gap: 6px;
 }
 
-.skill-review-muted {
-  color: var(--color-text-muted, var(--muted));
-  font-size: var(--text-sm, .8125rem);
+.skill-review-tabpanel {
+  display: grid;
+  gap: var(--space-2, 8px);
+  min-width: 0;
 }
 
-.skill-review-notice {
-  font-size: var(--text-sm, .8125rem);
-  padding: var(--space-2, 8px) 10px;
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid var(--color-line, var(--line));
-  background: var(--color-surface-1, var(--surface));
+.skill-review-muted {
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-size: var(--text-sm, 0.8125rem);
 }
 
 .skill-review-list {
@@ -53,17 +53,23 @@
 
 .skill-review-panel button {
   position: relative;
-  border: 1px solid var(--color-line, var(--line));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
   border-radius: var(--radius-sm, 8px);
-  background: var(--color-surface-1, var(--surface));
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
   color: inherit;
   min-height: 36px;
   padding: 7px 10px;
+  font-size: var(--text-sm, 0.8125rem);
   cursor: pointer;
   touch-action: manipulation;
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
-    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .skill-review-panel button::before {
@@ -82,38 +88,42 @@
   }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .skill-review-panel button:hover:not(:disabled) {
-    background: var(--color-surface-3, var(--line));
+    background: var(--surface-inset, var(--color-surface-3, var(--line)));
   }
 }
 
 .skill-review-panel button:active:not(:disabled) {
-  opacity: .84;
+  opacity: 0.84;
 }
 
 .skill-review-panel button:focus-visible {
-  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
   outline-offset: 2px;
 }
 
 .skill-review-panel button.is-active {
-  border-color: var(--color-primary, var(--brand, var(--accent)));
+  border-color: var(--signal-primary, var(--color-primary, var(--accent)));
+  background: var(--signal-primary-soft, var(--surface-1));
   font-weight: var(--weight-semibold, 600);
 }
 
 .skill-review-panel button:disabled {
-  opacity: .55;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
 .skill-review-list .skill-review-card {
   display: grid;
+  justify-items: stretch;
   gap: 6px;
   width: 100%;
   min-height: var(--tap-min, 44px);
   text-align: left;
   padding: 10px var(--space-3, 12px);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-raised, var(--color-surface-2, var(--surface)));
 }
 
 .skill-review-card-top,
@@ -126,13 +136,13 @@
 }
 
 .skill-review-card-meta {
-  font-size: var(--text-xs, .75rem);
-  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
 }
 
 .skill-review-desc {
-  font-size: var(--text-sm, .8125rem);
-  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-sm, 0.8125rem);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -153,42 +163,48 @@
   gap: var(--space-1, 4px);
   padding: 2px 7px;
   border-radius: var(--radius-full, 999px);
-  font-size: var(--text-xs, .75rem);
+  font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
-  border: 1px solid var(--color-line, var(--line));
-  background: var(--color-surface-1, var(--surface));
-  color: var(--color-text-muted, var(--muted));
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
 }
 
 .skill-badge.is-active {
-  color: var(--color-success, var(--ok, var(--accent)));
-  border-color: color-mix(in srgb, var(--color-success, var(--ok, var(--accent))) 38%, var(--color-line, var(--line)));
+  color: var(--state-live-ink, var(--state-live, var(--color-success)));
+  border-color: var(--state-live-border, var(--border-default));
+  background: var(--state-live-soft, transparent);
 }
 
 .skill-badge.is-stale {
-  color: var(--color-warning, var(--warn, var(--danger)));
-  border-color: color-mix(in srgb, var(--color-warning, var(--warn, var(--danger))) 38%, var(--color-line, var(--line)));
+  color: var(--state-attention-ink, var(--state-attention, var(--color-warning)));
+  border-color: var(--state-attention-border, var(--border-default));
+  background: var(--state-attention-soft, transparent);
 }
 
 .skill-badge.is-archived {
   border-style: dashed;
-  background: var(--color-bg, var(--bg));
+  background: var(--ground, var(--color-bg, var(--bg)));
 }
 
 .skill-badge.is-accent {
-  color: var(--color-primary, var(--brand, var(--accent)));
-  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 38%, var(--color-line, var(--line)));
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+  border-color: var(--signal-primary-border, var(--border-default));
+  background: var(--signal-primary-soft, transparent);
 }
 
-.skill-review-panel code { overflow-wrap: anywhere; }
+.skill-review-panel code {
+  overflow-wrap: anywhere;
+}
 
 .skill-review-source,
 .skill-review-codebox,
 .skill-revision-row {
   min-width: 0;
-  border: 1px solid var(--color-line, var(--line));
-  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  border-radius: var(--radius-md, 12px);
   padding: 10px var(--space-3, 12px);
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
 }
 
 .skill-review-source,
@@ -199,8 +215,8 @@
 
 .skill-review-codebox figcaption {
   font-weight: var(--weight-semibold, 600);
-  font-size: var(--text-sm, .8125rem);
-  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-sm, 0.8125rem);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
 }
 
 .skill-review-codebox pre {
@@ -209,7 +225,8 @@
   margin: var(--space-2, 8px) 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: var(--text-sm, .8125rem);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm, 0.8125rem);
 }
 
 .skill-revision-row {
@@ -221,28 +238,34 @@
 }
 
 .skill-review-panel .skill-review-primary {
-  border-color: var(--color-primary, var(--brand, var(--accent)));
-  background: var(--color-primary-soft, var(--accent-soft, var(--surface)));
-  color: var(--color-text, var(--text));
+  border-color: var(--signal-primary-border, var(--signal-primary));
+  background: var(--signal-primary-soft, var(--color-primary-soft));
+  color: var(--ink-primary, var(--color-text, var(--text)));
   font-weight: var(--weight-semibold, 600);
 }
-
-.skill-review-panel [role='alert'] { color: var(--color-danger, var(--danger)); }
 
 .skill-review-editor-textarea {
   width: 100%;
   min-height: 260px;
   padding: var(--space-3, 12px);
-  border: 1px solid var(--color-line, var(--line));
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
   border-radius: var(--radius-md, 12px);
-  background: var(--color-bg, var(--bg));
-  color: var(--color-text, var(--text));
-  font: 0.82rem/1.55 ui-monospace, Consolas, monospace;
+  background: var(--ground, var(--color-bg, var(--bg)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  font-family: var(--font-mono);
+  font-size: var(--text-sm, 0.8125rem);
+  line-height: 1.55;
   resize: vertical;
   box-sizing: border-box;
 }
 
 .skill-review-editor-textarea:focus-visible {
-  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-review-panel button {
+    transition: none;
+  }
 }

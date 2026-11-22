@@ -134,9 +134,11 @@ pub fn status() -> AppResult<Value> {
     }
     #[cfg(target_os = "linux")]
     {
+        let enabled = is_enabled();
         Ok(json!({
             "installed": crate::process::systemd_available(),
-            "autostart": is_enabled(),
+            "autostart": enabled,
+            "serviceRegistered": linux_service::is_registered(enabled)?,
         }))
     }
     #[cfg(target_os = "macos")]
@@ -415,6 +417,19 @@ mod linux_service {
 
     pub fn is_enabled() -> bool {
         unit_is_enabled()
+    }
+
+    /// Disabling autostart retains this drop-in; removing the service deletes
+    /// it. An enabled legacy unit is also an existing registration.
+    pub fn is_registered(enabled: bool) -> AppResult<bool> {
+        if enabled {
+            return Ok(true);
+        }
+        match std::fs::metadata(dropin_path()?) {
+            Ok(metadata) => Ok(metadata.is_file()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(AppError::io("read Host service registration", error)),
+        }
     }
 
     /// Extra autostart status fields (linger) merged into `status` output.

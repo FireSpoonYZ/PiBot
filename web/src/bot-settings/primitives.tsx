@@ -1,10 +1,14 @@
 // Bot 设置（模型 / 插件技能 MCP / 高级）三个手机端页面共用的极简 UI 原语。
 // 所有样式以 .bs- 前缀限定在 bot-settings.css 中，不影响其它页面与桌面端。
-import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Loader2, Lock, Search, X } from 'lucide-react';
 import { Switch as UiSwitch } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { useText } from '../ui';
 import './bot-settings.css';
+
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 /* ------------------------------------------------------------------ */
 /* Sheet 外壳                                                          */
@@ -54,6 +58,9 @@ export interface SettingsSheetProps {
 /** 底部弹出的全高设置面板：抓手 + 居中标题 + 关闭，内容区滚动，底部操作区固定。 */
 export function SettingsSheet({ title, subtitle, onClose, onBack, footer, children }: SettingsSheetProps) {
   const t = useText();
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const previousActiveRef = useRef<HTMLElement | null>(null);
+  const openRafRef = useRef<number | null>(null);
   const [backStack, setBackStack] = useState<BackEntry[]>([]);
   const registerBack = useCallback((entry: BackEntry) => {
     setBackStack(prev => [...prev, entry]);
@@ -63,57 +70,103 @@ export function SettingsSheet({ title, subtitle, onClose, onBack, footer, childr
   }, []);
   const contextValue = useMemo(() => ({ registerBack }), [registerBack]);
   const effectiveOnBack = backStack.length > 0 ? backStack[backStack.length - 1].fn : onBack;
+  const effectiveOnBackRef = useRef(effectiveOnBack);
+  effectiveOnBackRef.current = effectiveOnBack;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useIsomorphicLayoutEffect(() => {
+    if (typeof document === 'undefined') return;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (active && active !== document.body && !sheetRef.current?.contains(active)) {
+      previousActiveRef.current = active;
+    }
+    return () => {
+      if (openRafRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(openRafRef.current);
+        openRafRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
-    const hasOpenModal = () => Boolean(document.querySelector('[role="dialog"][data-state="open"]'));
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
-      if (hasOpenModal()) return;
-      event.preventDefault();
-      (effectiveOnBack ?? onClose)();
-    };
-    const onAppBack = (event: Event) => {
-      if (event.defaultPrevented || !effectiveOnBack) return;
-      if (hasOpenModal()) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      effectiveOnBack();
-    };
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('app-back', onAppBack, true);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('app-back', onAppBack, true);
-    };
-  }, [effectiveOnBack, onClose]);
+    return registerOverlayBackHandler(() => {
+      (effectiveOnBackRef.current ?? onCloseRef.current)();
+    });
+  }, []);
 
   return (
     <SettingsSheetContext.Provider value={contextValue}>
-      <div className="bs-backdrop" role="presentation" onClick={onClose}>
-        <section className="bs-sheet" role="dialog" aria-modal="true" aria-label={title} onClick={event => event.stopPropagation()}>
-          <div className="bs-grabber" aria-hidden="true" />
-          <header className="bs-header">
-            <div className="bs-header-side">
-              {effectiveOnBack ? (
-                <button type="button" className="bs-icon-btn" aria-label={t('返回', 'Back')} onClick={effectiveOnBack}>
-                  <ArrowLeft aria-hidden="true" />
-                </button>
-              ) : null}
-            </div>
-            <div className="bs-header-title">
-              <h2>{title}</h2>
-              {subtitle ? <p>{subtitle}</p> : null}
-            </div>
-            <div className="bs-header-side is-end">
-              <button type="button" className="bs-icon-btn" aria-label={t('关闭', 'Close')} onClick={onClose}>
-                <X aria-hidden="true" />
-              </button>
-            </div>
-          </header>
-          <div className="bs-body">{children}</div>
-          {footer ? <footer className="bs-footer">{footer}</footer> : null}
-        </section>
-      </div>
+      <DialogPrimitive.Root
+        open
+        onOpenChange={nextOpen => {
+          if (!nextOpen) onCloseRef.current();
+        }}
+      >
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="bs-backdrop" />
+          <DialogPrimitive.Content
+            ref={sheetRef}
+            data-ui-dialog="open"
+            className="bs-sheet"
+            onEscapeKeyDown={event => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (effectiveOnBackRef.current) {
+                effectiveOnBackRef.current();
+              } else {
+                onCloseRef.current();
+              }
+            }}
+            onOpenAutoFocus={event => {
+              event.preventDefault();
+              if (typeof window !== 'undefined') {
+                if (openRafRef.current !== null) {
+                  window.cancelAnimationFrame(openRafRef.current);
+                }
+                openRafRef.current = window.requestAnimationFrame(() => {
+                  openRafRef.current = null;
+                  const sheet = sheetRef.current;
+                  if (sheet && !sheet.contains(document.activeElement)) {
+                    sheet.focus({ preventScroll: true });
+                  }
+                });
+              }
+            }}
+            onCloseAutoFocus={event => {
+              const target = previousActiveRef.current;
+              previousActiveRef.current = null;
+              if (target && target !== document.body && target.isConnected) {
+                event.preventDefault();
+                target.focus({ preventScroll: true });
+              }
+            }}
+          >
+            <div className="bs-grabber" aria-hidden="true" />
+            <header className="bs-header">
+              <div className="bs-header-side">
+                {effectiveOnBack ? (
+                  <button type="button" className="bs-icon-btn" aria-label={t('返回', 'Back')} onClick={effectiveOnBack}>
+                    <ArrowLeft aria-hidden="true" />
+                  </button>
+                ) : null}
+              </div>
+              <div className="bs-header-title">
+                <DialogPrimitive.Title>{title}</DialogPrimitive.Title>
+                {subtitle ? <DialogPrimitive.Description>{subtitle}</DialogPrimitive.Description> : null}
+              </div>
+              <div className="bs-header-side is-end">
+                <DialogPrimitive.Close type="button" className="bs-icon-btn" aria-label={t('关闭', 'Close')}>
+                  <X aria-hidden="true" />
+                </DialogPrimitive.Close>
+              </div>
+            </header>
+            {subtitle ? null : <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>}
+            <div className="bs-body">{children}</div>
+            {footer ? <footer className="bs-footer">{footer}</footer> : null}
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
     </SettingsSheetContext.Provider>
   );
 }

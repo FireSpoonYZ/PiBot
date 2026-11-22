@@ -1,10 +1,14 @@
-/* M18 mobile（Tauri 辅助进程）外壳样式：全面屏沉浸，由内部顶栏/底栏按 --top / --bottom 单次让位；
- * 软键盘统一在 #root 通过 --ime-bottom 单通道让位，不缩放 WebView。
- * 外壳容器使用 overflow: clip（附 hidden 回退），防止焦点或 scrollIntoView 误滚根节点。 */
+/* Android Tauri mobile shell: edge-to-edge immersive canvas.
+ * Safe-area tokens (--top, --bottom, --safe-left, --safe-right) are defined on :root in
+ * `web/src/design-system/tokens.css` so both `#root` and portaled overlays inherit them cleanly.
+ * Soft keyboard inset (--ime-bottom) lifts `#root` through a single channel without resizing WebView.
+ * Outer shell uses overflow: clip (with hidden fallback) so focus/scrollIntoView never scrolls the root.
+ */
 html, body {
   overflow: hidden;
   overflow: clip;
 }
+
 #root {
   box-sizing: border-box;
   height: 100%;
@@ -15,16 +19,42 @@ html, body {
   flex-direction: column;
   padding-top: 0;
   padding-bottom: var(--ime-bottom, 0px);
-  --bottom: max(
-    calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)),
-    0px
-  );
+  padding-inline: var(--safe-left, 0px) var(--safe-right, 0px);
 }
-.mobile-shell { flex: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; overflow: hidden; overflow: clip; background: var(--bg); }
-.mobile-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; overflow: clip; }
-.mobile-body .bot-hub-shell { max-width: none; }
-/* desktop app.css 是全局样式（先加载）：在本机页容器内恢复 styles.css 的排版基线，
- * 避免字体族/字号/行高/字重/段落下边距被桌面元素规则改变。 */
-.mobile-body { font-family: system-ui, -apple-system, "Noto Sans SC", sans-serif; font-size: 16px; line-height: 1.65; }
-.mobile-body :where(label) { font-weight: normal; }
-.mobile-body :where(p) { margin-bottom: 1em; }
+
+.mobile-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  overflow: clip;
+  background: var(--ground, var(--bg));
+}
+
+.mobile-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overflow: clip;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.mobile-body .bot-hub-shell {
+  max-width: none;
+}
+
+.mobile-body :where(label) {
+  font-weight: normal;
+}
+
+.mobile-body :where(p) {
+  margin-bottom: 1em;
+}

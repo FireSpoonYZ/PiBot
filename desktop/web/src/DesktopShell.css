@@ -1,183 +1,505 @@
-/* Lane 3：主壳 rail、设备选择器、设置弹窗的专属样式。
-   全部限定在 .desktop-shell / .desktop-dialog 作用域内，不影响 Android 复用的共享组件。
-   基础 token 与通用类（.desktop-shell .desktop-rail .app-workspace .workspace-body
-   .desktop-dialog .icon-button .primary-button .secondary-button .pill-tabs）由 app.css 提供；
-   下列 var() 回退值与 app.css 的 token 对齐，避免对 token 名的强依赖。 */
+/* Desktop shell: navigation rail, device selector, full-canvas Settings/Center workspace,
+ * and modal dialog layout. Scoped under .desktop-shell / .desktop-dialog / .desktop-settings-view /
+ * .desktop-center-view so shared mobile/remote components are not visually disturbed.
+ * Zero hardcoded color literals; consumes canonical design-system tokens. */
 
-/* ---------- 左窄导航轨 ---------- */
+/* ---------- Left Navigation Rail ---------- */
 .desktop-shell .desktop-rail {
-  flex: 0 0 68px;
+  flex: 0 0 56px;
+  width: 56px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 10px 6px;
-  border-right: 1px solid var(--line, #e5e5df);
-  background: var(--surface, #efeee9);
+  gap: var(--space-1);
+  padding: var(--space-2) 6px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--shell-rail);
 }
+
 .desktop-shell .rail-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  width: 56px;
+  justify-content: center;
+  gap: 3px;
+  width: 44px;
   min-height: 0;
-  padding: 8px 0 7px;
-  border: none;
-  border-radius: var(--radius-sm, 12px);
+  padding: 7px 0 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted, #70756f);
+  color: var(--ink-secondary);
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
-.desktop-shell .rail-item:hover {
-  background: var(--accent-soft, #e1e7df);
-  color: var(--text, #242622);
-}
+
 .desktop-shell .rail-item:focus-visible {
-  outline: 2px solid var(--brand, var(--accent));
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
 }
+
 .desktop-shell .rail-item.active {
-  background: var(--brand-soft, rgb(43 112 246 / 0.12));
-  color: var(--brand, var(--accent, #2B70F6));
+  background: var(--signal-primary-soft);
+  color: var(--signal-primary);
 }
-.desktop-shell .rail-label { font-size: 11px; line-height: 1.15; }
-.desktop-shell .rail-caption { font-size: 10px; color: var(--muted, #70756f); }
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .rail-item:hover:not(.active):not(:disabled) {
+    background: var(--surface-inset);
+    color: var(--ink-primary);
+  }
+}
+
+.desktop-shell .rail-label {
+  font-size: 10.5px;
+  font-weight: var(--weight-medium);
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.desktop-shell .rail-caption {
+  font-size: 10px;
+  color: var(--ink-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
 .desktop-shell .rail-group {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  margin-bottom: 4px;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
 }
-.desktop-shell .rail-spacer { flex: 1; }
+
+.desktop-shell .rail-spacer {
+  flex: 1;
+}
+
 .desktop-shell .rail-icon-wrap {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
+
 .desktop-shell .rail-update-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: #a64b24;
-  color: #fff;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-full);
+  background: var(--signal-primary);
+  color: var(--signal-primary-ink);
 }
+
 .desktop-shell .conn-dot {
   position: absolute;
   top: -2px;
   right: -4px;
   display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px var(--surface, #efeee9);
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--shell-rail);
 }
-.desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
-.desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }
-.desktop-shell .conn-dot.needs-attention { background: var(--warn, #ad6500); }
+.desktop-shell .conn-dot.online { background: var(--state-live); }
+.desktop-shell .conn-dot.offline { background: var(--state-danger); }
+.desktop-shell .conn-dot.needs-attention { background: var(--state-attention); }
 
-.desktop-shell .rail-notice-anchor {
-  position: relative;
-  display: flex;
+/* Left-rail ConnectionStatusPopover pill fitted cleanly inside 56px vertical rail. */
+.desktop-shell .desktop-rail .conn-status-pill.rail-conn-status {
+  width: 44px;
+  max-width: 44px;
+  min-height: 36px;
+  padding: 5px 2px;
+  flex-direction: column;
   justify-content: center;
+  gap: 3px;
+  border-radius: var(--radius-sm);
 }
+.desktop-shell .desktop-rail .conn-status-pill.rail-conn-status .conn-status-label {
+  max-width: 40px;
+  font-size: 10px;
+  line-height: 1.1;
+  text-align: center;
+}
+
 .desktop-shell .rail-notice-popover {
   position: absolute;
   left: calc(100% + 10px);
   bottom: 0;
-  z-index: 35;
+  z-index: var(--z-popover);
   width: min(380px, calc(100vw - 96px));
   max-height: min(60vh, 420px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .desktop-shell .rail-notice-popover > .grok-notice-card {
   margin: 0;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-popover);
 }
 
 .desktop-shell .center-recovery {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 4px 16px;
-  border-bottom: 1px solid var(--line-subtle, var(--line));
-  color: var(--muted);
-  font-size: 13px;
+  gap: var(--space-3);
+  padding: 6px var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
 }
 .desktop-shell .center-recovery .secondary-button {
   min-height: 28px;
   padding: 2px 10px;
 }
 
-/* ---------- 群聊 / 待发送 顶部设备选择器 ---------- */
-.desktop-shell .workspace-body { flex-direction: column; }
-.desktop-shell .app-workspace { position: relative; }
+/* ---------- Workspace & Pending Device Selector ---------- */
+.desktop-shell .workspace-body {
+  flex-direction: column;
+}
+
+.desktop-shell .app-workspace {
+  position: relative;
+}
+
 .desktop-shell .app-notices {
   position: absolute;
-  top: 8px;
+  top: var(--space-2);
   right: 14px;
-  z-index: 30;
+  z-index: var(--z-popover);
   width: min(460px, calc(100% - 28px));
   pointer-events: none;
 }
 .desktop-shell .app-notices > .grok-notice-card {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
   pointer-events: auto;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-popover);
 }
-.desktop-shell .chat-workspace-host { display: contents; }
-.desktop-shell .chat-workspace-host.workspace-hidden { display: none; }
-.desktop-shell .device-view { min-width: 0; }
+
+.desktop-shell .chat-workspace-host {
+  display: contents;
+}
+
+.desktop-shell .chat-workspace-host.workspace-hidden {
+  display: none;
+}
+
 .desktop-shell .device-view {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
+
 .desktop-shell .device-selector {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--line-subtle, var(--line, #e5e5df));
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--ground);
 }
+
 .desktop-shell .device-selector-label {
-  font-size: 12px;
-  color: var(--muted, #70756f);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-secondary);
   white-space: nowrap;
+  flex-shrink: 0;
 }
+
 .desktop-shell .pending-device-picker {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+  min-width: 0;
 }
+
+.desktop-shell .pending-device-select {
+  min-width: 220px;
+  max-width: 340px;
+}
+
 .desktop-shell .device-selector select {
   min-width: 220px;
   max-width: 340px;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 999px;
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  color: var(--ink-primary);
   padding: 5px 12px;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
-.desktop-shell .device-view > .empty-state { margin: auto; }
 
-/* ---------- 设置弹窗（Radix Dialog） ---------- */
-/* 设置弹窗独占 overlay 层级：裸 .desktop-dialog-overlay 归各 lane（如 create-bot-dialog z41），本 lane 不跨 lane 改写通用 overlay。 */
+.desktop-shell .device-view > .empty-state {
+  margin: auto;
+}
+
+/* ---------- Full-canvas Settings & Center Admin Workspace Views ---------- */
+.desktop-settings-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--ink-primary);
+}
+
+.desktop-settings-sidebar {
+  flex: none;
+  width: 224px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-3);
+  background: var(--surface-1);
+  border-right: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.desktop-settings-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) var(--space-1);
+}
+
+.desktop-settings-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.desktop-settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  text-align: left;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.desktop-settings-nav-item > span:not(.nav-status-dot) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.desktop-settings-nav-item > svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .desktop-settings-nav-item:hover:not(.active):not(:disabled) {
+    background: var(--surface-inset);
+    color: var(--ink-primary);
+  }
+}
+.desktop-settings-nav-item.active,
+.desktop-settings-nav-item[aria-current="page"] {
+  background: var(--surface-raised);
+  color: var(--signal-primary);
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-control);
+}
+.desktop-settings-nav-item:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: -2px;
+}
+.desktop-settings-nav-item .nav-status-dot {
+  margin-left: auto;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--ink-muted);
+}
+.desktop-settings-nav-item .nav-status-dot.online { background: var(--state-live); }
+.desktop-settings-nav-item .nav-status-dot.warn { background: var(--state-attention); }
+
+.desktop-settings-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--ground);
+  padding: var(--space-6) var(--space-8) var(--space-8);
+}
+
+.desktop-settings-main.is-center-admin {
+  padding: var(--space-4) var(--space-6) var(--space-8);
+}
+
+.desktop-settings-inner {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.desktop-center-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--ground);
+  color: var(--ink-primary);
+}
+.desktop-center-view > .ca-root {
+  flex: 1;
+  min-height: 0;
+  background: var(--ground);
+}
+.desktop-center-view > .ca-root > .ca-shell,
+.desktop-center-view > .desktop-center-inner {
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+  padding: var(--space-5) var(--space-6) var(--space-8);
+}
+.desktop-center-view > :not(.ca-root):not(.desktop-center-inner) {
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+}
+.desktop-settings-main > .desktop-center-view {
+  max-width: 1120px;
+  margin-inline: auto;
+  overflow: visible;
+}
+.desktop-settings-main > .desktop-center-view > .ca-root > .ca-shell {
+  padding: 0;
+}
+
+/* ---------- Adaptive Compact Layout (< 780px) ---------- */
+@media (max-width: 779px) {
+  .desktop-shell {
+    flex-direction: column;
+  }
+  .desktop-shell .desktop-rail {
+    order: 2;
+    flex: 0 0 auto;
+    width: 100%;
+    height: auto;
+    min-height: 50px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-right: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .desktop-shell .rail-group {
+    flex-direction: row;
+    margin-bottom: 0;
+    gap: 4px;
+  }
+  .desktop-shell .rail-item {
+    width: auto;
+    min-width: 44px;
+    padding: 5px 10px;
+    flex-direction: row;
+    gap: 5px;
+  }
+  .desktop-shell .desktop-rail .conn-status-pill.rail-conn-status {
+    width: auto;
+    max-width: 124px;
+    min-height: 28px;
+    padding: 0 8px;
+    flex-direction: row;
+    gap: 5px;
+    border-radius: var(--radius-full);
+  }
+  .desktop-shell .desktop-rail .conn-status-pill.rail-conn-status .conn-status-label {
+    max-width: 88px;
+    font-size: var(--text-xs);
+  }
+}
+
+@media (max-width: 780px) {
+  .desktop-settings-view {
+    flex-direction: column;
+  }
+  .desktop-settings-sidebar {
+    width: auto;
+    flex-direction: column;
+    padding: var(--space-3) var(--space-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-y: visible;
+  }
+  .desktop-settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    gap: var(--space-1);
+    scrollbar-width: none;
+  }
+  .desktop-settings-nav::-webkit-scrollbar { display: none; }
+  .desktop-settings-nav-item {
+    width: auto;
+  }
+  .desktop-settings-main {
+    padding: var(--space-4) var(--space-4) var(--space-6);
+  }
+}
+
+/* ---------- Settings Dialog (Radix Dialog) — Compat Preserved ---------- */
 .desktop-dialog-overlay.settings-dialog-overlay {
   position: fixed;
   inset: 0;
-  z-index: 50;
-  background: rgb(0 0 0 / 0.35);
+  z-index: var(--z-dialog);
+  background: var(--scrim);
 }
+
 .desktop-dialog.settings-dialog {
   position: fixed;
-  z-index: 51;
+  z-index: calc(var(--z-dialog) + 1);
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -187,112 +509,158 @@
   flex-direction: column;
   padding: 0;
   overflow: hidden;
-  background: var(--surface-elevated, #fff);
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: var(--radius-lg, 22px);
-  box-shadow: var(--shadow-lg, 0 16px 42px rgb(0 0 0 / 0.14));
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
 }
-.desktop-dialog.client-settings-dialog { width: min(480px, 94vw); }
+
+.desktop-dialog.client-settings-dialog {
+  width: min(480px, 94vw);
+}
+
 .desktop-dialog.settings-shell-dialog {
-  --bs-accent: var(--brand);
+  --bs-accent: var(--signal-primary);
   width: min(760px, 94vw);
   height: min(620px, 84vh);
   max-height: 84vh;
-  transition: width 0.16s ease, height 0.16s ease;
+  transition: width var(--dur-fast) var(--ease-out), height var(--dur-fast) var(--ease-out);
 }
+
+.desktop-shell .center-recovery-banner {
+  flex: none;
+  margin: 0;
+  border-radius: 0;
+  border-inline: 0;
+  border-top: 0;
+}
+
+.desktop-shell .center-recovery-banner .secondary-button {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+}
+
 .desktop-dialog.settings-shell-dialog.settings-shell-center-admin {
   width: 92vw;
   max-width: 1120px;
   height: 84vh;
   max-height: 84vh;
 }
+
 .settings-shell-wrap {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
 }
+
 .settings-shell-head {
   flex: none;
-  border-bottom: 1px solid var(--line-subtle, var(--line, #e5e5df));
-  padding-bottom: 10px !important;
+  border-bottom: 1px solid var(--border-subtle);
 }
+
 .settings-shell-layout {
   flex: 1;
   min-height: 0;
   display: flex;
 }
+
 .settings-shell-nav {
   flex: none;
   width: 176px;
-  padding: 12px 10px;
-  border-right: 1px solid var(--line-subtle, var(--line, #e5e5df));
-  background: var(--surface, #f6f5f0);
+  padding: var(--space-3) 10px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-1);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
+
 .settings-nav-item {
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 9px 11px;
+  padding: 8px 11px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text, #242622);
-  font-size: 13px;
-  font-weight: 500;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
   text-align: left;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
 }
-.settings-nav-item:hover {
-  background: var(--surface-hover, rgb(0 0 0 / 0.04));
+.settings-nav-item > span:not(.nav-status-dot) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+@media (hover: hover) and (pointer: fine) {
+  .settings-nav-item:hover:not(.active):not(:disabled) {
+    background: var(--surface-inset);
+    color: var(--ink-primary);
+  }
+}
+
 .settings-nav-item.active {
-  background: var(--surface-elevated, #fff);
-  color: var(--brand, #2563eb);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  background: var(--surface-raised);
+  color: var(--signal-primary);
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-control);
 }
+
 .settings-nav-item .nav-status-dot {
   margin-left: auto;
+  flex: none;
   width: 7px;
   height: 7px;
-  border-radius: 50%;
-  background: var(--muted, #8c9189);
+  border-radius: var(--radius-full);
+  background: var(--ink-muted);
 }
-.settings-nav-item .nav-status-dot.online { background: var(--ok, #16a34a); }
-.settings-nav-item .nav-status-dot.warn { background: #d97706; }
+.settings-nav-item .nav-status-dot.online { background: var(--state-live); }
+.settings-nav-item .nav-status-dot.warn { background: var(--state-attention); }
 
 .settings-shell-body {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 22px 22px;
+  overscroll-behavior: contain;
+  padding: var(--space-4) 22px 22px;
 }
+
 .settings-shell-body.center-admin-body {
   padding: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
+
 .settings-center-admin-embed {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: auto;
+  overscroll-behavior: contain;
 }
+
 .settings-pane-header {
   margin-bottom: 14px;
 }
 .settings-pane-header h3 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  font-weight: 650;
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
 }
 .settings-pane-header p { margin: 0; }
 
@@ -300,18 +668,22 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.host-status-pill.online { color: var(--ok, #16a34a); }
-.host-status-pill.warn { color: #b45309; }
-.host-status-pill.muted { color: var(--muted, #70756f); }
+.host-status-pill.online { color: var(--state-live); }
+.host-status-pill.warn { color: var(--state-attention); }
+.host-status-pill.muted { color: var(--ink-secondary); }
+
 .host-status-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   background: currentColor;
 }
+
 .host-repair-banner {
   display: flex;
   align-items: center;
@@ -319,414 +691,480 @@
   gap: 10px;
   flex-wrap: wrap;
   margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--warn-line, rgb(217 119 6 / 0.35));
-  background: var(--warn-bg, rgb(217 119 6 / 0.08));
+  padding: 10px var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--state-attention-border);
+  background: var(--state-attention-soft);
+  color: var(--state-attention-ink);
 }
 .host-repair-banner button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
+
 .settings-diagnostics-body {
   display: flex;
   flex-direction: column;
   gap: 14px;
   padding-top: 10px;
 }
+
 .diagnostics-block {
   padding-top: 10px;
-  border-top: 1px dashed var(--line-subtle, var(--line, #e5e5df));
+  border-top: 1px dashed var(--border-subtle);
 }
-.diagnostics-block:first-child { padding-top: 0; border-top: 0; }
+.diagnostics-block:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
 .diagnostics-block h5 {
   margin: 0 0 6px;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
 }
+
 .diagnostics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 4px 12px;
+  gap: var(--space-1) var(--space-3);
+  font-variant-numeric: tabular-nums;
 }
+
 .settings-empty-card {
-  margin: 24px auto;
+  margin: var(--space-6) auto;
   max-width: 420px;
-  padding: 24px;
-  border-radius: 14px;
-  border: 1px solid var(--line, #e5e5df);
-  background: var(--surface, #f6f5f0);
+  padding: var(--space-6);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
 }
-.settings-empty-card h4 { margin: 0; font-size: 15px; }
+.settings-empty-card h4 { margin: 0; font-size: var(--text-md); }
 .settings-empty-card p { margin: 0; }
-.danger-outline { color: var(--danger, #dc2626); border-color: rgb(220 38 38 / 0.35); }
+
+.danger-outline {
+  color: var(--state-danger);
+  border-color: var(--state-danger-border);
+}
+
 .desktop-dialog .dialog-head {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 14px 18px 6px;
 }
-.desktop-dialog .dialog-title { flex: 1; margin: 0; font-size: 16px; font-weight: 650; }
+.desktop-dialog .dialog-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
 .desktop-dialog .dialog-desc {
   margin: 0 18px 10px;
-  font-size: 12px;
-  color: var(--muted, #70756f);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
 }
-.client-settings-dialog .dialog-desc { margin-left: 60px; }
+.client-settings-dialog .dialog-desc {
+  margin-left: 60px;
+}
 .desktop-dialog .dialog-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0 18px 18px;
 }
 
-/* 设置首页与详情共用的列表行 */
-.settings-shell-dialog .settings-row-group,
-.client-settings-dialog .settings-row-group {
-  border-top: 1px solid var(--line-subtle, var(--line));
+/* Shared list rows across Settings dialog & full-canvas Settings view */
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-group {
+  border-top: 1px solid var(--border-subtle);
 }
-.settings-shell-dialog .settings-row,
-.client-settings-dialog .settings-row {
+
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
   min-height: 44px;
-  padding: 8px;
+  padding: var(--space-2);
   border: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--ink-primary);
   text-align: left;
 }
-.settings-shell-dialog .settings-row + .settings-row,
-.client-settings-dialog .settings-row + .settings-row {
-  border-top: 1px solid var(--line-subtle, var(--line));
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row + .settings-row {
+  border-top: 1px solid var(--border-subtle);
 }
-.settings-shell-dialog .settings-row-label,
-.client-settings-dialog .settings-row-label {
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-label {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.settings-shell-dialog .settings-row > .metadata,
-.settings-shell-dialog .settings-row > .status,
-.client-settings-dialog .settings-row > .metadata,
-.client-settings-dialog .settings-row > .status {
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row > .metadata,
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row > .status {
   max-width: 60%;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
-.settings-shell-dialog .settings-row-link,
-.client-settings-dialog .settings-row-link { cursor: pointer; }
-.settings-shell-dialog .settings-row-link:hover,
-.client-settings-dialog .settings-row-link:hover { background: var(--surface); }
-.settings-shell-dialog .settings-row-link:focus-visible,
-.client-settings-dialog .settings-row-link:focus-visible {
-  outline: 2px solid var(--brand);
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-link {
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-link:hover {
+    background: var(--surface-1);
+  }
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-link:focus-visible {
+  outline: 2px solid var(--signal-primary);
   outline-offset: -2px;
 }
-.settings-shell-dialog .settings-row-icon,
-.client-settings-dialog .settings-row-icon {
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-icon,
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-chevron {
   flex: none;
   display: inline-flex;
-  color: var(--muted);
+  color: var(--ink-secondary);
 }
-.settings-shell-dialog .settings-row-chevron,
-.client-settings-dialog .settings-row-chevron {
-  flex: none;
-  color: var(--muted);
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row input[type="radio"] {
+  accent-color: var(--signal-primary);
 }
-.settings-shell-dialog .settings-row input[type="radio"],
-.client-settings-dialog .settings-row input[type="radio"] { accent-color: var(--brand); }
 
-/* 弹窗分区 */
-.desktop-dialog .settings-section {
-  padding: 12px 0;
-  border-top: 1px solid var(--line-subtle, var(--line, #e5e5df));
+/* Sections & disclosures (shared across dialogs & full-canvas Settings view) */
+:is(.desktop-dialog, .desktop-settings-view) .settings-section {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
 }
-.desktop-dialog .settings-section:first-child { border-top: none; }
-.desktop-dialog .settings-section h4 { margin: 0 0 8px; font-size: 13px; }
-.desktop-dialog .settings-disclosure > summary {
+:is(.desktop-dialog, .desktop-settings-view) .settings-section:first-child { border-top: 0; }
+:is(.desktop-dialog, .desktop-settings-view) .settings-section h4 { margin: 0 0 var(--space-2); font-size: var(--text-sm); }
+
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > :not(summary) {
+  margin: 0;
+}
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border: 0;
   cursor: pointer;
   list-style: none;
 }
-.desktop-dialog .settings-disclosure > summary::-webkit-details-marker { display: none; }
-.desktop-dialog .settings-disclosure > summary::before {
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary::-webkit-details-marker { display: none; }
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary::before {
   content: '›';
   font-size: 17px;
   line-height: 1;
-  color: var(--muted);
+  color: var(--ink-tertiary);
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.desktop-dialog .settings-disclosure[open] > summary::before { transform: rotate(90deg); }
-.desktop-dialog .settings-disclosure > summary > .metadata,
-.desktop-dialog .settings-disclosure > summary > .status { margin-left: auto; }
-.desktop-dialog .settings-disclosure[open] > summary { margin-bottom: 10px; }
-.desktop-dialog .settings-diagnostics {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--muted);
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure[open] > summary::before { transform: rotate(90deg); }
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary > .metadata,
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary > .status { margin-left: auto; }
+:is(.desktop-dialog, .desktop-settings-view) .settings-disclosure[open] > summary { margin-bottom: 10px; border-bottom: 0; }
+
+:is(.desktop-dialog, .desktop-settings-view) .settings-diagnostics {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
   overflow-wrap: anywhere;
 }
-.desktop-dialog .settings-diagnostics > summary { cursor: pointer; }
-.desktop-dialog .settings-diagnostics[open] > summary { margin-bottom: 6px; }
-.settings-shell-dialog .settings-device {
+:is(.desktop-dialog, .desktop-settings-view) .settings-diagnostics > summary { cursor: pointer; }
+:is(.desktop-dialog, .desktop-settings-view) .settings-diagnostics[open] > summary { margin-bottom: 6px; }
+
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device {
   flex: 1;
   min-width: 0;
   border: 0;
   background: transparent;
 }
-.settings-shell-dialog .settings-device > summary {
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device > summary {
   min-height: 44px;
-  padding: 6px 4px;
+  padding: 6px var(--space-1);
   border-radius: var(--radius-xs);
-  font-weight: 400;
+  font-weight: var(--weight-regular);
 }
-.settings-shell-dialog .settings-device > summary:hover { background: var(--surface); }
-.settings-shell-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
-.settings-shell-dialog .settings-device[open] > summary {
+@media (hover: hover) and (pointer: fine) {
+  :is(.settings-shell-dialog, .desktop-settings-view) .settings-device > summary:hover {
+    background: var(--surface-1);
+  }
+}
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device > summary:focus-visible { outline-offset: -2px; }
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device[open] > summary {
   margin-bottom: 0;
   border-bottom: 0;
 }
-.settings-shell-dialog .settings-device-name {
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device-name {
   display: flex;
   flex: 1;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 8px;
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.settings-shell-dialog .settings-device > .settings-device-details {
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device > .settings-device-details {
   margin: 0;
-  padding: 0 8px 8px 20px;
+  padding: 0 var(--space-2) var(--space-2) var(--space-5);
 }
-.settings-shell-dialog .device-list.settings-directory { gap: 0; }
-.settings-shell-dialog .settings-directory > .settings-device-item {
+:is(.settings-shell-dialog, .desktop-settings-view) .device-list.settings-directory { gap: 0; }
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-directory > .settings-device-item {
   min-height: 44px;
   align-items: flex-start;
-  border-top: 1px solid var(--line-subtle, var(--line));
+  border-top: 1px solid var(--border-subtle);
   border-radius: 0;
 }
-.settings-shell-dialog .settings-device-item > .icon-button,
-.settings-shell-dialog .settings-device-item > .rename-inline {
-  margin-top: 4px;
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device-item > .icon-button,
+:is(.settings-shell-dialog, .desktop-settings-view) .settings-device-item > .rename-inline {
+  margin-top: var(--space-1);
 }
-.desktop-dialog .section-head {
+
+:is(.desktop-dialog, .desktop-settings-view) .section-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
-.desktop-dialog .section-head h4 { margin: 0; }
-.desktop-dialog .card-row {
+:is(.desktop-dialog, .desktop-settings-view) .section-head h4 { margin: 0; }
+
+:is(.desktop-dialog, .desktop-settings-view) .card-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
-.desktop-dialog .dialog-actions {
+
+:is(.desktop-dialog, .desktop-settings-view) .dialog-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
-.client-settings-dialog .settings-client-id {
+
+:is(.client-settings-dialog, .desktop-settings-view) .settings-client-id {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--mono, monospace);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
-/* 档案与设备行 */
-.desktop-dialog .profile-list,
-.desktop-dialog .device-list {
+/* Profile & device rows */
+:is(.desktop-dialog, .desktop-settings-view) .profile-list,
+:is(.desktop-dialog, .desktop-settings-view) .device-list {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin: 0 0 8px;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-2);
 }
-.desktop-dialog .device-list li {
+:is(.desktop-dialog, .desktop-settings-view) .device-list li {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.desktop-dialog .profile-row,
-.desktop-dialog .device-row {
+:is(.desktop-dialog, .desktop-settings-view) .profile-row,
+:is(.desktop-dialog, .desktop-settings-view) .device-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   flex: 1;
   width: 100%;
+  min-width: 0;
   min-height: 0;
-  padding: 8px 10px;
+  padding: var(--space-2) 10px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm, 12px);
+  border-radius: var(--radius-sm);
   background: transparent;
   text-align: left;
   cursor: pointer;
 }
-.desktop-dialog .profile-row:hover,
-.desktop-dialog .device-row:hover { background: var(--surface, #efeee9); }
-.desktop-dialog li.selected > .profile-row,
-.desktop-dialog li.selected > .device-row {
-  background: var(--brand-soft, rgb(43 112 246 / 0.12));
-  border-color: var(--brand, var(--accent, #2B70F6));
+@media (hover: hover) and (pointer: fine) {
+  :is(.desktop-dialog, .desktop-settings-view) .profile-row:hover,
+  :is(.desktop-dialog, .desktop-settings-view) .device-row:hover {
+    background: var(--surface-1);
+  }
 }
-.desktop-dialog .profile-title { font-weight: 600; }
+:is(.desktop-dialog, .desktop-settings-view) li.selected > .profile-row,
+:is(.desktop-dialog, .desktop-settings-view) li.selected > .device-row {
+  background: var(--signal-primary-soft);
+  border-color: var(--signal-primary-border);
+}
+:is(.desktop-dialog, .desktop-settings-view) .profile-title { font-weight: var(--weight-semibold); }
 
-/* 设备行内改名 */
-.desktop-dialog .rename-inline {
+/* Inline device rename */
+:is(.desktop-dialog, .desktop-settings-view) .rename-inline {
   display: flex;
   align-items: center;
   gap: 6px;
   flex: 1;
   min-width: 0;
 }
-.desktop-dialog .rename-inline input {
+:is(.desktop-dialog, .desktop-settings-view) .rename-inline input {
   flex: 1;
   min-width: 0;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   padding: 5px 10px;
-  font-size: 13px;
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
+  font-size: var(--text-sm);
+  background: var(--surface-inset);
+  color: var(--ink-primary);
 }
 
-/* 弹窗表单 */
-.desktop-dialog .form-grid {
+/* Modal & settings forms — single-column linear rhythm */
+:is(.desktop-dialog, .desktop-settings-view) .form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
 }
-.desktop-dialog .form-grid label {
+:is(.desktop-dialog, .desktop-settings-view) .form-grid label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted, #70756f);
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
 }
-.desktop-dialog .form-grid .checkbox-field {
+:is(.desktop-dialog, .desktop-settings-view) .form-grid .checkbox-field {
   flex-direction: row;
-  gap: 8px;
+  align-items: center;
+  gap: var(--space-2);
   grid-column: 1 / -1;
 }
-.desktop-dialog .form-grid .form-grid-full { grid-column: 1 / -1; }
-.desktop-dialog .form-grid input,
-.desktop-dialog .form-grid select {
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 8px;
+:is(.desktop-dialog, .desktop-settings-view) .form-grid .form-grid-full { grid-column: 1 / -1; }
+:is(.desktop-dialog, .desktop-settings-view) .form-grid input,
+:is(.desktop-dialog, .desktop-settings-view) .form-grid select {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   padding: 6px 10px;
-  font-size: 13px;
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
+  font-size: var(--text-sm);
+  background: var(--surface-inset);
+  color: var(--ink-primary);
 }
-.desktop-dialog .settings-connect {
+:is(.desktop-dialog, .desktop-settings-view) .settings-connect {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 10px;
 }
-.desktop-dialog .settings-connect label {
+:is(.desktop-dialog, .desktop-settings-view) .settings-connect label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted, #70756f);
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
 }
-.desktop-dialog .settings-connect input,
-.desktop-dialog .settings-connect textarea {
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 8px;
+:is(.desktop-dialog, .desktop-settings-view) .settings-connect input,
+:is(.desktop-dialog, .desktop-settings-view) .settings-connect textarea {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
   padding: 6px 10px;
-  font-size: 13px;
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
+  font-size: var(--text-sm);
+  background: var(--surface-inset);
+  color: var(--ink-primary);
 }
-.desktop-dialog .settings-connect textarea {
+:is(.desktop-dialog, .desktop-settings-view) .settings-connect textarea {
   min-height: 72px;
   resize: vertical;
 }
 
-/* ---------- 已归档智能体 ---------- */
-.desktop-dialog .archived-bot-list {
+/* ---------- Archived Bots inside Settings ---------- */
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-list {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
 }
-.desktop-dialog .archived-bot-card {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 14px;
-  background: var(--surface-elevated, #fff);
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
 }
-.desktop-dialog .archived-bot-row {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
 }
-.desktop-dialog .archived-bot-open {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-open {
   flex: 1;
-  min-width: 200px;
+  min-width: 180px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 6px;
+  padding: var(--space-1) 6px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text, #242622);
+  color: var(--ink-primary);
   text-align: left;
   cursor: pointer;
 }
-.desktop-dialog .archived-bot-open:hover {
-  background: var(--surface, #efeee9);
+@media (hover: hover) and (pointer: fine) {
+  :is(.desktop-dialog, .desktop-settings-view) .archived-bot-open:hover {
+    background: var(--surface-1);
+  }
 }
-.desktop-dialog .archived-bot-info {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-info {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.desktop-dialog .archived-bot-actions {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-actions {
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
   gap: 6px;
 }
-.desktop-dialog .archived-bot-actions :is(button, summary) {
+:is(.desktop-dialog, .desktop-settings-view) .archived-bot-actions :is(button, summary) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   padding: 5px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.desktop-dialog .archive-more { border: 0; background: transparent; }
-.desktop-dialog .archive-more > summary { display: flex; cursor: pointer; }
-.desktop-dialog .archive-more[open] > button {
+:is(.desktop-dialog, .desktop-settings-view) .archive-more { border: 0; background: transparent; }
+:is(.desktop-dialog, .desktop-settings-view) .archive-more > summary { display: flex; cursor: pointer; }
+:is(.desktop-dialog, .desktop-settings-view) .archive-more[open] > button {
   display: flex;
   margin: 6px 0 0;
 }
-.desktop-dialog .archived-confirm-banner {
+:is(.desktop-dialog, .desktop-settings-view) .archived-confirm-banner {
   margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-dialog.settings-shell-dialog,
+  .desktop-shell .rail-item,
+  .desktop-settings-nav-item,
+  :is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary::before {
+    transition: none;
+  }
 }

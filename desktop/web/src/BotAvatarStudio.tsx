@@ -1,6 +1,6 @@
 // Bot 头像由中心保存，本地缓存只用于展示。
 import { useEffect, useState } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { ChevronDown, RotateCcw } from 'lucide-react';
 import {
   GROK_COLOR_PALETTE,
   GROK_EXPRESSION_LIST,
@@ -11,7 +11,7 @@ import {
   type GrokAvatarPreset,
 } from '../../../web/src/GrokBotAvatar';
 import { saveCentralBotAvatar } from '../../../web/src/botAvatarSync';
-import { ErrorNotice, useAction } from '../../../web/src/ui';
+import { ErrorNotice, useAction, useText } from '../../../web/src/ui';
 import type { DesktopPanelApi } from './types';
 
 export function BotAvatarStudio({
@@ -32,6 +32,7 @@ export function BotAvatarStudio({
   /** 持久化后回调（供外层 bump avatarVersion，刷新其它 avatar 实例）。 */
   onChanged?: () => void;
 }) {
+  const t = useText();
   const [draft, setDraft] = useState<GrokAvatarPreset>(() =>
     resolveBotAvatarPreset(botKey, roleName, isPrimary),
   );
@@ -55,24 +56,39 @@ export function BotAvatarStudio({
   }
 
   return (
-    <div className="avatar-studio">
-      <button className="avatar-studio-trigger" type="button" aria-expanded={editing} onClick={() => setEditing(value => !value)}>
+    <div className="bot-avatar-studio">
+      <button
+        className="bot-avatar-studio-trigger"
+        type="button"
+        aria-expanded={editing}
+        onClick={() => setEditing(value => !value)}
+      >
         <GrokBotAvatar preset={draft} size={40} isPrimary={isPrimary} starBadge={isPrimary} />
-        <span>{editing ? '收起头像编辑' : '编辑头像'}</span>
-        {dirty ? <small>未保存</small> : null}
+        <span className="bot-avatar-studio-trigger-text">
+          <span>{editing ? t('收起头像编辑', 'Hide avatar editor') : t('编辑头像', 'Edit avatar')}</span>
+          {dirty ? <small className="bot-avatar-studio-dirty">{t('未保存', 'Unsaved')}</small> : null}
+        </span>
+        <ChevronDown
+          size={15}
+          aria-hidden="true"
+          className={`bot-avatar-studio-chevron${editing ? ' is-open' : ''}`}
+        />
       </button>
+
       {editing ? (
-        <>
-          <div className="avatar-studio-section-title">形状</div>
-          <div className="avatar-shape-grid" role="group" aria-label="形状">
+        <div className="bot-avatar-studio-body">
+          <div className="avatar-studio-section-title">{t('形状', 'Shape')}</div>
+          <div className="avatar-shape-grid" role="group" aria-label={t('形状', 'Shape')}>
             {GROK_SHAPE_ORDER.map((item) => {
               const selected = draft.shape === item.shape;
+              const label = t(item.labelZh, item.labelEn);
               return (
                 <button
                   key={item.shape}
                   type="button"
                   className={`avatar-shape-cell${selected ? ' selected' : ''}`}
-                  title={item.labelZh}
+                  title={label}
+                  aria-label={t(`形状：${label}`, `Shape: ${label}`)}
                   aria-pressed={selected}
                   disabled={action.busy}
                   onClick={() => {
@@ -94,16 +110,18 @@ export function BotAvatarStudio({
             })}
           </div>
 
-          <div className="avatar-studio-section-title">表情</div>
-          <div className="avatar-expression-grid" role="group" aria-label="表情">
+          <div className="avatar-studio-section-title">{t('表情', 'Expression')}</div>
+          <div className="avatar-expression-grid" role="group" aria-label={t('表情', 'Expression')}>
             {GROK_EXPRESSION_LIST.map((expr) => {
               const selected = draft.expressionIndex === expr.index;
+              const label = t(expr.labelZh, expr.labelEn);
               return (
                 <button
                   key={expr.index}
                   type="button"
                   className={`avatar-expression-cell${selected ? ' selected' : ''}`}
-                  title={expr.labelZh}
+                  title={label}
+                  aria-label={t(`表情：${label}`, `Expression: ${label}`)}
                   aria-pressed={selected}
                   disabled={action.busy}
                   onClick={() => {
@@ -115,22 +133,24 @@ export function BotAvatarStudio({
                     preset={{ ...draft, expressionIndex: expr.index }}
                     size={46}
                   />
-                  <span>{expr.labelZh}</span>
+                  <span>{label}</span>
                 </button>
               );
             })}
           </div>
 
-          <div className="avatar-studio-section-title">颜色</div>
-          <div className="avatar-color-grid" role="group" aria-label="颜色">
+          <div className="avatar-studio-section-title">{t('颜色', 'Color')}</div>
+          <div className="avatar-color-grid" role="group" aria-label={t('颜色', 'Color')}>
             {GROK_COLOR_PALETTE.map((c) => {
               const selected = draft.color.toLowerCase() === c.hex.toLowerCase();
+              const label = t(c.labelZh, c.labelEn);
               return (
                 <button
                   key={c.id}
                   type="button"
                   className={`avatar-color-swatch${selected ? ' selected' : ''}`}
-                  title={c.labelZh}
+                  title={label}
+                  aria-label={t(`颜色：${label}`, `Color: ${label}`)}
                   aria-pressed={selected}
                   disabled={action.busy}
                   onClick={() => {
@@ -150,22 +170,28 @@ export function BotAvatarStudio({
               className="secondary-button"
               disabled={action.busy}
               onClick={() => persist(null)}
-              title="放弃自定义并恢复该 Bot 的默认头像"
+              title={t('放弃自定义并恢复该 Bot 的默认头像', 'Discard customizations and restore the default avatar')}
             >
-              <RotateCcw size={14} /> 恢复默认
+              <RotateCcw size={14} aria-hidden="true" /> {t('恢复默认', 'Reset default')}
             </button>
             <button
               type="button"
               className="primary-button"
               disabled={!dirty || action.busy}
               onClick={() => persist(draft)}
-              title="保存到中心并同步到其他客户端"
+              title={t('保存到中心并同步到其他客户端', 'Save to Center and sync to your other clients')}
             >
-              {action.busy ? '保存中…' : dirty ? '保存形象' : '已保存'}
+              {action.busy
+                ? t('保存中…', 'Saving…')
+                : dirty
+                  ? t('保存形象', 'Save avatar')
+                  : t('已保存', 'Saved')}
             </button>
           </div>
-          <p className="avatar-studio-hint">保存后会同步到其他客户端。</p>
-        </>
+          <p className="avatar-studio-hint">
+            {t('保存后会同步到其他客户端。', 'Changes sync to your other clients once saved.')}
+          </p>
+        </div>
       ) : null}
       <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
     </div>

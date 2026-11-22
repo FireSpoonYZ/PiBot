@@ -184,10 +184,11 @@ function createGoogleRulesHarness() {
   };
 }
 
-test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAuth/account/create operations', () => {
+test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAuth/account operations', () => {
   const expectedNames = [
     'automation_google_rule_list',
     'automation_google_rule_events_list',
+    'automation_google_rule_create',
     'automation_google_rule_set_enabled',
     'automation_google_rule_update',
     'automation_google_rule_remove',
@@ -210,6 +211,8 @@ test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAu
 
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_list')?.readOnly, true);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_events_list')?.readOnly, true);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_create')?.readOnly, false);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_create')?.destructive, false);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_set_enabled')?.readOnly, false);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_set_enabled')?.destructive, false);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_update')?.readOnly, false);
@@ -228,7 +231,6 @@ test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAu
   assert.deepEqual(Object.keys(automationHandlers).sort(), [...automationNames].sort());
 
   const forbiddenFragments = [
-    'google_rule_create',
     'google_authorize',
     'google_configure',
     'google_callback',
@@ -290,13 +292,24 @@ test('openOperations enforces automation read/write scopes and Ajv schemas for G
     const roNames = ops.list(readOnlyActor).map((op) => op.name);
     assert.ok(roNames.includes('automation_google_rule_list'));
     assert.ok(roNames.includes('automation_google_rule_events_list'));
+    assert.equal(roNames.includes('automation_google_rule_create'), false);
     assert.equal(roNames.includes('automation_google_rule_set_enabled'), false);
     assert.equal(roNames.includes('automation_google_rule_update'), false);
     assert.equal(roNames.includes('automation_google_rule_remove'), false);
 
-    // Read succeeds with read scope; writes are rejected with FORBIDDEN.
+    // Read succeeds with read scope; writes (including create) are rejected with FORBIDDEN.
     const listed = await ops.call(readOnlyActor, 'automation_google_rule_list', {});
     assert.equal(listed.items.length, 1);
+    await assert.rejects(
+      () => ops.call(readOnlyActor, 'automation_google_rule_create', {
+        deviceId: 'dev-1',
+        botId: 'bot-main',
+        account: 'alice@example.com',
+        source: 'gmail',
+        instruction: 'Read-only caller cannot create',
+      }),
+      (err) => err?.code === 'FORBIDDEN',
+    );
     await assert.rejects(
       () => ops.call(readOnlyActor, 'automation_google_rule_set_enabled', { id: ruleId, enabled: false }),
       (err) => err?.code === 'FORBIDDEN',
@@ -312,17 +325,38 @@ test('openOperations enforces automation read/write scopes and Ajv schemas for G
       (err) => err?.code === 'FORBIDDEN',
     );
 
-    // Write scope allows pause/resume, rejects reads without read scope.
+    // Write scope allows create and pause/resume, rejects reads without read scope.
     await assert.rejects(
       () => ops.call(writeOnlyActor, 'automation_google_rule_list', {}),
       (err) => err?.code === 'FORBIDDEN',
     );
+    const createdByOAuth = await ops.call(writeOnlyActor, 'automation_google_rule_create', {
+      deviceId: 'dev-1',
+      botId: 'bot-main',
+      account: 'alice@example.com',
+      source: 'calendar',
+      minutesBefore: 5,
+      instruction: 'Join meeting in 5m',
+    });
+    assert.equal(createdByOAuth.rule.source, 'calendar');
+    assert.equal(createdByOAuth.rule.minutesBefore, 5);
+
     const paused = await ops.call(writeOnlyActor, 'automation_google_rule_set_enabled', { id: ruleId, enabled: false });
     assert.equal(paused.rule.enabled, false);
 
-    // Bot actor can invoke both read and write operations.
+    // Bot actor can invoke both read and write operations, including create & rebind.
+    const createdByBot = await ops.call(BOT_MAIN, 'automation_google_rule_create', {
+      account: 'alice@example.com',
+      source: 'gmail',
+      from: ['alerts@example.com'],
+      instruction: 'Triage alert email',
+    });
+    assert.equal(createdByBot.rule.deviceId, 'dev-1');
+    assert.equal(createdByBot.rule.botId, 'bot-main');
     const resumed = await ops.call(BOT_MAIN, 'automation_google_rule_set_enabled', { id: ruleId, enabled: true });
     assert.equal(resumed.rule.enabled, true);
+    const rebound = await ops.call(BOT_MAIN, 'automation_google_rule_update', { id: ruleId, account: 'bob@example.com' });
+    assert.equal(rebound.rule.account, 'bob@example.com');
 
     // Ajv schema rejects path traversal IDs, out-of-range limits, and extra fields.
     await assert.rejects(
@@ -334,7 +368,7 @@ test('openOperations enforces automation read/write scopes and Ajv schemas for G
       (err) => err?.code === 'INVALID_ARGUMENT',
     );
     await assert.rejects(
-      () => ops.call(BOT_MAIN, 'automation_google_rule_update', { id: ruleId, account: 'bob@example.com' }),
+      () => ops.call(BOT_MAIN, 'automation_google_rule_update', { id: ruleId, unknownField: 'bad' }),
       (err) => err?.code === 'INVALID_ARGUMENT',
     );
   } finally {
@@ -491,7 +525,160 @@ test('Google rule read, sanitized events (no unauthorized email/calendar body), 
   }
 });
 
-test('automation_google_rule_update edits safe source-matched fields and rejects cross-source or non-existent rules', async () => {
+test('automation_google_rule_create creates Gmail/Calendar rules with target defaults and validates inputs', async () => {
+  const env = createGoogleRulesHarness();
+  try {
+    // Bot caller defaults deviceId/botId to itself.
+    const createdGmail = await env.handlers.automation_google_rule_create({
+      account: 'ALICE@example.com',
+      source: 'gmail',
+      event: 'new_email',
+      name: 'Boss Inbox',
+      from: ['Boss@Example.com', 'boss@example.com'],
+      subjectContains: 'Action',
+      label: 'INBOX',
+      instruction: 'Summarize boss mail',
+    }, BOT_MAIN);
+    assert.equal(createdGmail.rule.deviceId, 'dev-1');
+    assert.equal(createdGmail.rule.botId, 'bot-main');
+    assert.equal(createdGmail.rule.account, 'alice@example.com');
+    assert.equal(createdGmail.rule.source, 'gmail');
+    assert.equal(createdGmail.rule.event, 'new_email');
+    assert.equal(createdGmail.rule.enabled, true);
+    assert.deepEqual(createdGmail.rule.from, ['boss@example.com']);
+    assert.equal(createdGmail.rule.subjectContains, 'Action');
+
+    // Cross-device Bot call requires explicit botId.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        deviceId: 'dev-2',
+        account: 'bob@example.com',
+        source: 'gmail',
+        instruction: 'Missing botId',
+      }, BOT_MAIN),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+
+    // Cross-device Bot call with explicit botId succeeds for Calendar (minutesBefore: 0).
+    const createdCal = await env.handlers.automation_google_rule_create({
+      deviceId: 'dev-2',
+      botId: 'bot-remote',
+      account: 'bob@example.com',
+      source: 'calendar',
+      event: 'starting_soon',
+      minutesBefore: 0,
+      enabled: false,
+      instruction: 'Ping right at start',
+    }, BOT_MAIN);
+    assert.equal(createdCal.rule.deviceId, 'dev-2');
+    assert.equal(createdCal.rule.botId, 'bot-remote');
+    assert.equal(createdCal.rule.account, 'bob@example.com');
+    assert.equal(createdCal.rule.source, 'calendar');
+    assert.equal(createdCal.rule.calendar, 'primary');
+    assert.equal(createdCal.rule.minutesBefore, 0);
+    assert.equal(createdCal.rule.enabled, false);
+
+    // Multiple connected accounts require explicit account on create.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        source: 'gmail',
+        instruction: 'Ambiguous account',
+      }, BOT_MAIN),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+
+    // Single connected account allows omitting account on create.
+    env.setConnectedAccounts([
+      {
+        id: 'acct-alice',
+        email: 'alice@example.com',
+        status: 'connected',
+        services: [
+          { service: 'gmail', state: 'ready' },
+          { service: 'calendar', state: 'ready' },
+        ],
+      },
+    ]);
+    const autoAccountRule = await env.handlers.automation_google_rule_create({
+      source: 'calendar',
+      instruction: 'Auto-resolved account reminder',
+    }, BOT_MAIN);
+    assert.equal(autoAccountRule.rule.account, 'alice@example.com');
+    assert.equal(autoAccountRule.rule.minutesBefore, 10);
+
+    // OAuth caller must specify deviceId & botId explicitly.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        deviceId: 'dev-1',
+        source: 'gmail',
+        instruction: 'Missing botId for OAuth',
+      }, OAUTH_UNSCOPED_TARGETS),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+
+    // Mismatched event or cross-source filters rejected.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        source: 'gmail',
+        event: 'starting_soon',
+        instruction: 'Bad event',
+      }, BOT_MAIN),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        source: 'gmail',
+        minutesBefore: 5,
+        instruction: 'Bad filter',
+      }, BOT_MAIN),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        source: 'calendar',
+        from: ['a@b.com'],
+        instruction: 'Bad filter',
+      }, BOT_MAIN),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
+
+    // Disconnected account or unknown Bot rejected.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        account: 'missing@example.com',
+        source: 'gmail',
+        instruction: 'Unknown account',
+      }, BOT_MAIN),
+      (err) => err?.code === 'NOT_FOUND',
+    );
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        deviceId: 'dev-1',
+        botId: 'bot-missing',
+        source: 'gmail',
+        instruction: 'Unknown bot',
+      }, BOT_MAIN),
+      (err) => err?.code === 'BOT_NOT_FOUND',
+    );
+
+    // Scoped OAuth caller cannot create rule targeting an unauthorized Bot.
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_create({
+        deviceId: 'dev-2',
+        botId: 'bot-remote',
+        source: 'gmail',
+        instruction: 'Unauthorized target',
+      }, OAUTH_SCOPED_MAIN),
+      (err) => err?.code === 'FORBIDDEN',
+    );
+
+    assert.equal(env.accountManageCalls.length, 0);
+  } finally {
+    await env.close();
+  }
+});
+
+test('automation_google_rule_update edits fields, supports rebinding target/account/source, and validates constraints', async () => {
   const env = createGoogleRulesHarness();
   try {
     const gmailSeed = await env.rulesService.manage('save', {
@@ -543,7 +730,7 @@ test('automation_google_rule_update edits safe source-matched fields and rejects
       (err) => err?.code === 'INVALID_ARGUMENT',
     );
 
-    // Gmail partial edit updates normalized filters and preserves untouched fields + original binding.
+    // Gmail partial edit updates normalized filters and preserves untouched fields.
     const updatedGmail = await env.handlers.automation_google_rule_update({
       id: gmailSeed.rule.id,
       name: 'Finance Mail Updated',
@@ -572,6 +759,26 @@ test('automation_google_rule_update edits safe source-matched fields and rejects
     assert.equal('to' in clearedGmail.rule, false);
     assert.equal('subjectContains' in clearedGmail.rule, false);
     assert.equal('label' in clearedGmail.rule, false);
+
+    // Rebinding target deviceId/botId, account, and switching source gmail -> calendar works cleanly.
+    const reboundToCal = await env.handlers.automation_google_rule_update({
+      id: gmailSeed.rule.id,
+      deviceId: 'dev-2',
+      botId: 'bot-remote',
+      account: 'bob@example.com',
+      source: 'calendar',
+      event: 'starting_soon',
+      minutesBefore: 25,
+      instruction: 'Handle bob calendar on remote bot',
+    }, BOT_MAIN);
+    assert.equal(reboundToCal.rule.deviceId, 'dev-2');
+    assert.equal(reboundToCal.rule.botId, 'bot-remote');
+    assert.equal(reboundToCal.rule.account, 'bob@example.com');
+    assert.equal(reboundToCal.rule.source, 'calendar');
+    assert.equal(reboundToCal.rule.event, 'starting_soon');
+    assert.equal(reboundToCal.rule.calendar, 'primary');
+    assert.equal(reboundToCal.rule.minutesBefore, 25);
+    assert.equal('from' in reboundToCal.rule, false);
 
     // Calendar edit updates minutesBefore and resets calendar to primary when null is passed.
     const updatedCal = await env.handlers.automation_google_rule_update({
@@ -604,7 +811,7 @@ test('automation_google_rule_update edits safe source-matched fields and rejects
   }
 });
 
-test('security boundaries reject OAuth/token fields, target/account redirection, lost admission, and out-of-scope botTargets', async () => {
+test('security boundaries reject OAuth/token fields, unavailable targets/accounts, and out-of-scope botTargets', async () => {
   const env = createGoogleRulesHarness();
   try {
     const mainRule = await env.rulesService.manage('save', {
@@ -654,6 +861,17 @@ test('security boundaries reject OAuth/token fields, target/account redirection,
         (err) => err?.code === 'FORBIDDEN',
       );
       await assert.rejects(
+        () => env.handlers.automation_google_rule_create({
+          deviceId: 'dev-1',
+          botId: 'bot-main',
+          account: 'alice@example.com',
+          source: 'gmail',
+          instruction: 'Should reject auth fields',
+          ...bad,
+        }, OAUTH_UNSCOPED_TARGETS),
+        (err) => err?.code === 'FORBIDDEN',
+      );
+      await assert.rejects(
         () => env.handlers.automation_google_rule_update({ id: mainRule.rule.id, ...bad }, OAUTH_UNSCOPED_TARGETS),
         (err) => err?.code === 'FORBIDDEN',
       );
@@ -667,34 +885,19 @@ test('security boundaries reject OAuth/token fields, target/account redirection,
       );
     }
 
-    // 3. Target, account, source, and event redirection strictly forbidden on update and set_enabled.
-    const redirectAttempts = [
-      { deviceId: 'dev-2' },
-      { botId: 'bot-other' },
-      { account: 'bob@example.com' },
-      { source: 'calendar' },
-      { event: 'starting_soon' },
-    ];
-    for (const attempt of redirectAttempts) {
-      await assert.rejects(
-        () => env.handlers.automation_google_rule_update({
-          id: mainRule.rule.id,
-          instruction: 'Try redirect',
-          ...attempt,
-        }, OAUTH_UNSCOPED_TARGETS),
-        (err) => err?.code === 'FORBIDDEN',
-      );
+    // 3. set_enabled rejects unexpected fields outside {id, enabled}.
+    for (const extra of [{ deviceId: 'dev-2' }, { botId: 'bot-other' }, { account: 'bob@example.com' }, { source: 'calendar' }]) {
       await assert.rejects(
         () => env.handlers.automation_google_rule_set_enabled({
           id: mainRule.rule.id,
           enabled: true,
-          ...attempt,
+          ...extra,
         }, OAUTH_UNSCOPED_TARGETS),
-        (err) => err?.code === 'FORBIDDEN',
+        (err) => err?.code === 'INVALID_ARGUMENT',
       );
     }
 
-    // 4. Scoped OAuth botTargets isolates list and blocks cross-Bot events/toggle/update/remove.
+    // 4. Scoped OAuth botTargets isolates list and blocks cross-Bot events/toggle/update/rebind/remove.
     const scopedList = await env.handlers.automation_google_rule_list({}, OAUTH_SCOPED_MAIN);
     assert.deepEqual(scopedList.items.map((r) => r.id), [mainRule.rule.id]);
 
@@ -708,6 +911,14 @@ test('security boundaries reject OAuth/token fields, target/account redirection,
     );
     await assert.rejects(
       () => env.handlers.automation_google_rule_update({ id: remoteRule.rule.id, name: 'Hijack' }, OAUTH_SCOPED_MAIN),
+      (err) => err?.code === 'FORBIDDEN',
+    );
+    await assert.rejects(
+      () => env.handlers.automation_google_rule_update({
+        id: mainRule.rule.id,
+        deviceId: 'dev-2',
+        botId: 'bot-remote',
+      }, OAUTH_SCOPED_MAIN),
       (err) => err?.code === 'FORBIDDEN',
     );
     await assert.rejects(

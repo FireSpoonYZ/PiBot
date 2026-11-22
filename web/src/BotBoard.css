@@ -1,35 +1,49 @@
+/* BotBoard styles: Wave 1 tokens, flat hairline cards, tabular-nums, sticky mobile topbar. */
+
 .bot-board {
-  --bb-bg: var(--color-bg, var(--bg));
-  --bb-surface: var(--color-surface-1, var(--surface));
-  --bb-surface-elevated: var(--color-surface-2, var(--surface-elevated));
-  --bb-text: var(--color-text, var(--text));
-  --bb-muted: var(--color-text-muted, var(--muted));
-  --bb-subtle: var(--color-text-subtle, color-mix(in srgb, var(--bb-muted) 68%, transparent));
-  --bb-line: var(--color-line, var(--line));
-  --bb-line-subtle: var(--line-subtle, color-mix(in srgb, var(--bb-line) 72%, transparent));
-  --bb-primary: var(--color-primary, var(--brand, var(--accent)));
-  --bb-primary-soft: var(--color-primary-soft, var(--brand-soft, color-mix(in srgb, var(--bb-primary) 12%, transparent)));
-  --bb-selection: var(--color-selection, var(--selection));
-  --bb-danger: var(--color-danger, var(--danger));
-  --bb-danger-soft: var(--danger-soft, color-mix(in srgb, var(--bb-danger) 12%, transparent));
-  --bb-warning: var(--color-warning, var(--warn));
-  --bb-warning-soft: var(--warn-soft, color-mix(in srgb, var(--bb-warning) 13%, transparent));
-  --bb-success: var(--color-success, var(--ok));
-  --bb-success-soft: var(--ok-soft, color-mix(in srgb, var(--bb-success) 13%, transparent));
+  --bb-bg: var(--ground, var(--color-bg, var(--bg)));
+  --bb-surface: var(--surface-1, var(--color-surface-1, var(--surface)));
+  --bb-surface-elevated: var(--surface-raised, var(--color-surface-2, var(--surface-elevated)));
+  --bb-text: var(--ink-primary, var(--color-text, var(--text)));
+  --bb-muted: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  --bb-subtle: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  --bb-line: var(--border-default, var(--color-line, var(--line)));
+  --bb-line-subtle: var(--border-subtle, var(--line-subtle, var(--line)));
+  --bb-primary: var(--signal-primary, var(--color-primary, var(--brand, var(--accent))));
+  --bb-primary-soft: var(--signal-primary-soft, var(--color-primary-soft, var(--brand-soft)));
+  --bb-selection: var(--signal-selection, var(--color-selection, var(--selection)));
+  --bb-danger: var(--state-danger, var(--color-danger, var(--danger)));
+  --bb-danger-soft: var(--state-danger-soft, var(--danger-soft));
+  --bb-warning: var(--state-attention, var(--color-warning, var(--warn)));
+  --bb-warning-soft: var(--state-attention-soft, var(--warn-soft));
+  --bb-success: var(--state-live, var(--color-success, var(--ok)));
+  --bb-success-soft: var(--state-live-soft, var(--ok-soft));
   box-sizing: border-box;
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: auto;
-  padding: calc(var(--space-5, 20px) + var(--top, 0px)) var(--space-6, 24px) calc(var(--space-6, 24px) + var(--bottom, 0px));
+  overscroll-behavior-y: contain;
   color: var(--bb-text);
   background: var(--bb-bg);
+}
+
+.bot-board.bot-board-desktop {
+  padding: calc(var(--space-5, 20px) + var(--top, 0px)) var(--space-6, 24px) calc(var(--space-6, 24px) + var(--bottom, 0px));
+}
+
+.bot-board:not(.bot-board-desktop) {
+  padding: 0 0 calc(var(--space-5, 20px) + var(--bottom, 0px));
 }
 
 .bot-board-inner {
   width: 100%;
   max-width: 1080px;
   margin-inline: auto;
+}
+
+.bot-board:not(.bot-board-desktop) .bot-board-body {
+  padding: var(--space-3, 12px) max(var(--space-4, 16px), var(--safe-right, 0px)) 0 max(var(--space-4, 16px), var(--safe-left, 0px));
 }
 
 .bot-board button,
@@ -65,6 +79,20 @@
   margin-bottom: var(--space-3, 12px);
 }
 
+.bot-board:not(.bot-board-desktop) .bot-board-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky, 10);
+  min-height: calc(52px + var(--top, 0px));
+  margin-bottom: 0;
+  padding: var(--top, 0px) max(var(--space-4, 16px), var(--safe-right, 0px)) 0 max(var(--space-4, 16px), var(--safe-left, 0px));
+  background: var(--bb-bg);
+  border-bottom: 1px solid var(--bb-line-subtle);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .bot-board-header-left {
   display: flex;
   align-items: center;
@@ -74,7 +102,7 @@
 
 .bot-board-header h1 {
   margin: 0;
-  font-size: var(--text-xl, 1.375rem);
+  font-size: var(--text-lg, 1.125rem);
   font-weight: var(--weight-semibold, 600);
   letter-spacing: -0.01em;
   line-height: 1.3;
@@ -83,7 +111,12 @@
   text-overflow: ellipsis;
 }
 
+.bot-board-desktop .bot-board-header h1 {
+  font-size: var(--text-xl, 1.375rem);
+}
+
 .bot-board-header button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -96,8 +129,9 @@
   background: transparent;
   padding: 0;
   color: var(--bb-text);
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, ease),
+    transform var(--dur-press, 120ms) var(--ease-out, ease);
 }
 
 .bot-board-header button svg {
@@ -138,17 +172,18 @@
   width: 100%;
   min-height: 40px;
   padding: 0 var(--space-3, 12px);
-  border: 1px solid color-mix(in srgb, var(--bb-line) 75%, transparent);
+  border: 1px solid var(--bb-line-subtle);
   border-radius: var(--radius-md, 12px);
   background: var(--bb-surface);
   color: var(--bb-text);
   font-size: var(--text-sm, 0.8125rem);
-  transition: border-color var(--dur-fast, 150ms) var(--ease-out, ease),
+  transition:
+    border-color var(--dur-fast, 150ms) var(--ease-out, ease),
     background-color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
 
 .bot-board-search:focus-within {
-  border-color: color-mix(in srgb, var(--bb-muted) 45%, var(--bb-line));
+  border-color: var(--bb-primary);
 }
 
 .bot-board-search-icon {
@@ -200,7 +235,8 @@
   border-radius: var(--radius-full, 999px);
   background: color-mix(in srgb, var(--bb-text) 10%, transparent);
   color: var(--bb-muted);
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     color var(--dur-fast, 150ms) var(--ease-out, ease);
 }
 
@@ -258,7 +294,8 @@
   font-weight: var(--weight-medium, 500);
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, ease),
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     border-color var(--dur-fast, 150ms) var(--ease-out, ease),
     color var(--dur-fast, 150ms) var(--ease-out, ease),
     opacity var(--dur-fast, 150ms) var(--ease-out, ease);
@@ -286,7 +323,7 @@
 
 .bot-board-filters button[aria-pressed="true"] {
   background: var(--bb-selection);
-  border-color: color-mix(in srgb, var(--bb-primary) 55%, var(--bb-line));
+  border-color: var(--signal-primary-border, var(--bb-primary));
   color: var(--bb-text);
   font-weight: var(--weight-semibold, 600);
   opacity: 1;
@@ -294,30 +331,17 @@
 
 .bot-board-filter-count {
   opacity: 0.78;
+  font-variant-numeric: tabular-nums;
 }
 
 .bot-board-filters button[aria-pressed="true"] .bot-board-filter-count {
   opacity: 0.9;
 }
 
-/* ————— Alerts, Notes & Empty State ————— */
+/* ————— Banners & Empty State ————— */
 
-.bot-board-alert {
-  margin: 0 0 var(--space-3, 12px);
-  padding: var(--space-2, 9px) var(--space-3, 13px);
-  border-radius: var(--radius-md, 12px);
-  border: 1px solid color-mix(in srgb, var(--bb-danger) 30%, var(--bb-line));
-  background: var(--bb-danger-soft);
-  color: var(--bb-danger);
-  font-size: var(--text-xs, 0.75rem);
-  line-height: 1.5;
-}
-
-.bot-board-snapshot-note {
-  margin: 0 0 var(--space-3, 12px);
-  color: var(--bb-muted);
-  font-size: var(--text-xs, 0.75rem);
-  line-height: 1.5;
+.bot-board-banner {
+  margin-bottom: var(--space-3, 12px);
 }
 
 .bot-board-empty-state {
@@ -411,7 +435,7 @@
   gap: var(--space-3, 12px);
 }
 
-/* ————— Cards ————— */
+/* ————— Flat Hairline Cards ————— */
 
 .bot-board-card {
   width: 100%;
@@ -422,17 +446,19 @@
   gap: var(--space-2, 8px);
   text-align: left;
   padding: var(--space-3, 12px) 14px;
-  border: 1px solid var(--bb-line);
-  border-radius: var(--radius-md, 14px);
+  border: 1px solid var(--bb-line-subtle);
+  border-radius: var(--radius-md, 12px);
   background: var(--bb-surface-elevated);
+  box-shadow: none;
   overflow-wrap: anywhere;
-  transition: border-color var(--dur-fast, 150ms) var(--ease-out, ease),
+  transition:
+    border-color var(--dur-fast, 150ms) var(--ease-out, ease),
     background-color var(--dur-fast, 150ms) var(--ease-out, ease),
-    transform var(--dur-fast, 150ms) var(--ease-out, ease);
+    transform var(--dur-press, 120ms) var(--ease-out, ease);
 }
 
 .bot-board-card.is-offline {
-  background: color-mix(in srgb, var(--bb-surface) 52%, var(--bb-bg));
+  background: var(--bb-surface);
   border-color: var(--bb-line-subtle);
 }
 
@@ -455,20 +481,20 @@
   text-align: left;
   padding: var(--space-3, 12px) 14px 10px;
   border: 0;
-  border-radius: var(--radius-md, 14px) var(--radius-md, 14px) 0 0;
+  border-radius: var(--radius-md, 12px) var(--radius-md, 12px) 0 0;
   background: transparent;
 }
 
 button.bot-board-card:active:not(:disabled),
 .bot-board-card-main:active:not(:disabled) {
-  background: var(--bb-surface-elevated);
+  background: var(--bb-surface);
   opacity: 1;
-  transform: scale(0.992);
+  transform: scale(0.985);
 }
 
 .bot-board-card.is-offline:active:not(:disabled),
 .bot-board-card.is-offline .bot-board-card-main:active:not(:disabled) {
-  background: color-mix(in srgb, var(--bb-surface) 64%, var(--bb-bg));
+  background: var(--surface-inset, var(--bb-surface));
 }
 
 .bot-board-card-head {
@@ -497,7 +523,7 @@ button.bot-board-card:active:not(:disabled),
 }
 
 .bot-board-card-titles strong {
-  font-size: var(--text-md, 0.90625rem);
+  font-size: var(--text-md, 0.9375rem);
   font-weight: var(--weight-semibold, 600);
   color: var(--bb-text);
   line-height: 1.35;
@@ -527,16 +553,17 @@ button.bot-board-card:active:not(:disabled),
   align-items: center;
   padding: 2px 8px;
   border-radius: var(--radius-full, 999px);
-  font-size: 0.71875rem;
+  font-size: var(--text-2xs, 0.6875rem);
   font-weight: var(--weight-semibold, 600);
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
   white-space: nowrap;
   color: var(--bb-muted);
-  background: color-mix(in srgb, var(--bb-text) 7%, transparent);
+  background: var(--bb-surface);
 }
 
 .bot-board-badge.is-warning {
-  color: var(--bb-warning);
+  color: var(--state-attention-ink, var(--bb-warning));
   background: var(--bb-warning-soft);
 }
 
@@ -546,18 +573,18 @@ button.bot-board-card:active:not(:disabled),
 }
 
 .bot-board-badge.is-review {
-  color: var(--bb-success);
+  color: var(--state-live-ink, var(--bb-success));
   background: var(--bb-success-soft);
 }
 
 .bot-board-badge.is-danger {
-  color: var(--bb-danger);
+  color: var(--state-danger-ink, var(--bb-danger));
   background: var(--bb-danger-soft);
 }
 
 .bot-board-badge.is-offline {
   color: var(--bb-muted);
-  background: color-mix(in srgb, var(--bb-text) 7%, transparent);
+  background: var(--bb-surface);
 }
 
 .bot-board-time {
@@ -580,6 +607,7 @@ button.bot-board-card:active:not(:disabled),
   -webkit-line-clamp: 2;
   overflow: hidden;
   font-size: var(--text-sm, 0.8125rem);
+  font-variant-numeric: tabular-nums;
   line-height: 1.5;
   color: var(--bb-text);
   word-break: break-word;
@@ -625,7 +653,8 @@ button.bot-board-card:active:not(:disabled),
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
   color: var(--bb-muted);
-  transition: color var(--dur-fast, 150ms) var(--ease-out, ease),
+  transition:
+    color var(--dur-fast, 150ms) var(--ease-out, ease),
     background-color var(--dur-fast, 150ms) var(--ease-out, ease),
     opacity var(--dur-fast, 150ms) var(--ease-out, ease);
 }
@@ -705,9 +734,9 @@ details.bot-board-other[open] .bot-board-other-chevron {
   transform: rotate(90deg);
 }
 
-/* ————— Hover (Pointer devices) ————— */
+/* ————— Hover (Fine pointer devices only) ————— */
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .bot-board-header button:hover {
     background: var(--bb-surface);
   }
@@ -717,14 +746,14 @@ details.bot-board-other[open] .bot-board-other-chevron {
   }
   .bot-board-filters button:hover {
     color: var(--bb-text);
-    border-color: color-mix(in srgb, var(--bb-muted) 45%, var(--bb-line));
+    border-color: var(--border-strong, var(--bb-line));
     opacity: 1;
   }
   .bot-board-filters button[aria-pressed="true"]:hover {
     border-color: var(--bb-primary);
   }
   .bot-board-card:hover {
-    border-color: color-mix(in srgb, var(--bb-muted) 42%, var(--bb-line));
+    border-color: var(--bb-line);
   }
   .bot-board-link-btn:hover {
     color: var(--bb-text);
@@ -739,10 +768,10 @@ details.bot-board-other[open] .bot-board-other-chevron {
   }
 }
 
-/* ————— Mobile Responsive ————— */
+/* ————— Responsive ————— */
 
 @media (max-width: 700px) {
-  .bot-board {
+  .bot-board.bot-board-desktop {
     padding: calc(var(--space-3, 12px) + var(--top, 0px)) var(--space-4, 16px) calc(var(--space-5, 20px) + var(--bottom, 0px));
   }
   .bot-board-desktop .bot-board-grid {
@@ -762,5 +791,11 @@ details.bot-board-other[open] .bot-board-other-chevron {
   details.bot-board-other > summary,
   .bot-board-other-chevron {
     transition: none;
+  }
+
+  .bot-board-header button:active:not(:disabled),
+  button.bot-board-card:active:not(:disabled),
+  .bot-board-card-main:active:not(:disabled) {
+    transform: none;
   }
 }

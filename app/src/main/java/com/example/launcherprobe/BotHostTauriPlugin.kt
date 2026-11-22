@@ -270,7 +270,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             }
             "pairCenter" -> pairCenter(invoke, params)
             "pairCenterWithCode" -> pairCenterWithCode(invoke, params)
-            "scanPairingCode" -> scanPairingCode(invoke)
+            "scanPairingCode" -> scanPairingCode(invoke, params.optString("purpose") == "clipboardGroup")
             "repairCenterBinding" -> repairCenterBinding(invoke)
             "onboardingStatus" -> onboardingStatus(invoke)
             "onboardingAction" -> onboardingAction(invoke, params)
@@ -969,14 +969,13 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
     }
 
-    // ---------- 扫码配对（UI 本地动作，不经 Host 桥） ----------
+    // ---------- 二维码扫描（UI 本地动作，不经 Host 桥） ----------
 
     /**
-     * 打开应用内二维码扫描（ZXing，不依赖 Google 服务）。相机权限由扫描界面在首次使用时请求；
-     * 用户拒绝时回执 CAMERA_DENIED，界面退回粘贴配对码。只回传扫到的原文：配对码的解析与兑换
-     * 仍在原生配对链（CenterPairing.pairWithCode）里，一次性密钥不经过这里的任何存储。
+     * 复用 ZXing 扫描中心配对或剪贴板同步组二维码。相机权限由扫描界面按需请求，
+     * 拒绝时回传 CAMERA_DENIED。扫码结果仅回传原文，由调用方处理。
      */
-    private fun scanPairingCode(invoke: Invoke) {
+    private fun scanPairingCode(invoke: Invoke, clipboardGroup: Boolean) {
         if (!foregroundUi()) {
             replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台扫码")
             return
@@ -985,15 +984,20 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             replyInvalid(invoke, "BUSY", "扫码进行中")
             return
         }
-        val intent = ScanOptions()
-            .setCaptureActivity(PairingScanActivity::class.java)
-            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            .setPrompt("对准中心管理页「添加设备」里的二维码")
-            .setBeepEnabled(false)
-            .setOrientationLocked(false)
-            .setBarcodeImageEnabled(false)
-            .createScanIntent(hostActivity)
         try {
+            val prompt = if (clipboardGroup) {
+                hostActivity.getString(R.string.clipboard_sync_scan_prompt)
+            } else {
+                "对准中心管理页「添加设备」里的二维码"
+            }
+            val intent = ScanOptions()
+                .setCaptureActivity(PairingScanActivity::class.java)
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt(prompt)
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+                .setBarcodeImageEnabled(false)
+                .createScanIntent(hostActivity)
             startActivityForResult(invoke, intent, "onScanPairingCodeResult")
         } catch (t: Throwable) {
             scanInFlight.set(false)

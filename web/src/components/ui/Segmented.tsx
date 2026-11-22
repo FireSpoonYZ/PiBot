@@ -6,25 +6,30 @@ export interface SegmentedOption<V extends string = string> {
   disabled?: boolean;
 }
 
-export interface SegmentedProps<V extends string = string> {
+type SegmentedLabelProps =
+  | { 'aria-label': string; label?: string }
+  | { 'aria-label'?: string; label: string };
+
+export type SegmentedProps<V extends string = string> = SegmentedLabelProps & {
   options: readonly SegmentedOption<V>[];
   value: V | undefined;
   onChange: (value: V) => void;
-  'aria-label': string;
   disabled?: boolean;
   className?: string;
   ref?: Ref<HTMLDivElement>;
-}
+};
 
 export function Segmented<V extends string = string>({
   options,
   value,
   onChange,
   'aria-label': ariaLabel,
+  label,
   disabled = false,
   className = '',
   ref,
 }: SegmentedProps<V>) {
+  const accessibleLabel = ariaLabel ?? label;
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const firstEnabledIndex = options.findIndex(opt => !disabled && !opt.disabled);
   const selectedIndex = options.findIndex(opt => opt.value === value && !disabled && !opt.disabled);
@@ -72,7 +77,13 @@ export function Segmented<V extends string = string>({
   const cls = ['ui-segmented', className].filter(Boolean).join(' ');
 
   return (
-    <div ref={ref} role="radiogroup" aria-label={ariaLabel} className={cls}>
+    <div
+      ref={ref}
+      role="radiogroup"
+      aria-label={accessibleLabel}
+      aria-disabled={disabled || undefined}
+      className={cls}
+    >
       {options.map((option, index) => {
         const checked = value === option.value;
         const itemDisabled = Boolean(disabled || option.disabled);
@@ -85,7 +96,7 @@ export function Segmented<V extends string = string>({
             aria-checked={checked}
             tabIndex={index === activeTabIndex ? 0 : -1}
             disabled={itemDisabled}
-            className={`ui-segmented-item${checked ? ' is-active' : ''}`}
+            className={`ui-segmented-item ui-seg-btn${checked ? ' is-active' : ''}`}
             onClick={() => {
               if (!itemDisabled) onChange(option.value);
             }}

@@ -1,5 +1,6 @@
-import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft, CheckCircle2, ChevronRight, HelpCircle, Loader2, Pencil, Trash2, X } from 'lucide-react';
+import { Button, InlineBanner } from '../components/ui';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { mobileHaptic } from '../native/tauri-host';
 import { useText } from '../ui';
@@ -44,6 +45,30 @@ interface EditDraftState {
   steps: DraftStepItem[];
   newStepText: string;
   newStepBotValue: string;
+}
+
+const isCoarsePointerQuery = (): boolean =>
+  typeof window !== 'undefined' &&
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(pointer: coarse)').matches;
+
+function useIsCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(isCoarsePointerQuery);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(pointer: coarse)');
+    setCoarse(mql.matches);
+    const onChange = (event: MediaQueryListEvent) => setCoarse(event.matches);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    if (typeof mql.addListener === 'function') {
+      mql.addListener(onChange);
+      return () => mql.removeListener(onChange);
+    }
+  }, []);
+  return coarse;
 }
 
 function encodeBotValue(deviceId: string | null | undefined, botId: string | null | undefined): string {
@@ -180,12 +205,15 @@ export function TaskDetailView({
 }: TaskDetailViewProps) {
   const t = useText();
   const titleInputId = useId();
+  const titleErrorId = useId();
   const reqInputId = useId();
+  const stepErrorBaseId = useId();
   const logsBoxId = useId();
-  const isCoarsePointer =
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(pointer: coarse)').matches;
+  const isCoarsePointer = useIsCoarsePointer();
+
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const stepInputRefs = useRef<Array<HTMLInputElement | null>>([]);
+
   const [editMode, setEditMode] = useState(initialEditMode);
   const [editDraft, setEditDraft] = useState<EditDraftState>(() => createEditDraft(task));
   const [logsOpen, setLogsOpen] = useState(false);
@@ -196,6 +224,8 @@ export function TaskDetailView({
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [adoptionBusy, setAdoptionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [stepErrors, setStepErrors] = useState<Record<number, string>>({});
 
   useEffect(() => {
     setEditMode(initialEditMode);
@@ -203,6 +233,8 @@ export function TaskDetailView({
     setEditConflict(false);
     setDeleteArmed(false);
     setActionError(null);
+    setTitleError(null);
+    setStepErrors({});
     // Reset edit draft only when switching task or initialEditMode prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, initialEditMode]);
@@ -217,6 +249,7 @@ export function TaskDetailView({
 
   const counts = useMemo(() => stepCounts(task), [task]);
   const flatSteps = useMemo(() => flattenStepsWithDepth(task.steps), [task.steps]);
+  const hasRevisionConflict = editMode && (editConflict || task.revision !== editDraft.editBaseRevision);
 
   const topBots = useMemo(() => {
     const seen = new Set<string>();
@@ -251,7 +284,19 @@ export function TaskDetailView({
     setEditConflict(false);
     setDeleteArmed(false);
     setActionError(null);
+    setTitleError(null);
+    setStepErrors({});
     setEditMode(true);
+  };
+
+  const exitEditMode = () => {
+    if (saving || deleting || reloadingEdit) return;
+    setEditMode(false);
+    setEditConflict(false);
+    setDeleteArmed(false);
+    setActionError(null);
+    setTitleError(null);
+    setStepErrors({});
   };
 
   const handleReloadLatestForEdit = async () => {
@@ -262,6 +307,8 @@ export function TaskDetailView({
       const latest = (await controller.getTask(task.id)) ?? task;
       setEditDraft(createEditDraft(latest));
       setEditConflict(false);
+      setTitleError(null);
+      setStepErrors({});
     } catch (err) {
       setActionError(
         err instanceof Error && err.message ? err.message : String(err || t('重新载入当前版本失败', 'Failed to reload latest version')),
@@ -293,7 +340,7 @@ export function TaskDetailView({
 
   const handleNewStepKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey) {
       event.preventDefault();
       handleAddDraftStep();
     }
@@ -315,7 +362,33 @@ export function TaskDetailView({
   };
 
   const handleSaveEdit = async () => {
-    if (saving || deleting) return;
+    if (saving || deleting || reloadingEdit || hasRevisionConflict) return;
+
+    // Inline validation instead of silent title revert or silent step drop.
+    const trimmedTitle = editDraft.title.trim();
+    const nextTitleError = trimmedTitle ? null : t('请输入任务标题', 'Task title cannot be empty');
+    const nextStepErrors: Record<number, string> = {};
+    let firstInvalidStepIdx = -1;
+    editDraft.steps.forEach((step, idx) => {
+      if (!step.text.trim()) {
+        nextStepErrors[idx] = t('请输入子任务名称，或恢复原内容', 'Subtask name cannot be empty');
+        if (firstInvalidStepIdx === -1) firstInvalidStepIdx = idx;
+      }
+    });
+
+    if (nextTitleError || firstInvalidStepIdx !== -1) {
+      setTitleError(nextTitleError);
+      setStepErrors(nextStepErrors);
+      if (nextTitleError) {
+        titleInputRef.current?.focus();
+      } else if (firstInvalidStepIdx !== -1) {
+        stepInputRefs.current[firstInvalidStepIdx]?.focus();
+      }
+      return;
+    }
+
+    setTitleError(null);
+    setStepErrors({});
     setSaving(true);
     setActionError(null);
     try {
@@ -332,40 +405,37 @@ export function TaskDetailView({
           ]
         : editDraft.steps;
 
-      const stepsPayload = draftSteps
-        .map(step => {
-          const text = step.text.trim();
-          if (!text) return null;
-          const { deviceId, botId } = decodeBotValue(step.botValue);
-          const resolvedBot = findBotOption(bots, deviceId, botId);
-          const effectiveDeviceId = deviceId || resolvedBot?.deviceId || null;
-          let status = step.status;
-          if (status !== 'done' && status !== 'cancelled') {
-            if (!botId) {
-              status = 'unassigned';
-            } else if (status === 'unassigned') {
-              status = 'todo';
-            }
+      const stepsPayload = draftSteps.map(step => {
+        const text = step.text.trim();
+        const { deviceId, botId } = decodeBotValue(step.botValue);
+        const resolvedBot = findBotOption(bots, deviceId, botId);
+        const effectiveDeviceId = deviceId || resolvedBot?.deviceId || null;
+        let status = step.status;
+        if (status !== 'done' && status !== 'cancelled') {
+          if (!botId) {
+            status = 'unassigned';
+          } else if (status === 'unassigned') {
+            status = 'todo';
           }
-          return {
-            ...(step.id ? { id: step.id } : {}),
-            parentStepId: step.parentStepId,
-            text,
-            status,
-            deviceId: effectiveDeviceId,
-            botId,
-            ...(step.dependsOnStepIds ? { dependsOnStepIds: step.dependsOnStepIds } : {}),
-            ...(step.preserved !== undefined ? { preserved: step.preserved } : {}),
-            ...(step.relationNote !== undefined ? { relationNote: step.relationNote } : {}),
-            ...(step.resultSummary !== undefined ? { resultSummary: step.resultSummary } : {}),
-          };
-        })
-        .filter((item): item is NonNullable<typeof item> => item !== null);
+        }
+        return {
+          ...(step.id ? { id: step.id } : {}),
+          parentStepId: step.parentStepId,
+          text,
+          status,
+          deviceId: effectiveDeviceId,
+          botId,
+          ...(step.dependsOnStepIds ? { dependsOnStepIds: step.dependsOnStepIds } : {}),
+          ...(step.preserved !== undefined ? { preserved: step.preserved } : {}),
+          ...(step.relationNote !== undefined ? { relationNote: step.relationNote } : {}),
+          ...(step.resultSummary !== undefined ? { resultSummary: step.resultSummary } : {}),
+        };
+      });
 
       await controller.updateTask({
         taskId: task.id,
         expectedRevision: editDraft.editBaseRevision,
-        title: editDraft.title.trim() || task.title,
+        title: trimmedTitle,
         requirement: editDraft.requirement.trim(),
         steps: stepsPayload,
       });
@@ -384,6 +454,19 @@ export function TaskDetailView({
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleEditCardKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      void handleSaveEdit();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      exitEditMode();
     }
   };
 
@@ -518,6 +601,12 @@ export function TaskDetailView({
     return found?.name || task.pendingPrompt.botName || t('未知 Bot', 'Unknown Bot');
   }, [task.pendingPrompt, bots, t]);
 
+  const deleteLiveAnnouncement = deleting
+    ? t('正在删除任务…', 'Deleting task…')
+    : deleteArmed
+      ? t('已进入删除确认状态，4 秒内再次点击将永久删除此任务', 'Delete armed. Activate again within 4 seconds to permanently delete this task.')
+      : '';
+
   return (
     <div className="tasks-scroll">
       <div className="tasks-container page-enter">
@@ -538,70 +627,94 @@ export function TaskDetailView({
           {renderAdoptionStrip()}
 
           {actionError ? (
-            <div className="tasks-error-strip" role="alert">
-              <span>{actionError}</span>
-            </div>
+            <InlineBanner
+              tone="danger"
+              compact
+              role="alert"
+              className="tasks-error-banner"
+              title={actionError}
+            />
           ) : null}
 
-          {editMode ? (
-            <section className="detail-edit-card" aria-label={t('编辑任务要求与子任务', 'Edit task requirements and subtasks')}>
-              {editConflict || task.revision !== editDraft.editBaseRevision ? (
-                <div className="detail-conflict-box" role="alert">
-                  <div className="detail-conflict-head">
-                    <span>
-                      {editConflict
-                        ? t(`保存冲突（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）：你的修改草稿已保留在下方`, `Save conflict (base v${editDraft.editBaseRevision}, latest v${task.revision}): your draft is preserved below`)
-                        : t(`后台已有新进展（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）`, `Updated in background (base v${editDraft.editBaseRevision}, latest v${task.revision})`)}
-                    </span>
-                  </div>
-                  <p className="detail-conflict-summary">
-                    {t('当前最新状态：', 'Latest status: ')}{task.title} · {t(`已完成 ${counts.done}/${counts.total}`, `Done ${counts.done}/${counts.total}`)}
+          {hasRevisionConflict ? (
+            <InlineBanner
+              tone="attention"
+              role="alert"
+              className="detail-conflict-banner"
+              title={
+                <span className="tabular-nums">
+                  {editConflict
+                    ? t(`保存冲突（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）：你的修改草稿已保留在下方`, `Save conflict (base v${editDraft.editBaseRevision}, latest v${task.revision}): your draft is preserved below`)
+                    : t(`后台已有新进展（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）`, `Updated in background (base v${editDraft.editBaseRevision}, latest v${task.revision})`)}
+                </span>
+              }
+              detail={
+                <div className="detail-conflict-details">
+                  <p className="detail-conflict-summary tabular-nums">
+                    {t('当前最新状态：', 'Latest status: ')}
+                    {task.title} · {t(`已完成 ${counts.done}/${counts.total}`, `Done ${counts.done}/${counts.total}`)}
                     {task.logs.length > 0 ? ` · ${task.logs[task.logs.length - 1].text}` : ''}
                   </p>
                   <p className="detail-conflict-note">
-                    {t('为防止覆盖 Bot 最新进展，保存会按基准版本拦截；请核对后重新载入当前版本再继续编辑。', 'To avoid overwriting the latest Bot progress, saving is blocked by version mismatch. Reload the latest version to continue editing.')}
+                    {t('为防止覆盖 Bot 最新进展，当前已禁用保存；请核对后重新载入当前版本再继续编辑。', 'Saving is disabled to avoid overwriting the latest Bot progress. Reload the latest version to continue editing.')}
                   </p>
-                  <div className="detail-conflict-actions">
-                    <button
-                      type="button"
-                      className="mini-pill active"
-                      disabled={saving || deleting || reloadingEdit}
-                      onClick={() => void handleReloadLatestForEdit()}
-                    >
-                      {reloadingEdit ? t('载入中…', 'Reloading…') : t('重新载入当前版本', 'Reload latest version')}
-                    </button>
-                    <button
-                      type="button"
-                      className="mini-pill"
-                      disabled={saving || deleting || reloadingEdit}
-                      onClick={() => {
-                        setEditMode(false);
-                        setEditConflict(false);
-                        setDeleteArmed(false);
-                        setActionError(null);
-                      }}
-                    >
-                      {t('退出编辑核对详情', 'Exit edit to review')}
-                    </button>
-                  </div>
                 </div>
-              ) : null}
+              }
+              actions={
+                <>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={saving || deleting || reloadingEdit}
+                    onClick={() => void handleReloadLatestForEdit()}
+                  >
+                    {reloadingEdit ? t('载入中…', 'Reloading…') : t('重新载入当前版本', 'Reload latest version')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={saving || deleting || reloadingEdit}
+                    onClick={exitEditMode}
+                  >
+                    {t('退出编辑核对详情', 'Exit edit to review')}
+                  </Button>
+                </>
+              }
+            />
+          ) : null}
 
-              <div>
+          {editMode ? (
+            <section
+              className="detail-edit-card"
+              aria-label={t('编辑任务要求与子任务', 'Edit task requirements and subtasks')}
+              onKeyDown={handleEditCardKeyDown}
+            >
+              <div className="edit-field-block">
                 <label className="edit-field-label" htmlFor={titleInputId}>
                   {t('任务标题', 'Task title')}
                 </label>
                 <input
+                  ref={titleInputRef}
                   id={titleInputId}
                   className="req-edit-title"
                   type="text"
                   value={editDraft.title}
-                  onChange={e => setEditDraft(prev => ({ ...prev, title: e.target.value }))}
+                  aria-invalid={Boolean(titleError) || undefined}
+                  aria-describedby={titleError ? titleErrorId : undefined}
+                  onChange={e => {
+                    if (titleError) setTitleError(null);
+                    setEditDraft(prev => ({ ...prev, title: e.target.value }));
+                  }}
                   disabled={saving || deleting}
                 />
+                {titleError ? (
+                  <p id={titleErrorId} className="field-error-text" role="alert">
+                    {titleError}
+                  </p>
+                ) : null}
               </div>
 
-              <div>
+              <div className="edit-field-block">
                 <label className="edit-field-label" htmlFor={reqInputId}>
                   {t('整体要求', 'Requirements')}
                 </label>
@@ -614,11 +727,16 @@ export function TaskDetailView({
                 />
               </div>
 
-              <div className="edit-steps-group">
-                <span className="edit-field-label">{t('分工与子任务', 'Plan & subtasks')}</span>
+              <fieldset className="edit-steps-fieldset edit-steps-group">
+                <legend className="edit-steps-legend edit-field-label">
+                  {t('分工与子任务', 'Plan & subtasks')}
+                </legend>
                 {editDraft.steps.map((step, idx) => {
+                  const stepNum = idx + 1;
                   const isDone = step.status === 'done';
                   const isCancelled = step.status === 'cancelled';
+                  const stepErr = stepErrors[idx];
+                  const stepErrId = `${stepErrorBaseId}-${idx}`;
                   const decodedCurrent = decodeBotValue(step.botValue);
                   const currentMissing =
                     Boolean(decodedCurrent.botId) &&
@@ -627,63 +745,85 @@ export function TaskDetailView({
                     );
                   const origStep = step.id ? task.steps.find(s => s.id === step.id) : undefined;
                   return (
-                    <div key={step.id ?? `draft-${idx}`} className="edit-step-row">
-                      <input
-                        className={`edit-step-input${isCancelled ? ' is-cancelled' : ''}`}
-                        type="text"
-                        value={step.text}
-                        aria-label={t('子任务名称', 'Subtask name')}
-                        disabled={saving || deleting}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setEditDraft(prev => {
-                            const next = prev.steps.slice();
-                            next[idx] = { ...next[idx], text: val };
-                            return { ...prev, steps: next };
-                          });
-                        }}
-                      />
-                      <select
-                        className="edit-step-select"
-                        aria-label={t('负责 Bot', 'Assigned Bot')}
-                        value={step.botValue}
-                        disabled={isDone || isCancelled || saving || deleting}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setEditDraft(prev => {
-                            const next = prev.steps.slice();
-                            next[idx] = { ...next[idx], botValue: val };
-                            return { ...prev, steps: next };
-                          });
-                        }}
-                      >
-                        <option value="">{t('等待安排（待接手）', 'Unassigned (pending)')}</option>
-                        {currentMissing ? (
-                          <option value={step.botValue}>
-                            {origStep?.botName || t('未知 Bot', 'Unknown Bot')}
-                          </option>
-                        ) : null}
-                        {bots.map(bot => (
-                          <option
-                            key={`${bot.deviceId}:${bot.botId}`}
-                            value={encodeBotValue(bot.deviceId, bot.botId)}
-                          >
-                            {bot.name}
-                          </option>
-                        ))}
-                      </select>
-                      {!isDone ? (
-                        <button
-                          type="button"
-                          className="mini-pill"
+                    <div key={step.id ?? `draft-${idx}`} className="edit-step-entry">
+                      <div className="edit-step-row">
+                        <input
+                          ref={el => { stepInputRefs.current[idx] = el; }}
+                          className={`edit-step-input${isCancelled ? ' is-cancelled' : ''}`}
+                          type="text"
+                          value={step.text}
+                          aria-label={t(`第 ${stepNum} 项子任务名称`, `Subtask ${stepNum} name`)}
+                          aria-invalid={Boolean(stepErr) || undefined}
+                          aria-describedby={stepErr ? stepErrId : undefined}
                           disabled={saving || deleting}
-                          onClick={() => handleToggleStepCancel(idx)}
+                          onChange={e => {
+                            const val = e.target.value;
+                            if (stepErrors[idx]) {
+                              setStepErrors(prev => {
+                                const next = { ...prev };
+                                delete next[idx];
+                                return next;
+                              });
+                            }
+                            setEditDraft(prev => {
+                              const next = prev.steps.slice();
+                              next[idx] = { ...next[idx], text: val };
+                              return { ...prev, steps: next };
+                            });
+                          }}
+                        />
+                        <select
+                          className="edit-step-select"
+                          aria-label={t(`第 ${stepNum} 项子任务负责 Bot`, `Subtask ${stepNum} assigned Bot`)}
+                          value={step.botValue}
+                          disabled={isDone || isCancelled || saving || deleting}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setEditDraft(prev => {
+                              const next = prev.steps.slice();
+                              next[idx] = { ...next[idx], botValue: val };
+                              return { ...prev, steps: next };
+                            });
+                          }}
                         >
-                          {isCancelled ? t('恢复', 'Restore') : t('取消此项', 'Cancel')}
-                        </button>
-                      ) : (
-                        <span className="step-status-pill is-done">{t('已完成', 'Done')}</span>
-                      )}
+                          <option value="">{t('等待安排（待接手）', 'Unassigned (pending)')}</option>
+                          {currentMissing ? (
+                            <option value={step.botValue}>
+                              {origStep?.botName || t('未知 Bot', 'Unknown Bot')}
+                            </option>
+                          ) : null}
+                          {bots.map(bot => (
+                            <option
+                              key={`${bot.deviceId}:${bot.botId}`}
+                              value={encodeBotValue(bot.deviceId, bot.botId)}
+                            >
+                              {bot.name}
+                            </option>
+                          ))}
+                        </select>
+                        {!isDone ? (
+                          <button
+                            type="button"
+                            className="mini-pill"
+                            aria-label={
+                              isCancelled
+                                ? t(`恢复第 ${stepNum} 项子任务`, `Restore subtask ${stepNum}`)
+                                : t(`取消第 ${stepNum} 项子任务`, `Cancel subtask ${stepNum}`)
+                            }
+                            disabled={saving || deleting}
+                            onClick={() => handleToggleStepCancel(idx)}
+                          >
+                            {isCancelled ? t('恢复', 'Restore') : t('取消此项', 'Cancel')}
+                          </button>
+                        ) : (
+                          <span className="step-status-pill is-done">{t('已完成', 'Done')}</span>
+                        )}
+                      </div>
+                      {stepErr ? (
+                        <p id={stepErrId} className="field-error-text" role="alert">
+                          {stepErr}
+                        </p>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -725,9 +865,12 @@ export function TaskDetailView({
                     {t('+ 添加', '+ Add')}
                   </button>
                 </div>
-              </div>
+              </fieldset>
 
               <div className="req-edit-actions">
+                <span className="sr-only" role="status" aria-live="polite">
+                  {deleteLiveAnnouncement}
+                </span>
                 <button
                   type="button"
                   className={`tb-danger-link${deleteArmed ? ' is-armed' : ''}`}
@@ -735,26 +878,27 @@ export function TaskDetailView({
                   onClick={() => void handleDeleteTask()}
                 >
                   <Trash2 size={14} aria-hidden="true" />
-                  <span>{deleting ? t('删除中…', 'Deleting…') : deleteArmed ? t('再次点击确认删除', 'Tap again to confirm delete') : t('删除任务', 'Delete task')}</span>
+                  <span>
+                    {deleting
+                      ? t('删除中…', 'Deleting…')
+                      : deleteArmed
+                        ? t('再次点击确认删除', 'Tap again to confirm delete')
+                        : t('删除任务', 'Delete task')}
+                  </span>
                 </button>
                 <div className="req-edit-actions-right">
                   <button
                     type="button"
                     className="tb-secondary-btn"
                     disabled={saving || deleting || reloadingEdit}
-                    onClick={() => {
-                      setEditMode(false);
-                      setEditConflict(false);
-                      setDeleteArmed(false);
-                      setActionError(null);
-                    }}
+                    onClick={exitEditMode}
                   >
                     {t('取消', 'Cancel')}
                   </button>
                   <button
                     type="button"
                     className="tb-primary-btn"
-                    disabled={saving || deleting || reloadingEdit}
+                    disabled={saving || deleting || reloadingEdit || hasRevisionConflict}
                     onClick={() => void handleSaveEdit()}
                   >
                     {saving ? t('保存中…', 'Saving…') : t('保存', 'Save')}
@@ -837,7 +981,7 @@ export function TaskDetailView({
               <section className="steps-card" aria-label={t('分工与子任务', 'Plan & subtasks')}>
                 <div className="steps-head">
                   <span className="steps-head-title">{t('分工与子任务', 'Plan & subtasks')}</span>
-                  <span className="steps-head-count tabular">
+                  <span className="steps-head-count tabular tabular-nums">
                     {t(`已完成 ${counts.done} / ${counts.total}`, `Done ${counts.done} / ${counts.total}`)}
                   </span>
                 </div>
@@ -930,7 +1074,9 @@ export function TaskDetailView({
               onClick={() => setLogsOpen(v => !v)}
             >
               <ChevronRight size={15} aria-hidden="true" />
-              <span className="tabular">{t(`变更与进展记录 (${task.logs.length})`, `Activity & change log (${task.logs.length})`)}</span>
+              <span className="tabular tabular-nums">
+                {t(`变更与进展记录 (${task.logs.length})`, `Activity & change log (${task.logs.length})`)}
+              </span>
             </button>
             {logsOpen ? (
               <div id={logsBoxId} className="logs-box">
@@ -941,8 +1087,8 @@ export function TaskDetailView({
                 ) : (
                   task.logs.map(lg => (
                     <div key={lg.id} className="log-row">
-                      <span className="log-time tabular">{formatLogTime(lg.time)}</span>
-                      <span>{lg.text}</span>
+                      <span className="log-time tabular tabular-nums">{formatLogTime(lg.time)}</span>
+                      <span className="log-text">{lg.text}</span>
                     </div>
                   ))
                 )}

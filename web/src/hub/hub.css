@@ -1,37 +1,85 @@
 /* hub lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
-/* Hub 主屏在 conversation/dm 子页打开时保持 DOM（隐藏不卸载），返回不丢滚动位置。 */
+/* Keep HubScreen mounted when navigating to chats, profiles, or create screens. */
 .hub-hidden { display: none; }
 
-/* 主 Bot Hero：横向紧凑卡片（头像左、名称+节点徽章右），真实卡片/占位卡片/骨架卡片严格等高（82px）。 */
-.hub-hero-section { padding: 8px 16px 10px; display: flex; }
-.hub-hero-section::before, .hub-hero-section::after { content: none; }
+.hub-scroll-area {
+  overscroll-behavior: contain;
+}
+
+.hub-bot-time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Primary Bot Hero: flat raised hairline card with 12px radius; equal 82px height across states. */
+.hub-hero-section {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  display: flex;
+}
+.hub-hero-section::before,
+.hub-hero-section::after {
+  content: none;
+}
 .hub-hero-button.hub-hero-card {
   flex: 1 1 auto;
+  min-width: 0;
   max-width: 100%;
   min-height: 82px;
   box-sizing: border-box;
   flex-direction: row;
   align-items: center;
-  gap: 12px;
-  padding: 8px 14px;
-  border-radius: 18px;
-  background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  gap: var(--space-3);
+  padding: var(--space-2) 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  box-shadow: none;
   filter: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .hub-hero-button.hub-hero-card:not(.hub-hero-skeleton):hover {
+    border-color: var(--border-default);
+  }
+}
+.hub-hero-button.hub-hero-card:not(.hub-hero-skeleton):active {
+  background: var(--surface-1);
+  transform: scale(0.985);
+}
+.hub-hero-button.hub-hero-card:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: 2px;
 }
 .hub-hero-button.hub-hero-card.hub-hero-placeholder {
   border-style: dashed;
-  border-color: color-mix(in srgb, var(--color-primary) 34%, var(--color-line));
+  border-color: var(--signal-primary-border);
 }
 .hub-hero-button.hub-hero-card.hub-hero-skeleton {
   cursor: default;
   pointer-events: none;
 }
-.hub-hero-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.hub-hero-card .hub-hero-name { font-size: .95rem; font-weight: 600; color: var(--text); }
+.hub-hero-card-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+.hub-hero-card .hub-hero-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
 
-/* H5 FLIP 列表容器与项：ul > li 兼容 SortablePinnedChat 同容器检索 */
+/* FLIP list container compatible with SortablePinnedChat peer queries. */
 .hub-bot-list-items {
   list-style: none;
   margin: 0;
@@ -46,7 +94,7 @@
   min-width: 0;
 }
 
-/* H1: 列表行头像右下角在线状态小圆点（绝对定位，不改变 62px 行高） */
+/* Avatar corner online status dot (fixed position, zero row-height impact). */
 .hub-bot-avatar-wrap {
   position: relative;
   display: inline-flex;
@@ -63,31 +111,39 @@
   width: 10px;
   height: 10px;
   border-radius: var(--radius-full);
-  border: 2px solid var(--color-bg);
-  background: var(--color-text-subtle);
+  border: 2px solid var(--ground);
+  background: var(--ink-tertiary);
   pointer-events: none;
-  transition: background-color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
 }
 .hub-bot-status-dot.is-online {
-  background: var(--color-success);
+  background: var(--state-live);
   opacity: 1;
 }
 .hub-bot-status-dot.is-connecting {
-  background: var(--color-text-subtle);
-  opacity: 0.72;
+  background: var(--state-attention);
+  opacity: 0.85;
 }
 .hub-bot-status-dot.is-offline {
-  background: var(--color-text-subtle);
-  opacity: 0.5;
+  background: var(--ink-tertiary);
+  opacity: 0.55;
 }
 
-/* 列表顶部筛选 Chips（复用 bot-settings 原语 .bs-chips/.bs-chip）。 */
-.hub-filter-chips { padding: 2px 0 8px; }
+/* Filter chips strip. */
+.hub-filter-chips {
+  padding: 2px 0 var(--space-2);
+}
+.hub-filter-chips .bs-chip {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 
-/* 归档行在 archived-bots 页里降低不透明度以区分。 */
-.hub-bot-row.is-archived { opacity: .72; }
+/* Archived row subtle visual differentiation. */
+.hub-bot-row.is-archived {
+  opacity: 0.86;
+}
 
-/* 创建群聊页（group-create）：已选成员胶囊带 + 候选 Bot 勾选列表。 */
+/* Group creation screen: selected member chips, search bar & candidate rows. */
 .group-create-chips {
   display: flex;
   flex-wrap: wrap;
@@ -99,28 +155,39 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
   max-width: 100%;
-  padding: 5px 10px 5px 6px;
+  min-height: 36px;
+  min-width: var(--tap-min);
+  padding: 6px 12px 6px 8px;
   border-radius: var(--radius-full);
-  background: var(--color-surface-1);
-  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-  color: var(--color-text);
+  white-space: nowrap;
+  color: var(--ink-primary);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
-.group-create-chip::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: max(100%, var(--tap-min));
-  height: max(100%, var(--tap-min));
+@media (pointer: coarse) {
+  .group-create-chip {
+    min-height: var(--tap-min);
+  }
+}
+@media (hover: hover) and (pointer: fine) {
+  .group-create-chip:hover:not(:disabled) {
+    background: var(--surface-raised);
+  }
 }
 .group-create-chip:active {
-  background: var(--color-surface-3);
+  background: var(--surface-inset);
+}
+.group-create-chip:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: 2px;
 }
 .group-create-chip-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -130,7 +197,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-muted);
+  flex: none;
+  color: var(--ink-secondary);
 }
 .group-create-search {
   display: flex;
@@ -138,11 +206,11 @@
   gap: var(--space-2);
   padding: 0 14px;
   min-height: var(--tap-min);
-  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 65%, transparent);
-  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--ink-secondary);
 }
 .group-create-search:focus-within {
-  border-bottom-color: color-mix(in srgb, var(--color-text-muted) 45%, var(--color-line));
+  border-bottom-color: var(--signal-primary);
 }
 .group-create-search input {
   flex: 1;
@@ -152,11 +220,60 @@
   background: transparent;
   padding: 0;
   font-size: var(--text-md);
-  color: var(--color-text);
+  color: var(--ink-primary);
   outline: none;
 }
 .group-create-search input:focus-visible {
   outline: none;
+}
+.group-create-search-clear {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--surface-inset);
+  color: var(--ink-secondary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.group-create-search-clear::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: var(--tap-min);
+  height: var(--tap-min);
+}
+@media (hover: hover) and (pointer: fine) {
+  .group-create-search-clear:hover {
+    background: var(--border-default);
+    color: var(--ink-primary);
+  }
+}
+.group-create-search-clear:active {
+  background: var(--border-default);
+  color: var(--ink-primary);
+}
+.group-create-search-clear:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: 2px;
+}
+.group-create-empty-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.group-create-empty-text {
+  color: var(--ink-secondary);
+  font-size: var(--text-base);
+  line-height: 1.5;
 }
 .group-create-bot-row {
   display: flex;
@@ -166,20 +283,22 @@
   min-height: var(--tap-min);
   padding: 11px 14px;
   text-align: left;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 55%, transparent);
-  transition: background-color var(--dur-fast) ease;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
-.group-create-bot-row:last-child { border-bottom: 0; }
-@media (hover: hover) {
+.group-create-bot-row:last-child {
+  border-bottom: 0;
+}
+@media (hover: hover) and (pointer: fine) {
   .group-create-bot-row:hover {
-    background: color-mix(in srgb, var(--color-surface-1) 75%, transparent);
+    background: var(--surface-1);
   }
 }
 .group-create-bot-row:active {
-  background: color-mix(in srgb, var(--color-surface-1) 75%, transparent);
+  background: var(--surface-1);
 }
 .group-create-bot-row.is-selected {
-  background: var(--color-primary-soft);
+  background: var(--signal-primary-soft);
 }
 .group-create-bot-info {
   flex: 1;
@@ -195,16 +314,19 @@
   min-width: 0;
 }
 .group-create-bot-name {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
-  color: var(--color-text);
+  color: var(--ink-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .group-create-bot-sub {
+  min-width: 0;
   font-size: var(--text-sm);
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -214,14 +336,29 @@
   width: 22px;
   height: 22px;
   border-radius: var(--radius-full);
-  border: 1.8px solid var(--color-line);
+  border: 1.8px solid var(--border-default);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-on-primary);
-  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  color: var(--signal-primary-ink);
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 .group-create-bot-row.is-selected .group-create-check {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
+  background: var(--signal-primary);
+  border-color: var(--signal-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-hero-button.hub-hero-card,
+  .hub-bot-status-dot,
+  .group-create-chip,
+  .group-create-search-clear,
+  .group-create-bot-row,
+  .group-create-check {
+    transition: none;
+  }
+
+  .hub-hero-button.hub-hero-card:not(.hub-hero-skeleton):active {
+    transform: none;
+  }
 }

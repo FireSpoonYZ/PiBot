@@ -26,9 +26,9 @@ export function googleChoiceLabel(choice: GoogleServiceChoice, t: Translator): s
     case 'gmail':
       return 'Gmail';
     case 'calendar':
-      return t('日历 (Calendar)', 'Calendar');
+      return t('日历', 'Calendar');
     case 'files':
-      return t('云盘、文档与表格 (Drive / Docs / Sheets)', 'Drive, Docs and Sheets');
+      return t('云盘、文档与表格', 'Drive, Docs and Sheets');
   }
 }
 
@@ -48,9 +48,9 @@ export function googleServiceLabel(service: string, t: Translator): string {
     case 'gmail':
       return 'Gmail';
     case 'calendar':
-      return t('日历 (Calendar)', 'Calendar');
+      return t('日历', 'Calendar');
     case 'files':
-      return t('Drive · Docs · Sheets', 'Drive, Docs & Sheets');
+      return t('云盘、文档与表格', 'Drive, Docs & Sheets');
     case 'drive':
       return 'Google Drive';
     case 'docs':
@@ -58,7 +58,7 @@ export function googleServiceLabel(service: string, t: Translator): string {
     case 'sheets':
       return 'Google Sheets';
     case 'contacts':
-      return t('联系人联查 (People)', 'Contacts (People)');
+      return t('联系人联查', 'Contacts');
     default:
       return service;
   }
@@ -165,27 +165,18 @@ export function googleSetupModeMeta(mode: GoogleSetupMode, t: Translator): {
   switch (mode) {
     case 'do-it-for-me':
       return {
-        title: t('自动代办 (Do it for me)', 'Do it for me'),
-        description: t(
-          'Bot 在内置浏览器协助填写非敏感项；遇到登录、政策勾选或创建 Secret 时自动停手交给你亲自操作。',
-          'Bot fills non-sensitive Cloud Console fields in the embedded browser, and pauses for you on sign-in, policy agreement, and client secret creation.',
-        ),
+        title: t('自动代办', 'Do it for me'),
+        description: t('Bot 在内置浏览器协助填写非敏感项；遇到登录、政策勾选或创建 Secret 时自动停手交给你亲自操作。', 'Bot fills non-sensitive Cloud Console fields in the embedded browser, and pauses for you on sign-in, policy agreement, and client secret creation.'),
       };
     case 'guide-here':
       return {
-        title: t('内嵌指导 (Guide me here)', 'Guide me here'),
-        description: t(
-          '在右侧/全屏 Bot 内置浏览器打开对应页面，由你亲自点击与输入，Bot 跟踪非敏感步骤进度。',
-          'Opens the Cloud Console in the Bot browser for you to click while tracking non-sensitive step progress.',
-        ),
+        title: t('内嵌指导', 'Guide me here'),
+        description: t('在右侧或全屏 Bot 内置浏览器打开对应页面，由你亲自点击与输入，Bot 跟踪非敏感步骤进度。', 'Opens the Cloud Console in the Bot browser for you to click while tracking non-sensitive step progress.'),
       };
     case 'guide-browser':
       return {
-        title: t('外部浏览器指导 (Guide me in my browser)', 'Guide me in my browser'),
-        description: t(
-          '在你自己的系统浏览器操作，Bot 看不到页面；每完成一步点「已完成」继续。适合手机或受限环境。',
-          'Run in your own system browser where the Bot cannot see the page; tap Done after each step.',
-        ),
+        title: t('外部浏览器指导', 'Guide me in my browser'),
+        description: t('在你自己的系统浏览器操作，Bot 看不到页面；每完成一步点「已完成」继续。适合手机或受限环境。', 'Run in your own system browser where the Bot cannot see the page; tap Done after each step.'),
       };
   }
 }
@@ -353,10 +344,7 @@ export function validateWebClientJson(
   if ('installed' in obj && !('web' in obj)) {
     return {
       ok: false,
-      error: t(
-        '检测到这是 Desktop app (installed) 凭据；PiBot Center 需要「Web application」类型凭据，请在 Google Cloud Console 创建 Web application 客户端。',
-        'This is a Desktop app (“installed”) client JSON. PiBot Center requires a “Web application” OAuth client.',
-      ),
+      error: t('检测到这是桌面应用凭据；PiBot Center 需要 Web 应用类型凭据，请在 Google Cloud Console 创建 Web application 客户端。', 'This is a Desktop app client JSON. PiBot Center requires a Web application OAuth client.'),
     };
   }
   const web = obj.web;

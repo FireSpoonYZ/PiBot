@@ -10,9 +10,7 @@ import {
   Clock,
   ExternalLink,
   Globe,
-  KeyRound,
   Loader2,
-  Lock,
   Pencil,
   Plus,
   RefreshCw,
@@ -28,7 +26,10 @@ import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   ActionMenu,
+  CaCardDisclosure,
   CaCardSkeleton,
+  CaChips,
+  CaConfirmDialog,
   CaDisclosure,
   CaExternalUrlBox,
   CaModal,
@@ -84,6 +85,17 @@ import type {
   GoogleStatusResponse,
 } from './types';
 
+type GoogleSection = 'accounts' | 'rules' | 'client';
+type RuleSourceFilter = 'all' | GoogleRuleSource;
+
+type GoogleModal =
+  | null
+  | { kind: 'wizard' }
+  | { kind: 'connect'; targetAccount: GoogleAccountStatus | null }
+  | { kind: 'remove-account'; account: GoogleAccountStatus }
+  | { kind: 'rule'; editing: GoogleRule | null }
+  | { kind: 'confirm-delete-rule'; rule: GoogleRule };
+
 interface ActiveAuthFlow {
   flowId: string;
   authorizationUrl: string;
@@ -92,6 +104,50 @@ interface ActiveAuthFlow {
   choices: GoogleServiceChoice[];
   targetAccount?: string;
   error?: string;
+}
+
+export interface PendingGoogleFlow extends ActiveAuthFlow {
+  phase: 'pending';
+}
+
+const pendingGoogleFlows = new Map<string, PendingGoogleFlow>();
+
+function isPendingFlowExpired(
+  flow: Pick<PendingGoogleFlow, 'expiresAt'>,
+  now = Date.now(),
+): boolean {
+  const expMs = new Date(flow.expiresAt).getTime();
+  return !Number.isFinite(expMs) || expMs <= now;
+}
+
+function readPendingGoogleFlow(scopeKey: string): PendingGoogleFlow | null {
+  const stored = pendingGoogleFlows.get(scopeKey);
+  if (!stored) return null;
+  if (isPendingFlowExpired(stored)) {
+    pendingGoogleFlows.delete(scopeKey);
+    return null;
+  }
+  return stored;
+}
+
+function writePendingGoogleFlow(scopeKey: string, flow: PendingGoogleFlow): void {
+  if (isPendingFlowExpired(flow)) {
+    pendingGoogleFlows.delete(scopeKey);
+    return;
+  }
+  pendingGoogleFlows.set(scopeKey, flow);
+}
+
+export function clearPendingGoogleFlow(scopeKey?: string, expectedFlowId?: string): void {
+  if (scopeKey === undefined) {
+    pendingGoogleFlows.clear();
+    return;
+  }
+  if (expectedFlowId !== undefined) {
+    const existing = pendingGoogleFlows.get(scopeKey);
+    if (existing && existing.flowId !== expectedFlowId) return;
+  }
+  pendingGoogleFlows.delete(scopeKey);
 }
 
 interface NoticeBanner {
@@ -103,7 +159,29 @@ interface NoticeBanner {
   onAction?: () => void;
 }
 
+interface GoogleCacheData {
+  status: GoogleStatusResponse | null;
+  unavailableReason: string | null;
+  forbiddenReason: string | null;
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  rules: GoogleRule[];
+  rulesUnavailable: boolean;
+}
+
 const MINUTES_BEFORE_PRESETS = [0, 5, 10, 15, 30] as const;
+
+function StatusDot({ tone }: { tone: 'ok' | 'warn' | 'danger' | 'muted' }): React.JSX.Element {
+  const bg =
+    tone === 'ok'
+      ? 'var(--ca-ok)'
+      : tone === 'warn'
+        ? 'var(--ca-warn)'
+        : tone === 'danger'
+          ? 'var(--ca-danger)'
+          : 'var(--ca-text-subtle)';
+  return <span className="ca-dot" style={{ background: bg }} aria-hidden="true" />;
+}
 
 function toIsoExpiresAt(raw: string | number): string {
   if (typeof raw === 'number') {
@@ -118,16 +196,6 @@ function isTransientNetworkError(err: unknown): boolean {
     return err.status === 0 || err.status === 408 || err.status === 429 || err.status >= 500;
   }
   return true;
-}
-
-interface GoogleCacheData {
-  status: GoogleStatusResponse | null;
-  unavailableReason: string | null;
-  forbiddenReason: string | null;
-  devices: CenterDevice[];
-  bots: CenterBotRef[];
-  rules: GoogleRule[];
-  rulesUnavailable: boolean;
 }
 
 export function GoogleTab({
@@ -154,6 +222,18 @@ export function GoogleTab({
     () => readTabCache<GoogleCacheData>(cacheKey, 'google')?.data ?? null,
     [cacheKey],
   );
+  const initialPendingFlow = useMemo(() => readPendingGoogleFlow(cacheKey), [cacheKey]);
+
+  // Progressive 3-section segmented navigation: default to 'accounts' if configured or OAuth flow is pending, else 'client'
+  const [section, setSection] = useState<GoogleSection>(() =>
+    initialPendingFlow || initialCache?.status?.client?.configured ? 'accounts' : 'client',
+  );
+  const userPickedSectionRef = useRef(false);
+
+  // Single mutually exclusive modal union (never stacks modals)
+  const [modal, setModal] = useState<GoogleModal>(null);
+  const modalRef = useRef<GoogleModal>(modal);
+  modalRef.current = modal;
 
   // Primary status & directory data
   const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
@@ -175,8 +255,10 @@ export function GoogleTab({
   const [rulesUnavailable, setRulesUnavailable] = useState<boolean>(
     () => initialCache?.rulesUnavailable ?? false,
   );
+  const [ruleSourceFilter, setRuleSourceFilter] = useState<RuleSourceFilter>('all');
   const [ruleBotFilter, setRuleBotFilter] = useState<string>('all');
   const [togglingRuleId, setTogglingRuleId] = useState<string | null>(null);
+  const [deletingRule, setDeletingRule] = useState(false);
 
   const hasLoadedRef = useRef(hasLoaded);
   const statusRef = useRef(status);
@@ -240,8 +322,7 @@ export function GoogleTab({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
 
-  // Private Web OAuth Client configure drawer
-  const [configOpen, setConfigOpen] = useState(false);
+  // In-page OAuth Client form state ('client' section)
   const [configMode, setConfigMode] = useState<'file' | 'manual'>('file');
   const [configBusy, setConfigBusy] = useState(false);
   const [configError, setConfigError] = useState('');
@@ -252,16 +333,13 @@ export function GoogleTab({
   const [draggingJson, setDraggingJson] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Target Bot setup wizard / manual mode drawer
-  const [wizardOpen, setWizardOpen] = useState(false);
+  // Bot setup wizard form state
   const [wizardTargetBotKey, setWizardTargetBotKey] = useState(() => {
     const first = (initialCache?.bots ?? []).find(b => !b.archivedAt);
     return first ? botKey(first.deviceId, first.botId) : '';
   });
 
-  // Connect / Add Services modal
-  const [connectOpen, setConnectOpen] = useState(false);
-  const [connectTargetAccount, setConnectTargetAccount] = useState<GoogleAccountStatus | null>(null);
+  // Connect / Add Services modal state
   const [selectedChoices, setSelectedChoices] = useState<GoogleServiceChoice[]>([
     'gmail',
     'calendar',
@@ -270,22 +348,19 @@ export function GoogleTab({
   const [connectBusy, setConnectBusy] = useState(false);
   const [connectError, setConnectError] = useState('');
 
-  // Active OAuth system-browser flow
-  const [activeFlow, setActiveFlow] = useState<ActiveAuthFlow | null>(null);
+  // Active OAuth system-browser flow (hydrated from module-level store across tab switches)
+  const [activeFlow, setActiveFlow] = useState<ActiveAuthFlow | null>(() => initialPendingFlow);
   const [cancellingFlow, setCancellingFlow] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const flowGenRef = useRef(0);
-  const pollInFlightRef = useRef(false);
+  const prevFlowScopeRef = useRef(cacheKey);
 
-  // Remove account confirmation modal
-  const [removeTarget, setRemoveTarget] = useState<GoogleAccountStatus | null>(null);
+  // Remove account modal state
   const [removeRevoke, setRemoveRevoke] = useState(true);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState('');
 
-  // Rule create / edit drawer
-  const [ruleDrawerOpen, setRuleDrawerOpen] = useState(false);
-  const [editingRule, setEditingRule] = useState<GoogleRule | null>(null);
+  // Rule create / edit modal state
   const [ruleSource, setRuleSource] = useState<GoogleRuleSource>('gmail');
   const [ruleBotKey, setRuleBotKey] = useState('');
   const [ruleAccount, setRuleAccount] = useState('');
@@ -310,7 +385,43 @@ export function GoogleTab({
     }
   }, []);
 
-  // Ensure secrets and timers are cleared on unmount
+  const switchSection = useCallback(
+    (next: GoogleSection) => {
+      userPickedSectionRef.current = true;
+      setSection(prev => {
+        if (prev === 'client' && next !== 'client') {
+          clearSecretDrafts();
+        }
+        return next;
+      });
+    },
+    [clearSecretDrafts],
+  );
+
+  // Clear stale flow when scope (cacheKey) changes while mounted
+  useEffect(() => {
+    const prevScope = prevFlowScopeRef.current;
+    if (prevScope === cacheKey) return;
+    prevFlowScopeRef.current = cacheKey;
+    clearPendingGoogleFlow(prevScope);
+    flowGenRef.current += 1;
+    setCancellingFlow(false);
+    setActiveFlow(readPendingGoogleFlow(cacheKey));
+  }, [cacheKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleUnauth = () => {
+      clearPendingGoogleFlow(cacheKey);
+      flowGenRef.current += 1;
+      setCancellingFlow(false);
+      setActiveFlow(null);
+    };
+    window.addEventListener('center-unauthenticated', handleUnauth);
+    return () => window.removeEventListener('center-unauthenticated', handleUnauth);
+  }, [cacheKey]);
+
+  // Clear secrets and timers on unmount
   useEffect(() => {
     return () => {
       flowGenRef.current += 1;
@@ -385,7 +496,6 @@ export function GoogleTab({
           setRules([]);
           return;
         }
-        // If backend requires explicit deviceId+botId query params, fetch per active bot.
         if (err instanceof CenterApiError && err.status === 400 && botList.length > 0) {
           try {
             const perBot = await Promise.all(
@@ -409,14 +519,14 @@ export function GoogleTab({
           } catch (fallbackErr) {
             if (activeRef.current) {
               const t = tRef.current;
-              setRulesError(errorMessage(fallbackErr, t('加载自动规则失败', 'Failed to load rules')));
+              setRulesError(errorMessage(fallbackErr, t('加载邮件与日历规则失败，请重试', 'Failed to load rules. Please retry.')));
             }
             return;
           }
         }
         if (activeRef.current) {
           const t = tRef.current;
-          setRulesError(errorMessage(err, t('加载自动规则失败', 'Failed to load rules')));
+          setRulesError(errorMessage(err, t('加载邮件与日历规则失败，请重试', 'Failed to load rules. Please retry.')));
         }
       }
     },
@@ -455,6 +565,11 @@ export function GoogleTab({
         } else {
           setUnavailableReason(null);
           setStatus(googleRes);
+          if (!userPickedSectionRef.current) {
+            setSection(
+              readPendingGoogleFlow(cacheKey) || googleRes.client?.configured ? 'accounts' : 'client',
+            );
+          }
         }
 
         const nextDevices = syncRes?.devices ?? [];
@@ -492,7 +607,7 @@ export function GoogleTab({
         } else if (err instanceof CenterApiError && err.status === 403) {
           const msg =
             err.message ||
-            t('当前会话无权管理中心 Google 应用配置，请联系中心管理员或使用所有者会话登录中心管理页。', 'This session cannot manage Center Google settings. Contact the Center administrator or sign in as the owner.');
+            t('当前会话无权管理中心 Google 应用配置，请联系中心管理员或使用所有者会话登录。', 'This session cannot manage Center Google settings. Contact the Center administrator or sign in as the owner.');
           if (statusRef.current) {
             if (activeRef.current) {
               showNotice('load-error', msg, {
@@ -512,7 +627,7 @@ export function GoogleTab({
         } else {
           const msg = errorMessage(
             err,
-            t('暂时无法获取中心 Google 状态', 'Unable to load Center Google status'),
+            t('暂时无法获取中心 Google 状态，请检查中心连接后重试', 'Unable to load Center Google status. Check connectivity and retry.'),
           );
           if (statusRef.current) {
             if (activeRef.current) {
@@ -572,10 +687,28 @@ export function GoogleTab({
   // Countdown tick while waiting for system browser OAuth (paused when tab hidden)
   useEffect(() => {
     if (!active || !activeFlow || activeFlow.phase !== 'pending') return;
-    setNowMs(Date.now());
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    const currentFlow = activeFlow;
+    const checkTick = () => {
+      const now = Date.now();
+      setNowMs(now);
+      if (isPendingFlowExpired(currentFlow, now)) {
+        const t = tRef.current;
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+        setActiveFlow(prev =>
+          prev && prev.flowId === currentFlow.flowId && prev.phase === 'pending'
+            ? {
+                ...prev,
+                phase: 'failed',
+                error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+              }
+            : prev,
+        );
+      }
+    };
+    checkTick();
+    const timer = window.setInterval(checkTick, 1000);
     return () => window.clearInterval(timer);
-  }, [active, activeFlow]);
+  }, [active, activeFlow, cacheKey]);
 
   const handleFlowCompleted = useCallback(
     async (account: GoogleAccountStatus | undefined, flow: ActiveAuthFlow) => {
@@ -595,7 +728,7 @@ export function GoogleTab({
         } else {
           setBanner({
             tone: 'warn',
-            text: t(`已连接 ${account.email}，但有 ${issueCount} 项服务尚未就绪（如未勾选权限、API 未启用或被组织限制）。请按下方服务行提示逐项处理。`, `Connected ${account.email}, with ${issueCount} service(s) still needing attention. Review the per-service rows below.`),
+            text: t(`已连接 ${account.email}，但有 ${issueCount} 项服务尚未就绪。请按下方服务行提示逐项处理。`, `Connected ${account.email}, with ${issueCount} service(s) needing attention. Review the service rows below.`),
           });
         }
       } else {
@@ -616,14 +749,37 @@ export function GoogleTab({
     const gen = flowGenRef.current;
     const currentFlow = activeFlow;
 
+    if (isPendingFlowExpired(currentFlow)) {
+      clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+      setActiveFlow({
+        ...currentFlow,
+        phase: 'failed',
+        error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+      });
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+
     const pollOnce = async () => {
-      if (pollInFlightRef.current || gen !== flowGenRef.current) return;
-      pollInFlightRef.current = true;
+      if (disposed || inFlight || gen !== flowGenRef.current) return;
+      if (isPendingFlowExpired(currentFlow)) {
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+        setActiveFlow({
+          ...currentFlow,
+          phase: 'failed',
+          error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+        });
+        return;
+      }
+      inFlight = true;
       try {
         const res = await api.getGoogleFlow({ flowId: currentFlow.flowId });
-        if (gen !== flowGenRef.current) return;
+        if (disposed || gen !== flowGenRef.current) return;
         if (res.phase === 'pending') return;
 
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
         if (res.phase === 'connected') {
           setActiveFlow(null);
           await handleFlowCompleted(res.account, currentFlow);
@@ -645,9 +801,9 @@ export function GoogleTab({
             t('此次授权未完成或已过期，原有有效连接未受影响。请重新开始。', 'Authorization did not complete or expired. Existing connections were not affected.'),
         });
       } catch (err) {
-        if (gen !== flowGenRef.current) return;
-        // Transient poll error: keep polling until server reports terminal state or user cancels.
+        if (disposed || gen !== flowGenRef.current) return;
         if (err instanceof CenterApiError && (err.status === 404 || err.status === 410)) {
+          clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
           setActiveFlow({
             ...currentFlow,
             phase: 'failed',
@@ -655,7 +811,7 @@ export function GoogleTab({
           });
         }
       } finally {
-        pollInFlightRef.current = false;
+        inFlight = false;
       }
     };
 
@@ -673,23 +829,12 @@ export function GoogleTab({
     document.addEventListener('visibilitychange', onReturn);
 
     return () => {
+      disposed = true;
       window.clearInterval(timer);
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
     };
-  }, [active, activeFlow, api, handleFlowCompleted, t]);
-
-  // Open private configure drawer
-  const openConfigureDrawer = useCallback(() => {
-    clearSecretDrafts();
-    setConfigMode('file');
-    setConfigOpen(true);
-  }, [clearSecretDrafts]);
-
-  const closeConfigureDrawer = useCallback(() => {
-    setConfigOpen(false);
-    clearSecretDrafts();
-  }, [clearSecretDrafts]);
+  }, [active, activeFlow, api, cacheKey, handleFlowCompleted, t]);
 
   const handleJsonFilePick = useCallback(
     async (file: File | null | undefined) => {
@@ -700,7 +845,7 @@ export function GoogleTab({
         setClientFileName(file.name);
         setClientFileRaw(text);
       } catch (err) {
-        setConfigError(errorMessage(err, t('读取文件失败', 'Failed to read file')));
+        setConfigError(errorMessage(err, t('读取文件失败，请重新选择 JSON 文件', 'Failed to read file. Select the JSON file again.')));
       } finally {
         if (fileInputRef.current) {
           fileInputRef.current.value = '';
@@ -713,7 +858,6 @@ export function GoogleTab({
   const openConnectModal = useCallback(
     (targetAccount?: GoogleAccountStatus | null, presetChoices?: GoogleServiceChoice[]) => {
       setConnectError('');
-      setConnectTargetAccount(targetAccount ?? null);
       if (presetChoices && presetChoices.length > 0) {
         setSelectedChoices(canonicalChoices(presetChoices));
       } else if (targetAccount) {
@@ -729,18 +873,19 @@ export function GoogleTab({
       } else {
         setSelectedChoices(['gmail', 'calendar', 'files']);
       }
-      setConnectOpen(true);
+      setModal({ kind: 'connect', targetAccount: targetAccount ?? null });
     },
     [],
   );
 
   const handleSaveClientConfig = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (configBusy) return;
     setConfigError('');
 
     if (configMode === 'file') {
       if (!clientFileRaw) {
-        setConfigError(t('请先选择或拖入 Google Cloud 导出的 Web OAuth JSON 文件', 'Please select a Web OAuth JSON file first.'));
+        setConfigError(t('请先选择或拖入 Google Cloud 导出的 Web OAuth JSON 文件', 'Select or drop a Web OAuth JSON file exported from Google Cloud.'));
         return;
       }
       const check = validateWebClientJson(
@@ -749,12 +894,12 @@ export function GoogleTab({
         t,
       );
       if (!check.ok) {
-        setConfigError(check.error || t('JSON 文件校验未通过', 'Invalid client JSON file'));
+        setConfigError(check.error || t('JSON 文件校验未通过，请确认为 Web application 类型客户端', 'Client JSON validation failed. Ensure it is a Web application client.'));
         return;
       }
     } else {
       if (!clientIdDraft.trim() || !clientSecretDraft.trim()) {
-        setConfigError(t('请填写完整的 Client ID 与 Client Secret', 'Please enter both Client ID and Client Secret.'));
+        setConfigError(t('请填写完整的 Client ID 与 Client Secret 后保存', 'Enter both Client ID and Client Secret before saving.'));
         return;
       }
     }
@@ -768,27 +913,32 @@ export function GoogleTab({
 
       const updated = await api.configureGoogle(payload);
       clearSecretDrafts();
-      setConfigOpen(false);
+      clearPendingGoogleFlow(cacheKey);
+      flowGenRef.current += 1;
+      setActiveFlow(null);
       setStatus(updated);
       await loadAll({ silent: true });
 
       const tail = maskClientId(updated?.client?.clientId);
       const hasAccounts = (updated?.accounts ?? accounts).length > 0;
+      userPickedSectionRef.current = true;
+      setSection('accounts');
       setBanner({
         tone: 'ok',
         text: tail
-          ? t(`中心 Google 应用已加密保存（Web Client · ${tail}）。出于安全原因，Client Secret 已清空，不再回显也不支持导出。`, `Center Google app saved encrypted (Web Client · ${tail}). Client Secret has been cleared and cannot be viewed or exported.`)
-          : t('中心 Google 应用已加密保存。出于安全原因，Client Secret 已清空，不再回显也不支持导出。', 'Center Google app saved encrypted. Client Secret has been cleared and cannot be viewed or exported.'),
+          ? t(`中心 Google 客户端已加密保存（Web Client ${tail}），Client Secret 已从界面清空。`, `Center Google client saved encrypted (Web Client ${tail}). Client Secret has been cleared.`)
+          : t('中心 Google 客户端已加密保存，Client Secret 已从界面清空。', 'Center Google client saved encrypted. Client Secret has been cleared.'),
         ...(!hasAccounts
           ? {
-              actionLabel: t('继续：登录你的 Google 账号', 'Next: Sign in to Google'),
+              actionLabel: t('连接 Google 账号', 'Connect Google account'),
               onAction: () => openConnectModal(null),
             }
           : {}),
       });
     } catch (err) {
+      const detail = errorMessage(err, t('中心拒绝了客户端配置', 'Center rejected client credentials'));
       setConfigError(
-        errorMessage(err, t('保存中心 Google 应用配置失败', 'Failed to save Center Google app config')),
+        t(`保存 OAuth 客户端失败：${detail}。请核对凭据和重定向 URI 后重试。`, `Failed to save OAuth client: ${detail}. Verify credentials and redirect URI, then retry.`),
       );
     } finally {
       setConfigBusy(false);
@@ -816,7 +966,7 @@ export function GoogleTab({
         });
         if (gen !== flowGenRef.current) return;
 
-        const flow: ActiveAuthFlow = {
+        const flow: PendingGoogleFlow = {
           flowId: res.flowId,
           authorizationUrl: res.authorizationUrl,
           expiresAt: toIsoExpiresAt(res.expiresAt),
@@ -824,17 +974,19 @@ export function GoogleTab({
           choices: normalized,
           targetAccount,
         };
+        writePendingGoogleFlow(cacheKey, flow);
         setActiveFlow(flow);
-        setConnectOpen(false);
-        setConnectTargetAccount(null);
+        setModal(null);
+        userPickedSectionRef.current = true;
+        setSection('accounts');
 
         void openExternalUrl(res.authorizationUrl, onOpenExternalUrl).catch(() => {
           // URL remains accessible via the Reopen Browser button and fallback link box.
         });
       } catch (err) {
         if (gen !== flowGenRef.current) return;
-        const msg = errorMessage(err, t('发起 Google 授权失败', 'Failed to start Google authorization'));
-        if (connectOpen) {
+        const msg = errorMessage(err, t('发起 Google 授权失败，请检查 OAuth 客户端配置后重试', 'Failed to start Google authorization. Verify OAuth client settings and retry.'));
+        if (modalRef.current?.kind === 'connect') {
           setConnectError(msg);
         } else {
           setBanner({ tone: 'danger', text: msg });
@@ -843,22 +995,25 @@ export function GoogleTab({
         setConnectBusy(false);
       }
     },
-    [api, connectOpen, onOpenExternalUrl, t],
+    [api, cacheKey, onOpenExternalUrl, setBanner, t],
   );
 
   const handleCancelFlow = async () => {
-    if (!activeFlow) return;
+    if (!activeFlow || cancellingFlow) return;
     const flowId = activeFlow.flowId;
+    const flowSnapshot = activeFlow;
     setCancellingFlow(true);
     flowGenRef.current += 1;
+    clearPendingGoogleFlow(cacheKey, flowId);
     try {
       await api.cancelGoogleFlow({ flowId });
     } catch {
       // Even if server already expired/finished, stop waiting locally and refresh status.
     } finally {
+      clearPendingGoogleFlow(cacheKey, flowId);
       setCancellingFlow(false);
       setActiveFlow({
-        ...activeFlow,
+        ...flowSnapshot,
         phase: 'cancelled',
         error: t('已取消本次授权，原有有效连接未受影响。', 'Authorization cancelled. Existing connections were not affected.'),
       });
@@ -896,7 +1051,6 @@ export function GoogleTab({
       }
     } catch (err) {
       if (isTransientNetworkError(err)) {
-        // Transient outage must NOT clear tokens or degrade to reconnect_required.
         setTransientCheckErrors(prev => ({
           ...prev,
           [key]: errorMessage(
@@ -921,16 +1075,20 @@ export function GoogleTab({
   };
 
   // Remove account confirmation & separated local-remove vs Google-revoke report
+  const removeTargetAccount = modal?.kind === 'remove-account' ? modal.account : null;
+
   const affectedRulesForRemoveTarget = useMemo(() => {
-    if (!removeTarget) return [];
+    if (!removeTargetAccount) return [];
     return rules.filter(
-      r => r.account === removeTarget.email || (removeTarget.id && r.account === removeTarget.id),
+      r =>
+        r.account === removeTargetAccount.email ||
+        (removeTargetAccount.id && r.account === removeTargetAccount.id),
     );
-  }, [removeTarget, rules]);
+  }, [removeTargetAccount, rules]);
 
   const handleConfirmRemove = async () => {
-    if (!removeTarget) return;
-    const email = removeTarget.email;
+    if (!removeTargetAccount || removeBusy) return;
+    const email = removeTargetAccount.email;
     const requestedRevoke = removeRevoke;
     setRemoveBusy(true);
     setRemoveError('');
@@ -939,21 +1097,21 @@ export function GoogleTab({
         account: email,
         revoke: requestedRevoke,
       });
-      setRemoveTarget(null);
+      setModal(null);
       await loadAll({ silent: true });
 
       const revokeErr = res?.revokeError || res?.revokeWarning || null;
       if (!requestedRevoke) {
         setBanner({
           tone: 'info',
-          text: t(`已从本中心移除 ${email} 的本地凭据（未向 Google 撤权）。如需彻底断开第三方访问，请前往 Google 账号第三方连接页核实。`, `Removed ${email} locally from this Center (not revoked at Google). You can verify third-party access in your Google Account.`),
+          text: t(`已从本中心移除 ${email} 的本地凭据（未向 Google 撤权）。如需断开第三方访问，请前往 Google 第三方连接页核实。`, `Removed ${email} locally from this Center (not revoked at Google). You can verify third-party access in your Google Account.`),
           linkUrl: GOOGLE_CONNECTIONS_URL,
           linkLabel: t('打开 Google 第三方连接', 'Open Google connections'),
         });
       } else if (res?.revoked === false || revokeErr) {
         setBanner({
           tone: 'warn',
-          text: t(`本地凭据已删除，但向 Google 撤权失败${revokeErr ? `（${revokeErr}）` : ''}。请前往 Google 账号第三方连接手动确认撤销。`, `Local credentials were removed, but revoking access at Google failed${revokeErr ? ` (${revokeErr})` : ''}. Please revoke it manually in your Google Account.`),
+          text: t(`本地凭据已删除，但向 Google 撤权失败${revokeErr ? `（${revokeErr}）` : ''}。请前往 Google 账号手动确认撤销。`, `Local credentials were removed, but revoking access at Google failed${revokeErr ? ` (${revokeErr})` : ''}. Please revoke it manually in your Google Account.`),
           linkUrl: GOOGLE_CONNECTIONS_URL,
           linkLabel: t('前往 Google 手动撤权', 'Review in Google Account'),
         });
@@ -964,7 +1122,7 @@ export function GoogleTab({
         });
       }
     } catch (err) {
-      setRemoveError(errorMessage(err, t('移除账号失败', 'Failed to remove account')));
+      setRemoveError(errorMessage(err, t('移除账号失败，请重试', 'Failed to remove account. Please retry.')));
     } finally {
       setRemoveBusy(false);
     }
@@ -982,9 +1140,8 @@ export function GoogleTab({
     [botByKey, deviceById],
   );
 
-  const openCreateRuleDrawer = () => {
-    setEditingRule(null);
-    setRuleSource('gmail');
+  const openCreateRuleModal = () => {
+    setRuleSource(ruleSourceFilter === 'calendar' ? 'calendar' : 'gmail');
     setRuleBotKey(
       ruleBotFilter !== 'all'
         ? ruleBotFilter
@@ -1002,11 +1159,10 @@ export function GoogleTab({
     setRuleInstruction('');
     setRuleEnabled(true);
     setRuleFormError('');
-    setRuleDrawerOpen(true);
+    setModal({ kind: 'rule', editing: null });
   };
 
-  const openEditRuleDrawer = (rule: GoogleRule) => {
-    setEditingRule(rule);
+  const openEditRuleModal = (rule: GoogleRule) => {
     setRuleSource(rule.source);
     setRuleBotKey(botKey(rule.deviceId, rule.botId));
     setRuleAccount(rule.account);
@@ -1017,28 +1173,30 @@ export function GoogleTab({
     setRuleInstruction(rule.instruction);
     setRuleEnabled(rule.enabled);
     setRuleFormError('');
-    setRuleDrawerOpen(true);
+    setModal({ kind: 'rule', editing: rule });
   };
 
   const handleSaveRule = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (ruleBusy || modal?.kind !== 'rule') return;
     setRuleFormError('');
     const sep = ruleBotKey.indexOf('::');
     if (sep <= 0) {
-      setRuleFormError(t('请选择目标 Bot', 'Please choose a target Bot.'));
+      setRuleFormError(t('请选择目标 Bot 后保存', 'Choose a target Bot before saving.'));
       return;
     }
     const deviceId = ruleBotKey.slice(0, sep);
     const botId = ruleBotKey.slice(sep + 2);
     if (!ruleAccount.trim()) {
-      setRuleFormError(t('请选择 Google 账号', 'Please choose a Google account.'));
+      setRuleFormError(t('请选择要监听的 Google 账号', 'Choose a Google account to monitor.'));
       return;
     }
     if (!ruleInstruction.trim()) {
-      setRuleFormError(t('请填写触发指令', 'Please enter a trigger instruction.'));
+      setRuleFormError(t('请填写触发后交给 Bot 的指令', 'Enter the instruction for the Bot.'));
       return;
     }
     const minutes = parseCalendarMinutesBefore(ruleMinutesBefore);
+    const editingRule = modal.editing;
 
     const payload: GoogleRule = {
       ...(editingRule?.id ? { id: editingRule.id } : {}),
@@ -1062,18 +1220,19 @@ export function GoogleTab({
     setRuleBusy(true);
     try {
       await api.saveGoogleRule(payload);
-      setRuleDrawerOpen(false);
+      setModal(null);
       await loadRules(activeBots);
       setBanner({
         tone: 'ok',
         text: editingRule
-          ? t('自动触发规则已更新', 'Trigger rule updated')
+          ? t('邮件与日历规则已更新', 'Trigger rule updated')
           : ruleSource === 'gmail'
-            ? t('新邮件规则已保存（仅对开启后新到达的邮件生效，不回放历史收件箱）', 'New mail rule saved (applies only to new emails arriving after enabling).')
+            ? t('新邮件规则已保存（仅对开启后新到达的邮件生效）', 'New mail rule saved (applies only to newly arriving mail).')
             : t('会前提醒规则已保存', 'Pre-meeting rule saved'),
       });
     } catch (err) {
-      setRuleFormError(errorMessage(err, t('保存规则失败', 'Failed to save rule')));
+      const detail = errorMessage(err, t('中心未能保存规则', 'Center could not save the rule'));
+      setRuleFormError(t(`保存规则失败：${detail}。请检查表单项后重试。`, `Failed to save rule: ${detail}. Check the fields and retry.`));
     } finally {
       setRuleBusy(false);
     }
@@ -1093,17 +1252,23 @@ export function GoogleTab({
         tone: 'info',
         text: nextEnabled
           ? t('已启用该自动规则', 'Trigger rule resumed')
-          : t('已暂停该自动规则（不影响任何 Bot 主动使用 Google 账号）', 'Trigger rule paused (all Bots can still use Google on demand).'),
+          : t('已暂停该自动规则（不影响 Bot 主动使用 Google 工具）', 'Trigger rule paused (Bots can still use Google on demand).'),
       });
     } catch (err) {
-      setRulesError(errorMessage(err, t('更新规则状态失败', 'Failed to update rule')));
+      setRulesError(errorMessage(err, t('更新规则状态失败，请重试', 'Failed to update rule status. Please retry.')));
     } finally {
       setTogglingRuleId(null);
     }
   };
 
-  const handleDeleteRule = async (rule: GoogleRule) => {
-    if (!rule.id) return;
+  const handleConfirmDeleteRule = async () => {
+    if (modal?.kind !== 'confirm-delete-rule' || deletingRule) return;
+    const rule = modal.rule;
+    if (!rule.id) {
+      setModal(null);
+      return;
+    }
+    setDeletingRule(true);
     setRulesError('');
     try {
       await api.removeGoogleRule({
@@ -1111,20 +1276,27 @@ export function GoogleTab({
         deviceId: rule.deviceId,
         botId: rule.botId,
       });
+      setModal(null);
       await loadRules(activeBots);
       setBanner({
         tone: 'info',
         text: t('已删除自动触发规则', 'Trigger rule deleted'),
       });
     } catch (err) {
-      setRulesError(errorMessage(err, t('删除规则失败', 'Failed to delete rule')));
+      setModal(null);
+      setRulesError(errorMessage(err, t('删除规则失败，请重试', 'Failed to delete rule. Please retry.')));
+    } finally {
+      setDeletingRule(false);
     }
   };
 
   const filteredRules = useMemo(() => {
-    if (ruleBotFilter === 'all') return rules;
-    return rules.filter(r => botKey(r.deviceId, r.botId) === ruleBotFilter);
-  }, [rules, ruleBotFilter]);
+    return rules.filter(r => {
+      if (ruleSourceFilter !== 'all' && r.source !== ruleSourceFilter) return false;
+      if (ruleBotFilter !== 'all' && botKey(r.deviceId, r.botId) !== ruleBotFilter) return false;
+      return true;
+    });
+  }, [rules, ruleBotFilter, ruleSourceFilter]);
 
   const handleCopyWithFeedback = async (key: string, value: string) => {
     const ok = await copyToClipboard(value);
@@ -1143,8 +1315,7 @@ export function GoogleTab({
     return (
       <div className="ca-form-stack">
         <CaCardSkeleton height={60} subbar label={t('正在加载 Google Workspace…', 'Loading Google Workspace…')} />
-        <CaSectionSkeleton rows={2} headWidth={156} trailingWidth={104} />
-        <CaSectionSkeleton rows={2} headWidth={184} trailingWidth={96} />
+        <CaSectionSkeleton rows={3} headWidth={156} trailingWidth={104} />
       </div>
     );
   }
@@ -1218,6 +1389,11 @@ export function GoogleTab({
     status?.clientKey === 'gone';
   const clientConfigured = Boolean(client.configured);
   const clientIdTail = maskClientId(client.clientId);
+  const clientTone: 'ok' | 'warn' | 'danger' | 'muted' = clientInvalid
+    ? 'danger'
+    : clientConfigured
+      ? 'ok'
+      : 'warn';
 
   const selectedWizardBot = activeBots.find(
     b => botKey(b.deviceId, b.botId) === wizardTargetBotKey,
@@ -1226,6 +1402,8 @@ export function GoogleTab({
     ? deviceById.get(selectedWizardBot.deviceId) ?? null
     : null;
   const canJumpToBotWizard = Boolean(onStartGoogleSetupWizard || onConfigureBot);
+
+  const connectTargetAccount = modal?.kind === 'connect' ? modal.targetAccount : null;
 
   const toggleServiceChoice = (choice: GoogleServiceChoice, lockedIncluded: boolean) => {
     if (lockedIncluded) return;
@@ -1241,883 +1419,991 @@ export function GoogleTab({
     <div>
       <CaRefreshBar active={refreshing} />
 
-      {/* 1. Center Web OAuth Application Card */}
-      <section className="ca-section" aria-labelledby="ca-google-app-heading">
-        <div className="ca-default-card ca-wrap">
-          <div className="ca-row-main">
-            <div className="ca-row-title">
-              <KeyRound size={15} aria-hidden="true" />
-              <span id="ca-google-app-heading">
-                {t('中心 Google 应用（Web OAuth）', 'Center Google App (Web OAuth)')}
-              </span>
-              {clientInvalid ? (
-                <span className="ca-pill ca-pill-danger">{t('应用凭据无效', 'Invalid client')}</span>
-              ) : clientConfigured ? (
-                <span className="ca-pill ca-pill-ok">
-                  {clientIdTail
-                    ? t(`已配置 · Web Client ${clientIdTail}`, `Configured · Web Client ${clientIdTail}`)
-                    : t('已配置', 'Configured')}
-                </span>
-              ) : (
-                <span className="ca-pill ca-pill-muted">{t('未配置', 'Not configured')}</span>
-              )}
-              {client.projectId && (
-                <span className="ca-pill ca-pill-muted ca-mono">{client.projectId}</span>
-              )}
-            </div>
-            <span className="ca-row-sub">
-              {clientConfigured
-                ? t('由中心统一加密托管，Client Secret 永不回显也不支持导出。下方已连接账号对本中心所有现有和未来 Bot 默认可用，无需逐 Bot 开启。', 'Encrypted in Center storage; Client Secret is never shown or exported. Connected accounts below are shared across all current and future Bots with no per-Bot switches.')
-                : t('只需在中心配置一次 Web OAuth 应用，所有主机上的 Bot 都可复用，无需在每台设备重复导入密钥文件。', 'Configure one Web OAuth app in Center and every Bot across your hosts can reuse it—no per-machine key files.')}
-            </span>
-          </div>
+      {/* Top 3-section segmented navigation */}
+      <div className="ca-toolbar">
+        <CaSegmented<GoogleSection>
+          value={section}
+          onChange={switchSection}
+          ariaLabel={t('Google Workspace 分区', 'Google Workspace sections')}
+          options={[
+            { value: 'accounts', label: t('账号与授权', 'Accounts') },
+            { value: 'rules', label: t('邮件与日历规则', 'Rules') },
+            { value: 'client', label: t('OAuth 客户端', 'OAuth Client') },
+          ]}
+        />
 
-          <div className="ca-row-actions ca-wrap">
-            {!clientConfigured ? (
-              <>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-primary ca-btn-sm"
-                  onClick={openConfigureDrawer}
-                >
-                  <Lock size={13} aria-hidden="true" />
-                  <span>{t('录入 Web OAuth 凭据', 'Enter Web OAuth credentials')}</span>
-                </button>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  onClick={() => setWizardOpen(true)}
-                >
-                  <Bot size={13} aria-hidden="true" />
-                  <span>{t('通过目标 Bot 向导创建', 'Guided setup via Bot')}</span>
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-primary ca-btn-sm"
-                  disabled={activeFlow?.phase === 'pending'}
-                  onClick={() => openConnectModal(null)}
-                >
-                  <Plus size={13} aria-hidden="true" />
-                  <span>{t('连接 Google 账号', 'Connect Google account')}</span>
-                </button>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  onClick={openConfigureDrawer}
-                >
-                  <Settings2 size={13} aria-hidden="true" />
-                  <span>{t('更换凭据', 'Rotate credentials')}</span>
-                </button>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-ghost ca-btn-icon"
-                  disabled={refreshing}
-                  aria-label={t('刷新 Google 状态', 'Refresh Google status')}
-                  title={t('刷新', 'Refresh')}
-                  onClick={() => void loadAll({ silent: true })}
-                >
-                  <RefreshCw size={15} className={refreshing ? 'ca-spin' : undefined} aria-hidden="true" />
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Redirect URI row + invalid client alert */}
-        <div className="ca-google-subbar">
-          <div className="ca-google-redirect-line">
-            <span className="ca-muted">
-              {t('已授权的重定向 URI', 'Authorized redirect URI')}
-              {redirectInfo.isPreview ? t('（参考）', ' (preview)') : ''}
-            </span>
-            <code className="ca-mono ca-google-uri">{redirectInfo.uri}</code>
-            <CopyButton value={redirectInfo.uri} label={t('复制 URI', 'Copy URI')} />
-          </div>
-          {clientInvalid && (
-            <p className="ca-error-text" role="alert" style={{ marginTop: 8 }}>
-              {client.error ||
-                t('Google 已无法识别当前 Web OAuth 应用（可能已在 Cloud Console 中被删除或停用）。请更换有效凭据后重新连接账号。', 'Google no longer recognizes this Web OAuth client. Rotate to valid credentials and reconnect accounts.')}
-            </p>
-          )}
-        </div>
-      </section>
-
-      {/* 2. Active System Browser Authorization Flow Banner */}
-      {activeFlow && (
-        <section className="ca-section ca-oauth-card smooth-expand-mount" aria-live="polite">
-          <div className="ca-oauth-head">
-            <div className="ca-oauth-head-main">
-              <div className="ca-row-title">
-                {activeFlow.phase === 'pending' ? (
-                  <>
-                    <Loader2 size={15} aria-hidden="true" className="ca-spin" />
-                    <span>{t('等待系统浏览器完成 Google 授权', 'Waiting for Google sign-in in system browser')}</span>
-                    <span className="ca-pill ca-pill-info ca-num">
-                      {t('剩余', 'Left')} {formatCountdown(activeFlow.expiresAt, nowMs)}
-                    </span>
-                  </>
-                ) : activeFlow.phase === 'cancelled' ? (
-                  <>
-                    <AlertCircle size={15} aria-hidden="true" />
-                    <span>{t('已取消此次授权', 'Authorization cancelled')}</span>
-                  </>
-                ) : (
-                  <>
-                    <AlertTriangle size={15} aria-hidden="true" />
-                    <span>{t('授权未完成', 'Authorization did not finish')}</span>
-                  </>
-                )}
-              </div>
-              <p className="ca-oauth-hint" style={{ margin: '4px 0 0' }}>
-                {activeFlow.phase === 'pending'
-                  ? t('请在刚打开的系统浏览器中完成 Google 登录、MFA 验证与权限同意。授权完成后会自动回流，无需复制回调地址到聊天。', 'Complete Google sign-in, MFA, and consent in your system browser. This page refreshes automatically—never paste callback URLs into chat.')
-                  : activeFlow.error}
-              </p>
-              <div className="ca-muted" style={{ marginTop: 4 }}>
-                {activeFlow.targetAccount ? `${activeFlow.targetAccount} · ` : ''}
-                {activeFlow.choices.map(c => googleChoiceShortLabel(c, t)).join(' · ')}
-              </div>
-            </div>
-
-            <div className="ca-row-actions ca-wrap">
-              {activeFlow.phase === 'pending' ? (
-                <>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-sm"
-                    onClick={() =>
-                      void openExternalUrl(activeFlow.authorizationUrl, onOpenExternalUrl)
-                    }
-                  >
-                    <ExternalLink size={13} aria-hidden="true" />
-                    <span>{t('重新打开浏览器', 'Reopen browser')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-ghost ca-btn-sm"
-                    disabled={cancellingFlow}
-                    onClick={() => void handleCancelFlow()}
-                  >
-                    <LabelStack
-                      active={cancellingFlow ? t('正在取消…', 'Cancelling…') : t('取消', 'Cancel')}
-                      labels={[t('取消', 'Cancel'), t('正在取消…', 'Cancelling…')]}
-                    />
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-primary ca-btn-sm"
-                    onClick={() =>
-                      void startAuthorize(activeFlow.choices, activeFlow.targetAccount)
-                    }
-                  >
-                    {t('重新开始', 'Try again')}
-                  </button>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-ghost ca-btn-sm"
-                    onClick={() => setActiveFlow(null)}
-                  >
-                    {t('关闭', 'Dismiss')}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {activeFlow.phase === 'pending' && (
-            <CaDisclosure title={t('浏览器未自动弹出？手动打开授权链接', 'Browser did not open? Copy or open link')}>
-              <CaExternalUrlBox
-                url={activeFlow.authorizationUrl}
-                onOpenUrl={onOpenExternalUrl}
-                copyLabel={t('复制链接', 'Copy link')}
-              />
-            </CaDisclosure>
-          )}
-        </section>
-      )}
-
-      {/* 3. Shared Google Accounts Section */}
-      <section className="ca-section" aria-labelledby="ca-google-accounts-heading">
-        <div className="ca-section-head">
-          <div>
-            <h3 id="ca-google-accounts-heading" className="ca-section-title">
-              {t('共享 Google 账号', 'Shared Google Accounts')}
-              {accounts.length > 0 ? ` (${accounts.length})` : ''}
-            </h3>
-            <div className="ca-muted" style={{ marginTop: 2 }}>
-              {accounts.length === 0
-                ? t('连接后，本中心现在和以后创建的所有 Bot 都可使用已就绪的 Google 服务。', 'Once connected, all current and future Bots on this Center can use ready Google services.')
-                : accounts.length === 1
-                  ? t('当前 1 个共享账号，所有 Bot 默认使用此账号，无需逐 Bot 分配或开关。', '1 shared account: all Bots use it by default with no per-Bot toggles.')
-                  : t(`当前 ${accounts.length} 个共享账号，所有 Bot 均可使用。请求未指明账号时，Bot 会先确认这次用哪个账号，不会随意切换。`, `${accounts.length} shared accounts available to all Bots. When unspecified, Bots ask which account to use instead of guessing.`)}
-            </div>
-          </div>
-
-          {clientConfigured && (
+        <div className="ca-toolbar-group">
+          {section === 'accounts' && clientConfigured && (
             <button
               type="button"
-              className="ca-btn ca-btn-sm"
+              className="ca-btn ca-btn-primary ca-btn-sm"
               disabled={activeFlow?.phase === 'pending'}
               onClick={() => openConnectModal(null)}
             >
               <Plus size={13} aria-hidden="true" />
-              <span>{accounts.length === 0 ? t('连接账号', 'Connect account') : t('添加其他账号', 'Add another account')}</span>
+              <span>{t('连接 Google 账号', 'Connect account')}</span>
             </button>
           )}
+          {section === 'rules' && !rulesUnavailable && (
+            <button
+              type="button"
+              className="ca-btn ca-btn-primary ca-btn-sm"
+              disabled={accounts.length === 0 || activeBots.length === 0}
+              onClick={openCreateRuleModal}
+            >
+              <Plus size={13} aria-hidden="true" />
+              <span>{t('新建规则', 'New rule')}</span>
+            </button>
+          )}
+          {section === 'client' && (
+            <button
+              type="button"
+              className="ca-btn ca-btn-sm"
+              onClick={() => setModal({ kind: 'wizard' })}
+            >
+              <Bot size={13} aria-hidden="true" />
+              <span>{t('Bot 建项向导', 'Bot Setup Wizard')}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="ca-btn ca-btn-ghost ca-btn-icon"
+            disabled={refreshing}
+            aria-label={t('刷新 Google 状态', 'Refresh Google status')}
+            title={t('刷新', 'Refresh')}
+            onClick={() => void loadAll({ silent: true })}
+          >
+            <RefreshCw size={15} className={refreshing ? 'ca-spin' : undefined} aria-hidden="true" />
+          </button>
         </div>
+      </div>
 
-        {accounts.length === 0 ? (
-          <div className="ca-empty">
-            {clientConfigured ? (
-              <div className="ca-google-empty-stack">
-                <p style={{ margin: 0 }}>
-                  {t('尚未连接 Google 账号。使用本人系统浏览器完成授权后，所有 Bot 立即可用。', 'No Google account connected yet. Authorize in your system browser to make Google services available to all Bots.')}
-                </p>
-                <div className="ca-inline-row" style={{ justifyContent: 'center' }}>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-primary ca-btn-sm"
-                    disabled={activeFlow?.phase === 'pending'}
-                    onClick={() => openConnectModal(null)}
-                  >
-                    <Globe size={14} aria-hidden="true" />
-                    <span>{t('前往 Google 登录', 'Sign in to Google')}</span>
-                  </button>
+      {/* SECTION 1: Accounts & Authorization */}
+      {section === 'accounts' && (
+        <div className="ca-form-stack">
+          {/* Compact OAuth Client Live Readiness Row */}
+          <section className="ca-section" aria-label={t('OAuth 客户端状态', 'OAuth client status')}>
+            <div className="ca-row">
+              <div className="ca-row-main">
+                <div className="ca-row-title">
+                  <StatusDot tone={clientTone} />
+                  <span>{t('OAuth 客户端', 'OAuth Client')}</span>
+                  {clientInvalid ? (
+                    <span className="ca-pill ca-pill-danger">{t('凭据无效', 'Invalid')}</span>
+                  ) : clientConfigured ? (
+                    <span className="ca-pill ca-pill-ok">{t('已配置', 'Configured')}</span>
+                  ) : (
+                    <span className="ca-pill ca-pill-warn">{t('未配置', 'Not configured')}</span>
+                  )}
+                  {client.projectId && (
+                    <span className="ca-pill ca-pill-muted ca-mono">{client.projectId}</span>
+                  )}
                 </div>
+                <span className="ca-row-sub">
+                  {clientInvalid
+                    ? client.error || t('Google 已无法识别此客户端，请更换有效凭据后重新连接账号', 'Google no longer recognizes this client. Update credentials and reconnect accounts.')
+                    : clientConfigured
+                      ? `${clientIdTail ? `Web Client ${clientIdTail} · ` : ''}${
+                          activeBots.length > 0
+                            ? t(`已连接账号默认对全部 ${activeBots.length} 个活跃 Bot 开放`, `Connected accounts are shared across all ${activeBots.length} active Bots`)
+                            : t('已连接账号默认对本中心所有 Bot 开放', 'Connected accounts are shared across all Bots on this Center')
+                        }`
+                      : t('请先在「OAuth 客户端」页面配置中心 Web OAuth 凭据', 'Set up your Web OAuth credentials in the OAuth Client section first')}
+                </span>
+              </div>
+              <div className="ca-row-actions">
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-sm"
+                  onClick={() => switchSection('client')}
+                >
+                  <Settings2 size={13} aria-hidden="true" />
+                  <span>{t('修改客户端', 'Edit client')}</span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {/* Active System Browser OAuth Progress */}
+          {activeFlow && (
+            <section className="ca-section ca-oauth-card smooth-expand-mount" aria-live="polite">
+              <div className="ca-oauth-head">
+                <div className="ca-oauth-head-main">
+                  <div className="ca-row-title">
+                    {activeFlow.phase === 'pending' ? (
+                      <>
+                        <Loader2 size={15} aria-hidden="true" className="ca-spin" />
+                        <span>{t('等待系统浏览器完成 Google 授权', 'Waiting for Google sign-in in system browser')}</span>
+                        <span className="ca-pill ca-pill-info ca-num">
+                          {t('剩余', 'Left')} {formatCountdown(activeFlow.expiresAt, nowMs)}
+                        </span>
+                      </>
+                    ) : activeFlow.phase === 'cancelled' ? (
+                      <>
+                        <AlertCircle size={15} aria-hidden="true" />
+                        <span>{t('已取消此次授权', 'Authorization cancelled')}</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle size={15} aria-hidden="true" />
+                        <span>{t('授权未完成', 'Authorization did not finish')}</span>
+                      </>
+                    )}
+                  </div>
+                  <p className="ca-oauth-hint" style={{ margin: '4px 0 0' }}>
+                    {activeFlow.phase === 'pending'
+                      ? t('请在系统浏览器中完成登录、MFA 验证与权限同意，完成后本页会自动刷新。', 'Complete Google sign-in, MFA, and consent in your system browser. This page refreshes automatically.')
+                      : activeFlow.error}
+                  </p>
+                  <div className="ca-muted" style={{ marginTop: 4 }}>
+                    {activeFlow.targetAccount ? `${activeFlow.targetAccount} · ` : ''}
+                    {activeFlow.choices.map(c => googleChoiceShortLabel(c, t)).join(' · ')}
+                  </div>
+                </div>
+
+                <div className="ca-row-actions ca-wrap">
+                  {activeFlow.phase === 'pending' ? (
+                    <>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-sm"
+                        onClick={() =>
+                          void openExternalUrl(activeFlow.authorizationUrl, onOpenExternalUrl)
+                        }
+                      >
+                        <ExternalLink size={13} aria-hidden="true" />
+                        <span>{t('重新打开浏览器', 'Reopen browser')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-ghost ca-btn-sm"
+                        disabled={cancellingFlow}
+                        onClick={() => void handleCancelFlow()}
+                      >
+                        <LabelStack
+                          active={cancellingFlow ? t('正在取消…', 'Cancelling…') : t('取消授权', 'Cancel')}
+                          labels={[t('取消授权', 'Cancel'), t('正在取消…', 'Cancelling…')]}
+                        />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-primary ca-btn-sm"
+                        onClick={() =>
+                          void startAuthorize(activeFlow.choices, activeFlow.targetAccount)
+                        }
+                      >
+                        {t('重新开始', 'Try again')}
+                      </button>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-ghost ca-btn-sm"
+                        onClick={() => {
+                          clearPendingGoogleFlow(cacheKey, activeFlow.flowId);
+                          setActiveFlow(null);
+                        }}
+                      >
+                        {t('关闭', 'Dismiss')}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {activeFlow.phase === 'pending' && (
+                <CaDisclosure title={t('浏览器未自动弹出？手动打开授权链接', 'Browser did not open? Copy or open link')}>
+                  <CaExternalUrlBox
+                    url={activeFlow.authorizationUrl}
+                    onOpenUrl={onOpenExternalUrl}
+                    copyLabel={t('复制链接', 'Copy link')}
+                  />
+                </CaDisclosure>
+              )}
+            </section>
+          )}
+
+          {/* Connected Google Accounts */}
+          <section className="ca-section" aria-labelledby="ca-google-accounts-heading">
+            <div className="ca-section-head">
+              <div>
+                <h3 id="ca-google-accounts-heading" className="ca-section-title">
+                  {t('已连接账号与 Bot 共享授权', 'Connected Accounts & Bot Access')}
+                  {accounts.length > 0 ? ` (${accounts.length})` : ''}
+                </h3>
+                <div className="ca-muted" style={{ marginTop: 2 }}>
+                  {accounts.length <= 1
+                    ? t('所有已连接账号自动共享给本中心全部 Bot，无需逐个 Bot 开关。', 'Connected accounts are shared with every Bot on this Center automatically.')
+                    : t(`当前 ${accounts.length} 个共享账号，所有 Bot 均可使用；任务未指定账号时 Bot 会先向你确认。`, `${accounts.length} shared accounts available to all Bots; when unspecified, Bots ask which account to use.`)}
+                </div>
+              </div>
+              {clientConfigured && accounts.length > 0 && (
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-sm"
+                  disabled={activeFlow?.phase === 'pending'}
+                  onClick={() => openConnectModal(null)}
+                >
+                  <Plus size={13} aria-hidden="true" />
+                  <span>{t('添加账号', 'Add account')}</span>
+                </button>
+              )}
+            </div>
+
+            {accounts.length === 0 ? (
+              <div className="ca-empty">
+                {clientConfigured ? (
+                  <div className="ca-google-empty-stack">
+                    <p style={{ margin: 0 }}>
+                      {t('尚未连接 Google 账号。在系统浏览器完成登录后，本中心所有 Bot 立即可使用已就绪服务。', 'No Google account connected yet. Sign in via your system browser to enable Google services for all Bots.')}
+                    </p>
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-primary ca-btn-sm"
+                      disabled={activeFlow?.phase === 'pending'}
+                      onClick={() => openConnectModal(null)}
+                    >
+                      <Globe size={14} aria-hidden="true" />
+                      <span>{t('前往 Google 登录', 'Sign in to Google')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="ca-google-empty-stack">
+                    <p style={{ margin: 0 }}>
+                      {t('请先配置中心 OAuth 客户端，再连接 Google 账号。', 'Configure the Center OAuth client before connecting a Google account.')}
+                    </p>
+                    <div className="ca-inline-row ca-wrap" style={{ justifyContent: 'center' }}>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-primary ca-btn-sm"
+                        onClick={() => switchSection('client')}
+                      >
+                        {t('配置 OAuth 客户端', 'Configure OAuth Client')}
+                      </button>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-sm"
+                        onClick={() => setModal({ kind: 'wizard' })}
+                      >
+                        {t('通过 Bot 向导创建', 'Guided setup via Bot')}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="ca-google-empty-stack">
-                <p style={{ margin: 0 }}>
-                  {t('请先配置中心 Google Web OAuth 应用，再通过系统浏览器连接你的 Google 账号。', 'Configure the Center Google Web OAuth app first, then sign in with your Google account in your system browser.')}
-                </p>
-                <div className="ca-inline-row ca-wrap" style={{ justifyContent: 'center' }}>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-primary ca-btn-sm"
-                    onClick={openConfigureDrawer}
-                  >
-                    {t('我已有凭据，直接录入', 'Enter credentials directly')}
-                  </button>
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-sm"
-                    onClick={() => setWizardOpen(true)}
-                  >
-                    {t('选择目标 Bot 引导创建', 'Guided setup via Bot')}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="ca-list">
-            {accounts.map(account => {
-              const needsReconnect = isAccountReconnectRequired(account);
-              const transientErr =
-                transientCheckErrors[account.email] ||
-                (account.status === 'temp_error'
-                  ? account.error ||
-                    account.reason ||
-                    t('暂时无法连接 Google 验证状态', 'Temporarily unable to reach Google')
-                  : '');
-              const checking = checkingAccounts.has(account.email);
-              const readinessRows = buildReadinessRows(account.services ?? [], t);
-              const activeProblems = readinessRows.filter(
-                row =>
-                  row.state !== 'ready' &&
-                  !(row.state === 'needs-permission' && skippedServices[`${account.email}::${row.key}`]),
-              );
-              const existingChoices = canonicalChoices(account.choices ?? []);
-              const missingChoices = GOOGLE_SERVICE_CHOICES.filter(c => !existingChoices.includes(c));
-              const accountRuleCount = rules.filter(
-                r => r.account === account.email || (account.id && r.account === account.id),
-              ).length;
+              <div className="ca-list">
+                {accounts.map(account => {
+                  const needsReconnect = isAccountReconnectRequired(account);
+                  const transientErr =
+                    transientCheckErrors[account.email] ||
+                    (account.status === 'temp_error'
+                      ? account.error ||
+                        account.reason ||
+                        t('暂时无法连接 Google 验证状态', 'Temporarily unable to reach Google')
+                      : '');
+                  const checking = checkingAccounts.has(account.email);
+                  const readinessRows = buildReadinessRows(account.services ?? [], t);
+                  const activeProblems = readinessRows.filter(
+                    row =>
+                      row.state !== 'ready' &&
+                      !(row.state === 'needs-permission' && skippedServices[`${account.email}::${row.key}`]),
+                  );
+                  const existingChoices = canonicalChoices(account.choices ?? []);
+                  const missingChoices = GOOGLE_SERVICE_CHOICES.filter(c => !existingChoices.includes(c));
+                  const accountRuleCount = rules.filter(
+                    r => r.account === account.email || (account.id && r.account === account.id),
+                  ).length;
 
-              return (
-                <div key={account.id || account.email} className="ca-google-account">
-                  <div className="ca-google-account-head">
-                    <div className="ca-row-main">
-                      <div className="ca-row-title">
-                        <span>{account.email}</span>
-                        {needsReconnect ? (
-                          <span className="ca-pill ca-pill-danger">
-                            {t('需重连', 'Reconnect required')}
-                          </span>
-                        ) : transientErr ? (
-                          <span className="ca-pill ca-pill-warn">
-                            {t('暂时不可达', 'Temporarily unreachable')}
-                          </span>
-                        ) : activeProblems.length > 0 ? (
-                          <span className="ca-pill ca-pill-warn">
-                            {t(`已连接 · ${activeProblems.length} 项待处理`, `Connected · ${activeProblems.length} to fix`)}
-                          </span>
-                        ) : (
-                          <span className="ca-pill ca-pill-ok">{t('已连接', 'Connected')}</span>
-                        )}
-                      </div>
-                      <span className="ca-row-sub">
-                        {t('所有 Bot 共用', 'Shared by all Bots')}
-                        {accountRuleCount > 0
-                          ? t(` · 关联 ${accountRuleCount} 条自动规则`, ` · ${accountRuleCount} rule(s)`)
-                          : ''}
-                        {account.checkedAt
-                          ? t(` · 上次检查 ${formatTime(account.checkedAt, locale)}`, ` · Checked ${formatTime(account.checkedAt, locale)}`)
-                          : ''}
-                      </span>
-                    </div>
+                  const accountTone: 'ok' | 'warn' | 'danger' = needsReconnect
+                    ? 'danger'
+                    : transientErr || activeProblems.length > 0
+                      ? 'warn'
+                      : 'ok';
 
-                    <div className="ca-row-actions ca-wrap">
-                      {needsReconnect ? (
-                        <button
-                          type="button"
-                          className="ca-btn ca-btn-primary ca-btn-sm"
-                          disabled={activeFlow?.phase === 'pending' || !clientConfigured}
-                          onClick={() =>
-                            void startAuthorize(
-                              existingChoices.length > 0 ? existingChoices : ['gmail', 'calendar', 'files'],
-                              account.email,
-                            )
-                          }
-                        >
-                          <RefreshCw size={13} aria-hidden="true" />
-                          <span>{t('重新连接', 'Reconnect')}</span>
-                        </button>
-                      ) : transientErr ? (
-                        <button
-                          type="button"
-                          className="ca-btn ca-btn-sm"
-                          disabled={checking}
-                          onClick={() => void handleCheckAccount(account)}
-                        >
-                          <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
-                          <LabelStack
-                            active={checking ? t('检查中…', 'Checking…') : t('重试检查', 'Retry check')}
-                            labels={[t('重试检查', 'Retry check'), t('检查中…', 'Checking…')]}
-                          />
-                        </button>
-                      ) : (
-                        <>
-                          {missingChoices.length > 0 && (
+                  return (
+                    <div key={account.id || account.email} className="ca-google-account">
+                      <div className="ca-google-account-head">
+                        <div className="ca-row-main">
+                          <div className="ca-row-title">
+                            <StatusDot tone={accountTone} />
+                            <span>{account.email}</span>
+                            {needsReconnect ? (
+                              <span className="ca-pill ca-pill-danger">{t('需重连', 'Reconnect required')}</span>
+                            ) : transientErr ? (
+                              <span className="ca-pill ca-pill-warn">{t('暂时不可达', 'Temporarily unreachable')}</span>
+                            ) : activeProblems.length > 0 ? (
+                              <span className="ca-pill ca-pill-warn">
+                                {t(`${activeProblems.length} 项待处理`, `${activeProblems.length} to fix`)}
+                              </span>
+                            ) : (
+                              <span className="ca-pill ca-pill-ok">{t('已就绪', 'Ready')}</span>
+                            )}
+                          </div>
+                          <span className="ca-row-sub">
+                            {activeBots.length > 0
+                              ? t(`已授权全部 ${activeBots.length} 个 Bot`, `Granted to all ${activeBots.length} Bots`)
+                              : t('所有 Bot 共用', 'Shared by all Bots')}
+                            {accountRuleCount > 0
+                              ? t(` · ${accountRuleCount} 条规则`, ` · ${accountRuleCount} rule(s)`)
+                              : ''}
+                            {account.checkedAt
+                              ? t(` · 上次检查 ${formatTime(account.checkedAt, locale)}`, ` · Checked ${formatTime(account.checkedAt, locale)}`)
+                              : ''}
+                          </span>
+                        </div>
+
+                        <div className="ca-row-actions ca-wrap">
+                          {needsReconnect ? (
+                            <button
+                              type="button"
+                              className="ca-btn ca-btn-primary ca-btn-sm"
+                              disabled={activeFlow?.phase === 'pending' || !clientConfigured}
+                              onClick={() =>
+                                void startAuthorize(
+                                  existingChoices.length > 0 ? existingChoices : ['gmail', 'calendar', 'files'],
+                                  account.email,
+                                )
+                              }
+                            >
+                              <RefreshCw size={13} aria-hidden="true" />
+                              <span>{t('重新连接', 'Reconnect')}</span>
+                            </button>
+                          ) : transientErr ? (
                             <button
                               type="button"
                               className="ca-btn ca-btn-sm"
-                              disabled={activeFlow?.phase === 'pending'}
-                              onClick={() => openConnectModal(account)}
+                              disabled={checking}
+                              onClick={() => void handleCheckAccount(account)}
                             >
-                              <Plus size={13} aria-hidden="true" />
-                              <span>{t('添加服务', 'Add services')}</span>
+                              <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
+                              <LabelStack
+                                active={checking ? t('检查中…', 'Checking…') : t('重试检查', 'Retry check')}
+                                labels={[t('重试检查', 'Retry check'), t('检查中…', 'Checking…')]}
+                              />
                             </button>
+                          ) : (
+                            <>
+                              {missingChoices.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="ca-btn ca-btn-sm"
+                                  disabled={activeFlow?.phase === 'pending'}
+                                  onClick={() => openConnectModal(account)}
+                                >
+                                  <Plus size={13} aria-hidden="true" />
+                                  <span>{t('添加服务', 'Add services')}</span>
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="ca-btn ca-btn-ghost ca-btn-sm"
+                                disabled={checking}
+                                onClick={() => void handleCheckAccount(account)}
+                              >
+                                <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
+                                <LabelStack
+                                  active={checking ? t('检查中…', 'Checking…') : t('检查状态', 'Check')}
+                                  labels={[t('检查状态', 'Check'), t('检查中…', 'Checking…')]}
+                                />
+                              </button>
+                            </>
                           )}
-                          <button
-                            type="button"
-                            className="ca-btn ca-btn-ghost ca-btn-sm"
-                            disabled={checking}
-                            onClick={() => void handleCheckAccount(account)}
-                          >
-                            <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
-                            <LabelStack
-                              active={checking ? t('检查中…', 'Checking…') : t('重新检查', 'Check')}
-                              labels={[t('重新检查', 'Check'), t('检查中…', 'Checking…')]}
-                            />
-                          </button>
-                        </>
+
+                          <ActionMenu
+                            items={[
+                              {
+                                label: t('重新检查服务', 'Check services'),
+                                disabled: checking,
+                                onSelect: () => void handleCheckAccount(account),
+                              },
+                              {
+                                label: t('管理服务 / 补充授权', 'Manage / add services'),
+                                disabled: activeFlow?.phase === 'pending' || !clientConfigured,
+                                onSelect: () => openConnectModal(account),
+                              },
+                              {
+                                label: t('重新连接账号', 'Reconnect account'),
+                                disabled: activeFlow?.phase === 'pending' || !clientConfigured,
+                                onSelect: () =>
+                                  void startAuthorize(
+                                    existingChoices.length > 0 ? existingChoices : ['gmail', 'calendar', 'files'],
+                                    account.email,
+                                  ),
+                              },
+                              {
+                                label: t('移除账号…', 'Remove account…'),
+                                danger: true,
+                                onSelect: () => {
+                                  setRemoveRevoke(true);
+                                  setRemoveError('');
+                                  setModal({ kind: 'remove-account', account });
+                                },
+                              },
+                            ]}
+                          />
+                        </div>
+                      </div>
+
+                      {needsReconnect && (
+                        <div className="ca-google-account-alert is-danger" role="alert">
+                          <AlertTriangle size={14} aria-hidden="true" />
+                          <span>
+                            {account.reason ||
+                              account.error ||
+                              t('Google 授权已失效或被撤销，依赖此账号的自动规则已暂停。请点击「重新连接」完成授权。', 'Google authorization expired or was revoked. Dependent rules are paused. Click Reconnect to restore access.')}
+                          </span>
+                        </div>
                       )}
 
-                      <ActionMenu
-                        items={[
-                          {
-                            label: t('重新检查服务', 'Check services'),
-                            disabled: checking,
-                            onSelect: () => void handleCheckAccount(account),
-                          },
-                          {
-                            label: t('管理服务 / 补充授权', 'Manage / add services'),
-                            disabled: activeFlow?.phase === 'pending' || !clientConfigured,
-                            onSelect: () => openConnectModal(account),
-                          },
-                          {
-                            label: t('重新连接账号', 'Reconnect account'),
-                            disabled: activeFlow?.phase === 'pending' || !clientConfigured,
-                            onSelect: () =>
-                              void startAuthorize(
-                                existingChoices.length > 0 ? existingChoices : ['gmail', 'calendar', 'files'],
-                                account.email,
-                              ),
-                          },
-                          {
-                            label: t('���除账号…', 'Remove account…'),
-                            danger: true,
-                            onSelect: () => {
-                              setRemoveTarget(account);
-                              setRemoveRevoke(true);
-                              setRemoveError('');
-                            },
-                          },
-                        ]}
-                      />
-                    </div>
-                  </div>
+                      {!needsReconnect && transientErr && (
+                        <div className="ca-google-account-alert is-warn" role="status">
+                          <AlertCircle size={14} aria-hidden="true" />
+                          <span>{transientErr}</span>
+                        </div>
+                      )}
 
-                  {needsReconnect && (
-                    <div className="ca-google-account-alert is-danger" role="alert">
-                      <AlertTriangle size={14} aria-hidden="true" />
-                      <span>
-                        {account.reason ||
-                          account.error ||
-                          t('Google 授权已失效或被撤销，依赖此账号的自动规则已暂停。请由本人点击「重新连接」完成授权（不会覆盖其他账号）。', 'Google authorization expired or was revoked. Dependent trigger rules are paused. Click Reconnect as the account owner.')}
-                      </span>
-                    </div>
-                  )}
+                      {/* Per-service readiness rows with readiness dots */}
+                      {readinessRows.length > 0 && (
+                        <div className="ca-google-services" role="list" aria-label={t('服务就绪度', 'Service readiness')}>
+                          {readinessRows.map(row => {
+                            const skipKey = `${account.email}::${row.key}`;
+                            const isSkipped = Boolean(skippedServices[skipKey]);
+                            const badge = readinessBadgeMeta(row.state, isSkipped, t);
+                            const copyId = `admin-${account.email}-${row.key}`;
+                            const enableUrl =
+                              row.enableUrl || googleApiEnableUrl(row.service, client.projectId);
 
-                  {!needsReconnect && transientErr && (
-                    <div className="ca-google-account-alert is-warn" role="status">
-                      <AlertCircle size={14} aria-hidden="true" />
-                      <span>{transientErr}</span>
-                    </div>
-                  )}
+                            return (
+                              <div key={row.key} className="ca-google-service-row" role="listitem">
+                                <div className="ca-google-service-main">
+                                  <div className="ca-row-title">
+                                    <StatusDot tone={badge.tone} />
+                                    <span className="ca-google-service-name">{row.label}</span>
+                                    <span className={`ca-pill ca-pill-${badge.tone}`}>{badge.label}</span>
+                                  </div>
+                                  {row.detail && row.state !== 'ready' && (
+                                    <span className="ca-row-sub">{row.detail}</span>
+                                  )}
+                                </div>
 
-                  {/* Per-service readiness rows */}
-                  {readinessRows.length > 0 && (
-                    <div className="ca-google-services" role="list" aria-label={t('服务就绪度', 'Service readiness')}>
-                      {readinessRows.map(row => {
-                        const skipKey = `${account.email}::${row.key}`;
-                        const isSkipped = Boolean(skippedServices[skipKey]);
-                        const badge = readinessBadgeMeta(row.state, isSkipped, t);
-                        const copyId = `admin-${account.email}-${row.key}`;
-                        const enableUrl =
-                          row.enableUrl || googleApiEnableUrl(row.service, client.projectId);
+                                <div className="ca-row-actions ca-wrap">
+                                  {row.state === 'needs-permission' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="ca-btn ca-btn-sm"
+                                        disabled={activeFlow?.phase === 'pending' || !clientConfigured}
+                                        onClick={() => {
+                                          const choices = row.choice
+                                            ? mergeChoices(existingChoices, [row.choice])
+                                            : existingChoices;
+                                          if (choices.length) void startAuthorize(choices, account.email);
+                                          else openConnectModal(account);
+                                        }}
+                                      >
+                                        {t('补充授权', 'Grant permission')}
+                                      </button>
+                                      {!isSkipped && (
+                                        <button
+                                          type="button"
+                                          className="ca-btn ca-btn-ghost ca-btn-sm"
+                                          onClick={() =>
+                                            setSkippedServices(prev => ({ ...prev, [skipKey]: true }))
+                                          }
+                                        >
+                                          {t('暂不使用', 'Skip')}
+                                        </button>
+                                      )}
+                                    </>
+                                  )}
 
-                        return (
-                          <div key={row.key} className="ca-google-service-row" role="listitem">
-                            <div className="ca-google-service-main">
-                              <div className="ca-row-title">
-                                <span className="ca-google-service-name">{row.label}</span>
-                                <span className={`ca-pill ca-pill-${badge.tone}`}>{badge.label}</span>
-                              </div>
-                              {row.detail && row.state !== 'ready' && (
-                                <span className="ca-row-sub">{row.detail}</span>
-                              )}
-                            </div>
+                                  {row.state === 'api-disabled' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="ca-btn ca-btn-sm"
+                                        onClick={() => void openExternalUrl(enableUrl, onOpenExternalUrl)}
+                                      >
+                                        <ExternalLink size={12} aria-hidden="true" />
+                                        <span>{t('去控制台启用', 'Enable in Console')}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="ca-btn ca-btn-ghost ca-btn-sm"
+                                        disabled={checking}
+                                        onClick={() => void handleCheckAccount(account)}
+                                      >
+                                        {t('重新检查', 'Re-check')}
+                                      </button>
+                                    </>
+                                  )}
 
-                            <div className="ca-row-actions ca-wrap">
-                              {row.state === 'needs-permission' && (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="ca-btn ca-btn-sm"
-                                    disabled={activeFlow?.phase === 'pending' || !clientConfigured}
-                                    onClick={() => {
-                                      const choices = row.choice
-                                        ? mergeChoices(existingChoices, [row.choice])
-                                        : existingChoices;
-                                      if (choices.length) void startAuthorize(choices, account.email);
-                                      else openConnectModal(account);
-                                    }}
-                                  >
-                                    {t('补授权', 'Grant permission')}
-                                  </button>
-                                  {!isSkipped && (
+                                  {row.state === 'blocked-by-admin' && (
                                     <button
                                       type="button"
-                                      className="ca-btn ca-btn-ghost ca-btn-sm"
+                                      className="ca-btn ca-btn-sm"
                                       onClick={() =>
-                                        setSkippedServices(prev => ({ ...prev, [skipKey]: true }))
+                                        void handleCopyWithFeedback(
+                                          copyId,
+                                          googleAdminTrustMessage(client.clientId, t),
+                                        )
                                       }
                                     >
-                                      {t('暂不使用', 'Skip')}
+                                      {copiedKey === copyId ? (
+                                        <Check size={12} aria-hidden="true" />
+                                      ) : (
+                                        <Shield size={12} aria-hidden="true" />
+                                      )}
+                                      <LabelStack
+                                        active={
+                                          copiedKey === copyId
+                                            ? t('已复制', 'Copied')
+                                            : t('复制给管理员', 'Copy for admin')
+                                        }
+                                        labels={[t('复制给管理员', 'Copy for admin'), t('已复制', 'Copied')]}
+                                      />
                                     </button>
                                   )}
-                                </>
-                              )}
 
-                              {row.state === 'api-disabled' && (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="ca-btn ca-btn-sm"
-                                    onClick={() => void openExternalUrl(enableUrl, onOpenExternalUrl)}
-                                  >
-                                    <ExternalLink size={12} aria-hidden="true" />
-                                    <span>{t('去控制台启用', 'Enable in Console')}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="ca-btn ca-btn-ghost ca-btn-sm"
-                                    disabled={checking}
-                                    onClick={() => void handleCheckAccount(account)}
-                                  >
-                                    {t('重新检查', 'Re-check')}
-                                  </button>
-                                </>
-                              )}
-
-                              {row.state === 'blocked-by-admin' && (
-                                <button
-                                  type="button"
-                                  className="ca-btn ca-btn-sm"
-                                  onClick={() =>
-                                    void handleCopyWithFeedback(
-                                      copyId,
-                                      googleAdminTrustMessage(client.clientId, t),
-                                    )
-                                  }
-                                >
-                                  {copiedKey === copyId ? (
-                                    <Check size={12} aria-hidden="true" />
-                                  ) : (
-                                    <Shield size={12} aria-hidden="true" />
+                                  {row.state === 'error' && (
+                                    <button
+                                      type="button"
+                                      className="ca-btn ca-btn-sm"
+                                      disabled={checking}
+                                      onClick={() => void handleCheckAccount(account)}
+                                    >
+                                      <RefreshCw size={12} aria-hidden="true" />
+                                      <span>{t('重新检查', 'Re-check')}</span>
+                                    </button>
                                   )}
-                                  <LabelStack
-                                    active={
-                                      copiedKey === copyId
-                                        ? t('已复制', 'Copied')
-                                        : t('复制给管理员', 'Copy for admin')
-                                    }
-                                    labels={[t('复制给管理员', 'Copy for admin'), t('已复制', 'Copied')]}
-                                  />
-                                </button>
-                              )}
-
-                              {row.state === 'error' && (
-                                <button
-                                  type="button"
-                                  className="ca-btn ca-btn-sm"
-                                  disabled={checking}
-                                  onClick={() => void handleCheckAccount(account)}
-                                >
-                                  <RefreshCw size={12} aria-hidden="true" />
-                                  <span>{t('重新检查', 'Re-check')}</span>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      {/* 4. Automatic Trigger Rules Section (New Mail / Pre-Meeting) */}
-      <section className="ca-section" aria-labelledby="ca-google-rules-heading">
-        <div className="ca-section-head">
-          <div>
-            <h3 id="ca-google-rules-heading" className="ca-section-title">
-              {t('自动触发规则（新邮件 / 会前提醒）', 'Automatic Trigger Rules (Mail / Meetings)')}
-              {!rulesUnavailable && rules.length > 0 ? ` (${rules.length})` : ''}
-            </h3>
-            <div className="ca-muted" style={{ marginTop: 2 }}>
-              {t('Google 工具已自动对所有 Bot 开放；此处仅配置由中心主动推送给指定 Bot 的自动规则。暂停规则不会撤销账号授权。', 'Google tools are automatically available to every Bot. Rules here only configure proactive triggers for a chosen Bot; pausing a rule never revokes Google access.')}
-            </div>
-          </div>
-
-          {!rulesUnavailable && (
-            <div className="ca-toolbar-group">
-              {activeBots.length > 1 && (
-                <select
-                  className="ca-select ca-google-filter-select"
-                  aria-label={t('按 Bot 筛选规则', 'Filter rules by Bot')}
-                  value={ruleBotFilter}
-                  onChange={e => setRuleBotFilter(e.target.value)}
-                >
-                  <option value="all">{t('全部 Bot', 'All Bots')}</option>
-                  {botsByDevice.map(([devId, group]) => (
-                    <optgroup key={devId} label={group.device?.name || devId}>
-                      {group.bots.map(b => (
-                        <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              )}
-              <button
-                type="button"
-                className="ca-btn ca-btn-sm"
-                disabled={accounts.length === 0 || activeBots.length === 0}
-                onClick={openCreateRuleDrawer}
-              >
-                <Plus size={13} aria-hidden="true" />
-                <span>{t('新建规则', 'New rule')}</span>
-              </button>
-            </div>
-          )}
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
+      )}
 
-        {rulesUnavailable ? (
-          <div className="ca-empty">
-            {t('当前中心尚未启用 Google 自动触发规则接口（/api/google/rules 不可用）。主动使用 Google 工具不受影响。', 'Google automatic trigger rules (/api/google/rules) are not enabled on this Center yet. On-demand Google tools are unaffected.')}
-          </div>
-        ) : filteredRules.length === 0 ? (
-          <div className="ca-empty">
-            {accounts.length === 0
-              ? t('连接 Google 账号后，可按需为指定 Bot 添加新邮件或会前提醒规则。', 'Connect a Google account to configure new-mail or pre-meeting rules for specific Bots.')
-              : activeBots.length === 0
-                ? t('暂无可用 Bot。在任一主机创建 Bot 后可为其配置自动触发规则。', 'No active Bots yet. Create a Bot on any host to assign trigger rules.')
-                : t('暂无自动触发规则。所有 Bot 仍可随时在对话中主动查询或处理 Google 任务。', 'No automatic trigger rules yet. All Bots can still use Google tools on demand in chat.')}
-          </div>
-        ) : (
-          <div className="ca-list">
-            {filteredRules.map((rule, idx) => {
-              const eff = ruleEffectiveStatus(rule, accountsByKey, t);
-              const idKey = rule.id || `${rule.deviceId}::${rule.botId}::${rule.source}::${idx}`;
-              const isToggling = togglingRuleId === idKey;
-              const filterSummary =
-                rule.source === 'gmail'
-                  ? [
-                      rule.from ? t(`发件人：${rule.from}`, `From: ${rule.from}`) : null,
-                      rule.subjectContains
-                        ? t(`主题含：${rule.subjectContains}`, `Subject: ${rule.subjectContains}`)
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ') || t('全部新到达邮件', 'All new arriving mail')
-                  : parseCalendarMinutesBefore(rule.minutesBefore) === 0
-                    ? t(`日历：${rule.calendar || 'primary'} · 开始时（0 分钟）`, `Calendar: ${rule.calendar || 'primary'} · At start (0 min)`)
-                    : t(`日历：${rule.calendar || 'primary'} · 提前 ${parseCalendarMinutesBefore(rule.minutesBefore)} 分钟`, `Calendar: ${rule.calendar || 'primary'} · ${parseCalendarMinutesBefore(rule.minutesBefore)} min before`);
+      {/* SECTION 2: Mail & Calendar Trigger Rules */}
+      {section === 'rules' && (
+        <section className="ca-section" aria-labelledby="ca-google-rules-heading">
+          <div className="ca-section-head">
+            <div>
+              <h3 id="ca-google-rules-heading" className="ca-section-title">
+                {t('邮件与日历规则', 'Mail & Calendar Rules')}
+                {!rulesUnavailable && rules.length > 0 ? ` (${filteredRules.length})` : ''}
+              </h3>
+              <div className="ca-muted" style={{ marginTop: 2 }}>
+                {t('配置由中心主动推送给指定 Bot 的新邮件与会前提醒；暂停规则不会撤销账号授权。', 'Configure proactive new-mail and pre-meeting triggers delivered to a chosen Bot; pausing a rule never revokes Google access.')}
+              </div>
+            </div>
 
-              return (
-                <div key={idKey} className="ca-row">
-                  <div className="ca-row-main">
-                    <div className="ca-row-title">
-                      <span className="ca-pill ca-pill-info">
-                        {rule.source === 'gmail'
-                          ? t('新邮件', 'New mail')
-                          : t('会前提醒', 'Pre-meeting')}
-                      </span>
-                      <span>{formatBotDisplay(rule.deviceId, rule.botId)}</span>
-                      <span className={`ca-pill ca-pill-${eff.tone}`}>{eff.label}</span>
-                    </div>
-                    <span className="ca-row-sub">
-                      {rule.account} · {filterSummary}
-                    </span>
-                    <span className="ca-row-sub">{rule.instruction}</span>
-                    {(rule.lastCheckedAt || rule.lastError) && (
+            {!rulesUnavailable && (
+              <div className="ca-toolbar-group">
+                {rules.length > 0 && (
+                  <CaChips<RuleSourceFilter>
+                    value={ruleSourceFilter}
+                    ariaLabel={t('按规则类型筛选', 'Filter rules by type')}
+                    options={[
+                      { value: 'all', label: t('全部', 'All') },
+                      { value: 'gmail', label: t('新邮件', 'Mail') },
+                      { value: 'calendar', label: t('会前提醒', 'Calendar') },
+                    ]}
+                    onChange={setRuleSourceFilter}
+                  />
+                )}
+                {activeBots.length > 1 && (
+                  <select
+                    className="ca-select ca-google-filter-select"
+                    aria-label={t('按 Bot 筛选规则', 'Filter rules by Bot')}
+                    value={ruleBotFilter}
+                    onChange={e => setRuleBotFilter(e.target.value)}
+                  >
+                    <option value="all">{t('全部 Bot', 'All Bots')}</option>
+                    {botsByDevice.map(([devId, group]) => (
+                      <optgroup key={devId} label={group.device?.name || devId}>
+                        {group.bots.map(b => (
+                          <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
+                            {b.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+          </div>
+
+          {rulesUnavailable ? (
+            <div className="ca-empty">
+              {t('当前中心尚未启用 Google 自动触发规则接口（/api/google/rules 不可用）。主动使用 Google 工具不受影响。', 'Google automatic trigger rules (/api/google/rules) are not enabled on this Center yet. On-demand Google tools are unaffected.')}
+            </div>
+          ) : filteredRules.length === 0 ? (
+            <div className="ca-empty">
+              <div className="ca-google-empty-stack">
+                <p style={{ margin: 0 }}>
+                  {accounts.length === 0
+                    ? t('请先连接至少一个 Google 账号，再为指定 Bot 创建邮件或日历触发规则。', 'Connect a Google account first to create mail or calendar trigger rules for your Bots.')
+                    : activeBots.length === 0
+                      ? t('暂无可用 Bot。在任一主机创建 Bot 后即可配置自动触发规则。', 'No active Bots yet. Create a Bot on any host to assign trigger rules.')
+                      : rules.length > 0
+                        ? t('当前筛选条件下没有匹配的规则。', 'No rules match the current filter.')
+                        : t('暂无邮件或日历自动触发规则。所有 Bot 仍可在对话中随时主动使用 Google 工具。', 'No automatic trigger rules yet. All Bots can still use Google tools on demand in chat.')}
+                </p>
+                {accounts.length === 0 ? (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-primary ca-btn-sm"
+                    onClick={() => switchSection(clientConfigured ? 'accounts' : 'client')}
+                  >
+                    {clientConfigured ? t('前往连接账号', 'Go to Accounts') : t('先配置 OAuth 客户端', 'Configure OAuth Client')}
+                  </button>
+                ) : activeBots.length > 0 && rules.length === 0 ? (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-primary ca-btn-sm"
+                    onClick={openCreateRuleModal}
+                  >
+                    <Plus size={13} aria-hidden="true" />
+                    <span>{t('新建第一条规则', 'Create first rule')}</span>
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="ca-list">
+              {filteredRules.map((rule, idx) => {
+                const eff = ruleEffectiveStatus(rule, accountsByKey, t);
+                const idKey = rule.id || `${rule.deviceId}::${rule.botId}::${rule.source}::${idx}`;
+                const isToggling = togglingRuleId === idKey;
+                const filterSummary =
+                  rule.source === 'gmail'
+                    ? [
+                        rule.from ? t(`发件人：${rule.from}`, `From: ${rule.from}`) : null,
+                        rule.subjectContains
+                          ? t(`主题含：${rule.subjectContains}`, `Subject: ${rule.subjectContains}`)
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || t('全部新到达邮件', 'All newly arriving mail')
+                    : parseCalendarMinutesBefore(rule.minutesBefore) === 0
+                      ? t(`日历：${rule.calendar || 'primary'} · 开始时（0 分钟）`, `Calendar: ${rule.calendar || 'primary'} · At start (0m)`)
+                      : t(`日历：${rule.calendar || 'primary'} · 提前 ${parseCalendarMinutesBefore(rule.minutesBefore)} 分钟`, `Calendar: ${rule.calendar || 'primary'} · ${parseCalendarMinutesBefore(rule.minutesBefore)}m before`);
+
+                return (
+                  <div key={idKey} className="ca-row">
+                    <div className="ca-row-main">
+                      <div className="ca-row-title">
+                        <StatusDot tone={eff.tone} />
+                        <span className="ca-pill ca-pill-info">
+                          {rule.source === 'gmail'
+                            ? t('新邮件', 'New mail')
+                            : t('会前提醒', 'Pre-meeting')}
+                        </span>
+                        <span>{formatBotDisplay(rule.deviceId, rule.botId)}</span>
+                        <span className={`ca-pill ca-pill-${eff.tone}`}>{eff.label}</span>
+                      </div>
                       <span className="ca-row-sub">
-                        {rule.lastCheckedAt && (
-                          <>
-                            <Clock size={11} aria-hidden="true" style={{ verticalAlign: '-1px', marginRight: 4 }} />
-                            {t('上次检查 ', 'Last checked ')}
-                            {formatTime(rule.lastCheckedAt, locale)}
-                          </>
-                        )}
-                        {rule.lastError ? ` · ${rule.lastError}` : ''}
+                        {rule.account} · {filterSummary}
                       </span>
-                    )}
-                  </div>
+                      <span className="ca-row-sub">{rule.instruction}</span>
+                      {(rule.lastCheckedAt || rule.lastError) && (
+                        <span className="ca-row-sub">
+                          {rule.lastCheckedAt && (
+                            <>
+                              <Clock size={11} aria-hidden="true" style={{ verticalAlign: '-1px', marginRight: 4 }} />
+                              {t('上次检查 ', 'Last checked ')}
+                              {formatTime(rule.lastCheckedAt, locale)}
+                            </>
+                          )}
+                          {rule.lastError ? ` · ${rule.lastError}` : ''}
+                        </span>
+                      )}
+                    </div>
 
-                  <div className="ca-row-actions">
-                    <CaSwitch
-                      checked={rule.enabled}
-                      disabled={isToggling}
-                      label={t('启用或暂停此规则', 'Enable or pause this rule')}
-                      onChange={next => void handleToggleRule(rule, next)}
-                    />
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-ghost ca-btn-icon"
-                      aria-label={t('编辑规则', 'Edit rule')}
-                      title={t('编辑', 'Edit')}
-                      onClick={() => openEditRuleDrawer(rule)}
-                    >
-                      <Pencil size={14} aria-hidden="true" />
-                    </button>
-                    {rule.id && (
+                    <div className="ca-row-actions">
+                      <CaSwitch
+                        checked={rule.enabled}
+                        disabled={isToggling}
+                        label={t('启用或暂停此规则', 'Enable or pause this rule')}
+                        onChange={next => void handleToggleRule(rule, next)}
+                      />
                       <button
                         type="button"
                         className="ca-btn ca-btn-ghost ca-btn-icon"
-                        aria-label={t('删除规则', 'Delete rule')}
-                        title={t('删除', 'Delete')}
-                        onClick={() => void handleDeleteRule(rule)}
+                        aria-label={t('编辑规则', 'Edit rule')}
+                        title={t('编辑', 'Edit')}
+                        onClick={() => openEditRuleModal(rule)}
                       >
-                        <Trash2 size={14} aria-hidden="true" />
+                        <Pencil size={14} aria-hidden="true" />
                       </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      {/* Drawer A: Private Web OAuth Client Configuration */}
-      <CaModal
-        open={configOpen}
-        onOpenChange={open => {
-          if (!open) closeConfigureDrawer();
-        }}
-        title={
-          clientConfigured
-            ? t('更换中心 Google Web OAuth 凭据', 'Rotate Center Google Web OAuth Credentials')
-            : t('配置中心 Google Web OAuth 应用', 'Configure Center Google Web OAuth App')
-        }
-        description={t('私密直传中心加密凭据库，保存后立即清空，不进入聊天记录，永不回显或导出 Client Secret。', 'Sent directly to Center encrypted storage. Cleared immediately on save; never enters chat, never displayed or exported.')}
-        variant="drawer"
-      >
-        <form className="ca-form-stack" onSubmit={e => void handleSaveClientConfig(e)}>
-          {clientConfigured && (
-            <CaNotice tone="warn">
-              {t('更换为新的 Google OAuth 应用后，现有已连接的账号可能需要重新连接以重新签发令牌。', 'Switching to a different Google OAuth client may require existing accounts to reconnect.')}
-            </CaNotice>
-          )}
-
-          <div className="ca-cred-box">
-            <div className="ca-field-head" style={{ marginBottom: 4 }}>
-              <span className="ca-field-label">
-                {t('已授权的重定向 URI（在 Google Cloud 填入此地址）', 'Authorized redirect URI (add this in Google Cloud)')}
-              </span>
-              <CopyButton value={redirectInfo.uri} label={t('复制', 'Copy')} />
-            </div>
-            <div className="ca-mono ca-google-uri">{redirectInfo.uri}</div>
-          </div>
-
-          <div>
-            <CaSegmented<'file' | 'manual'>
-              value={configMode}
-              onChange={next => {
-                setConfigMode(next);
-                setConfigError('');
-                setClientFileName('');
-                setClientFileRaw('');
-                setClientIdDraft('');
-                setClientSecretDraft('');
-                if (fileInputRef.current) fileInputRef.current.value = '';
-              }}
-              ariaLabel={t('凭据录入方式', 'Credential entry method')}
-              options={[
-                { value: 'file', label: t('上传 Web JSON 文件', 'Upload Web JSON') },
-                { value: 'manual', label: t('手动输入 ID 与 Secret', 'Enter ID & Secret') },
-              ]}
-            />
-          </div>
-
-          {configMode === 'file' ? (
-            <div className="ca-field">
-              <label className="ca-field-label">
-                {t('Google Cloud Web OAuth 客户端 JSON', 'Google Cloud Web OAuth client JSON')}
-                <span className="ca-req">*</span>
-              </label>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={e => void handleJsonFilePick(e.target.files?.[0])}
-              />
-              <div
-                role="button"
-                tabIndex={0}
-                className={`ca-dropzone${draggingJson ? ' is-dragging' : ''}`}
-                onClick={() => fileInputRef.current?.click()}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    fileInputRef.current?.click();
-                  }
-                }}
-                onDragOver={e => {
-                  e.preventDefault();
-                  setDraggingJson(true);
-                }}
-                onDragLeave={() => setDraggingJson(false)}
-                onDrop={e => {
-                  e.preventDefault();
-                  setDraggingJson(false);
-                  void handleJsonFilePick(e.dataTransfer.files?.[0]);
-                }}
-              >
-                <Upload size={18} aria-hidden="true" style={{ marginBottom: 6 }} />
-                <div style={{ fontWeight: 500 }}>
-                  {clientFileName
-                    ? clientFileName
-                    : t('点击选择或拖入 client_secret_*.json', 'Click or drop client_secret_*.json')}
-                </div>
-                <div className="ca-muted" style={{ marginTop: 4 }}>
-                  {t('仅接受 Web application 客户端 JSON（≤ 64 KB）；拒绝桌面端、Service Account 与令牌文件', 'Accepts Web application client JSON only (≤ 64 KB); rejects Desktop, Service Account, and token files.')}
-                </div>
-              </div>
-
-              {clientJsonValidation &&
-                (clientJsonValidation.ok ? (
-                  <CaNotice tone={clientJsonValidation.warning ? 'warn' : 'ok'}>
-                    <div>
-                      <CheckCircle2
-                        size={13}
-                        aria-hidden="true"
-                        style={{ verticalAlign: '-2px', marginRight: 5 }}
-                      />
-                      {t(`已通过本地预检 · Web Client ${clientJsonValidation.clientIdTail ?? ''}${clientJsonValidation.projectId ? ` · 项目 ${clientJsonValidation.projectId}` : ''}`, `Pre-check passed · Web Client ${clientJsonValidation.clientIdTail ?? ''}${clientJsonValidation.projectId ? ` · Project ${clientJsonValidation.projectId}` : ''}`)}
+                      {rule.id && (
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-ghost ca-btn-icon"
+                          aria-label={t('删除规则', 'Delete rule')}
+                          title={t('删除', 'Delete')}
+                          onClick={() => setModal({ kind: 'confirm-delete-rule', rule })}
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                        </button>
+                      )}
                     </div>
-                    {clientJsonValidation.warning && (
-                      <div style={{ marginTop: 4 }}>{clientJsonValidation.warning}</div>
-                    )}
-                  </CaNotice>
-                ) : (
-                  <p className="ca-error-text" role="alert">
-                    {clientJsonValidation.error}
-                  </p>
-                ))}
+                  </div>
+                );
+              })}
             </div>
-          ) : (
-            <>
-              <div className="ca-field">
-                <label className="ca-field-label" htmlFor="ca-google-client-id">
-                  Client ID<span className="ca-req">*</span>
-                </label>
-                <input
-                  id="ca-google-client-id"
-                  type="text"
-                  className="ca-input ca-mono"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="123456789-xxxx.apps.googleusercontent.com"
-                  value={clientIdDraft}
-                  onChange={e => setClientIdDraft(e.target.value)}
-                />
-              </div>
-
-              <div className="ca-field">
-                <label className="ca-field-label" htmlFor="ca-google-client-secret">
-                  Client Secret<span className="ca-req">*</span>
-                </label>
-                <input
-                  id="ca-google-client-secret"
-                  type="password"
-                  className="ca-input ca-mono"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  placeholder="GOCSPX-..."
-                  value={clientSecretDraft}
-                  onChange={e => setClientSecretDraft(e.target.value)}
-                />
-                <p className="ca-field-help">
-                  {t('仅用于提交给中心加密存储，保存后立即从界面清空，不留存浏览器缓存。', 'Submitted directly to Center encrypted storage and wiped immediately after saving.')}
-                </p>
-              </div>
-            </>
           )}
+        </section>
+      )}
 
-          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
-            {configError ? (
-              <p className="ca-error-text" role="alert">
-                {configError}
-              </p>
-            ) : null}
-          </ReservedSlot>
+      {/* SECTION 3: OAuth Client Setup & Rotation (in-page, no drawer) */}
+      {section === 'client' && (
+        <div className="ca-form-stack">
+          <section className="ca-section" aria-labelledby="ca-google-client-heading">
+            <div className="ca-default-card ca-wrap">
+              <div className="ca-row-main">
+                <div className="ca-row-title">
+                  <StatusDot tone={clientTone} />
+                  <span id="ca-google-client-heading">
+                    {t('中心 Google Web OAuth 客户端', 'Center Google Web OAuth Client')}
+                  </span>
+                  {clientInvalid ? (
+                    <span className="ca-pill ca-pill-danger">{t('凭据无效', 'Invalid client')}</span>
+                  ) : clientConfigured ? (
+                    <span className="ca-pill ca-pill-ok">
+                      {clientIdTail
+                        ? t(`已配置 · ${clientIdTail}`, `Configured · ${clientIdTail}`)
+                        : t('已配置', 'Configured')}
+                    </span>
+                  ) : (
+                    <span className="ca-pill ca-pill-warn">{t('未配置', 'Not configured')}</span>
+                  )}
+                  {client.projectId && (
+                    <span className="ca-pill ca-pill-muted ca-mono">{client.projectId}</span>
+                  )}
+                </div>
+                <span className="ca-row-sub">
+                  {t('凭据直传中心加密存储，保存后立即从界面清空，永不回显也不进入聊天记录。', 'Credentials are stored encrypted in Center and cleared immediately after save; Client Secret is never shown or sent through chat.')}
+                </span>
+              </div>
+              {clientConfigured && (
+                <div className="ca-row-actions">
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-sm"
+                    onClick={() => switchSection('accounts')}
+                  >
+                    {t('查看已连接账号', 'View accounts')}
+                  </button>
+                </div>
+              )}
+            </div>
 
-          <CaDisclosure title={t('还没有 Web OAuth 应用？查看手动创建步骤', 'Need to create a Web OAuth app? Manual steps')}>
+            <div className="ca-google-subbar">
+              <div className="ca-google-redirect-line">
+                <span className="ca-muted">
+                  {t('已授权的重定向 URI', 'Authorized redirect URI')}
+                  {redirectInfo.isPreview ? t('（参考）', ' (preview)') : ''}
+                </span>
+                <code className="ca-mono ca-google-uri">{redirectInfo.uri}</code>
+                <CopyButton value={redirectInfo.uri} label={t('复制 URI', 'Copy URI')} />
+              </div>
+              {clientInvalid && (
+                <p className="ca-error-text" role="alert" style={{ marginTop: 8 }}>
+                  {client.error ||
+                    t('Google 已无法识别当前 Web OAuth 应用。请上传或录入有效凭据后重新连接账号。', 'Google no longer recognizes this Web OAuth client. Save valid credentials and reconnect accounts.')}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="ca-section">
+            <div className="ca-section-head">
+              <h3 className="ca-section-title">
+                {clientConfigured
+                  ? t('更换 OAuth 客户端凭据', 'Rotate OAuth Client Credentials')
+                  : t('录入 OAuth 客户端凭据', 'Save OAuth Client Credentials')}
+              </h3>
+              <CaSegmented<'file' | 'manual'>
+                value={configMode}
+                onChange={next => {
+                  setConfigMode(next);
+                  clearSecretDrafts();
+                }}
+                ariaLabel={t('凭据录入方式', 'Credential entry method')}
+                options={[
+                  { value: 'file', label: t('上传 JSON 文件', 'Upload JSON') },
+                  { value: 'manual', label: t('手动输入', 'Manual ID & Secret') },
+                ]}
+              />
+            </div>
+
+            <form className="ca-section-body ca-form-stack" onSubmit={e => void handleSaveClientConfig(e)}>
+              {clientConfigured && (
+                <CaNotice tone="warn">
+                  {t('更换为新的 Google OAuth 客户端后，现有已连接账号可能需要重新连接以签发新令牌。', 'Switching to a different Google OAuth client may require existing accounts to reconnect.')}
+                </CaNotice>
+              )}
+
+              {configMode === 'file' ? (
+                <div className="ca-field">
+                  <label className="ca-field-label">
+                    {t('Google Cloud Web OAuth 客户端 JSON', 'Google Cloud Web OAuth client JSON')}
+                    <span className="ca-req">*</span>
+                  </label>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: 'none' }}
+                    onChange={e => void handleJsonFilePick(e.target.files?.[0])}
+                  />
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    className={`ca-dropzone${draggingJson ? ' is-dragging' : ''}`}
+                    onClick={() => fileInputRef.current?.click()}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        fileInputRef.current?.click();
+                      }
+                    }}
+                    onDragOver={e => {
+                      e.preventDefault();
+                      setDraggingJson(true);
+                    }}
+                    onDragLeave={() => setDraggingJson(false)}
+                    onDrop={e => {
+                      e.preventDefault();
+                      setDraggingJson(false);
+                      void handleJsonFilePick(e.dataTransfer.files?.[0]);
+                    }}
+                  >
+                    <Upload size={18} aria-hidden="true" style={{ marginBottom: 6 }} />
+                    <div style={{ fontWeight: 500 }}>
+                      {clientFileName
+                        ? clientFileName
+                        : t('点击选择或拖入 client_secret_*.json', 'Click or drop client_secret_*.json')}
+                    </div>
+                    <div className="ca-muted" style={{ marginTop: 4 }}>
+                      {t('仅接受 Web application 客户端 JSON（≤ 64 KB）；拒绝桌面端、Service Account 与令牌文件', 'Accepts Web application client JSON only (≤ 64 KB); rejects Desktop, Service Account, and token files.')}
+                    </div>
+                  </div>
+
+                  {clientJsonValidation &&
+                    (clientJsonValidation.ok ? (
+                      <CaNotice tone={clientJsonValidation.warning ? 'warn' : 'ok'}>
+                        <div>
+                          <CheckCircle2
+                            size={13}
+                            aria-hidden="true"
+                            style={{ verticalAlign: '-2px', marginRight: 5 }}
+                          />
+                          {t(`本地预检通过 · Web Client ${clientJsonValidation.clientIdTail ?? ''}${clientJsonValidation.projectId ? ` · 项目 ${clientJsonValidation.projectId}` : ''}`, `Pre-check passed · Web Client ${clientJsonValidation.clientIdTail ?? ''}${clientJsonValidation.projectId ? ` · Project ${clientJsonValidation.projectId}` : ''}`)}
+                        </div>
+                        {clientJsonValidation.warning && (
+                          <div style={{ marginTop: 4 }}>{clientJsonValidation.warning}</div>
+                        )}
+                      </CaNotice>
+                    ) : (
+                      <p className="ca-error-text" role="alert">
+                        {clientJsonValidation.error}
+                      </p>
+                    ))}
+                </div>
+              ) : (
+                <>
+                  <div className="ca-field">
+                    <label className="ca-field-label" htmlFor="ca-google-client-id">
+                      Client ID<span className="ca-req">*</span>
+                    </label>
+                    <input
+                      id="ca-google-client-id"
+                      type="text"
+                      className="ca-input ca-mono"
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={configBusy}
+                      placeholder="123456789-xxxx.apps.googleusercontent.com"
+                      value={clientIdDraft}
+                      onChange={e => setClientIdDraft(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="ca-field">
+                    <label className="ca-field-label" htmlFor="ca-google-client-secret">
+                      Client Secret<span className="ca-req">*</span>
+                    </label>
+                    <input
+                      id="ca-google-client-secret"
+                      type="password"
+                      className="ca-input ca-mono"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      disabled={configBusy}
+                      placeholder="GOCSPX-..."
+                      value={clientSecretDraft}
+                      onChange={e => setClientSecretDraft(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+
+              <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+                {configError ? (
+                  <p className="ca-error-text" role="alert">
+                    {configError}
+                  </p>
+                ) : null}
+              </ReservedSlot>
+
+              <div className="ca-form-actions ca-form-actions-between">
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-ghost ca-btn-sm"
+                  disabled={configBusy}
+                  onClick={() => setModal({ kind: 'wizard' })}
+                >
+                  <Bot size={13} aria-hidden="true" />
+                  <span>{t('改用 Bot 建项向导', 'Use Bot setup wizard')}</span>
+                </button>
+                <button
+                  type="submit"
+                  className="ca-btn ca-btn-primary"
+                  aria-busy={configBusy}
+                  disabled={
+                    configBusy ||
+                    (configMode === 'file'
+                      ? !clientFileRaw || !clientJsonValidation?.ok
+                      : !clientIdDraft.trim() || !clientSecretDraft.trim())
+                  }
+                >
+                  <LabelStack
+                    active={configBusy ? t('保存中…', 'Saving…') : t('加密保存凭据', 'Save credentials')}
+                    labels={[t('加密保存凭据', 'Save credentials'), t('保存中…', 'Saving…')]}
+                  />
+                </button>
+              </div>
+            </form>
+          </section>
+
+          {/* Collapsible Manual Setup Guide */}
+          <CaCardDisclosure
+            title={t('手动创建 Google Web OAuth 客户端指南', 'Manual Web OAuth setup guide')}
+            subtitle={t('展开查看在 Google Cloud Console 创建项目、启用 API 与导出 JSON 的 5 个步骤', 'Expand for 5 steps to create a Google Cloud project, enable APIs, and export JSON')}
+          >
             <ol className="ca-google-steps">
               <li>
                 <span>{t('在 Google Cloud 创建或选择项目：', 'Create or select a Google Cloud project: ')}</span>
@@ -2158,7 +2444,7 @@ export function GoogleTab({
               </li>
               <li>
                 <span>
-                  {t('配置 Google Auth Platform（填入你的应用名、联系邮箱、自托管中心域名，选择受众 External 或 Workspace Internal，并由本人勾选用户数据政策）：', 'Configure Google Auth Platform (your app name, email, your own Center domain, External or Workspace Internal audience, and personally agree to the User Data Policy): ')}
+                  {t('配置 Google Auth Platform（填入应用名、联系邮箱、自托管中心域名，选择受众 External 或 Workspace Internal，并勾选用户数据政策）：', 'Configure Google Auth Platform (your app name, email, Center domain, External or Workspace Internal audience, and User Data Policy): ')}
                 </span>
                 <a
                   href={GOOGLE_CLOUD_AUTH_OVERVIEW_URL}
@@ -2175,7 +2461,7 @@ export function GoogleTab({
               </li>
               <li>
                 <span>
-                  {t('创建 OAuth 客户端，应用类型务必选择 Web application，并将上方的「已授权的重定向 URI」添加到 Authorized redirect URIs：', 'Create an OAuth client of type Web application and add the Authorized redirect URI shown above: ')}
+                  {t('创建 OAuth 客户端，应用类型选择 Web application，并将上方「已授权的重定向 URI」添加到 Authorized redirect URIs：', 'Create a Web application OAuth client and add the Authorized redirect URI shown above to Authorized redirect URIs: ')}
                 </span>
                 <a
                   href={GOOGLE_CLOUD_AUTH_CLIENTS_URL}
@@ -2191,67 +2477,31 @@ export function GoogleTab({
                 </a>
               </li>
               <li>
-                {t('下载 JSON 上传到上方，或直接粘贴 Client ID 与 Client Secret 保存。', 'Download the JSON and upload it above, or paste Client ID and Client Secret directly.')}
+                {t('下载 JSON 上传到上方，或直接粘贴 Client ID 与 Client Secret 加密保存。', 'Download the JSON and upload it above, or paste Client ID and Client Secret directly.')}
               </li>
             </ol>
-          </CaDisclosure>
+          </CaCardDisclosure>
+        </div>
+      )}
 
-          <div className="ca-form-actions ca-form-actions-between">
-            <button
-              type="button"
-              className="ca-btn ca-btn-ghost ca-btn-sm"
-              onClick={() => {
-                closeConfigureDrawer();
-                setWizardOpen(true);
-              }}
-            >
-              {t('改用目标 Bot 向导', 'Use Bot setup wizard')}
-            </button>
-            <div className="ca-inline-row">
-              <button
-                type="button"
-                className="ca-btn"
-                disabled={configBusy}
-                onClick={closeConfigureDrawer}
-              >
-                {t('取消', 'Cancel')}
-              </button>
-              <button
-                type="submit"
-                className="ca-btn ca-btn-primary"
-                disabled={
-                  configBusy ||
-                  (configMode === 'file'
-                    ? !clientFileRaw || !clientJsonValidation?.ok
-                    : !clientIdDraft.trim() || !clientSecretDraft.trim())
-                }
-              >
-                <LabelStack
-                  active={configBusy ? t('加密保存中…', 'Saving…') : t('加密保存', 'Save encrypted')}
-                  labels={[t('加密保存', 'Save encrypted'), t('加密保存中…', 'Saving…')]}
-                />
-              </button>
-            </div>
-          </div>
-        </form>
-      </CaModal>
-
-      {/* Drawer B: Target Bot Browser Setup Wizard / Manual Mode Path */}
+      {/* Mutually Exclusive Modal 1: Bot Setup Wizard */}
       <CaModal
-        open={wizardOpen}
-        onOpenChange={setWizardOpen}
-        title={t('选择目标 Bot 进入建项向导或手动模式', 'Guided Google App Setup via Bot or Manual Mode')}
-        description={t('可选择一台在线主机上的 Bot 进入三模式建项向导（自动代办 / 内嵌指导 / 外部浏览器指导），或直接在此手动录入。', 'Launch the 3-mode setup wizard on a target Bot (Do it for me / Guide me here / Guide me in my browser), or enter credentials manually here.')}
+        open={modal?.kind === 'wizard'}
+        onOpenChange={open => {
+          if (!open) setModal(null);
+        }}
+        title={t('通过目标 Bot 启动建项向导', 'Guided Google App Setup via Bot')}
+        description={t('选择主机上的 Bot 启动三模式建项向导（自动代办 / 内嵌指导 / 外部浏览器指导）。', 'Launch the 3-mode setup wizard on a target Bot (Do it for me / Guide me here / Guide me in my browser).')}
         variant="drawer"
       >
         <div className="ca-form-stack">
           <CaNotice tone="info">
-            {t('建项过程中涉及 Google 登录、条款勾选与创建 Client Secret 时，必须由本人亲自确认，凭据通过私密控件直传中心，不经过聊天记录。', 'Google sign-in, policy agreement, and Client Secret creation always require you directly. Credentials are submitted privately to Center, never via chat.')}
+            {t('Google 登录、条款确认与创建 Client Secret 始终由本人完成，凭据直传中心加密存储，不进入聊天记录。', 'Google sign-in, policy agreement, and Client Secret creation always require you directly. Credentials are submitted privately to Center, never via chat.')}
           </CaNotice>
 
           {activeBots.length === 0 ? (
             <div className="ca-empty-hint">
-              {t('当前中心暂无可用 Bot。你可以先在手动模式中直接录入 Web OAuth 凭据，或先在桌面端/手机端创建 Bot。', 'No active Bots on this Center yet. You can enter Web OAuth credentials manually now, or create a Bot in the PiBot app first.')}
+              {t('当前中心暂无可用 Bot。你可以直接返回「OAuth 客户端」手动录入凭据，或先在桌面端/手机端创建 Bot。', 'No active Bots on this Center yet. Enter Web OAuth credentials manually in OAuth Client, or create a Bot in the PiBot app first.')}
             </div>
           ) : (
             <div className="ca-field">
@@ -2283,13 +2533,13 @@ export function GoogleTab({
 
               {selectedWizardDevice && selectedWizardDevice.platform === 'android' && (
                 <p className="ca-field-help">
-                  {t('提示：Android 本机 Host 受系统策略限制，进入向导后将默认推荐「外部浏览器指导（Guide me in my browser）」。如需内嵌浏览器协助，请选择在线桌面主机上的 Bot。', 'Note: Android local hosts default to "Guide me in my browser". Pick an online desktop host Bot for embedded browser assistance.')}
+                  {t('Android 本机 Host 默认推荐「外部浏览器指导」。如需内嵌浏览器协助，请选择在线桌面主机上的 Bot。', 'Android local hosts default to "Guide me in my browser". Pick an online desktop host Bot for embedded browser assistance.')}
                 </p>
               )}
 
               {selectedWizardDevice && !selectedWizardDevice.online && (
                 <p className="ca-field-help">
-                  {t('当前所选设备处于离线状态。设备上线后可在该 Bot 中启动建项向导，或现在直接切换手动模式录入。', 'The selected device is currently offline. Bring it online to run the wizard on that Bot, or switch to manual entry now.')}
+                  {t('所选设备当前离线。设备上线后可在该 Bot 启动向导，或现在直接切换手动录入。', 'The selected device is currently offline. Bring it online to run the wizard, or enter credentials manually now.')}
                 </p>
               )}
             </div>
@@ -2301,14 +2551,9 @@ export function GoogleTab({
                 {t('在 PiBot 客户端打开该 Bot 启动向导', 'Open this Bot in the PiBot app to start the wizard')}
               </div>
               <p className="ca-field-help" style={{ marginBottom: 8 }}>
-                {t(`当前处于独立中心网页，浏览器建项向导需在目标主机对应的 PiBot 桌面端或手机端打开「${formatBotDisplay(selectedWizardBot.deviceId, selectedWizardBot.botId)}」，然后发送“帮我配置 Google 应用”或在能力设置中启动向导。完成后将下载的 Web OAuth JSON 回到此处私密录入即可。`, `You are in the standalone Center web console. Open "${formatBotDisplay(selectedWizardBot.deviceId, selectedWizardBot.botId)}" in the PiBot desktop or mobile app to run the browser setup wizard, then save the Web OAuth credentials here.`)}
+                {t(`在桌面端或手机端打开「${formatBotDisplay(selectedWizardBot.deviceId, selectedWizardBot.botId)}」，发送“帮我配置 Google 应用”启动向导，完成后将 Web OAuth JSON 回到此处上传即可。`, `Open "${formatBotDisplay(selectedWizardBot.deviceId, selectedWizardBot.botId)}" in the PiBot desktop or mobile app to run the browser setup wizard, then upload the Web OAuth JSON here.`)}
               </p>
-              <div className="ca-inline-row ca-wrap">
-                <CopyButton
-                  value={redirectInfo.uri}
-                  label={t('复制回调 URI', 'Copy redirect URI')}
-                />
-              </div>
+              <CopyButton value={redirectInfo.uri} label={t('复制回调 URI', 'Copy redirect URI')} />
             </div>
           )}
 
@@ -2317,15 +2562,15 @@ export function GoogleTab({
               type="button"
               className="ca-btn"
               onClick={() => {
-                setWizardOpen(false);
-                openConfigureDrawer();
+                setModal(null);
+                switchSection('client');
               }}
             >
-              {t('切到手动录入模式', 'Switch to manual entry')}
+              {t('切到手动录入', 'Manual entry')}
             </button>
 
             <div className="ca-inline-row">
-              <button type="button" className="ca-btn ca-btn-ghost" onClick={() => setWizardOpen(false)}>
+              <button type="button" className="ca-btn ca-btn-ghost" onClick={() => setModal(null)}>
                 {t('关闭', 'Close')}
               </button>
               {selectedWizardBot && canJumpToBotWizard && (
@@ -2333,7 +2578,7 @@ export function GoogleTab({
                   type="button"
                   className="ca-btn ca-btn-primary"
                   onClick={() => {
-                    setWizardOpen(false);
+                    setModal(null);
                     if (onStartGoogleSetupWizard) {
                       onStartGoogleSetupWizard(selectedWizardBot.deviceId, selectedWizardBot.botId);
                     } else if (onConfigureBot) {
@@ -2342,7 +2587,7 @@ export function GoogleTab({
                   }}
                 >
                   <Bot size={14} aria-hidden="true" />
-                  <span>{onStartGoogleSetupWizard ? t('打开目标 Bot 向导', 'Open target Bot wizard') : t('打开目标 Bot', 'Open target Bot')}</span>
+                  <span>{onStartGoogleSetupWizard ? t('打开 Bot 向导', 'Open Bot wizard') : t('打开目标 Bot', 'Open target Bot')}</span>
                 </button>
               )}
             </div>
@@ -2350,22 +2595,21 @@ export function GoogleTab({
         </div>
       </CaModal>
 
-      {/* Modal C: Connect / Add Services (System Browser OAuth) */}
+      {/* Mutually Exclusive Modal 2: Connect / Add Services (System Browser OAuth) */}
       <CaModal
-        open={connectOpen}
+        open={modal?.kind === 'connect'}
         onOpenChange={open => {
-          setConnectOpen(open);
-          if (!open) {
+          if (!open && !connectBusy) {
             setConnectError('');
-            setConnectTargetAccount(null);
+            setModal(null);
           }
         }}
         title={
           connectTargetAccount
-            ? t(`为 ${connectTargetAccount.email} 管理服务授权`, `Manage services for ${connectTargetAccount.email}`)
+            ? t(`管理服务授权 · ${connectTargetAccount.email}`, `Manage services · ${connectTargetAccount.email}`)
             : t('选择要连接的 Google 服务', 'Choose Google services to connect')
         }
-        description={t('将在你的系统浏览器中完成本人登录、MFA 与权限同意。', 'You will sign in and grant consent in your system browser.')}
+        description={t('将在系统浏览器中完成本人登录、MFA 与权限同意。', 'You will sign in and grant consent in your system browser.')}
         variant="modal"
       >
         <div className="ca-form-stack">
@@ -2385,7 +2629,7 @@ export function GoogleTab({
                   type="button"
                   role="checkbox"
                   aria-checked={checked}
-                  disabled={alreadyGranted}
+                  disabled={alreadyGranted || connectBusy}
                   className={`ca-google-choice${checked ? ' is-selected' : ''}${alreadyGranted ? ' is-locked' : ''}`}
                   onClick={() => toggleServiceChoice(choice, alreadyGranted)}
                 >
@@ -2411,12 +2655,12 @@ export function GoogleTab({
           <div className="ca-google-base-scope">
             <Shield size={14} aria-hidden="true" />
             <span>
-              {t('基础附带：账号识别与联系人联查（People API，用于按姓名查找联系人与组织目录），不可单独取消。', 'Always included: account identity and contact name lookup (People API) to resolve names and directory contacts.')}
+              {t('基础附带：账号识别与联系人联查（People API，用于按姓名查找联系人与目录）。', 'Always included: account identity and contact name lookup (People API).')}
             </span>
           </div>
 
           <CaNotice tone="info">
-            {t('连接后，本中心现在和以后创建的所有 Bot 都能以你的身份使用你同意的 Google 服务；能向这些 Bot 发起任务的人也可能通过它们访问数据。', 'Once connected, all current and future Bots on this Center can use the approved Google services as you; anyone allowed to message those Bots may access data through them.')}
+            {t('连接后，本中心所有现有和未来 Bot 都能以你的身份访问所选服务。', 'Once connected, all current and future Bots on this Center can use the approved services as you.')}
           </CaNotice>
 
           <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
@@ -2432,13 +2676,14 @@ export function GoogleTab({
               type="button"
               className="ca-btn"
               disabled={connectBusy}
-              onClick={() => setConnectOpen(false)}
+              onClick={() => setModal(null)}
             >
               {t('取消', 'Cancel')}
             </button>
             <button
               type="button"
               className="ca-btn ca-btn-primary"
+              aria-busy={connectBusy}
               disabled={connectBusy || selectedChoices.length === 0}
               onClick={() => {
                 const unionChoices = connectTargetAccount
@@ -2453,12 +2698,12 @@ export function GoogleTab({
                   connectBusy
                     ? t('正在发起授权…', 'Starting sign-in…')
                     : connectTargetAccount
-                      ? t('前往 Google 补充授权', 'Continue to Google consent')
+                      ? t('前往 Google 补充授权', 'Authorize in Google')
                       : t('前往 Google 登录', 'Sign in to Google')
                 }
                 labels={[
                   connectTargetAccount
-                    ? t('前往 Google 补充授权', 'Continue to Google consent')
+                    ? t('前往 Google 补充授权', 'Authorize in Google')
                     : t('前往 Google 登录', 'Sign in to Google'),
                   t('正在发起授权…', 'Starting sign-in…'),
                 ]}
@@ -2468,30 +2713,30 @@ export function GoogleTab({
         </div>
       </CaModal>
 
-      {/* Modal D: Remove Account Confirmation (Local Remove vs Revoke at Google) */}
+      {/* Mutually Exclusive Modal 3: Remove Account Confirmation */}
       <CaModal
-        open={Boolean(removeTarget)}
+        open={modal?.kind === 'remove-account'}
         onOpenChange={open => {
           if (!open && !removeBusy) {
-            setRemoveTarget(null);
             setRemoveError('');
+            setModal(null);
           }
         }}
         title={t('移除 Google 账号', 'Remove Google Account')}
-        description={removeTarget?.email}
+        description={removeTargetAccount?.email}
         variant="modal"
       >
-        {removeTarget && (
+        {removeTargetAccount && (
           <div className="ca-form-stack">
             <CaNotice tone="warn">
-              {t(`移除后，本中心所有 Bot 将不能再使用 ${removeTarget.email}；其他已连接的 Google 账号不受影响。`, `All Bots on this Center will stop having access to ${removeTarget.email}. Other connected Google accounts are unaffected.`)}
+              {t(`移除后，本中心所有 Bot 将停止访问 ${removeTargetAccount.email}；其他已连接账号不受影响。`, `All Bots on this Center will lose access to ${removeTargetAccount.email}. Other connected accounts are unaffected.`)}
             </CaNotice>
 
             <div className="ca-cred-box">
               <div className="ca-field-label" style={{ marginBottom: 4 }}>
                 {affectedRulesForRemoveTarget.length > 0
                   ? t(`引用此账号的 ${affectedRulesForRemoveTarget.length} 条自动规则将停止：`, `${affectedRulesForRemoveTarget.length} trigger rule(s) using this account will stop:`)
-                  : t('自动触发规则影响', 'Impact on automatic rules')}
+                  : t('自动触发规则影响', 'Impact on trigger rules')}
               </div>
               {affectedRulesForRemoveTarget.length === 0 ? (
                 <p className="ca-field-help">
@@ -2517,6 +2762,7 @@ export function GoogleTab({
                 <input
                   type="radio"
                   name="google-remove-mode"
+                  disabled={removeBusy}
                   checked={removeRevoke}
                   onChange={() => setRemoveRevoke(true)}
                 />
@@ -2525,7 +2771,7 @@ export function GoogleTab({
                     {t('移除并向 Google 撤权（推荐）', 'Remove and revoke access at Google (recommended)')}
                   </span>
                   <span className="ca-row-sub">
-                    {t('先请求 Google 撤销令牌，再清除中心本地凭据；若 Google 撤权失败会分开报告结果。', 'Requests token revocation at Google first, then deletes local Center credentials; reports both outcomes separately.')}
+                    {t('先向 Google 撤销令牌，再清除本地凭据；若撤权失败会分开提示结果。', 'Requests token revocation at Google first, then deletes local credentials; reports both outcomes separately.')}
                   </span>
                 </span>
               </label>
@@ -2534,6 +2780,7 @@ export function GoogleTab({
                 <input
                   type="radio"
                   name="google-remove-mode"
+                  disabled={removeBusy}
                   checked={!removeRevoke}
                   onChange={() => setRemoveRevoke(false)}
                 />
@@ -2542,7 +2789,7 @@ export function GoogleTab({
                     {t('仅从中心移除本地凭据', 'Remove from Center only')}
                   </span>
                   <span className="ca-row-sub">
-                    {t('仅删除中心加密凭据，不通知 Google 撤权。你可稍后在 Google 账号第三方连接页手动撤权。', 'Deletes only Center credentials without calling Google revoke. You can revoke later in Google Account connections.')}
+                    {t('仅删除中心加密凭据，不通知 Google 撤权。可稍后在 Google 账号中手动撤权。', 'Deletes only Center credentials without calling Google revoke. You can revoke later in Google Account connections.')}
                   </span>
                 </span>
               </label>
@@ -2561,13 +2808,14 @@ export function GoogleTab({
                 type="button"
                 className="ca-btn"
                 disabled={removeBusy}
-                onClick={() => setRemoveTarget(null)}
+                onClick={() => setModal(null)}
               >
                 {t('取消', 'Cancel')}
               </button>
               <button
                 type="button"
                 className="ca-btn ca-btn-danger"
+                aria-busy={removeBusy}
                 disabled={removeBusy}
                 onClick={() => void handleConfirmRemove()}
               >
@@ -2587,18 +2835,21 @@ export function GoogleTab({
         )}
       </CaModal>
 
-      {/* Drawer E: Create / Edit Automatic Trigger Rule */}
+      {/* Mutually Exclusive Modal 4: Create / Edit Rule */}
       <CaModal
-        open={ruleDrawerOpen}
+        open={modal?.kind === 'rule'}
         onOpenChange={open => {
-          if (!open && !ruleBusy) setRuleDrawerOpen(false);
+          if (!open && !ruleBusy) {
+            setRuleFormError('');
+            setModal(null);
+          }
         }}
         title={
-          editingRule
-            ? t('编辑自动触发规则', 'Edit Trigger Rule')
-            : t('新建自动触发规则', 'New Trigger Rule')
+          modal?.kind === 'rule' && modal.editing
+            ? t('编辑邮件与日历规则', 'Edit Trigger Rule')
+            : t('新建邮件与日历规则', 'New Trigger Rule')
         }
-        description={t('为指定 Bot 配置新邮件或会前提醒，由中心持续检查并投递。', 'Configure a new-mail or pre-meeting rule checked by Center and delivered to the selected Bot.')}
+        description={t('由中心持续检查并按规则投递给指定 Bot。', 'Checked continuously by Center and delivered to the selected Bot.')}
         variant="drawer"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSaveRule(e)}>
@@ -2622,6 +2873,7 @@ export function GoogleTab({
             <select
               id="ca-google-rule-bot"
               className="ca-select"
+              disabled={ruleBusy}
               value={ruleBotKey}
               onChange={e => setRuleBotKey(e.target.value)}
             >
@@ -2646,6 +2898,7 @@ export function GoogleTab({
             <select
               id="ca-google-rule-account"
               className="ca-select"
+              disabled={ruleBusy}
               value={ruleAccount}
               onChange={e => setRuleAccount(e.target.value)}
             >
@@ -2670,6 +2923,7 @@ export function GoogleTab({
                     id="ca-google-rule-from"
                     type="text"
                     className="ca-input"
+                    disabled={ruleBusy}
                     placeholder="boss@company.com"
                     value={ruleFrom}
                     onChange={e => setRuleFrom(e.target.value)}
@@ -2683,6 +2937,7 @@ export function GoogleTab({
                     id="ca-google-rule-subject"
                     type="text"
                     className="ca-input"
+                    disabled={ruleBusy}
                     placeholder={t('例如：周报 / 紧急', 'e.g. Invoice / Urgent')}
                     value={ruleSubject}
                     onChange={e => setRuleSubject(e.target.value)}
@@ -2703,6 +2958,7 @@ export function GoogleTab({
                   id="ca-google-rule-cal"
                   type="text"
                   className="ca-input"
+                  disabled={ruleBusy}
                   placeholder="primary"
                   value={ruleCalendar}
                   onChange={e => setRuleCalendar(e.target.value)}
@@ -2722,6 +2978,7 @@ export function GoogleTab({
                   max={1440}
                   step={1}
                   className="ca-input ca-num"
+                  disabled={ruleBusy}
                   value={ruleMinutesBefore}
                   onChange={e => setRuleMinutesBefore(e.target.value)}
                 />
@@ -2730,6 +2987,7 @@ export function GoogleTab({
                     <button
                       key={m}
                       type="button"
+                      disabled={ruleBusy}
                       className={`ca-chip${parseCalendarMinutesBefore(ruleMinutesBefore, -1) === m ? ' is-active' : ''}`}
                       onClick={() => setRuleMinutesBefore(String(m))}
                     >
@@ -2751,6 +3009,7 @@ export function GoogleTab({
               id="ca-google-rule-instruction"
               rows={3}
               className="ca-textarea"
+              disabled={ruleBusy}
               placeholder={
                 ruleSource === 'gmail'
                   ? t('例如：总结邮件要点与待办事项并提醒我', 'e.g. Summarize key points and action items for me')
@@ -2765,6 +3024,7 @@ export function GoogleTab({
             <span className="ca-field-label">{t('保存后立即启用', 'Enable rule immediately')}</span>
             <CaSwitch
               checked={ruleEnabled}
+              disabled={ruleBusy}
               label={t('启用规则', 'Enable rule')}
               onChange={setRuleEnabled}
             />
@@ -2783,11 +3043,16 @@ export function GoogleTab({
               type="button"
               className="ca-btn"
               disabled={ruleBusy}
-              onClick={() => setRuleDrawerOpen(false)}
+              onClick={() => setModal(null)}
             >
               {t('取消', 'Cancel')}
             </button>
-            <button type="submit" className="ca-btn ca-btn-primary" disabled={ruleBusy}>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={ruleBusy}
+              aria-busy={ruleBusy}
+            >
               <LabelStack
                 active={ruleBusy ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
                 labels={[t('保存规则', 'Save rule'), t('保存中…', 'Saving…')]}
@@ -2796,6 +3061,25 @@ export function GoogleTab({
           </div>
         </form>
       </CaModal>
+
+      {/* Mutually Exclusive Modal 5: Confirm Delete Rule */}
+      <CaConfirmDialog
+        open={modal?.kind === 'confirm-delete-rule'}
+        title={t('删除自动触发规则', 'Delete Trigger Rule')}
+        description={
+          modal?.kind === 'confirm-delete-rule'
+            ? t(`删除分配给「${formatBotDisplay(modal.rule.deviceId, modal.rule.botId)}」的规则后将停止自动推送，不影响该 Bot 主动使用 Google 工具。`, `Deleting this rule for "${formatBotDisplay(modal.rule.deviceId, modal.rule.botId)}" stops automatic notifications without affecting on-demand Google access.`)
+            : ''
+        }
+        confirmLabel={t('删除规则', 'Delete rule')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={deletingRule}
+        onCancel={() => {
+          if (!deletingRule) setModal(null);
+        }}
+        onConfirm={() => void handleConfirmDeleteRule()}
+      />
     </div>
   );
 }

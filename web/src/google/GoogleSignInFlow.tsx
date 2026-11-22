@@ -3,10 +3,11 @@
 // - Client secrets live only in uncontrolled DOM inputs or transient File reads, never React state or chat.
 // - Google OAuth always opens the system browser via openExternalUrl, never a Bot WebView.
 // - Completion is verified strictly from Center /api/google/flow + /api/google/status, never chat text.
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { Check, Copy, ExternalLink, Lock, RefreshCw, ShieldAlert, Upload } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Check, Copy, ExternalLink, Lock, RefreshCw, Upload } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { InlineBanner } from '../components/ui';
 import { useText } from '../ui';
 import {
   cancelGoogleAuthFlow,
@@ -61,6 +62,8 @@ export function GoogleClientConfigForm({
   const idPrefix = useId();
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileTabRef = useRef<HTMLButtonElement>(null);
+  const manualTabRef = useRef<HTMLButtonElement>(null);
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
 
@@ -193,8 +196,32 @@ export function GoogleClientConfigForm({
     );
   }
 
+  const handleContainerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && !submitting && onCancel) {
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    }
+  };
+
+  const handleTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      const nextMode = mode === 'file' ? 'manual' : 'file';
+      setMode(nextMode);
+      setError('');
+      (nextMode === 'file' ? fileTabRef : manualTabRef).current?.focus();
+    }
+  };
+
+  const fileTabId = `${idPrefix}-tab-file`;
+  const manualTabId = `${idPrefix}-tab-manual`;
+  const filePanelId = `${idPrefix}-panel-file`;
+  const manualPanelId = `${idPrefix}-panel-manual`;
+  const errorId = `${idPrefix}-error`;
+
   return (
-    <div className="gws-private-box" aria-busy={submitting}>
+    <div className="gws-private-box" aria-busy={submitting} onKeyDown={handleContainerKeyDown}>
       <div className="gws-private-head">
         <Lock size={15} aria-hidden="true" />
         <span>{t('私密录入 Center Web OAuth 凭据', 'Private Center Web OAuth Configuration')}</span>
@@ -211,7 +238,7 @@ export function GoogleClientConfigForm({
 
       <div className="gws-uri-row">
         <div className="gws-uri-text">
-          <span className="gws-label-xs">{t('已授权的重定向 URI（Web application）', 'Authorized redirect URI (Web application)')}</span>
+          <span className="gws-label-xs">{t('已授权的重定向 URI', 'Authorized redirect URI')}</span>
           <code className="gws-code">{effectiveRedirectUri}</code>
         </div>
         <button type="button" className="gws-btn is-ghost is-sm" onClick={() => void copyRedirectUri()}>
@@ -222,29 +249,39 @@ export function GoogleClientConfigForm({
 
       <div className="gws-seg" role="tablist" aria-label={t('录入方式', 'Input method')}>
         <button
+          ref={fileTabRef}
+          id={fileTabId}
           type="button"
           role="tab"
           aria-selected={mode === 'file'}
+          aria-controls={filePanelId}
+          tabIndex={mode === 'file' ? 0 : -1}
           className={`gws-seg-btn${mode === 'file' ? ' is-active' : ''}`}
           disabled={submitting}
           onClick={() => { setMode('file'); setError(''); }}
+          onKeyDown={handleTabKeyDown}
         >
           {t('上传 JSON 文件', 'Upload JSON file')}
         </button>
         <button
+          ref={manualTabRef}
+          id={manualTabId}
           type="button"
           role="tab"
           aria-selected={mode === 'manual'}
+          aria-controls={manualPanelId}
+          tabIndex={mode === 'manual' ? 0 : -1}
           className={`gws-seg-btn${mode === 'manual' ? ' is-active' : ''}`}
           disabled={submitting}
           onClick={() => { setMode('manual'); setError(''); }}
+          onKeyDown={handleTabKeyDown}
         >
           {t('粘贴 Client ID / Secret', 'Paste Client ID & Secret')}
         </button>
       </div>
 
       {mode === 'file' ? (
-        <div className="gws-upload-area">
+        <div id={filePanelId} role="tabpanel" aria-labelledby={fileTabId} className="gws-upload-area">
           <input
             ref={fileInputRef}
             id={`${idPrefix}-file`}
@@ -272,48 +309,54 @@ export function GoogleClientConfigForm({
           </span>
         </div>
       ) : (
-        <form ref={formRef} className="gws-form" autoComplete="off" noValidate onSubmit={e => void handleManualSubmit(e)}>
-          <label className="gws-field" htmlFor={`${idPrefix}-cid`}>
-            <span className="gws-label">{t('Web Client ID', 'Web Client ID')}</span>
-            <input
-              id={`${idPrefix}-cid`}
-              name="clientId"
-              type="text"
-              className="gws-input"
-              autoComplete="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              disabled={submitting}
-              placeholder="1234567890-xxxx.apps.googleusercontent.com"
-              onChange={() => setError('')}
-            />
-          </label>
-          <label className="gws-field" htmlFor={`${idPrefix}-csec`}>
-            <span className="gws-label">{t('Web Client Secret', 'Web Client Secret')}</span>
-            <input
-              id={`${idPrefix}-csec`}
-              name="clientSecret"
-              type="password"
-              className="gws-input"
-              autoComplete="new-password"
-              autoCapitalize="none"
-              spellCheck={false}
-              disabled={submitting}
-              placeholder="GOCSPX-…"
-              onChange={() => setError('')}
-            />
-          </label>
-          <div className="gws-actions">
-            <button type="submit" className="gws-btn is-primary" disabled={submitting}>
-              {submitting ? t('加密保存中…', 'Encrypting & saving…') : t('加密保存到 Center', 'Encrypt & save to Center')}
-            </button>
-            {onCancel ? (
-              <button type="button" className="gws-btn is-ghost" disabled={submitting} onClick={onCancel}>
-                {t('取消', 'Cancel')}
+        <div id={manualPanelId} role="tabpanel" aria-labelledby={manualTabId}>
+          <form ref={formRef} className="gws-form" autoComplete="off" noValidate onSubmit={e => void handleManualSubmit(e)}>
+            <label className="gws-field" htmlFor={`${idPrefix}-cid`}>
+              <span className="gws-label">{t('Web Client ID', 'Web Client ID')}</span>
+              <input
+                id={`${idPrefix}-cid`}
+                name="clientId"
+                type="text"
+                className="gws-input"
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                disabled={submitting}
+                aria-invalid={Boolean(error) || undefined}
+                aria-describedby={error ? errorId : undefined}
+                placeholder="1234567890-xxxx.apps.googleusercontent.com"
+                onChange={() => setError('')}
+              />
+            </label>
+            <label className="gws-field" htmlFor={`${idPrefix}-csec`}>
+              <span className="gws-label">{t('Web Client Secret', 'Web Client Secret')}</span>
+              <input
+                id={`${idPrefix}-csec`}
+                name="clientSecret"
+                type="password"
+                className="gws-input"
+                autoComplete="new-password"
+                autoCapitalize="none"
+                spellCheck={false}
+                disabled={submitting}
+                aria-invalid={Boolean(error) || undefined}
+                aria-describedby={error ? errorId : undefined}
+                placeholder="GOCSPX-…"
+                onChange={() => setError('')}
+              />
+            </label>
+            <div className="gws-actions">
+              <button type="submit" className="gws-btn is-primary" disabled={submitting}>
+                {submitting ? t('加密保存中…', 'Encrypting & saving…') : t('加密保存到 Center', 'Encrypt & save to Center')}
               </button>
-            ) : null}
-          </div>
-        </form>
+              {onCancel ? (
+                <button type="button" className="gws-btn is-ghost" disabled={submitting} onClick={onCancel}>
+                  {t('取消', 'Cancel')}
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </div>
       )}
 
       {mode === 'file' && onCancel ? (
@@ -325,16 +368,20 @@ export function GoogleClientConfigForm({
       ) : null}
 
       {error ? (
-        <div className="gws-error" role="alert">
-          <ShieldAlert size={15} aria-hidden="true" />
-          <div className="gws-error-body">
-            <span>{error}</span>
-            {adminBlocked && onOpenCenterAdmin ? (
-              <button type="button" className="gws-link-btn" onClick={onOpenCenterAdmin}>
-                {t('前往中心管理页查看 →', 'Open Center Admin →')}
-              </button>
-            ) : null}
-          </div>
+        <div id={errorId} className="gws-banner-wrap">
+          <InlineBanner
+            tone="danger"
+            role="alert"
+            compact
+            title={error}
+            actions={
+              adminBlocked && onOpenCenterAdmin ? (
+                <button type="button" className="gws-link-btn" onClick={onOpenCenterAdmin}>
+                  {t('前往中心管理页查看', 'Open Center Admin')}
+                </button>
+              ) : undefined
+            }
+          />
         </div>
       ) : null}
     </div>
@@ -725,16 +772,16 @@ export function GoogleSignInFlow({
       </p>
 
       {phase === 'cancelled' ? (
-        <p className="gws-muted" role="status">
-          {t('已取消此次授权，未新增或改动已有连接。', 'Authorization cancelled. No connections were changed.')}
-        </p>
+        <InlineBanner
+          tone="neutral"
+          role="status"
+          compact
+          title={t('已取消此次授权，未新增或改动已有连接。', 'Authorization cancelled. No connections were changed.')}
+        />
       ) : null}
 
       {error ? (
-        <div className="gws-error" role="alert">
-          <ShieldAlert size={15} aria-hidden="true" />
-          <span>{error}</span>
-        </div>
+        <InlineBanner tone="danger" role="alert" compact title={error} />
       ) : null}
 
       <div className="gws-actions">

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 import type { ChatToolCallItem } from './chatTurnModel';
 import { formatTurnDuration, pendingToolPrompts, resolveToolPresentationActive } from './chatTurnModel';
 import {
@@ -72,7 +73,7 @@ export interface ToolCallCardProps {
   /** 仅作初始展开态（省略时回退 !collapseOutput）；用户手动切换后不再被自动覆写。 */
   defaultOpen?: boolean;
   presentationOnly?: boolean;
-  /** 内部嵌套层级计数（默认 0），移动端精简模式用于限制最大缩进 2 层。 */
+  /** 内部嵌套层级计数（默认 0），用于限制最大缩进 2 层。 */
   depth?: number;
   googleContext?: GoogleChatCardContext;
   onSubmitQuestionnaire?: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
@@ -82,7 +83,7 @@ export interface ToolCallCardProps {
   onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
 }
 
-/** One model call, its script-owned children, and its own result stay in the same block. */
+/** One model call, its script-owned children, and its own result stay in one flat trace block. */
 export function ToolCallCard({
   tool,
   scopeKey,
@@ -102,29 +103,34 @@ export function ToolCallCard({
   onAnswerTaskPrompt,
 }: ToolCallCardProps) {
   const t = useText();
+  const panelId = useId();
   const isCoarse = useIsCoarsePointer();
   const mobileCompact = isCoarse && variant !== 'desktop';
-  const [argSummaryExpanded, setArgSummaryExpanded] = useState(false);
   const [expandedArgKeys, setExpandedArgKeys] = useState<Record<string, boolean>>({});
   const [showRawArgs, setShowRawArgs] = useState(false);
+
   const presentation = readToolPresentation(tool.presentation);
   const codemode = tool.name === 'codemode';
   const script = codemode && typeof tool.args?.code === 'string' ? tool.args.code : undefined;
   const argsEntries = tool.args ? Object.entries(tool.args) : [];
   const args = argsEntries.length > 0 ? JSON.stringify(tool.args, null, 2) : undefined;
   const incomplete = tool.status === 'done' && tool.outcome !== 'ok';
+
   const statusLabel = tool.status === 'running' ? t('调用中', 'Calling')
     : tool.status === 'error' ? t('失败', 'Failed')
       : tool.status === 'cancelled' ? t('已取消', 'Cancelled')
         : tool.status === 'interrupted' ? t('已中断', 'Interrupted')
           : incomplete ? t('结果不完整', 'Outcome unavailable') : t('已完成', 'Done');
+
   const icon = tool.status === 'running' ? '…'
     : tool.status === 'error' ? '✕'
       : tool.status === 'cancelled' ? '⊘'
         : tool.status === 'interrupted' || incomplete ? '—' : '✓';
+
   const duration = tool.durationMs === undefined ? undefined
     : tool.durationMs < 1000 ? `${Math.round(tool.durationMs)}ms`
       : formatTurnDuration(tool.durationMs, (_zh, en) => en);
+
   const presentationKey = presentation
     ? presentation.kind === 'todo'
       ? tool.id
@@ -142,6 +148,7 @@ export function ToolCallCard({
                   ? `${presentation.installationId}:${presentation.conversationId}:${presentation.requestId}`
                   : presentation.requestId
     : tool.id;
+
   const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
   const sendToTarget = sendTo
     ? (sendTo.targetName ||
@@ -160,6 +167,7 @@ export function ToolCallCard({
                 ? t('通知', 'Notice')
                 : t('发送消息', 'Message'))
     : undefined;
+
   const hasDetails = codemode || args !== undefined || tool.output !== undefined || tool.outputTruncated ||
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
   const hasVisibleChildPresentation = Boolean(
@@ -171,27 +179,34 @@ export function ToolCallCard({
       pendingToolPrompts(tool.children, tool.status === 'running').length > 0
     ),
   );
+
   // 严格把 defaultOpen / !collapseOutput 作为初始态，在渲染期同步推导自动展开；
   // 一旦用户手动切换展开/收起，永不再由 props 或异步子调用变化自动覆盖。
   const [initialOpen] = useState<boolean>(() => defaultOpen ?? !collapseOutput);
-  const [userCompactOpen, setUserCompactOpen] = useState<boolean | null>(null);
-  const [userDetailsOpen, setUserDetailsOpen] = useState<boolean | null>(null);
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const [autoExpandedForChild, setAutoExpandedForChild] = useState<boolean>(
-    () => mobileCompact && hasVisibleChildPresentation,
+    () => hasVisibleChildPresentation,
   );
-  if (mobileCompact && hasVisibleChildPresentation && !autoExpandedForChild && userCompactOpen === null) {
+  if (hasVisibleChildPresentation && !autoExpandedForChild && userOpen === null) {
     setAutoExpandedForChild(true);
   }
-  const compactExpanded = userCompactOpen ?? (initialOpen || autoExpandedForChild);
-  const detailsOpen = userDetailsOpen ?? initialOpen;
-  const hasCompactBody = hasDetails || Boolean(tool.argSummary || tool.error || tool.children?.length ||
-    tool.nestedCallsTruncated || (codemode && tool.status !== 'running' && tool.children === undefined));
+
+  const expanded = userOpen ?? (initialOpen || autoExpandedForChild);
+  const hasPanelContent = hasDetails || Boolean(
+    tool.error ||
+    tool.children?.length ||
+    tool.nestedCallsTruncated ||
+    (!sendTo && tool.argSummary) ||
+    (codemode && tool.status !== 'running' && tool.children === undefined),
+  );
+
   const isGoogleSetupHistory = presentation?.kind === 'google-setup';
   const presentationActive = isGoogleSetupHistory
     ? false
     : resolveToolPresentationActive(tool, presentation, active, disabled);
   const questionnaireInterrupted = presentation?.kind === 'questionnaire' && presentation.status === 'pending' &&
     (tool.status === 'error' || tool.status === 'interrupted' || tool.status === 'cancelled');
+
   const presentationCard = presentation ? (
     <ToolPresentationCard
       key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
@@ -211,6 +226,7 @@ export function ToolCallCard({
       onAnswerTaskPrompt={onAnswerTaskPrompt}
     />
   ) : null;
+
   if (presentationOnly) return presentationCard;
   if (isGoogleSetupHistory) {
     return (
@@ -250,50 +266,54 @@ export function ToolCallCard({
       </div>
     ) : null;
 
+  const sendToSummary = sendTo
+    ? [sendToTarget, sendToAction].filter(Boolean).join(' · ')
+    : undefined;
+
+  const rowContent = (
+    <>
+      <span className="tool-call-icon" aria-hidden="true">{icon}</span>
+      {sendTo ? (
+        <span className="tool-call-name is-prose">{sendToSummary || tool.name}</span>
+      ) : (
+        <span className="tool-call-name">{tool.name}</span>
+      )}
+      {!sendTo && tool.argSummary ? (
+        <span className="tool-call-summary" title={isCoarse ? undefined : tool.argSummary}>
+          {tool.argSummary}
+        </span>
+      ) : null}
+      <span className="tool-call-state">{statusLabel}</span>
+      {duration ? <span className="tool-call-duration tabular-nums">{duration}</span> : null}
+      {hasPanelContent ? (
+        <ChevronDown
+          size={13}
+          aria-hidden="true"
+          className={`tool-call-chevron${expanded ? ' is-open' : ''}`}
+        />
+      ) : null}
+    </>
+  );
+
   return (
     <div
       key={`${scopeKey}:${tool.id}`}
       role="listitem"
       className={`tool-call-card is-${tool.status}${incomplete ? ' is-incomplete' : ''}${tool.parentCallId ? ' is-nested' : ''}${sendTo ? ' is-send-to' : ''}${mobileCompact ? ' is-mobile-compact' : ''}`}
     >
-      {mobileCompact ? (
-        hasCompactBody ? (
-          <button
-            type="button"
-            className={`tool-call-header tool-call-compact-toggle${compactExpanded ? ' is-expanded' : ''}`}
-            aria-expanded={compactExpanded}
-            onClick={() => setUserCompactOpen(!compactExpanded)}
-          >
-            <span className="tool-call-icon" aria-hidden="true">{icon}</span>
-            <span className="tool-call-name">{tool.name}</span>
-            <span className="tool-call-state">{statusLabel}</span>
-            {duration ? <span className="tool-call-duration">{duration}</span> : null}
-          </button>
-        ) : (
-          <div className="tool-call-header">
-            <span className="tool-call-icon" aria-hidden="true">{icon}</span>
-            <span className="tool-call-name">{tool.name}</span>
-            <span className="tool-call-state">{statusLabel}</span>
-            {duration ? <span className="tool-call-duration">{duration}</span> : null}
-          </div>
-        )
+      {hasPanelContent ? (
+        <button
+          type="button"
+          className={`tool-call-header tool-call-toggle${expanded ? ' is-expanded' : ''}`}
+          aria-expanded={expanded}
+          aria-controls={panelId}
+          onClick={() => setUserOpen(!expanded)}
+        >
+          {rowContent}
+        </button>
       ) : (
         <div className="tool-call-header">
-          <span className="tool-call-icon" aria-hidden="true">{icon}</span>
-          <span className="tool-call-name">{tool.name}</span>
-          {tool.argSummary ? (
-            <button
-              type="button"
-              className={`tool-call-args${argSummaryExpanded ? ' is-expanded' : ''}`}
-              aria-expanded={argSummaryExpanded}
-              title={isCoarse ? undefined : tool.argSummary}
-              onClick={() => setArgSummaryExpanded(v => !v)}
-            >
-              <span className="tool-call-args-text">{tool.argSummary}</span>
-            </button>
-          ) : null}
-          <span className="tool-call-state">{statusLabel}</span>
-          {duration ? <span className="tool-call-duration">{duration}</span> : null}
+          {rowContent}
         </div>
       )}
 
@@ -301,11 +321,19 @@ export function ToolCallCard({
         <div className={`tool-send-to-preview${sendTo.silentPass ? ' is-silent' : ''}`}>
           <div className="tool-send-to-meta">
             <span className="tool-send-to-target">{sendToTarget}</span>
-            {sendToAction ? <span className="tool-send-to-badge">{sendToAction}</span> : null}
+            {sendToAction ? (
+              <>
+                <span className="tool-send-to-sep" aria-hidden="true">·</span>
+                <span className="tool-send-to-action">{sendToAction}</span>
+              </>
+            ) : null}
             {sendTo.fileCount && sendTo.fileCount > 0 ? (
-              <span className="tool-send-to-files">
-                {t(`${sendTo.fileCount} 个附件`, `${sendTo.fileCount} file(s)`)}
-              </span>
+              <>
+                <span className="tool-send-to-sep" aria-hidden="true">·</span>
+                <span className="tool-send-to-files tabular-nums">
+                  {t(`${sendTo.fileCount} 个附件`, `${sendTo.fileCount} file(s)`)}
+                </span>
+              </>
             ) : null}
           </div>
           {sendTo.silentPass ? (
@@ -316,93 +344,88 @@ export function ToolCallCard({
         </div>
       ) : null}
 
-      {mobileCompact ? (
-        compactExpanded && hasCompactBody ? (
-          <div className="tool-call-compact-body">
-            {tool.error ? <pre className="tool-call-error">{tool.error}</pre> : null}
-            {argsEntries.length > 0 ? (
-              <div className="tool-call-section">
-                <span className="tool-call-label">{t('参数', 'Arguments')}</span>
-                <dl className="tool-call-kv-list">
-                  {argsEntries.map(([key, rawValue]) => {
-                    const formatted = formatCompactArgValue(rawValue);
-                    const isLong = isLongCompactArgValue(formatted);
-                    const isValExpanded = Boolean(expandedArgKeys[key]);
-                    return (
-                      <div key={key} className="tool-call-kv-row">
-                        <dt className="tool-call-kv-key">{key}</dt>
-                        <dd className="tool-call-kv-val-cell">
-                          {isLong ? (
-                            <button
-                              type="button"
-                              className={`tool-call-kv-val-toggle${isValExpanded ? ' is-expanded' : ''}`}
-                              aria-expanded={isValExpanded}
-                              onClick={() => setExpandedArgKeys(prev => ({ ...prev, [key]: !prev[key] }))}
-                            >
-                              <span className="tool-call-kv-val-text">
-                                {isValExpanded ? formatted : previewCompactArgValue(formatted)}
-                              </span>
-                              <span className="tool-call-kv-val-action">
-                                {isValExpanded ? t('收起', 'Collapse') : t('展开', 'Expand')}
-                              </span>
-                            </button>
-                          ) : (
-                            <span className="tool-call-kv-val">{formatted}</span>
-                          )}
-                        </dd>
-                      </div>
-                    );
-                  })}
-                </dl>
-                {args !== undefined ? (
-                  <div className="tool-call-raw-wrap">
-                    <button
-                      type="button"
-                      className="tool-call-raw-toggle"
-                      aria-expanded={showRawArgs}
-                      onClick={() => setShowRawArgs(v => !v)}
-                    >
-                      {showRawArgs ? t('收起原文', 'Hide raw') : t('查看原文', 'View raw')}
-                    </button>
-                    {showRawArgs ? <pre className="tool-call-raw-pre">{args}</pre> : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : codemode ? (
-              <p className="tool-call-notice">{t('此记录未保留脚本。', 'The script is not available in this record.')}</p>
-            ) : tool.argSummary ? (
-              <div className="tool-call-section">
-                <span className="tool-call-label">{t('参数摘要', 'Argument preview')}</span>
-                <pre className="tool-call-arg-full">{tool.argSummary}</pre>
-              </div>
-            ) : null}
+      {expanded && hasPanelContent ? (
+        <div id={panelId} className="tool-call-panel">
+          {tool.error ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('错误', 'Error')}</span>
+              <pre className="tool-call-error">{tool.error}</pre>
+            </div>
+          ) : null}
 
-            {renderChildren()}
-            {tool.nestedCallsTruncated ? (
-              <p className="tool-call-notice">{t('子调用摘要已截断，部分信息未显示。', 'Nested call summaries are truncated; some information is not shown.')}</p>
-            ) : null}
-            {codemode && tool.status !== 'running' && tool.children === undefined ? (
-              <p className="tool-call-notice">{t('此记录未保留子调用摘要。', 'No nested call summaries were recorded.')}</p>
-            ) : null}
+          {script !== undefined ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('脚本', 'Script')}</span>
+              <pre className="tool-call-code">{script}</pre>
+            </div>
+          ) : mobileCompact && argsEntries.length > 0 ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('参数', 'Arguments')}</span>
+              <dl className="tool-call-kv-list">
+                {argsEntries.map(([key, rawValue]) => {
+                  const formatted = formatCompactArgValue(rawValue);
+                  const isLong = isLongCompactArgValue(formatted);
+                  const isValExpanded = Boolean(expandedArgKeys[key]);
+                  return (
+                    <div key={key} className="tool-call-kv-row">
+                      <dt className="tool-call-kv-key">{key}</dt>
+                      <dd className="tool-call-kv-val-cell">
+                        {isLong ? (
+                          <button
+                            type="button"
+                            className={`tool-call-kv-val-toggle${isValExpanded ? ' is-expanded' : ''}`}
+                            aria-expanded={isValExpanded}
+                            onClick={() => setExpandedArgKeys(prev => ({ ...prev, [key]: !prev[key] }))}
+                          >
+                            <span className="tool-call-kv-val-text">
+                              {isValExpanded ? formatted : previewCompactArgValue(formatted)}
+                            </span>
+                            <span className="tool-call-kv-val-action">
+                              {isValExpanded ? t('收起', 'Collapse') : t('展开', 'Expand')}
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="tool-call-kv-val">{formatted}</span>
+                        )}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+              {args !== undefined ? (
+                <div className="tool-call-raw-wrap">
+                  <button
+                    type="button"
+                    className="tool-call-raw-toggle"
+                    aria-expanded={showRawArgs}
+                    onClick={() => setShowRawArgs(v => !v)}
+                  >
+                    {showRawArgs ? t('收起原文', 'Hide raw') : t('查看原文', 'View raw')}
+                  </button>
+                  {showRawArgs ? <pre className="tool-call-code">{args}</pre> : null}
+                </div>
+              ) : null}
+            </div>
+          ) : args !== undefined ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('参数', 'Arguments')}</span>
+              <pre className="tool-call-code">{args}</pre>
+            </div>
+          ) : codemode ? (
+            <p className="tool-call-notice">{t('此记录未保留脚本。', 'The script is not available in this record.')}</p>
+          ) : tool.argSummary ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('参数摘要', 'Argument preview')}</span>
+              <pre className="tool-call-code">{tool.argSummary}</pre>
+            </div>
+          ) : null}
 
-            {tool.output !== undefined ? (
-              <div className="tool-call-section">
-                <span className="tool-call-label">
-                  {tool.status === 'running' ? t('实时输出', 'Live output') : t('输出', 'Output')}
-                </span>
-                <pre>{tool.output}</pre>
-              </div>
-            ) : codemode ? (
-              <p className="tool-call-notice">{t('暂无记录的文本输出。', 'No recorded text output is available.')}</p>
-            ) : null}
-            {tool.outputTruncated ? <p className="tool-call-notice">{t('输出已截断。', 'Output is truncated.')}</p> : null}
-          </div>
-        ) : null
-      ) : (
-        <>
-          {tool.error ? <pre className="tool-call-error">{tool.error}</pre> : null}
-
-          {renderChildren()}
+          {tool.children && tool.children.length > 0 ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">{t('子调用', 'Nested calls')}</span>
+              {renderChildren()}
+            </div>
+          ) : null}
           {tool.nestedCallsTruncated ? (
             <p className="tool-call-notice">{t('子调用摘要已截断，部分信息未显示。', 'Nested call summaries are truncated; some information is not shown.')}</p>
           ) : null}
@@ -410,48 +433,21 @@ export function ToolCallCard({
             <p className="tool-call-notice">{t('此记录未保留子调用摘要。', 'No nested call summaries were recorded.')}</p>
           ) : null}
 
-          {hasDetails ? (
-            <details
-              className="tool-call-details"
-              open={detailsOpen}
-              onToggle={event => {
-                const nextOpen = event.currentTarget.open;
-                if (nextOpen !== detailsOpen) {
-                  setUserDetailsOpen(nextOpen);
-                }
-              }}
-            >
-              <summary>{codemode ? t('脚本与输出', 'Script and output') : t('调用详情', 'Call details')}</summary>
-              {script !== undefined ? (
-                <div className="tool-call-section">
-                  <span className="tool-call-label">{t('脚本', 'Script')}</span>
-                  <pre>{script}</pre>
-                </div>
-              ) : args !== undefined ? (
-                <div className="tool-call-section">
-                  <span className="tool-call-label">{t('参数', 'Arguments')}</span>
-                  <pre>{args}</pre>
-                </div>
-              ) : codemode ? <p className="tool-call-notice">{t('此记录未保留脚本。', 'The script is not available in this record.')}</p>
-                : tool.argSummary ? (
-                  <div className="tool-call-section">
-                    <span className="tool-call-label">{t('参数摘要', 'Argument preview')}</span>
-                    <pre>{tool.argSummary}</pre>
-                  </div>
-                ) : null}
-              {tool.output !== undefined ? (
-                <div className="tool-call-section">
-                  <span className="tool-call-label">
-                    {tool.status === 'running' ? t('实时输出', 'Live output') : t('输出', 'Output')}
-                  </span>
-                  <pre>{tool.output}</pre>
-                </div>
-              ) : codemode ? <p className="tool-call-notice">{t('暂无记录的文本输出。', 'No recorded text output is available.')}</p> : null}
-              {tool.outputTruncated ? <p className="tool-call-notice">{t('输出已截断。', 'Output is truncated.')}</p> : null}
-            </details>
+          {tool.output !== undefined ? (
+            <div className="tool-call-section">
+              <span className="tool-call-label">
+                {tool.status === 'running' ? t('实时输出', 'Live output') : t('输出', 'Output')}
+              </span>
+              <pre className="tool-call-code">{tool.output}</pre>
+            </div>
+          ) : codemode ? (
+            <p className="tool-call-notice">{t('暂无记录的文本输出。', 'No recorded text output is available.')}</p>
           ) : null}
-        </>
-      )}
+          {tool.outputTruncated ? (
+            <p className="tool-call-notice">{t('输出已截断。', 'Output is truncated.')}</p>
+          ) : null}
+        </div>
+      ) : null}
 
       {presentationCard}
     </div>

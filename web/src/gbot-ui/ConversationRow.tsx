@@ -99,7 +99,7 @@ export function ConversationRow({
           {unread ? (
             <span aria-hidden="true" className="gbot-conversation-row__unread-dot" />
           ) : null}
-          {time ? <span className="gbot-conversation-row__time">{time}</span> : null}
+          {time ? <span className="gbot-conversation-row__time tabular-nums">{time}</span> : null}
         </span>
         {subtitle ? (
           <span className="gbot-conversation-row__preview">{subtitle}</span>

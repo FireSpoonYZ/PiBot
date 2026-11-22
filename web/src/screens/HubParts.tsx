@@ -50,10 +50,12 @@ export function HubPrimaryHero({
 export function HubArchivedRow({
   onOpen,
   onOpenMenu,
+  className = '',
   children,
 }: {
   onOpen: () => void;
   onOpenMenu: (position: { x: number; y: number }) => void;
+  className?: string;
   children: ReactNode;
 }) {
   const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
@@ -61,7 +63,7 @@ export function HubArchivedRow({
   // 抬起在内按钮时会残留计时器。仅重写 Enter/Space 打开行为。
   return (
     <div
-      className="hub-bot-row is-archived"
+      className={`hub-bot-row is-archived${className ? ` ${className}` : ''}`}
       role="button"
       tabIndex={0}
       {...interactions}

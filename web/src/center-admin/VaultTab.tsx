@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
-import { KeyRound, Lock, RefreshCw, Settings2, Unlock } from 'lucide-react';
-import { LabelStack } from '../layout';
+import { Lock, RefreshCw, Settings2, Unlock } from 'lucide-react';
+import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
 import { readTabCache, writeTabCache } from './cache';
 import { errorMessage } from './transport';
@@ -9,6 +9,7 @@ import type { CenterApi } from './transport';
 import {
   BotTreeSelector,
   CaCardSkeleton,
+  CaConfirmDialog,
   CaModal,
   CaNotice,
   CaRefreshBar,
@@ -42,6 +43,23 @@ interface VaultCacheData {
   vaultCapBindings: Array<[string, BotCapabilityConfig]>;
 }
 
+type VaultModal =
+  | null
+  | { kind: 'settings' }
+  | { kind: 'unlock' }
+  | { kind: 'grant'; secretRef: string }
+  | { kind: 'confirm-logout' };
+
+function StatusDot({ tone }: { tone: 'ok' | 'warn' | 'muted' }): React.JSX.Element {
+  const bg =
+    tone === 'ok'
+      ? 'var(--ca-ok)'
+      : tone === 'warn'
+        ? 'var(--ca-warn)'
+        : 'var(--ca-text-subtle)';
+  return <span className="ca-dot" style={{ background: bg }} aria-hidden="true" />;
+}
+
 export function VaultTab({
   api,
   active = true,
@@ -62,6 +80,7 @@ export function VaultTab({
   const [refreshing, setRefreshing] = useState(false);
   const [initialError, setInitialError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const [status, setStatus] = useState<ExternalVaultStatus | null>(() => initialCache?.status ?? null);
   const [items, setItems] = useState<ExternalVaultItemMeta[]>(() => initialCache?.items ?? []);
@@ -80,20 +99,25 @@ export function VaultTab({
   );
   const [capBusyKeys, setCapBusyKeys] = useState<Set<string>>(new Set());
 
-  // Unlock form
-  const [masterPassword, setMasterPassword] = useState('');
+  // Mutually exclusive modal state
+  const [modal, setModal] = useState<VaultModal>(null);
+  const settingsOpenRef = useRef(false);
+  settingsOpenRef.current = modal?.kind === 'settings';
 
-  // Service settings drawer
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const settingsOpenRef = useRef(settingsOpen);
-  settingsOpenRef.current = settingsOpen;
+  // Unlock modal state
+  const [masterPassword, setMasterPassword] = useState('');
+  const [unlockError, setUnlockError] = useState('');
+
+  // Settings modal state
   const [sourceDraft, setSourceDraft] = useState<VaultSource>(() => initialCache?.status.source ?? 'local');
   const [serverUrlDraft, setServerUrlDraft] = useState(() => initialCache?.status.serverUrl ?? '');
   const [emailDraft, setEmailDraft] = useState(() => initialCache?.status.email ?? '');
+  const [settingsError, setSettingsError] = useState('');
+  const [checkFeedback, setCheckFeedback] = useState<{ tone: 'ok' | 'danger'; text: string } | null>(null);
 
-  // Grant drawer for a Vaultwarden item
-  const [grantItem, setGrantItem] = useState<ExternalVaultItemMeta | null>(null);
+  // Grant modal state
   const [grantBusyKeys, setGrantBusyKeys] = useState<Set<string>>(new Set());
+  const [grantError, setGrantError] = useState('');
 
   const hasLoadedRef = useRef(hasLoaded);
   const cacheKeyRef = useRef(cacheKey);
@@ -118,14 +142,6 @@ export function VaultTab({
     (msg: string) => {
       if (msg) showNotice('notice', msg, { tone: 'ok' });
       else clearNotice('notice');
-    },
-    [clearNotice, showNotice],
-  );
-
-  const setSettingsError = useCallback(
-    (msg: string) => {
-      if (msg) showNotice('settings-error', msg, { tone: 'danger' });
-      else clearNotice('settings-error');
     },
     [clearNotice, showNotice],
   );
@@ -173,7 +189,7 @@ export function VaultTab({
       const map = new Map<string, BotCapabilityConfig>();
       for (const b of activeBots) {
         const key = botKey(b.deviceId, b.botId);
-        const cfg = bindingsRec[key];
+        const cfg = bindingsRec[key] ?? bindingsRec[`${b.deviceId}:${b.botId}`];
         if (cfg) map.set(key, cfg);
       }
       setVaultCapBindings(map);
@@ -195,7 +211,7 @@ export function VaultTab({
     } catch (err) {
       if (gen !== loadGenRef.current) return;
       const t = tRef.current;
-      const msg = errorMessage(err, t('加载密码库状态失败', 'Failed to load vault status'));
+      const msg = errorMessage(err, t('加载密码库状态失败，请检查中心连接后重试', 'Failed to load vault status. Check center connectivity and try again.'));
       if (hasLoadedRef.current) {
         if (activeRef.current) {
           showNotice('load-error', msg, {
@@ -229,6 +245,7 @@ export function VaultTab({
   useEffect(() => {
     return () => {
       loadGenRef.current += 1;
+      setMasterPassword('');
     };
   }, []);
 
@@ -245,15 +262,38 @@ export function VaultTab({
     });
   }, [bots, cacheKey, devices, hasLoaded, items, listRevision, status, vaultCapBindings, vaultInstall]);
 
+  const openSettingsModal = () => {
+    if (status) {
+      setSourceDraft(status.source);
+      setServerUrlDraft(status.serverUrl ?? '');
+      setEmailDraft(status.email ?? '');
+    }
+    setSettingsError('');
+    setCheckFeedback(null);
+    setModal({ kind: 'settings' });
+  };
+
+  const openUnlockModal = () => {
+    setMasterPassword('');
+    setUnlockError('');
+    setModal({ kind: 'unlock' });
+  };
+
+  const openGrantModal = (secretRef: string) => {
+    setGrantError('');
+    setModal({ kind: 'grant', secretRef });
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!status) return;
+    if (!status || busy) return;
     if (sourceDraft === 'vaultwarden' && (!serverUrlDraft.trim() || !emailDraft.trim())) {
-      setSettingsError(t('请填写 Vaultwarden 服务地址与账号邮箱', 'Please enter the Vaultwarden server URL and account email'));
+      setSettingsError(t('请填写 Vaultwarden 服务器地址与登录邮箱后重试', 'Enter both the Vaultwarden server URL and login email, then try again.'));
       return;
     }
     setBusy(true);
     setSettingsError('');
+    setCheckFeedback(null);
     try {
       const next = await api.vaultControl<ExternalVaultStatus>({
         action: 'configure',
@@ -264,30 +304,46 @@ export function VaultTab({
           : {}),
       });
       setStatus(next);
-      setSettingsOpen(false);
+      setModal(null);
       await loadAll();
       setNotice(
         sourceDraft === 'local'
-          ? t('已切换为内置本地密码库', 'Switched to built-in local vault')
-          : t('Vaultwarden 服务配置已保存', 'Vaultwarden settings saved'),
+          ? t('已切换为本地密码库', 'Switched to Local Vault')
+          : t('Vaultwarden 数据源设置已保存', 'Vaultwarden source settings saved'),
       );
     } catch (err) {
-      setSettingsError(errorMessage(err, t('保存密码库配置失败', 'Failed to save vault settings')));
+      const detail = errorMessage(err, t('中心拒绝了配置变更', 'Center rejected the configuration'));
+      setSettingsError(t(`保存数据源设置失败：${detail}。请检查地址与网络后重试。`, `Failed to save source settings: ${detail}. Verify the URL and try again.`));
     } finally {
       setBusy(false);
     }
   };
 
   const handleCheckServer = async () => {
+    if (busy) return;
     setBusy(true);
     setSettingsError('');
+    setCheckFeedback(null);
     try {
       const res = await api.vaultControl<ExternalVaultCheckResult>({ action: 'check' });
       setStatus(res.status);
-      if (res.reachable) setNotice(t('Vaultwarden 服务器连接正常', 'Vaultwarden server connection OK'));
-      else setSettingsError(t('无法连接到 Vaultwarden 服务器', 'Unable to connect to Vaultwarden server'));
+      if (res.reachable) {
+        setCheckFeedback({
+          tone: 'ok',
+          text: t('Vaultwarden 服务器连接正常', 'Vaultwarden server is reachable'),
+        });
+      } else {
+        setCheckFeedback({
+          tone: 'danger',
+          text: t('无法连接到 Vaultwarden 服务器，请确认地址与 TLS 证书配置后重试', 'Cannot reach Vaultwarden server. Verify the server URL and TLS settings, then try again.'),
+        });
+      }
     } catch (err) {
-      setSettingsError(errorMessage(err, t('检测连接失败', 'Connection check failed')));
+      const detail = errorMessage(err, t('连接检测失败', 'Connection check failed'));
+      setCheckFeedback({
+        tone: 'danger',
+        text: t(`检测连接失败：${detail}`, `Connection check failed: ${detail}`),
+      });
     } finally {
       setBusy(false);
     }
@@ -295,8 +351,9 @@ export function VaultTab({
 
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!status || !masterPassword) return;
+    if (!status || !masterPassword || busy) return;
     setBusy(true);
+    setUnlockError('');
     setError('');
     try {
       const unlocked = await api.vaultControl<ExternalVaultStatus>({
@@ -306,62 +363,72 @@ export function VaultTab({
       });
       setMasterPassword('');
       setStatus(unlocked);
+      setModal(null);
       await api.vaultControl<ExternalVaultStatus>({ action: 'sync' }).catch(() => null);
       await loadAll();
-      setNotice(t('Vaultwarden 已解锁并同步凭据列表', 'Vaultwarden unlocked and credentials synced'));
+      setNotice(t('Vaultwarden 已解锁并同步凭据目录', 'Vaultwarden unlocked and credentials synced'));
     } catch (err) {
-      setError(errorMessage(err, t('解锁失败，请检查主密码', 'Unlock failed. Please check your master password')));
+      const detail = errorMessage(err, t('主密码验证未通过', 'Master password verification failed'));
+      setUnlockError(
+        t(`解锁失败：${detail}。请核对主密码并确认服务可达后重试。`, `Unlock failed: ${detail}. Check your master password and server connectivity, then try again.`),
+      );
     } finally {
       setBusy(false);
     }
   };
 
   const handleSync = async () => {
-    setBusy(true);
+    if (busy || syncing) return;
+    setSyncing(true);
     setError('');
     try {
       await api.vaultControl<ExternalVaultStatus>({ action: 'sync' });
       await loadAll();
       setNotice(t('凭据目录已同步', 'Credential catalog synced'));
     } catch (err) {
-      setError(errorMessage(err, t('同步失败', 'Sync failed')));
+      const detail = errorMessage(err, t('同步请求失败', 'Sync request failed'));
+      setError(t(`同步凭据失败：${detail}。请稍后重试。`, `Failed to sync credentials: ${detail}. Try again in a moment.`));
     } finally {
-      setBusy(false);
+      setSyncing(false);
     }
   };
 
   const handleLock = async () => {
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
       const next = await api.vaultControl<ExternalVaultStatus>({ action: 'lock' });
       setStatus(next);
       setItems([]);
+      setModal(null);
       setNotice(t('Vaultwarden 已锁定', 'Vaultwarden locked'));
     } catch (err) {
-      setError(errorMessage(err, t('锁定失败', 'Lock failed')));
+      const detail = errorMessage(err, t('锁定请求失败', 'Lock request failed'));
+      setError(t(`锁定密码库失败：${detail}。请重试。`, `Failed to lock vault: ${detail}. Please try again.`));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleLogoutVaultwarden = async () => {
+  const handleConfirmLogoutVaultwarden = async () => {
+    if (busy) return;
     setBusy(true);
-    setSettingsError('');
+    setError('');
     try {
       const next = await api.vaultControl<ExternalVaultStatus>({ action: 'logout' });
       setStatus(next);
       setItems([]);
-      setSettingsOpen(false);
-      setNotice(t('已清除 Vaultwarden 会话', 'Vaultwarden session cleared'));
+      setModal(null);
+      setNotice(t('已清除 Vaultwarden 登录会话', 'Vaultwarden login session cleared'));
     } catch (err) {
-      setSettingsError(errorMessage(err, t('清除会话失败', 'Failed to clear session')));
+      setModal({ kind: 'settings' });
+      setSettingsError(errorMessage(err, t('清除登录会话失败，请重试', 'Failed to clear login session. Try again.')));
     } finally {
       setBusy(false);
     }
   };
 
-  // Immediate cross-device grant toggle for Vaultwarden item
   const handleToggleItemGrant = async (
     item: ExternalVaultItemMeta,
     deviceId: string,
@@ -370,7 +437,7 @@ export function VaultTab({
   ) => {
     const key = botKey(deviceId, botId);
     setGrantBusyKeys(prev => new Set(prev).add(key));
-    setError('');
+    setGrantError('');
     try {
       const current = items.find(i => i.secretRef === item.secretRef) ?? item;
       const filtered = current.allowedBots.filter(
@@ -388,10 +455,9 @@ export function VaultTab({
       });
       setItems(updated.items);
       setListRevision(updated.revision);
-      const nextSelected = updated.items.find(i => i.secretRef === item.secretRef) ?? null;
-      setGrantItem(nextSelected);
     } catch (err) {
-      setError(errorMessage(err, t('更新凭据授权失败', 'Failed to update credential authorization')));
+      const detail = errorMessage(err, t('中心未接受授权变更', 'Center rejected grant update'));
+      setGrantError(t(`更新凭据授权失败：${detail}。请刷新后重试。`, `Failed to update access: ${detail}. Refresh and try again.`));
     } finally {
       setGrantBusyKeys(prev => {
         const next = new Set(prev);
@@ -401,7 +467,6 @@ export function VaultTab({
     }
   };
 
-  // Local e-launcher.vault capability toggle per Bot
   const handleToggleLocalVaultBot = async (deviceId: string, botId: string, checked: boolean) => {
     if (!vaultInstall) return;
     const key = botKey(deviceId, botId);
@@ -422,7 +487,8 @@ export function VaultTab({
         return next;
       });
     } catch (err) {
-      setError(errorMessage(err, t('更新本地密码库能力授权失败', 'Failed to update local vault capability authorization')));
+      const detail = errorMessage(err, t('更新授权失败', 'Failed to update access'));
+      setError(t(`更新本地密码库访问权限失败：${detail}。请重试。`, `Failed to update local vault access: ${detail}. Please try again.`));
     } finally {
       setCapBusyKeys(prev => {
         const next = new Set(prev);
@@ -442,6 +508,11 @@ export function VaultTab({
         item.secretRef.toLowerCase().includes(q),
     );
   }, [items, query]);
+
+  const grantItem = useMemo(
+    () => (modal?.kind === 'grant' ? items.find(i => i.secretRef === modal.secretRef) ?? null : null),
+    [items, modal],
+  );
 
   const grantSelectedKeys = useMemo(() => {
     const set = new Set<string>();
@@ -482,125 +553,124 @@ export function VaultTab({
               </button>
             }
           >
-            {initialError || t('加载密码库状态失败', 'Failed to load vault status')}
+            {initialError || t('加载密码库状态失败，请重试', 'Failed to load vault status. Please retry.')}
           </CaNotice>
         </div>
       </section>
     );
   }
 
+  const isVaultwarden = status.source === 'vaultwarden';
+  const statusDotTone: 'ok' | 'warn' | 'muted' = !isVaultwarden
+    ? 'ok'
+    : status.configured && !status.locked
+      ? 'ok'
+      : 'warn';
+
+  const readinessSummary = isVaultwarden
+    ? status.configured
+      ? `${status.serverUrl || t('未配置地址', 'URL unset')} · ${status.email || t('未配置账号', 'Account unset')}${
+          status.lastSyncAt
+            ? t(` · 最近同步 ${formatTime(status.lastSyncAt, locale)}`, ` · Synced ${formatTime(status.lastSyncAt, locale)}`)
+            : ''
+        }`
+      : t('尚未配置服务器地址与登录邮箱，请先完成数据源设置', 'Server URL and login email are not set. Open Source Settings to configure.')
+    : vaultInstall
+      ? t(`凭据加密保存在各设备本地 · 已授权 ${localVaultSelectedKeys.size} 个 Bot`, `Encrypted on each device · ${localVaultSelectedKeys.size} ${localVaultSelectedKeys.size === 1 ? 'Bot' : 'Bots'} authorized`)
+      : t('凭据加密保存在各设备本地（请在桌面或手机端「密码凭据」页面管理条目）', 'Encrypted locally on each device (manage entries in the desktop or mobile Vault page)');
+
   return (
     <div>
       <CaRefreshBar active={refreshing} />
 
-      {/* Top vault source & status card */}
-      <section className="ca-section">
+      {/* Live Readiness Card */}
+      <section className="ca-section" aria-label={t('密码库状态', 'Vault readiness')}>
         <div className="ca-default-card ca-wrap">
           <div className="ca-row-main">
             <div className="ca-row-title">
-              <KeyRound size={15} aria-hidden="true" />
-              <span>
-                {status.source === 'vaultwarden'
-                  ? t('Vaultwarden 集中密码库', 'Vaultwarden Central Vault')
-                  : t('内置本地密码库', 'Built-in Local Vault')}
-              </span>
-              {status.source === 'vaultwarden' ? (
-                <span className={`ca-pill ${status.locked ? 'ca-pill-warn' : 'ca-pill-ok'}`}>
-                  {status.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')}
-                </span>
+              <StatusDot tone={statusDotTone} />
+              <span>{isVaultwarden ? 'Vaultwarden' : t('本地密码库', 'Local')}</span>
+              {isVaultwarden ? (
+                !status.configured ? (
+                  <span className="ca-pill ca-pill-warn">{t('未配置', 'Unconfigured')}</span>
+                ) : status.locked ? (
+                  <span className="ca-pill ca-pill-warn">{t('已锁定', 'Locked')}</span>
+                ) : (
+                  <span className="ca-pill ca-pill-ok">{t('已解锁', 'Unlocked')}</span>
+                )
               ) : (
-                <span className="ca-pill ca-pill-ok">{t('设备本地加密存储', 'Encrypted locally on device')}</span>
+                <span className="ca-pill ca-pill-ok">{t('本地加密', 'On-device')}</span>
               )}
             </div>
-            <div className="ca-row-sub">
-              {status.source === 'vaultwarden'
-                ? `${status.serverUrl || t('未配置地址', 'URL not set')} · ${status.email || t('未配置账号', 'Account not set')}${
-                    status.lastSyncAt
-                      ? t(` · 最近同步 ${formatTime(status.lastSyncAt, locale)}`, ` · Last synced ${formatTime(status.lastSyncAt, locale)}`)
-                      : ''
-                  }`
-                : t('凭据密文保存于各已绑定设备本地，仅响应明确授权给 Bot 的读取请求', 'Encrypted credentials are stored locally on each bound device and only answer read requests explicitly authorized for a Bot')}
-            </div>
+            <span className="ca-row-sub">{readinessSummary}</span>
           </div>
 
           <div className="ca-row-actions">
-            {status.source === 'vaultwarden' && !status.locked && (
-              <>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  disabled={busy}
-                  onClick={() => void handleSync()}
-                >
-                  <RefreshCw size={13} aria-hidden="true" />
-                  <span>{t('同步', 'Sync')}</span>
-                </button>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  disabled={busy}
-                  onClick={() => void handleLock()}
-                >
-                  <Lock size={13} aria-hidden="true" />
-                  <span>{t('锁定', 'Lock')}</span>
-                </button>
-              </>
+            {isVaultwarden && status.configured && status.locked && (
+              <button
+                type="button"
+                className="ca-btn ca-btn-primary ca-btn-sm"
+                disabled={busy}
+                onClick={openUnlockModal}
+              >
+                <Unlock size={13} aria-hidden="true" />
+                <span>{t('解锁密码库', 'Unlock')}</span>
+              </button>
+            )}
+            {isVaultwarden && status.configured && !status.locked && (
+              <button
+                type="button"
+                className="ca-btn ca-btn-primary ca-btn-sm"
+                disabled={busy}
+                onClick={() => void handleLock()}
+              >
+                <Lock size={13} aria-hidden="true" />
+                <span>{t('锁定', 'Lock')}</span>
+              </button>
             )}
             <button
               type="button"
-              className="ca-btn ca-btn-sm"
-              onClick={() => {
-                setSettingsError('');
-                setSettingsOpen(true);
-              }}
+              className={`ca-btn ca-btn-sm${isVaultwarden && !status.configured ? ' ca-btn-primary' : ''}`}
+              disabled={busy}
+              onClick={openSettingsModal}
             >
               <Settings2 size={13} aria-hidden="true" />
-              <span>{t('切换服务 / 设置', 'Switch Service / Settings')}</span>
+              <span>{t('数据源设置', 'Source Settings')}</span>
             </button>
           </div>
         </div>
       </section>
 
-      {status.source === 'vaultwarden' ? (
+      {isVaultwarden ? (
         status.locked ? (
           <section className="ca-section">
-            <div className="ca-section-head">
-              <h3 className="ca-section-title">{t('解锁 Vaultwarden', 'Unlock Vaultwarden')}</h3>
-            </div>
-            <form className="ca-section-body ca-form-stack" onSubmit={e => void handleUnlock(e)}>
-              {!status.configured ? (
-                <CaNotice tone="warn">
-                  {t('尚未配置 Vaultwarden 服务器地址与邮箱，请先点击右上角「切换服务 / 设置」完成配置。', 'Vaultwarden server URL and email are not configured yet. Click "Switch Service / Settings" in the top right to set them up.')}
-                </CaNotice>
-              ) : (
-                <>
-                  <div className="ca-field ca-field-narrow">
-                    <label className="ca-field-label">{t('主密码 (Master Password)', 'Master Password')}</label>
-                    <input
-                      type="password"
-                      className="ca-input"
-                      required
-                      autoComplete="current-password"
-                      placeholder={t('输入 Vaultwarden 主密码以解锁目录', 'Enter Vaultwarden master password to unlock catalog')}
-                      value={masterPassword}
-                      onChange={e => setMasterPassword(e.target.value)}
-                    />
-                    <p className="ca-field-help">
-                      {t('主密码仅用于解密当前中心会话内存，中心不落盘明文秘密。', 'The master password is only used to decrypt the current center session in memory; plaintext secrets are never written to disk.')}
-                    </p>
-                  </div>
-                  <div className="ca-inline-row">
-                    <button type="submit" className="ca-btn ca-btn-primary ca-btn-sm" disabled={busy}>
+            <div className="ca-empty">
+              <div className="ca-google-empty-stack">
+                <p style={{ margin: 0 }}>
+                  {status.configured
+                    ? t('Vaultwarden 当前已锁定。输入主密码解锁后即可同步目录并为 Bot 分配凭据访问权限。', 'Vaultwarden is locked. Unlock with your master password to view credentials and manage Bot access.')
+                    : t('请先在数据源设置中填写 Vaultwarden 服务器地址与账号邮箱。', 'Configure your Vaultwarden server URL and email in Source Settings first.')}
+                </p>
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-primary ca-btn-sm"
+                  disabled={busy}
+                  onClick={status.configured ? openUnlockModal : openSettingsModal}
+                >
+                  {status.configured ? (
+                    <>
                       <Unlock size={13} aria-hidden="true" />
-                      <LabelStack
-                        active={busy ? t('解锁中…', 'Unlocking…') : t('解锁并同步凭据', 'Unlock & Sync')}
-                        labels={[t('解锁并同步凭据', 'Unlock & Sync'), t('解锁中…', 'Unlocking…')]}
-                      />
-                    </button>
-                  </div>
-                </>
-              )}
-            </form>
+                      <span>{t('解锁密码库', 'Unlock')}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Settings2 size={13} aria-hidden="true" />
+                      <span>{t('数据源设置', 'Source Settings')}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </section>
         ) : (
           <section className="ca-section">
@@ -608,52 +678,63 @@ export function VaultTab({
               <h3 className="ca-section-title">
                 {t(`凭据条目 (${items.length})`, `Credentials (${items.length})`)}
               </h3>
-              <input
-                type="search"
-                className="ca-input ca-search-compact"
-                placeholder={t('筛选凭据标题或账号…', 'Filter by title or username…')}
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-              />
+              <div className="ca-toolbar-group">
+                <input
+                  type="search"
+                  className="ca-input ca-search-compact"
+                  placeholder={t('筛选凭据标题或账号…', 'Filter by title or username…')}
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-sm"
+                  disabled={busy || syncing}
+                  onClick={() => void handleSync()}
+                >
+                  <RefreshCw size={13} className={syncing ? 'ca-spin' : undefined} aria-hidden="true" />
+                  <LabelStack
+                    active={syncing ? t('同步中…', 'Syncing…') : t('同步目录', 'Sync')}
+                    labels={[t('同步目录', 'Sync'), t('同步中…', 'Syncing…')]}
+                  />
+                </button>
+              </div>
             </div>
 
             <div className="ca-list">
               {filteredItems.length === 0 ? (
                 <div className="ca-empty">
                   {items.length === 0
-                    ? t('Vaultwarden 暂无同步条目，可点击上方「同步」刷新', 'No synced Vaultwarden entries yet. Click "Sync" above to refresh.')
+                    ? t('Vaultwarden 暂无同步条目，点击上方「同步目录」拉取最新凭据。', 'No synced Vaultwarden entries yet. Click "Sync" above to fetch credentials.')
                     : t('没有匹配的凭据条目', 'No matching credentials')}
                 </div>
               ) : (
                 filteredItems.map(item => (
-                  <div key={item.secretRef} className="ca-row ca-row-split">
-                    <button
-                      type="button"
-                      className="ca-row-trigger"
-                      onClick={() => setGrantItem(item)}
-                    >
-                      <span className="ca-row-title">
+                  <div key={item.secretRef} className="ca-row">
+                    <div className="ca-row-main">
+                      <div className="ca-row-title">
+                        <StatusDot tone={item.allowedBots.length > 0 ? 'ok' : 'muted'} />
                         <span>{item.label || item.secretRef}</span>
                         <span
                           className={`ca-pill ${
                             item.allowedBots.length > 0 ? 'ca-pill-ok' : 'ca-pill-muted'
                           } ca-num`}
                         >
-                          {t(`已授权 ${item.allowedBots.length} 个 Bot`, `${item.allowedBots.length} ${item.allowedBots.length === 1 ? 'Bot' : 'Bots'} authorized`)}
+                          {t(`${item.allowedBots.length} 个 Bot`, `${item.allowedBots.length} ${item.allowedBots.length === 1 ? 'Bot' : 'Bots'}`)}
                         </span>
-                      </span>
+                      </div>
                       <span className="ca-row-sub">
-                        {item.username ? t(`账号：${item.username} · `, `Account: ${item.username} · `) : ''}
+                        {item.username ? `${item.username} · ` : ''}
                         <span className="ca-mono">{item.secretRef}</span>
                       </span>
-                    </button>
+                    </div>
                     <div className="ca-row-actions">
                       <button
                         type="button"
                         className="ca-btn ca-btn-sm"
-                        onClick={() => setGrantItem(item)}
+                        onClick={() => openGrantModal(item.secretRef)}
                       >
-                        {t('授权 Bot', 'Authorize Bots')}
+                        {t('管理授权', 'Manage Access')}
                       </button>
                     </div>
                   </div>
@@ -665,83 +746,165 @@ export function VaultTab({
       ) : (
         <section className="ca-section">
           <div className="ca-section-head">
-            <h3 className="ca-section-title">{t('本机密码条目与授权', 'Local Credentials & Authorization')}</h3>
-          </div>
-          <div className="ca-section-body ca-form-stack">
-            <CaNotice tone="info">
-              {t('内置本地密码库的数据加密保存在各设备本机（桌面/手机端「密码凭据」页面中增删管理）。如需由中心统一保管并向多个设备跨机分发凭据，可在右上角切换为 ', 'Built-in local vault data is stored encrypted on each device (manage entries in the desktop/mobile Vault page). To manage centrally and distribute across devices, switch in the top right to ')}
-              <strong>Vaultwarden</strong>
-              {t('。', '.')}
-            </CaNotice>
-
+            <h3 className="ca-section-title">{t('本地密码库 Bot 访问权限', 'Local Vault Bot Access')}</h3>
             {vaultInstall && (
-              <div>
-                <div className="ca-field-label ca-mb-2">
-                  {t(`允许读取本机密码库的 Bot（${vaultInstall.displayName}）`, `Bots allowed to read local vault (${vaultInstall.displayName})`)}
-                </div>
-                <BotTreeSelector
-                  devices={devices}
-                  bots={bots}
-                  selectedKeys={localVaultSelectedKeys}
-                  busyKeys={capBusyKeys}
-                  onToggleBot={(devId, bId, checked) =>
-                    void handleToggleLocalVaultBot(devId, bId, checked)
-                  }
-                />
+              <span className="ca-muted ca-num">
+                {t(`已授权 ${localVaultSelectedKeys.size} 个 Bot`, `${localVaultSelectedKeys.size} authorized`)}
+              </span>
+            )}
+          </div>
+          <div className="ca-section-body">
+            {vaultInstall ? (
+              <BotTreeSelector
+                devices={devices}
+                bots={bots}
+                selectedKeys={localVaultSelectedKeys}
+                busyKeys={capBusyKeys}
+                onToggleBot={(devId, bId, checked) =>
+                  void handleToggleLocalVaultBot(devId, bId, checked)
+                }
+              />
+            ) : (
+              <div className="ca-empty-hint">
+                {t('如需由中心统一托管凭据并跨设备授权给 Bot，请点击上方「数据源设置」切换为 Vaultwarden。', 'To manage credentials centrally across devices, click "Source Settings" above and switch to Vaultwarden.')}
               </div>
             )}
           </div>
         </section>
       )}
 
-      {/* Switch Service / Settings drawer */}
+      {/* Modal 1: Unlock Vaultwarden */}
       <CaModal
-        open={settingsOpen}
+        open={modal?.kind === 'unlock'}
         onOpenChange={open => {
-          if (!open) setSettingsError('');
-          setSettingsOpen(open);
+          if (!open && !busy) {
+            setMasterPassword('');
+            setUnlockError('');
+            setModal(null);
+          }
         }}
-        title={t('密码库服务设置', 'Vault Service Settings')}
-        description={t('选择中心协同使用的密码库后端', 'Choose the vault backend coordinated by the center')}
+        title={t('解锁 Vaultwarden', 'Unlock Vaultwarden')}
+        description={t('主密码仅用于解密当前中心内存会话，明文秘密不会写入磁盘。', 'Used only to decrypt the active center session in memory; plaintext secrets are never written to disk.')}
+        variant="modal"
+      >
+        <form className="ca-form-stack" onSubmit={e => void handleUnlock(e)}>
+          <div className="ca-field">
+            <label className="ca-field-label" htmlFor="ca-vault-master-password">
+              {t('主密码', 'Master Password')} <span className="ca-req">*</span>
+            </label>
+            <input
+              id="ca-vault-master-password"
+              type="password"
+              className="ca-input"
+              required
+              autoFocus
+              autoComplete="current-password"
+              disabled={busy}
+              placeholder={t('输入 Vaultwarden 主密码', 'Enter Vaultwarden master password')}
+              value={masterPassword}
+              onChange={e => {
+                setMasterPassword(e.target.value);
+                if (unlockError) setUnlockError('');
+              }}
+            />
+          </div>
+
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {unlockError ? (
+              <p className="ca-error-text" role="alert">
+                {unlockError}
+              </p>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={busy}
+              onClick={() => {
+                setMasterPassword('');
+                setUnlockError('');
+                setModal(null);
+              }}
+            >
+              {t('取消', 'Cancel')}
+            </button>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={busy || !masterPassword}
+              aria-busy={busy}
+            >
+              <Unlock size={13} aria-hidden="true" />
+              <LabelStack
+                active={busy ? t('解锁中…', 'Unlocking…') : t('解锁密码库', 'Unlock')}
+                labels={[t('解锁密码库', 'Unlock'), t('解锁中…', 'Unlocking…')]}
+              />
+            </button>
+          </div>
+        </form>
+      </CaModal>
+
+      {/* Modal 2: Source Settings */}
+      <CaModal
+        open={modal?.kind === 'settings'}
+        onOpenChange={open => {
+          if (!open && !busy) {
+            setSettingsError('');
+            setCheckFeedback(null);
+            setModal(null);
+          }
+        }}
+        title={t('密码库数据源设置', 'Vault Source Settings')}
+        description={t('选择中心使用的密码库后端', 'Choose the vault backend managed by this center')}
         variant="drawer"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSaveSettings(e)}>
           <div className="ca-field">
-            <label className="ca-field-label">{t('密码库模式', 'Vault Mode')}</label>
+            <label className="ca-field-label">{t('密码库数据源', 'Vault Source')}</label>
             <CaSegmented
-              ariaLabel={t('密码库模式', 'Vault Mode')}
+              ariaLabel={t('密码库数据源', 'Vault Source')}
               value={sourceDraft}
               options={[
-                { value: 'local', label: t('内置本地密码库', 'Built-in Local Vault') },
+                { value: 'local', label: t('本地密码库', 'Local') },
                 { value: 'vaultwarden', label: 'Vaultwarden' },
               ]}
-              onChange={setSourceDraft}
+              onChange={next => {
+                setSourceDraft(next);
+                setSettingsError('');
+                setCheckFeedback(null);
+              }}
             />
           </div>
 
           {sourceDraft === 'vaultwarden' && (
             <>
               <div className="ca-field">
-                <label className="ca-field-label">
+                <label className="ca-field-label" htmlFor="ca-vault-server-url">
                   {t('服务器地址', 'Server URL')} <span className="ca-req">*</span>
                 </label>
                 <input
+                  id="ca-vault-server-url"
                   type="url"
                   className="ca-input"
                   required
+                  disabled={busy}
                   placeholder="https://vault.example.com"
                   value={serverUrlDraft}
                   onChange={e => setServerUrlDraft(e.target.value)}
                 />
               </div>
               <div className="ca-field">
-                <label className="ca-field-label">
+                <label className="ca-field-label" htmlFor="ca-vault-email">
                   {t('登录邮箱', 'Login Email')} <span className="ca-req">*</span>
                 </label>
                 <input
+                  id="ca-vault-email"
                   type="email"
                   className="ca-input"
                   required
+                  disabled={busy}
                   placeholder="admin@example.com"
                   value={emailDraft}
                   onChange={e => setEmailDraft(e.target.value)}
@@ -762,37 +925,57 @@ export function VaultTab({
                     type="button"
                     className="ca-btn ca-btn-danger ca-btn-sm"
                     disabled={busy}
-                    onClick={() => void handleLogoutVaultwarden()}
+                    onClick={() => setModal({ kind: 'confirm-logout' })}
                   >
-                    {t('清除登录会话', 'Clear Login Session')}
+                    {t('清除登录会话', 'Clear Session')}
                   </button>
                 )}
               </div>
+
+              {checkFeedback && (
+                <CaNotice tone={checkFeedback.tone}>{checkFeedback.text}</CaNotice>
+              )}
             </>
           )}
 
-          <div className="ca-form-actions">
-            <button type="button" className="ca-btn" onClick={() => setSettingsOpen(false)}>
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {settingsError ? (
+              <p className="ca-error-text" role="alert">
+                {settingsError}
+              </p>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={busy}
+              onClick={() => setModal(null)}
+            >
               {t('取消', 'Cancel')}
             </button>
-            <button type="submit" className="ca-btn ca-btn-primary" disabled={busy}>
+            <button type="submit" className="ca-btn ca-btn-primary" disabled={busy} aria-busy={busy}>
               <LabelStack
-                active={busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save Settings')}
-                labels={[t('保存设置', 'Save Settings'), t('保存中…', 'Saving…')]}
+                active={busy ? t('保存中…', 'Saving…') : t('保存数据源设置', 'Save Settings')}
+                labels={[t('保存数据源设置', 'Save Settings'), t('保存中…', 'Saving…')]}
               />
             </button>
           </div>
         </form>
       </CaModal>
 
-      {/* Vaultwarden 单条目跨设备 Bot 树形多选授权抽屉（勾选即时生效） */}
+      {/* Modal 3: Manage Access for a Vaultwarden item */}
       <CaModal
-        open={Boolean(grantItem)}
+        open={modal?.kind === 'grant' && Boolean(grantItem)}
         onOpenChange={open => {
-          if (!open) setGrantItem(null);
+          if (!open) {
+            setGrantError('');
+            setModal(null);
+          }
         }}
-        title={t(`授权访问 · ${grantItem?.label || grantItem?.secretRef || ''}`, `Authorize Access · ${grantItem?.label || grantItem?.secretRef || ''}`)}
-        description={t('勾选即刻生效，仅授权的 Bot 可在运行期请求此凭据', 'Changes take effect immediately. Only authorized Bots can request this credential at runtime.')}
+        title={t(`管理授权 · ${grantItem?.label || grantItem?.secretRef || ''}`, `Manage Access · ${grantItem?.label || grantItem?.secretRef || ''}`)}
+        description={t('勾选即刻生效，仅授权的 Bot 可在运行时读取此凭据。', 'Changes apply immediately. Only authorized Bots can read this credential at runtime.')}
         variant="drawer"
       >
         {grantItem && (
@@ -806,6 +989,12 @@ export function VaultTab({
               </div>
             </div>
 
+            {grantError && (
+              <p className="ca-error-text" role="alert" style={{ margin: 0 }}>
+                {grantError}
+              </p>
+            )}
+
             <BotTreeSelector
               devices={devices}
               bots={bots}
@@ -815,9 +1004,30 @@ export function VaultTab({
                 void handleToggleItemGrant(grantItem, devId, bId, checked)
               }
             />
+
+            <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+              <button type="button" className="ca-btn" onClick={() => setModal(null)}>
+                {t('完成', 'Done')}
+              </button>
+            </div>
           </div>
         )}
       </CaModal>
+
+      {/* Modal 4: Confirm Clear Vaultwarden Session */}
+      <CaConfirmDialog
+        open={modal?.kind === 'confirm-logout'}
+        title={t('清除 Vaultwarden 登录会话', 'Clear Vaultwarden Session')}
+        description={t('清除后中心将锁定并断开当前 Vaultwarden 会话，Bot 将无法读取凭据，直到重新输入主密码解锁。', 'Clearing the session locks and disconnects Vaultwarden. Bots cannot read credentials until you unlock with your master password again.')}
+        confirmLabel={t('清除会话', 'Clear Session')}
+        cancelLabel={t('返回设置', 'Back to Settings')}
+        danger
+        busy={busy}
+        onCancel={() => {
+          if (!busy) setModal({ kind: 'settings' });
+        }}
+        onConfirm={() => void handleConfirmLogoutVaultwarden()}
+      />
     </div>
   );
 }

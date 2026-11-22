@@ -8,40 +8,44 @@
   background: transparent;
   outline: none;
   text-align: center;
-  color: var(--color-text);
+  color: var(--ink-primary);
 }
 .grok-profile-title-input:focus-visible,
 .grok-profile-subtitle-input:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--signal-primary);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 .grok-profile-title-input {
   font-size: var(--text-xl);
-  font-weight: var(--weight-bold);
+  font-weight: var(--weight-semibold);
 }
 .grok-profile-title-input::placeholder,
 .grok-profile-subtitle-input::placeholder {
-  color: color-mix(in srgb, var(--color-text-muted) 55%, transparent);
+  color: var(--ink-tertiary);
   font-weight: var(--weight-regular);
 }
 .grok-profile-subtitle-input {
   font-size: var(--text-md);
-  color: var(--color-text-muted);
+  color: var(--ink-secondary);
 }
 .grok-profile-subtitle-input::placeholder {
   font-size: var(--text-sm);
 }
 
 /* bot-profile: inline cwd error/hints inside the card. */
-.bot-profile-page h3.grok-section-label { margin: 0; }
+.bot-profile-page h3.grok-section-label {
+  margin: 0;
+}
 .profile-inline-error {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--danger);
+  color: var(--state-danger);
   white-space: normal;
 }
-.profile-inline-error + button { flex: none; }
+.profile-inline-error + button {
+  flex: none;
+}
 .profile-card-hint {
   margin: 0 18px 12px;
 }
@@ -50,12 +54,22 @@
   justify-content: flex-end;
   padding: 0 14px 12px;
 }
-.profile-lifecycle-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
-.profile-lifecycle-note { font-size: .78rem; font-weight: 400; color: var(--muted); }
+.profile-lifecycle-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  white-space: normal;
+}
+.profile-lifecycle-note {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  color: var(--ink-secondary);
+}
 
 /* bot-profile: topbar spacer keeps title centered when back is hidden (forced primary create). */
 .bot-profile-topbar-spacer {
-  width: 40px;
+  width: var(--tap-min);
   flex-shrink: 0;
 }
 
@@ -70,6 +84,35 @@
   display: block;
 }
 .bot-profile-primary-notice span {
-  font-size: 0.85rem;
-  opacity: 0.82;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* BotSkillsScreen: fully decoupled from hub/settings.css. */
+.bot-skills-page {
+  --bs-accent: var(--signal-primary);
+  --bs-card: var(--surface-raised);
+  --bs-hairline: var(--border-subtle);
+  --bs-radius: var(--radius-md);
+}
+.bot-skills-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.bot-skills-page .bs-card {
+  border-radius: var(--bs-radius);
+  background: var(--bs-card);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.bot-skills-review-card {
+  padding: var(--space-2);
+}
+
+/* Loading skeleton card inside Soul & Schedules screens. */
+.profile-loading-card {
+  padding: var(--space-4);
 }

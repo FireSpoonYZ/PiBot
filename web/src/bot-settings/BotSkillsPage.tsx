@@ -13,7 +13,9 @@ import type {
 } from '../../../center-contract/index.js';
 import type { CenterBotCapabilityEntry } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
-import { ConfirmDialog } from '../components/ui/dialog';
+import { ActionBar, ConfirmDialog } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
+import { useNotice } from '../notice';
 import { ErrorNotice, errorText, useText } from '../ui';
 import { centerAdminRequest, errorCodeOf, isCenterAuthOrBindError, newRequestId, pollCenterOperation } from './centerAdminBroker';
 import {
@@ -153,6 +155,7 @@ export function BotSkillsPage({
   botName,
 }: BotSkillsPageProps) {
   const t = useText();
+  const { notify } = useNotice();
   const advIdPrefix = useId();
   const aliveRef = useRef(true);
   const learningRevisionRef = useRef(-1);
@@ -161,9 +164,12 @@ export function BotSkillsPage({
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [authIssue, setAuthIssue] = useState<'none' | 'oauth' | 'offline'>('none');
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+
+  const notifySuccess = useCallback((title: string) => {
+    notify({ id: 'bot-skills-status', tone: 'success', title });
+  }, [notify]);
 
   const [capabilities, setCapabilities] = useState<CenterBotCapabilityEntry[]>([]);
   const [learnedItems, setLearnedItems] = useState<LearnedSkillItem[]>([]);
@@ -355,7 +361,6 @@ export function BotSkillsPage({
   ) => {
     setBusyKey('learning');
     setError('');
-    setNotice('');
     try {
       const { settings: updatedSettings } = await centerAdminRequest<{ settings: BotLearningSettings }>(api, identity, {
         method: 'POST',
@@ -371,14 +376,14 @@ export function BotSkillsPage({
           lastActiveSkillEveryRef.current = updatedSettings.review.skillEvery;
         }
       }
-      setNotice(successText);
+      notifySuccess(successText);
     } catch (failure) {
       if (aliveRef.current && errorCodeOf(failure) === 'REVISION_CONFLICT') await loadAll(true);
       if (aliveRef.current) handleFailure(failure);
     } finally {
       if (aliveRef.current) setBusyKey(null);
     }
-  }, [api, identity, botBasePath, handleFailure, loadAll]);
+  }, [api, identity, botBasePath, handleFailure, loadAll, notifySuccess]);
 
   const toggleAutomaticReflection = (enabled: boolean) => {
     if (!learning) return;
@@ -431,7 +436,7 @@ export function BotSkillsPage({
         body: { action: 'review' },
       });
       if (!aliveRef.current) return;
-      setNotice(t('已触发技能复盘与提炼', 'Skill review started'));
+      notifySuccess(t('已触发技能复盘与提炼', 'Skill review started'));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -452,7 +457,7 @@ export function BotSkillsPage({
         body: { action: 'cancel', jobId },
       });
       if (!aliveRef.current) return;
-      setNotice(t('已取消当前复盘任务', 'Review job cancelled'));
+      notifySuccess(t('已取消当前复盘任务', 'Review job cancelled'));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -559,7 +564,7 @@ export function BotSkillsPage({
       }
 
       if (!aliveRef.current) return;
-      setNotice(nextEnabled ? t(`已启用「${skill.name}」`, `Enabled "${skill.name}"`) : t(`已停用「${skill.name}」`, `Disabled "${skill.name}"`));
+      notifySuccess(nextEnabled ? t(`已启用「${skill.name}」`, `Enabled "${skill.name}"`) : t(`已停用「${skill.name}」`, `Disabled "${skill.name}"`));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -662,11 +667,11 @@ export function BotSkillsPage({
     const cleanName = newName.trim();
     const cleanDesc = newDesc.trim();
     if (!cleanName) {
-      setError(t('请填写技能名称', 'Please enter a skill name'));
+      setError(t('无法创建技能：请先填写技能名称。', 'Cannot create skill: enter a skill name first.'));
       return;
     }
     if (!cleanDesc && !/^---\r?\n[\s\S]*?description:/m.test(newBody)) {
-      setError(t('请填写一句话触发描述', 'Please enter a trigger description'));
+      setError(t('无法创建技能：请填写一句话触发描述（或在正文 YAML 中包含 description）。', 'Cannot create skill: enter a trigger description (or include description in YAML frontmatter).'));
       return;
     }
 
@@ -688,7 +693,7 @@ export function BotSkillsPage({
       setNewDesc('');
       setNewBody('');
       setNewExtraFiles([]);
-      setNotice(t(`已创建并启用技能「${cleanName}」`, `Created and enabled "${cleanName}"`));
+      notifySuccess(t(`已创建并启用技能「${cleanName}」`, `Created and enabled "${cleanName}"`));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -739,7 +744,7 @@ export function BotSkillsPage({
         } : null);
       }
       setEditingFiles(false);
-      setNotice(t('技能内容已保存', 'Skill files saved'));
+      notifySuccess(t('技能内容已保存', 'Skill files saved'));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -787,7 +792,7 @@ export function BotSkillsPage({
         },
       });
       setEditingFiles(true);
-      setNotice(t('已创建可编辑副本并绑定当前 Bot', 'Editable copy created and bound to this Bot'));
+      notifySuccess(t('已创建可编辑副本并绑定当前 Bot', 'Editable copy created and bound to this Bot'));
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
     } finally {
@@ -807,7 +812,7 @@ export function BotSkillsPage({
       });
       if (!aliveRef.current) return;
       setDetailTarget(prev => prev ? { ...prev, installation: updated } : null);
-      setNotice(t('可用范围已更新', 'Visibility scope updated'));
+      notifySuccess(t('可用范围已更新', 'Visibility scope updated'));
       await loadAll(true);
     } catch (failure) {
       if (aliveRef.current) handleFailure(failure);
@@ -825,7 +830,7 @@ export function BotSkillsPage({
       if (action === 'archive') {
         await archiveLearnedSkill(learned, detailTarget.installation?.installationId);
         if (!aliveRef.current) return;
-        setNotice(t(`已归档「${learned.name}」`, `Archived "${learned.name}"`));
+        notifySuccess(t(`已归档「${learned.name}」`, `Archived "${learned.name}"`));
         setDetailTarget(null);
       } else {
         const body: Record<string, unknown> = {
@@ -842,7 +847,7 @@ export function BotSkillsPage({
         });
         if (!aliveRef.current) return;
         setDetailTarget(prev => prev ? { ...prev, learned: updated } : null);
-        setNotice(t('状态已更新', 'Status updated'));
+        notifySuccess(t('技能状态已更新', 'Skill status updated'));
       }
       await loadAll(true);
     } catch (failure) {
@@ -928,17 +933,9 @@ export function BotSkillsPage({
 
   useEffect(() => {
     if (inSheet || !inSubview) return;
-    const onAppBack = (event: Event) => {
-      if (event.defaultPrevented) return;
-      if (document.querySelector('[role="dialog"][data-state="open"]')) return;
-      const handler = subviewBackRef.current;
-      if (!handler) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      handler();
-    };
-    window.addEventListener('app-back', onAppBack, true);
-    return () => window.removeEventListener('app-back', onAppBack, true);
+    return registerOverlayBackHandler(() => {
+      subviewBackRef.current?.();
+    });
   }, [inSheet, inSubview]);
 
   const renderAuthBanner = () => {
@@ -1084,14 +1081,14 @@ export function BotSkillsPage({
             ))}
           </div>
 
-          <div className="bs-skills-actions-row">
-            <button type="submit" className="bs-btn is-primary" disabled={busyKey === 'create'}>
-              {busyKey === 'create' ? t('创建并绑定中...', 'Creating...') : t('创建并为此 Bot 启用', 'Create & enable for Bot')}
-            </button>
-            <button type="button" className="bs-btn is-ghost" onClick={handleBackFromCreate}>
+          <ActionBar align="end" className="bs-skills-actions-row">
+            <button type="button" className="bs-btn is-ghost" disabled={busyKey === 'create'} onClick={handleBackFromCreate}>
               {t('取消', 'Cancel')}
             </button>
-          </div>
+            <button type="submit" className="bs-btn is-primary" disabled={busyKey === 'create'} aria-busy={busyKey === 'create' || undefined}>
+              {busyKey === 'create' ? t('创建并绑定中...', 'Creating skill...') : t('创建并启用技能', 'Create & enable skill')}
+            </button>
+          </ActionBar>
         </form>
       </div>
     );
@@ -1125,24 +1122,26 @@ export function BotSkillsPage({
               </button>
             ) : null}
 
-            <div className="bs-skills-actions-row">
+            <ActionBar align="end" className="bs-skills-actions-row">
               {detailTarget.editable ? (
                 editingFiles ? (
                   <>
                     <button
                       type="button"
-                      className="bs-btn is-primary is-small"
+                      className="bs-btn is-ghost is-small"
                       disabled={busyKey === 'save-files'}
-                      onClick={() => void saveSkillFiles()}
+                      onClick={handleCancelEditFiles}
                     >
-                      {busyKey === 'save-files' ? t('保存中...', 'Saving...') : t('保存', 'Save')}
+                      {t('取消编辑', 'Cancel editing')}
                     </button>
                     <button
                       type="button"
-                      className="bs-btn is-ghost is-small"
-                      onClick={handleCancelEditFiles}
+                      className="bs-btn is-primary is-small"
+                      disabled={busyKey === 'save-files'}
+                      aria-busy={busyKey === 'save-files' || undefined}
+                      onClick={() => void saveSkillFiles()}
                     >
-                      {t('取消', 'Cancel')}
+                      {busyKey === 'save-files' ? t('保存中...', 'Saving...') : t('保存更改', 'Save changes')}
                     </button>
                   </>
                 ) : (
@@ -1160,13 +1159,14 @@ export function BotSkillsPage({
                   type="button"
                   className="bs-btn is-primary is-small"
                   disabled={busyKey === 'convert-copy'}
+                  aria-busy={busyKey === 'convert-copy' || undefined}
                   onClick={() => void convertToEditableCopy()}
                 >
                   <Copy aria-hidden="true" />
-                  {busyKey === 'convert-copy' ? t('创建副本中...', 'Creating copy...') : t('转为可编辑副本', 'Convert to editable copy')}
+                  {busyKey === 'convert-copy' ? t('创建副本中...', 'Creating copy...') : t('转为可编辑副本', 'Create editable copy')}
                 </button>
               )}
-            </div>
+            </ActionBar>
           </div>
 
           <div className="bs-skills-detail-title">
@@ -1176,7 +1176,6 @@ export function BotSkillsPage({
           </div>
 
           <ErrorNotice error={error} onDismiss={() => setError('')} />
-          {notice ? <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')} /> : null}
 
           {detailTarget.installation && isShared ? (
             <div className="bs-skills-shared-banner">
@@ -1202,7 +1201,7 @@ export function BotSkillsPage({
           ) : null}
 
           {learnedDetail ? (
-            <div className="bs-skills-actions-row">
+            <ActionBar align="start" className="bs-skills-actions-row">
               <button
                 type="button"
                 className="bs-btn is-small"
@@ -1210,7 +1209,7 @@ export function BotSkillsPage({
                 onClick={() => void runLearnedAction('pin')}
               >
                 <Pin aria-hidden="true" />
-                {learnedDetail.pinned ? t('取消置顶', 'Unpin') : t('置顶', 'Pin')}
+                {learnedDetail.pinned ? t('取消置顶', 'Unpin skill') : t('置顶技能', 'Pin skill')}
               </button>
               <button
                 type="button"
@@ -1219,7 +1218,7 @@ export function BotSkillsPage({
                 onClick={() => void runLearnedAction('lock')}
               >
                 {learnedDetail.locked ? <Unlock aria-hidden="true" /> : <Lock aria-hidden="true" />}
-                {learnedDetail.locked ? t('解锁内容', 'Unlock') : t('锁定保护', 'Lock')}
+                {learnedDetail.locked ? t('解锁内容', 'Unlock content') : t('锁定保护', 'Lock content')}
               </button>
               {learnedDetail.state === 'archived' ? (
                 <button
@@ -1228,7 +1227,7 @@ export function BotSkillsPage({
                   disabled={busyKey !== null}
                   onClick={() => void runLearnedAction('restore')}
                 >
-                  {t('恢复启用', 'Restore')}
+                  {t('恢复技能', 'Restore skill')}
                 </button>
               ) : (
                 <button
@@ -1237,10 +1236,10 @@ export function BotSkillsPage({
                   disabled={busyKey !== null}
                   onClick={() => setConfirmAction({ kind: 'archive-detail', name: learnedDetail.name })}
                 >
-                  {t('归档技能', 'Archive')}
+                  {t('归档技能', 'Archive skill')}
                 </button>
               )}
-            </div>
+            </ActionBar>
           ) : null}
 
           <div className="bs-skills-files-bar" role="group" aria-label={t('技能文件', 'Skill files')}>
@@ -1275,33 +1274,35 @@ export function BotSkillsPage({
                   onChange={e => setEditNewFileName(e.target.value)}
                   placeholder={t('新增附属文件，如 run.sh', 'Add file, e.g. run.sh')}
                 />
-                <button
-                  type="button"
-                  className="bs-btn is-small"
-                  onClick={() => {
-                    const nextPath = normalizeExtraFilePath(editPrefix, editNewFileName);
-                    if (!nextPath) return;
-                    setDetailTarget(prev => prev ? {
-                      ...prev,
-                      files: { ...prev.files, [nextPath]: prev.files[nextPath] ?? '' },
-                    } : null);
-                    setSelectedFile(nextPath);
-                    setEditNewFileName('');
-                  }}
-                >
-                  <Plus aria-hidden="true" />
-                  {t('新增文件', 'Add file')}
-                </button>
-                {selectedFile !== 'SKILL.md' && fileKeys.length > 1 ? (
+                <ActionBar align="start">
                   <button
                     type="button"
-                    className="bs-btn is-danger is-small"
-                    onClick={() => setConfirmAction({ kind: 'delete-file', filePath: selectedFile })}
+                    className="bs-btn is-small"
+                    onClick={() => {
+                      const nextPath = normalizeExtraFilePath(editPrefix, editNewFileName);
+                      if (!nextPath) return;
+                      setDetailTarget(prev => prev ? {
+                        ...prev,
+                        files: { ...prev.files, [nextPath]: prev.files[nextPath] ?? '' },
+                      } : null);
+                      setSelectedFile(nextPath);
+                      setEditNewFileName('');
+                    }}
                   >
-                    <Trash2 aria-hidden="true" />
-                    {t('删除当前文件', 'Delete file')}
+                    <Plus aria-hidden="true" />
+                    {t('新增文件', 'Add file')}
                   </button>
-                ) : null}
+                  {selectedFile !== 'SKILL.md' && fileKeys.length > 1 ? (
+                    <button
+                      type="button"
+                      className="bs-btn is-danger is-small"
+                      onClick={() => setConfirmAction({ kind: 'delete-file', filePath: selectedFile })}
+                    >
+                      <Trash2 aria-hidden="true" />
+                      {t('删除当前文件', 'Delete file')}
+                    </button>
+                  ) : null}
+                </ActionBar>
               </div>
 
               <textarea
@@ -1333,13 +1334,12 @@ export function BotSkillsPage({
       <div className="bs-inline-panel bs-skills">
         {renderAuthBanner()}
         <ErrorNotice error={error} onDismiss={() => setError('')} />
-        {notice ? <ErrorNotice error={notice} tone="success" compact onDismiss={() => setNotice('')} /> : null}
 
         <div className="bs-skills-topbar">
           <span className="bs-skills-label">
             {botName ? `${botName} · ${t('技能与习得库', 'Skills & Learned Library')}` : t('技能与习得库', 'Skills & Learned Library')}
           </span>
-          <div className="bs-skills-topbar-actions">
+          <ActionBar align="end" className="bs-skills-topbar-actions">
             {jobActive ? (
               <button
                 type="button"
@@ -1347,13 +1347,14 @@ export function BotSkillsPage({
                 disabled={busyKey !== null}
                 onClick={() => void cancelActiveJob()}
               >
-                {t('复盘中 · 取消', 'Reviewing · Cancel')}
+                {t('取消复盘', 'Cancel review')}
               </button>
             ) : (
               <button
                 type="button"
                 className="bs-btn is-small"
                 disabled={!learning || busyKey !== null}
+                aria-busy={busyKey === 'review' || undefined}
                 onClick={() => void triggerReview()}
               >
                 <RefreshCw aria-hidden="true" className={busyKey === 'review' ? 'bs-spin' : undefined} />
@@ -1368,7 +1369,7 @@ export function BotSkillsPage({
               <Plus aria-hidden="true" />
               {t('新建技能', 'New skill')}
             </button>
-          </div>
+          </ActionBar>
         </div>
 
         {learning ? (
@@ -1514,14 +1515,17 @@ export function BotSkillsPage({
                     />
                     {t('自动合并重复技能', 'Consolidate duplicate skills')}
                   </label>
-                  <button
-                    type="button"
-                    className="bs-btn is-primary is-small"
-                    disabled={busyKey !== null}
-                    onClick={() => void saveAdvancedLearningConfig()}
-                  >
-                    {t('保存策略', 'Save policy')}
-                  </button>
+                  <ActionBar align="end">
+                    <button
+                      type="button"
+                      className="bs-btn is-primary is-small"
+                      disabled={busyKey !== null}
+                      aria-busy={busyKey === 'learning' || undefined}
+                      onClick={() => void saveAdvancedLearningConfig()}
+                    >
+                      {busyKey === 'learning' ? t('保存中...', 'Saving...') : t('保存学习策略', 'Save policy')}
+                    </button>
+                  </ActionBar>
                 </div>
               </Disclosure>
             ) : null}
@@ -1613,6 +1617,8 @@ export function BotSkillsPage({
           title: t('归档并停用技能？', 'Archive and disable skill?'),
           description: t(`关闭开关将归档已学技能「${confirmAction.skill.name}」并取消共享，确认继续吗？`, `Turning this off archives the learned skill "${confirmAction.skill.name}" and removes sharing. Continue?`),
           danger: true,
+          confirmLabel: t('归档并停用', 'Archive & disable'),
+          cancelLabel: t('保留启用', 'Keep enabled'),
           onConfirm: () => {
             const { skill } = confirmAction;
             setConfirmAction(null);
@@ -1624,6 +1630,8 @@ export function BotSkillsPage({
           title: t('归档技能？', 'Archive skill?'),
           description: t(`归档「${confirmAction.name}」将从本 Bot 停用并取消共享，后续可在已归档列表中恢复。确认归档吗？`, `Archiving "${confirmAction.name}" disables it on this Bot and removes sharing. You can restore it later from Archived. Continue?`),
           danger: true,
+          confirmLabel: t('归档技能', 'Archive skill'),
+          cancelLabel: t('取消', 'Cancel'),
           onConfirm: () => {
             setConfirmAction(null);
             void runLearnedAction('archive');
@@ -1634,6 +1642,8 @@ export function BotSkillsPage({
           title: t('删除当前文件？', 'Delete current file?'),
           description: t(`确认删除文件「${confirmAction.filePath}」吗？保存后该文件将从技能中移除。`, `Delete "${confirmAction.filePath}"? It will be removed from this skill when you save.`),
           danger: true,
+          confirmLabel: t('删除文件', 'Delete file'),
+          cancelLabel: t('取消', 'Cancel'),
           onConfirm: () => {
             const targetPath = confirmAction.filePath;
             const remaining = Object.keys(detailTarget?.files ?? {}).filter(k => k !== targetPath);
@@ -1652,6 +1662,8 @@ export function BotSkillsPage({
           title: t('放弃修改？', 'Discard changes?'),
           description: t('当前有未保存的新建技能内容，返回将丢失这些修改。确认放弃吗？', 'You have unsaved new skill changes. Going back will discard them. Continue?'),
           danger: true,
+          confirmLabel: t('放弃草稿', 'Discard draft'),
+          cancelLabel: t('继续编辑', 'Keep editing'),
           onConfirm: () => {
             setConfirmAction(null);
             exitCreate();
@@ -1662,6 +1674,8 @@ export function BotSkillsPage({
           title: t('放弃修改？', 'Discard changes?'),
           description: t('当前有未保存的技能文件修改，继续将丢失这些更改。确认放弃吗？', 'You have unsaved skill file changes. Continuing will discard them. Continue?'),
           danger: true,
+          confirmLabel: t('放弃修改', 'Discard changes'),
+          cancelLabel: t('继续编辑', 'Keep editing'),
           onConfirm: () => {
             const { exitToList } = confirmAction;
             setConfirmAction(null);
@@ -1683,6 +1697,8 @@ export function BotSkillsPage({
         title={confirmProps?.title ?? ''}
         description={confirmProps?.description ?? ''}
         danger={confirmProps?.danger}
+        confirmLabel={confirmProps?.confirmLabel}
+        cancelLabel={confirmProps?.cancelLabel}
         onCancel={() => setConfirmAction(null)}
         onConfirm={() => confirmProps?.onConfirm()}
       />

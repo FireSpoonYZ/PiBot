@@ -2,8 +2,8 @@
 //!
 //! Coordinates broker-generation-fenced Center auth, binding-scoped protected local
 //! persistence (DPAPI on Windows, atomic 0600 file on Linux), OS clipboard adapters,
-//! native WSS relay client, conflated bounded incoming writes, and an opt-in tray
-//! menu while clipboard sync is actively enabled and a tray host is available.
+//! native WSS relay client, conflated bounded incoming writes, and clipboard controls
+//! exposed to the application's native tray.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -204,11 +204,7 @@ mod imp {
   use serde::{Deserialize, Serialize};
   use serde_json::Value;
   use sha2::{Digest, Sha256};
-  use tauri::{
-    AppHandle, Manager,
-    menu::{MenuBuilder, MenuEvent, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-  };
+  use tauri::AppHandle;
   use tokio::sync::Notify;
 
   use super::{
@@ -240,13 +236,6 @@ mod imp {
   const MAX_STATE_FILE_BYTES: u64 = 64 * 1024;
   const WRITE_AUTH_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
   const ADAPTER_RETRY_DELAY: Duration = Duration::from_secs(2);
-
-  const TRAY_ID: &str = "pibot-clipboard-tray";
-  const TRAY_MENU_OPEN_ID: &str = "clipboard_tray_open";
-  const TRAY_MENU_PAUSE_ID: &str = "clipboard_tray_pause";
-  const TRAY_MENU_RESUME_ID: &str = "clipboard_tray_resume";
-  const TRAY_STATUS_INTERVAL: Duration = Duration::from_secs(1);
-  const TRAY_MENU_QUIT_ID: &str = "clipboard_tray_quit";
 
   static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -464,7 +453,6 @@ mod imp {
   struct RuntimeInner {
     epoch: u64,
     shutting_down: bool,
-    allow_exit: bool,
     lifecycle: ObservedLifecycle,
     active: Option<ActiveSessionMeta>,
     active_link: Option<Arc<Link>>,
@@ -472,8 +460,7 @@ mod imp {
     os_clipboard_healthy: bool,
     os_unsupported: bool,
     cached_persisted: Option<(String, PersistedState)>,
-    should_keep_tray: bool,
-    tray_menu: Option<Arc<TrayMenu>>,
+    show_tray_controls: bool,
     tray_paused: bool,
     reconcile_queued: bool,
   }
@@ -483,7 +470,6 @@ mod imp {
       Self {
         epoch: 0,
         shutting_down: false,
-        allow_exit: false,
         lifecycle: ObservedLifecycle::Unknown,
         active: None,
         active_link: None,
@@ -491,8 +477,7 @@ mod imp {
         os_clipboard_healthy: false,
         os_unsupported: false,
         cached_persisted: None,
-        should_keep_tray: false,
-        tray_menu: None,
+        show_tray_controls: false,
         tray_paused: false,
         reconcile_queued: false,
       }
@@ -538,64 +523,37 @@ mod imp {
       }
     }
 
-    /// Returns `true` only when clipboard sync is actively enabled, a real tray icon
-    /// is live so the user can reopen or quit PiBot, and no exit is in progress.
-    pub fn can_close_to_tray(&self, app: &AppHandle) -> bool {
-      let guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.shutting_down
-        || guard.allow_exit
-        || !guard.should_keep_tray
-        || guard.tray_menu.is_none()
-        || guard.os_unsupported
-      {
-        return false;
-      }
-      drop(guard);
-      app.tray_by_id(TRAY_ID).is_some()
+    /// A local snapshot for the application tray; reading it performs no IO.
+    pub fn tray_status(&self) -> Option<(ConnectionState, bool)> {
+      let paused = {
+        let guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.shutting_down || guard.os_unsupported || !guard.show_tray_controls {
+          return None;
+        }
+        guard.tray_paused
+      };
+      let connection = if paused { ConnectionState::Off } else { live_connection_state(&self.core) };
+      Some((connection, paused))
     }
 
-    /// Handles the single global tray menu listener registered on `tauri::Builder`.
-    pub fn handle_tray_menu_event(&self, app: &AppHandle, event: MenuEvent) {
-      match event.id().as_ref() {
-        TRAY_MENU_OPEN_ID => show_main_window(app),
-        id @ (TRAY_MENU_PAUSE_ID | TRAY_MENU_RESUME_ID) => {
-          let enabled = id == TRAY_MENU_RESUME_ID;
-          let app = app.clone();
-          tauri::async_runtime::spawn(async move {
-            let runtime = app.state::<ClipboardRuntime>();
-            if runtime.action_set_enabled(&app, enabled, true).await.is_err() {
-              show_main_window(&app);
-            }
-          });
-        }
-        TRAY_MENU_QUIT_ID => {
-          self.begin_explicit_quit(app);
-          let guest_ids = crate::browser_guest::begin_window_close(app).unwrap_or_default();
-          let app = app.clone();
-          tauri::async_runtime::spawn(async move {
-            crate::close_browser_window(&app, guest_ids).await;
-            app.exit(0);
-          });
-        }
-        _ => {}
-      }
+    pub async fn set_enabled_from_tray(&self, app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
+      self.action_set_enabled(app, enabled, true).await?;
+      Ok(())
     }
 
     /// Synchronously fences any running link, listener, or pending incoming write
     /// before a credential-changing or disconnect broker operation runs.
-    pub fn before_broker_request(&self, app: &AppHandle, op: &str) {
+    pub fn before_broker_request(&self, _app: &AppHandle, op: &str) {
       match op {
         "center_disconnect" => {
           let clip =
             detach_active_locked(&self.core, Some(ObservedLifecycle::Disconnected { cleared: true }), true, true);
           drop_detached_async(clip);
-          remove_tray_on_main_thread(app, true);
         }
         "disconnect" | "center_store" => {
           let clip =
             detach_active_locked(&self.core, Some(ObservedLifecycle::Disconnected { cleared: false }), true, true);
           drop_detached_async(clip);
-          remove_tray_on_main_thread(app, true);
         }
         "center_connect" | "connect" => {
           let clip =
@@ -660,7 +618,6 @@ mod imp {
                 true,
               );
               drop_detached_async(clip);
-              remove_tray_on_main_thread(app, true);
             }
           }
         }
@@ -684,7 +641,6 @@ mod imp {
                 true,
               );
               drop_detached_async(clip);
-              remove_tray_on_main_thread(app, true);
             }
           } else {
             let clip = detach_active_locked(
@@ -694,7 +650,6 @@ mod imp {
               true,
             );
             drop_detached_async(clip);
-            remove_tray_on_main_thread(app, true);
           }
         }
         "center_status" => {
@@ -724,7 +679,6 @@ mod imp {
                 true,
               );
               drop_detached_async(clip);
-              remove_tray_on_main_thread(app, true);
             }
             Some("error") => {
               let code = val.pointer("/error/code").and_then(Value::as_str);
@@ -775,7 +729,6 @@ mod imp {
               true,
             );
             drop_detached_async(clip);
-            remove_tray_on_main_thread(app, true);
           }
         }
         _ => {}
@@ -783,7 +736,7 @@ mod imp {
     }
 
     /// Called by `host_service` before persisting newly paired/adopted credentials.
-    pub fn on_center_credentials_changing(&self, app: &AppHandle) {
+    pub fn on_center_credentials_changing(&self, _app: &AppHandle) {
       let clip = detach_active_locked(
         &self.core,
         Some(ObservedLifecycle::Disconnected { cleared: false }),
@@ -791,40 +744,31 @@ mod imp {
         true,
       );
       drop_detached_async(clip);
-      remove_tray_on_main_thread(app, true);
     }
 
     /// Called from `RunEvent::Exit` on the main thread during application teardown.
-    pub fn shutdown(&self, app: &AppHandle) {
+    pub fn shutdown(&self, _app: &AppHandle) {
       let clip = {
         let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.shutting_down = true;
-        guard.allow_exit = true;
-        guard.should_keep_tray = false;
-        guard.tray_menu = None;
+        guard.show_tray_controls = false;
         guard.tray_paused = false;
         guard.detach_session()
       };
       self.core.incoming.clear();
-      // `RunEvent::Exit` runs on the main thread after the event loop has exited.
-      let removed = app.remove_tray_by_id(TRAY_ID);
-      drop(removed);
       drop(clip);
     }
 
-    fn begin_explicit_quit(&self, app: &AppHandle) {
+    pub fn begin_explicit_quit(&self) {
       let clip = {
         let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.shutting_down = true;
-        guard.allow_exit = true;
-        guard.should_keep_tray = false;
-        guard.tray_menu = None;
+        guard.show_tray_controls = false;
         guard.tray_paused = false;
         guard.detach_session()
       };
       self.core.incoming.clear();
       drop_detached_async(clip);
-      remove_tray_on_main_thread(app, false);
     }
 
     pub(super) async fn handle_action(
@@ -903,7 +847,7 @@ mod imp {
         });
       }
 
-      // Keep an already-visible tray only if the user paused sync from that tray.
+      // Keep the clipboard controls visible when sync was paused from the tray.
       if !persisted.enabled || !configured {
         stop_active_on_control(&self.core, app, !configured || !is_tray_paused(&self.core)).await;
         return Ok(ClipboardSyncReply {
@@ -972,9 +916,6 @@ mod imp {
       if !enabled {
         let clip = detach_active_locked(&self.core, None, false, !from_tray);
         drop_detached_async(clip);
-        if !from_tray {
-          remove_tray_on_main_thread(app, true);
-        }
       }
 
       let _guard = self.core.control_lock.lock().await;
@@ -1024,7 +965,7 @@ mod imp {
         save_persisted_async(&self.core, app, &binding, &updated).await?;
         if from_tray && updated.is_configured() {
           let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
-          guard.tray_paused = guard.tray_menu.is_some();
+          guard.tray_paused = guard.show_tray_controls;
         }
         return Ok(ClipboardSyncReply {
           status: if supported {
@@ -1347,7 +1288,7 @@ mod imp {
       }
     }
 
-    ensure_tray_on_control(core, app).await;
+    show_tray_controls(core);
     let connection = live_connection_state(core);
     if !is_platform_supported(core) {
       return unsupported_status(true, true);
@@ -1483,7 +1424,7 @@ mod imp {
         guard.active_link = Some(Arc::clone(&link));
         guard.active_clipboard = Some(Arc::clone(&clipboard));
         guard.os_clipboard_healthy = true;
-        guard.should_keep_tray = true;
+        guard.show_tray_controls = true;
         true
       } else {
         false
@@ -1763,17 +1704,14 @@ mod imp {
       }
       if unsupported {
         guard.os_unsupported = true;
-        guard.should_keep_tray = false;
-        guard.tray_menu = None;
+        guard.show_tray_controls = false;
         guard.tray_paused = false;
       }
       guard.detach_session()
     };
     core.incoming.clear();
     drop_detached_async(detached);
-    if unsupported {
-      remove_tray_on_main_thread(app, true);
-    } else {
+    if !unsupported {
       schedule_reconcile_after(Arc::clone(core), app.clone(), ADAPTER_RETRY_DELAY);
     }
   }
@@ -1792,8 +1730,7 @@ mod imp {
       guard.cached_persisted = None;
     }
     if clear_tray {
-      guard.should_keep_tray = false;
-      guard.tray_menu = None;
+      guard.show_tray_controls = false;
       guard.tray_paused = false;
     }
     let detached = guard.detach_session();
@@ -1802,7 +1739,7 @@ mod imp {
     detached
   }
 
-  async fn stop_active_on_control(core: &Arc<RuntimeCore>, app: &AppHandle, clear_tray: bool) {
+  async fn stop_active_on_control(core: &Arc<RuntimeCore>, _app: &AppHandle, clear_tray: bool) {
     let clip = detach_active_locked(core, None, false, clear_tray);
     let core = Arc::clone(core);
     let _ = tokio::task::spawn_blocking(move || {
@@ -1810,9 +1747,6 @@ mod imp {
       drop(core.native_write.lock().unwrap_or_else(|e| e.into_inner()));
       drop(clip);
     }).await;
-    if clear_tray {
-      remove_tray_on_main_thread(app, true);
-    }
   }
 
   async fn drop_clipboard_blocking(clipboard: Arc<SystemClipboard>) {
@@ -1903,211 +1837,17 @@ mod imp {
     }
   }
 
-  // ---------- Tray Management (opt-in and only with a visible tray host) ----------
-
-  struct TrayMenu {
-    status: MenuItem<tauri::Wry>,
-    pause: MenuItem<tauri::Wry>,
-    resume: MenuItem<tauri::Wry>,
-  }
+  // ---------- Clipboard Controls in the Application Tray ----------
 
   fn is_tray_paused(core: &RuntimeCore) -> bool {
     core.inner.lock().unwrap_or_else(|e| e.into_inner()).tray_paused
   }
 
-  fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-      let _ = window.unminimize();
-      let _ = window.show();
-      let _ = window.set_focus();
+  fn show_tray_controls(core: &RuntimeCore) {
+    let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
+    if !guard.shutting_down && !guard.os_unsupported {
+      guard.show_tray_controls = true;
     }
-  }
-
-  fn remove_tray_on_main_thread(app: &AppHandle, restore_if_hidden: bool) {
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-      let removed = handle.remove_tray_by_id(TRAY_ID).is_some();
-      if restore_if_hidden && removed {
-        if let Some(window) = handle.get_webview_window("main") {
-          if matches!(window.is_visible(), Ok(false)) {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-          }
-        }
-      }
-    });
-  }
-
-  async fn ensure_tray_on_control(core: &Arc<RuntimeCore>, app: &AppHandle) {
-    {
-      let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.shutting_down || guard.os_unsupported || guard.tray_menu.is_some() {
-        return;
-      }
-      guard.should_keep_tray = true;
-    }
-
-    let tray_app = app.clone();
-    let Ok(Some(menu)) = tokio::task::spawn_blocking(move || create_tray_if_available(&tray_app))
-      .await
-    else {
-      return;
-    };
-    let menu = Arc::new(menu);
-    let still_wanted = {
-      let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.should_keep_tray && !guard.shutting_down && !guard.os_unsupported {
-        guard.tray_menu = Some(Arc::clone(&menu));
-        true
-      } else {
-        false
-      }
-    };
-    if !still_wanted {
-      remove_tray_on_main_thread(app, false);
-      return;
-    }
-
-    let core = Arc::downgrade(core);
-    tauri::async_runtime::spawn(async move {
-      let mut previous = None;
-      loop {
-        let Some(core) = core.upgrade() else { break };
-        let paused = {
-          let guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-          if !guard.tray_menu.as_ref().is_some_and(|active| Arc::ptr_eq(active, &menu)) {
-            break;
-          }
-          guard.tray_paused
-        };
-        let connection = if paused { ConnectionState::Off } else { live_connection_state(&core) };
-        if previous != Some(connection) {
-          previous = Some(connection);
-          let label = match connection {
-            ConnectionState::Off => "Clipboard sync: paused",
-            ConnectionState::Connecting => "Clipboard sync: connecting",
-            ConnectionState::Online => "Clipboard sync: online",
-            ConnectionState::NotPaired | ConnectionState::Unauthorized => "Clipboard sync: not authorized",
-            ConnectionState::CertificateError => "Clipboard sync: certificate error",
-            ConnectionState::Unsupported => "Clipboard sync: upgrade Center",
-            ConnectionState::DisplayUnsupported => "Clipboard sync: unsupported display",
-            ConnectionState::GroupFull => "Clipboard sync: group full",
-            ConnectionState::Replaced => "Clipboard sync: replaced by this device ID",
-            ConnectionState::Offline => "Clipboard sync: offline",
-          };
-          let _ = menu.status.set_text(label);
-          let _ = menu.pause.set_enabled(!paused);
-          let _ = menu.resume.set_enabled(paused);
-        }
-        tokio::time::sleep(TRAY_STATUS_INTERVAL).await;
-      }
-    });
-  }
-
-  fn create_tray_if_available(app: &AppHandle) -> Option<TrayMenu> {
-    if app.tray_by_id(TRAY_ID).is_some() {
-      return None;
-    }
-    #[cfg(target_os = "linux")]
-    if !probe_linux_tray_available() {
-      return None;
-    }
-
-    let status = MenuItem::new(app, "Clipboard sync: connecting", false, None::<&str>).ok()?;
-    let pause = MenuItem::with_id(app, TRAY_MENU_PAUSE_ID, "Pause clipboard sync", true, None::<&str>).ok()?;
-    let resume = MenuItem::with_id(app, TRAY_MENU_RESUME_ID, "Resume clipboard sync", false, None::<&str>).ok()?;
-    let menu = MenuBuilder::new(app)
-      .text(TRAY_MENU_OPEN_ID, "Open PiBot")
-      .items(&[&status, &pause, &resume])
-      .text(TRAY_MENU_QUIT_ID, "Quit")
-      .build()
-      .ok()?;
-
-    TrayIconBuilder::with_id(TRAY_ID)
-      .icon(tauri::include_image!("../build/icons/icon.png"))
-      .tooltip("PiBot")
-      .menu(&menu)
-      .show_menu_on_left_click(false)
-      .on_tray_icon_event(|tray, event| {
-        let should_open = matches!(
-          event,
-          TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-          } | TrayIconEvent::DoubleClick {
-            button: MouseButton::Left,
-            ..
-          }
-        );
-        if should_open {
-          show_main_window(tray.app_handle());
-        }
-      })
-      .build(app)
-      .ok()?;
-
-    Some(TrayMenu { status, pause, resume })
-  }
-
-  #[cfg(target_os = "linux")]
-  fn probe_linux_tray_available() -> bool {
-    // 1. Confirm ayatana-appindicator3 or appindicator3 is present so libappindicator-sys
-    //    cannot panic on the GTK main thread.
-    let has_appindicator = unsafe {
-      let try_open = |name: &[u8]| -> bool {
-        let handle = libc::dlopen(
-          name.as_ptr().cast::<libc::c_char>(),
-          libc::RTLD_LAZY | libc::RTLD_LOCAL,
-        );
-        if !handle.is_null() {
-          libc::dlclose(handle);
-          true
-        } else {
-          false
-        }
-      };
-      try_open(b"libayatana-appindicator3.so.1\0") || try_open(b"libappindicator3.so.1\0")
-    };
-    if !has_appindicator {
-      return false;
-    }
-
-    // 2. Confirm a real StatusNotifierHost is registered on the session D-Bus
-    //    so close-to-tray never traps the user on desktops without a visible tray.
-    use gtk::gio::{self, BusType, Cancellable, DBusCallFlags};
-    use gtk::glib::variant::ToVariant;
-
-    let Ok(conn) = gio::bus_get_sync(BusType::Session, Cancellable::NONE) else {
-      return false;
-    };
-    let params = (
-      "org.kde.StatusNotifierWatcher",
-      "IsStatusNotifierHostRegistered",
-    )
-      .to_variant();
-    let Ok(reply) = conn.call_sync(
-      Some("org.kde.StatusNotifierWatcher"),
-      "/StatusNotifierWatcher",
-      "org.freedesktop.DBus.Properties",
-      "Get",
-      Some(&params),
-      None,
-      DBusCallFlags::NO_AUTO_START,
-      500,
-      Cancellable::NONE,
-    ) else {
-      return false;
-    };
-    if reply.n_children() < 1 {
-      return false;
-    }
-    reply
-      .child_value(0)
-      .as_variant()
-      .and_then(|v| v.get::<bool>())
-      == Some(true)
   }
 
   // ---------- Local Binding Peek & Protected Persistence ----------

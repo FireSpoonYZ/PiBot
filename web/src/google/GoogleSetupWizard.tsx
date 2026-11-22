@@ -6,7 +6,6 @@
 // - Never trusts model plain text as authorization completion; verifies Center status and respects privacy boundaries.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle,
   Check,
   ChevronDown,
   Copy,
@@ -19,6 +18,7 @@ import {
 } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import { InlineBanner, PopoverMenu, type PopoverMenuItem } from '../components/ui';
 import { useText } from '../ui';
 import {
   automaticGoogleClientSetup,
@@ -425,27 +425,7 @@ export function GoogleSetupWizard({
       ? externalSetup.choices
       : ['gmail', 'calendar'],
   );
-  const [openMenu, setOpenMenu] = useState<'none' | 'mode' | 'more'>('none');
   const [openedStepKey, setOpenedStepKey] = useState<string | null>(null);
-  const menuContainerRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (openMenu === 'none') return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (menuContainerRef.current && !menuContainerRef.current.contains(event.target as Node)) {
-        setOpenMenu('none');
-      }
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpenMenu('none');
-    };
-    document.addEventListener('pointerdown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [openMenu]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1170,19 +1150,24 @@ export function GoogleSetupWizard({
       : setup?.actions) ?? [];
   const resumeRetryNotice = resumeRetry?.scope === effectiveScopeKey && resumeRetry.runId === setup?.id &&
     resumeRetry.step === setup?.step && setup?.state === 'running' ? (
-      <div className={compactChat ? 'gws-compact-body' : 'gws-section-block'}>
-        <p className={compactChat ? 'gws-compact-notice' : 'gws-notice'} role="status">
-          {t('向导进度已保存。Bot 续跑请求提交失败。', 'Setup progress is saved. The request to resume the bot failed.')}
-        </p>
-        {!setup.blocker && !setup.unavailable && !effectiveReadOnly && callGoogleSetup ? (
-          <div className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
-            <button type="button" className="gws-btn is-primary is-sm" disabled={busy}
-              onClick={() => void handleBlockerAction({ id: 'continue' })}>
+      <InlineBanner
+        tone="attention"
+        role="status"
+        compact={compactChat}
+        title={t('向导进度已保存。Bot 续跑请求提交失败。', 'Setup progress is saved. The request to resume the bot failed.')}
+        actions={
+          !setup.blocker && !setup.unavailable && !effectiveReadOnly && callGoogleSetup ? (
+            <button
+              type="button"
+              className="gws-btn is-primary is-sm"
+              disabled={busy}
+              onClick={() => void handleBlockerAction({ id: 'continue' })}
+            >
               {compactBlockerLabel({ id: 'continue' }, t)}
             </button>
-          </div>
-        ) : null}
-      </div>
+          ) : undefined
+        }
+      />
     ) : null;
 
   if (compactChat) {
@@ -1296,6 +1281,116 @@ export function GoogleSetupWizard({
       }
     };
 
+    const modeMenuItems: PopoverMenuItem[] = activeMode && !setupCompleted
+      ? [
+          ...ALL_MODES.map<PopoverMenuItem>(mode => {
+            const available =
+              mode === 'guide-browser'
+                ? true
+                : mode === 'do-it-for-me'
+                  ? doItAvailable
+                  : guideHereAvailable;
+            const isSelected = activeMode === mode;
+            const disabledItem = !available || !canMutateChat || busy;
+            return {
+              key: mode,
+              checked: isSelected,
+              disabled: disabledItem,
+              label: (
+                <span className="gws-popover-item-stack">
+                  <span className="gws-popover-item-row">
+                    <span className="gws-popover-item-title">{compactModeLabel(mode, t)}</span>
+                    {!available ? (
+                      <span className="gws-popover-badge">{t('不可用', 'Unavailable')}</span>
+                    ) : null}
+                  </span>
+                  <span className="gws-popover-item-hint">{compactModeHint(mode, t)}</span>
+                </span>
+              ),
+              onSelect: () => {
+                if (!isSelected) void handleSelectMode(mode);
+              },
+            };
+          }),
+          ...(!embeddedSupported
+            ? [
+                {
+                  key: 'embedded-note',
+                  separatorBefore: true,
+                  disabled: true,
+                  label: (
+                    <span className="gws-popover-note">
+                      {humanizeEmbeddedReason(embeddedUnavailableDetail, isLocalAndroid, t)}
+                    </span>
+                  ),
+                  onSelect: () => {},
+                } satisfies PopoverMenuItem,
+              ]
+            : []),
+        ]
+      : [];
+
+    const moreMenuItems: PopoverMenuItem[] = [];
+    if (
+      onOpenBrowser &&
+      !effectiveReadOnly &&
+      embeddedSupported &&
+      !lockRequiresSystemBrowser &&
+      setup?.card?.card !== 'services' &&
+      (activeMode === 'do-it-for-me' || activeMode === 'guide-here')
+    ) {
+      moreMenuItems.push({
+        key: 'open-browser',
+        icon: <Globe size={14} aria-hidden="true" />,
+        label: openBrowserLabel,
+        onSelect: () => {
+          void handleOpenCurrentBrowser();
+        },
+      });
+    }
+    moreMenuItems.push({
+      key: 'refresh-status',
+      icon: <RefreshCw size={14} aria-hidden="true" />,
+      label: t('重新检查状态', 'Refresh status'),
+      disabled: busy,
+      onSelect: () => {
+        void refreshCenter();
+        if (callGoogleSetup) void sendControl({ action: 'status' });
+      },
+    });
+    if (onOpenCapabilities) {
+      moreMenuItems.push({
+        key: 'open-capabilities',
+        icon: <Lock size={14} aria-hidden="true" />,
+        label: t('前往能力设置录入凭据', 'Open Capabilities settings'),
+        onSelect: () => {
+          onOpenCapabilities();
+        },
+      });
+    }
+    if (onOpenCenterAdmin) {
+      moreMenuItems.push({
+        key: 'open-center-admin',
+        icon: <ExternalLink size={14} aria-hidden="true" />,
+        label: t('前往中心管理', 'Open Center Admin'),
+        onSelect: () => {
+          onOpenCenterAdmin();
+        },
+      });
+    }
+    if (canCancelRun) {
+      moreMenuItems.push({
+        key: 'cancel-setup',
+        separatorBefore: true,
+        danger: true,
+        disabled: busy,
+        label: t('中止向导', 'Cancel setup'),
+        onSelect: () => {
+          void sendControl({ action: 'cancel' }, { displayedSetup: setup });
+        },
+      });
+    }
+
     return (
       <section className="gws-compact-card" aria-label={t('Google 配置', 'Google setup')}>
         <div className="gws-compact-head">
@@ -1304,165 +1399,45 @@ export function GoogleSetupWizard({
             {botName ? <span className="gws-compact-bot">{botName}</span> : null}
           </div>
 
-          <div className="gws-compact-head-actions" ref={menuContainerRef}>
+          <div className="gws-compact-head-actions">
             {activeMode && !setupCompleted ? (
-              <div className="gws-popover-anchor">
-                <button
-                  type="button"
-                  className="gws-compact-chip"
-                  aria-haspopup="menu"
-                  aria-expanded={openMenu === 'mode'}
-                  disabled={busy}
-                  onClick={() => setOpenMenu(prev => (prev === 'mode' ? 'none' : 'mode'))}
-                >
-                  <span>{compactModeLabel(activeMode, t)}</span>
-                  <ChevronDown size={12} aria-hidden="true" />
-                </button>
-                {openMenu === 'mode' ? (
-                  <div className="gws-popover" role="menu" aria-label={t('切换操作方式', 'Switch mode')}>
-                    {ALL_MODES.map(mode => {
-                      const available =
-                        mode === 'guide-browser'
-                          ? true
-                          : mode === 'do-it-for-me'
-                            ? doItAvailable
-                            : guideHereAvailable;
-                      const isSelected = activeMode === mode;
-                      const disabledItem = !available || !canMutateChat || busy;
-                      return (
-                        <button
-                          key={mode}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={isSelected}
-                          disabled={disabledItem}
-                          className={`gws-popover-item${isSelected ? ' is-selected' : ''}`}
-                          onClick={() => {
-                            setOpenMenu('none');
-                            if (!isSelected) void handleSelectMode(mode);
-                          }}
-                        >
-                          <span className="gws-popover-item-row">
-                            <span className="gws-popover-item-title">{compactModeLabel(mode, t)}</span>
-                            {isSelected ? <Check size={13} aria-hidden="true" /> : null}
-                            {!available ? (
-                              <span className="gws-popover-badge">{t('不可用', 'Unavailable')}</span>
-                            ) : null}
-                          </span>
-                          <span className="gws-popover-item-hint">{compactModeHint(mode, t)}</span>
-                        </button>
-                      );
-                    })}
-                    {!embeddedSupported ? (
-                      <p className="gws-popover-note">
-                        {humanizeEmbeddedReason(embeddedUnavailableDetail, isLocalAndroid, t)}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="gws-popover-anchor">
-              <button
-                type="button"
-                className="gws-icon-btn"
-                aria-label={t('更多操作', 'More actions')}
-                aria-haspopup="menu"
-                aria-expanded={openMenu === 'more'}
-                onClick={() => setOpenMenu(prev => (prev === 'more' ? 'none' : 'more'))}
-              >
-                <MoreHorizontal size={15} aria-hidden="true" />
-              </button>
-              {openMenu === 'more' ? (
-                <div className="gws-popover is-compact-menu" role="menu" aria-label={t('更多操作', 'More actions')}>
-                  {onOpenBrowser && !effectiveReadOnly && embeddedSupported && !lockRequiresSystemBrowser &&
-                    setup?.card?.card !== 'services' && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="gws-popover-item"
-                      onClick={() => {
-                        setOpenMenu('none');
-                        void handleOpenCurrentBrowser();
-                      }}
-                    >
-                      <span className="gws-popover-item-row">
-                        <Globe size={13} aria-hidden="true" />
-                        <span className="gws-popover-item-title">{openBrowserLabel}</span>
-                      </span>
-                    </button>
-                  ) : null}
+              <PopoverMenu
+                side="top"
+                align="end"
+                ariaLabel={t('切换操作方式', 'Switch mode')}
+                menuClassName="gws-popover-menu"
+                items={modeMenuItems}
+                trigger={({ triggerProps }) => (
                   <button
                     type="button"
-                    role="menuitem"
-                    className="gws-popover-item"
+                    className="gws-compact-chip"
                     disabled={busy}
-                    onClick={() => {
-                      setOpenMenu('none');
-                      void refreshCenter();
-                      if (callGoogleSetup) void sendControl({ action: 'status' });
-                    }}
+                    {...triggerProps}
                   >
-                    <span className="gws-popover-item-row">
-                      <RefreshCw size={13} aria-hidden="true" />
-                      <span className="gws-popover-item-title">{t('重新检查状态', 'Refresh status')}</span>
-                    </span>
+                    <span>{compactModeLabel(activeMode, t)}</span>
+                    <ChevronDown size={12} aria-hidden="true" />
                   </button>
-                  {onOpenCapabilities ? (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="gws-popover-item"
-                      onClick={() => {
-                        setOpenMenu('none');
-                        onOpenCapabilities();
-                      }}
-                    >
-                      <span className="gws-popover-item-row">
-                        <Lock size={13} aria-hidden="true" />
-                        <span className="gws-popover-item-title">{t('前往能力设置录入凭据', 'Open Capabilities settings')}</span>
-                      </span>
-                    </button>
-                  ) : null}
-                  {onOpenCenterAdmin ? (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="gws-popover-item"
-                      onClick={() => {
-                        setOpenMenu('none');
-                        onOpenCenterAdmin();
-                      }}
-                    >
-                      <span className="gws-popover-item-row">
-                        <ExternalLink size={13} aria-hidden="true" />
-                        <span className="gws-popover-item-title">{t('前往中心管理', 'Open Center Admin')}</span>
-                      </span>
-                    </button>
-                  ) : null}
-                  {canCancelRun ? (
-                    <>
-                      <div className="gws-popover-sep" role="separator" />
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="gws-popover-item is-danger"
-                        disabled={busy}
-                        onClick={() => {
-                          setOpenMenu('none');
-                          void sendControl({ action: 'cancel' }, { displayedSetup: setup });
-                        }}
-                      >
-                        <span className="gws-popover-item-row">
-                          <span className="gws-popover-item-title">{t('中止向导', 'Cancel setup')}</span>
-                        </span>
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
+                )}
+              />
+            ) : null}
+
+            <PopoverMenu
+              side="top"
+              align="end"
+              ariaLabel={t('更多操作', 'More actions')}
+              menuClassName="gws-popover-menu"
+              items={moreMenuItems}
+              trigger={({ triggerProps }) => (
+                <button
+                  type="button"
+                  className="gws-icon-btn"
+                  aria-label={t('更多操作', 'More actions')}
+                  {...triggerProps}
+                >
+                  <MoreHorizontal size={15} aria-hidden="true" />
+                </button>
+              )}
+            />
 
             {onClose ? (
               <button
@@ -1658,42 +1633,45 @@ export function GoogleSetupWizard({
 
         {/* Sensitive takeover banner (real privacy boundary) */}
         {showBrowserTakeover && !setupCompleted ? (
-          <div className="gws-compact-alert is-warn" role="alert">
-            <div className="gws-compact-alert-text">
-              <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
-              <span>{browserLockHint}</span>
-            </div>
-            {!effectiveReadOnly ? (
-              <div className="gws-compact-actions">
-                {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
-                  <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
-                    <Globe size={13} aria-hidden="true" />
-                    <span>{t('接管当前页面', 'Take over page')}</span>
-                  </button>
-                ) : null}
-                {canMutateChat && currentStep && currentStep !== 'connect' && !hasPrimaryStepContinue ? (
-                  <button
-                    type="button"
-                    className="gws-btn is-primary is-sm"
-                    disabled={busy || waitingForExternalProjectId}
-                    onClick={() => void handleCompleteStep()}
-                  >
-                    {stepCopy?.continueLabel || t('已完成，继续', 'Done, continue')}
-                  </button>
-                ) : null}
-                {activeMode !== 'guide-browser' && canMutateChat ? (
-                  <button
-                    type="button"
-                    className="gws-btn is-ghost is-sm"
-                    disabled={busy}
-                    onClick={() => void handleSelectMode('guide-browser')}
-                  >
-                    {t('改用外部浏览器', 'Use system browser')}
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
+          <InlineBanner
+            tone="attention"
+            role="alert"
+            compact
+            title={t('此步骤需你亲自完成', 'Your turn')}
+            detail={browserLockHint}
+            actions={
+              !effectiveReadOnly ? (
+                <>
+                  {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
+                    <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
+                      <Globe size={13} aria-hidden="true" />
+                      <span>{t('接管当前页面', 'Take over page')}</span>
+                    </button>
+                  ) : null}
+                  {canMutateChat && currentStep && currentStep !== 'connect' && !hasPrimaryStepContinue ? (
+                    <button
+                      type="button"
+                      className="gws-btn is-primary is-sm"
+                      disabled={busy || waitingForExternalProjectId}
+                      onClick={() => void handleCompleteStep()}
+                    >
+                      {stepCopy?.continueLabel || t('已完成，继续', 'Done, continue')}
+                    </button>
+                  ) : null}
+                  {activeMode !== 'guide-browser' && canMutateChat ? (
+                    <button
+                      type="button"
+                      className="gws-btn is-ghost is-sm"
+                      disabled={busy}
+                      onClick={() => void handleSelectMode('guide-browser')}
+                    >
+                      {t('改用外部浏览器', 'Use system browser')}
+                    </button>
+                  ) : null}
+                </>
+              ) : undefined
+            }
+          />
         ) : null}
 
         {/* Active step: External browser guidance */}
@@ -1864,29 +1842,31 @@ export function GoogleSetupWizard({
 
         {/* Substantive blocker strip only (never generic yellow "needs-user" + duplicate Done) */}
         {showCompactBlocker ? (
-          <div className="gws-compact-alert" role="alert">
-            <div className="gws-compact-alert-row">
-              <AlertTriangle size={14} aria-hidden="true" />
-              <span>{describeCompactBlocker(setup!.blocker!, t)}</span>
-            </div>
-            {extraBlockerActions.length > 0 && !effectiveReadOnly ? (
-              <div className="gws-compact-actions">
-                {extraBlockerActions.map((action, idx) => (
-                  <button
-                    key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
-                    type="button"
-                    className={`gws-btn is-sm${idx === 0 && !hasPrimaryStepContinue ? ' is-primary' : ' is-ghost'}`}
-                    disabled={busy || (!canMutateChat && action.id !== 'copy-for-admin' && action.id !== 'turn-on' && action.id !== 'configure-client' && action.id !== 'import-key')}
-                    onClick={() => void handleBlockerAction(action)}
-                  >
-                    {action.id === 'copy-for-admin' ? <Copy size={12} aria-hidden="true" /> : null}
-                    {action.id === 'turn-on' ? <ExternalLink size={12} aria-hidden="true" /> : null}
-                    <span>{compactBlockerLabel(action, t)}</span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          <InlineBanner
+            tone="attention"
+            role="alert"
+            compact
+            title={describeCompactBlocker(setup!.blocker!, t)}
+            actions={
+              extraBlockerActions.length > 0 && !effectiveReadOnly ? (
+                <>
+                  {extraBlockerActions.map((action, idx) => (
+                    <button
+                      key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
+                      type="button"
+                      className={`gws-btn is-sm${idx === 0 && !hasPrimaryStepContinue ? ' is-primary' : ' is-ghost'}`}
+                      disabled={busy || (!canMutateChat && action.id !== 'copy-for-admin' && action.id !== 'turn-on' && action.id !== 'configure-client' && action.id !== 'import-key')}
+                      onClick={() => void handleBlockerAction(action)}
+                    >
+                      {action.id === 'copy-for-admin' ? <Copy size={12} aria-hidden="true" /> : null}
+                      {action.id === 'turn-on' ? <ExternalLink size={12} aria-hidden="true" /> : null}
+                      <span>{compactBlockerLabel(action, t)}</span>
+                    </button>
+                  ))}
+                </>
+              ) : undefined
+            }
+          />
         ) : null}
 
         {/* Fallback when live setup snapshot has not loaded yet */}
@@ -1913,13 +1893,8 @@ export function GoogleSetupWizard({
         ) : null}
 
         {resumeRetryNotice}
-        {notice ? <p className="gws-compact-notice" role="status">{notice}</p> : null}
-        {error ? (
-          <div className="gws-compact-error" role="alert">
-            <ShieldAlert size={14} aria-hidden="true" />
-            <span>{error}</span>
-          </div>
-        ) : null}
+        {notice ? <InlineBanner tone="info" role="status" compact title={notice} /> : null}
+        {error ? <InlineBanner tone="danger" role="alert" compact title={error} /> : null}
       </section>
     );
   }
@@ -1938,7 +1913,7 @@ export function GoogleSetupWizard({
               : showBrowserTakeover
                 ? t('等待本人接管', 'Needs takeover')
                 : activeMode
-                  ? googleSetupModeMeta(activeMode, t).title.split(' ')[0]
+                  ? compactModeLabel(activeMode, t)
                   : t('待选择方式', 'Choose mode')}
           </span>
           {onClose ? (
@@ -1953,7 +1928,7 @@ export function GoogleSetupWizard({
       <div className="gws-truth-bar">
         <span>
           {clientConfigured
-            ? t(`Center 应用：已配置 (${maskClientId(effectiveCenterClient?.clientId)})`, `Center app: Configured (${maskClientId(effectiveCenterClient?.clientId)})`)
+            ? t(`Center 应用：已配置 · ${maskClientId(effectiveCenterClient?.clientId)}`, `Center app: Configured · ${maskClientId(effectiveCenterClient?.clientId)}`)
             : t('Center 应用：未配置 Web OAuth Client', 'Center app: Web OAuth Client not configured')}
         </span>
         <button
@@ -1971,32 +1946,29 @@ export function GoogleSetupWizard({
       </div>
 
       {nonAdminBlocked && !clientConfigured ? (
-        <div className="gws-warning" role="status">
-          <ShieldAlert size={15} aria-hidden="true" />
-          <div className="gws-error-body">
-            <span>{t('当前 Center 尚未配置 Google OAuth 应用，请联系 Center 管理员完成一次性配置后再连接你的账号。', 'Center does not have a Google OAuth app configured yet. Ask your Center administrator to configure it once before connecting your account.')}</span>
-            <div className="gws-actions">
-              <button type="button" className="gws-btn is-ghost is-xs" onClick={() => void handleBlockerAction({ id: 'copy-for-admin' })}>
-                <Copy size={12} aria-hidden="true" />
-                <span>{t('复制管理员配置指引', 'Copy admin guide')}</span>
-              </button>
-            </div>
-          </div>
-        </div>
+        <InlineBanner
+          tone="attention"
+          role="status"
+          title={t('当前 Center 尚未配置 Google OAuth 应用，请联系 Center 管理员完成一次性配置后再连接你的账号。', 'Center does not have a Google OAuth app configured yet. Ask your Center administrator to configure it once before connecting your account.')}
+          actions={
+            <button type="button" className="gws-btn is-ghost is-xs" onClick={() => void handleBlockerAction({ id: 'copy-for-admin' })}>
+              <Copy size={12} aria-hidden="true" />
+              <span>{t('复制管理员配置指引', 'Copy admin guide')}</span>
+            </button>
+          }
+        />
       ) : null}
 
       {setupClaimsDoneWithoutCenter ? (
-        <div className="gws-warning" role="status">
-          <AlertTriangle size={15} aria-hidden="true" />
-          <span>{t('尚未在 Center 核验到已就绪的 Google 账号连接；授权完成以 Center 实际回调与探活结果为准，不采信聊天文本说明。', 'Center has not verified a connected Google account yet. Completion is determined strictly by Center status, never chat text.')}</span>
-        </div>
+        <InlineBanner
+          tone="attention"
+          role="status"
+          title={t('尚未在 Center 核验到已就绪的 Google 账号连接；授权完成以 Center 实际回调与探活结果为准，不采信聊天文本说明。', 'Center has not verified a connected Google account yet. Completion is determined strictly by Center status, never chat text.')}
+        />
       ) : null}
 
       {unavailableReason ? (
-        <div className="gws-warning" role="status">
-          <AlertTriangle size={15} aria-hidden="true" />
-          <span>{unavailableReason}</span>
-        </div>
+        <InlineBanner tone="attention" role="status" title={unavailableReason} />
       ) : null}
 
       {/* Quick path vs 3-mode selector */}
@@ -2142,28 +2114,30 @@ export function GoogleSetupWizard({
 
       {/* Browser lock / sensitive takeover banner */}
       {showBrowserTakeover ? (
-        <div className="gws-takeover-alert" role="alert">
-          <div className="gws-takeover-body">
-            <strong>{t('此步骤需你亲自完成', 'Your turn')}</strong>
-            <span>{browserLockHint}</span>
-          </div>
-          <div className="gws-actions">
-            {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
-              <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
-                <Globe size={14} aria-hidden="true" />
-                <span>{t('接管当前页面', 'Take over page')}</span>
+        <InlineBanner
+          tone="attention"
+          role="alert"
+          title={t('此步骤需你亲自完成', 'Your turn')}
+          detail={browserLockHint}
+          actions={
+            <>
+              {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
+                <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
+                  <Globe size={14} aria-hidden="true" />
+                  <span>{t('接管当前页面', 'Take over page')}</span>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="gws-btn is-ghost is-sm"
+                disabled={busy}
+                onClick={() => void handleSelectMode('guide-browser')}
+              >
+                {t('改用外部浏览器指导', 'Switch to external browser')}
               </button>
-            ) : null}
-            <button
-              type="button"
-              className="gws-btn is-ghost is-sm"
-              disabled={busy}
-              onClick={() => void handleSelectMode('guide-browser')}
-            >
-              {t('改用外部浏览器指导', 'Switch to external browser')}
-            </button>
-          </div>
-        </div>
+            </>
+          }
+        />
       ) : null}
 
       {/* Steps checklist */}
@@ -2271,7 +2245,7 @@ export function GoogleSetupWizard({
                 disabled={busy}
                 onClick={() => void handleCompleteStep()}
               >
-                {t('已完成这一步 (Done)', 'Done — next step')}
+                {t('已完成这一步', 'Done — next step')}
               </button>
             </div>
           ) : null}
@@ -2280,28 +2254,29 @@ export function GoogleSetupWizard({
 
       {/* Blocker details & real actions */}
       {setup?.blocker && !autoClientPending ? (
-        <div className="gws-blocker" role="alert">
-          <div className="gws-blocker-msg">
-            <AlertTriangle size={15} aria-hidden="true" />
-            <span>{describeBlocker(setup.blocker, t)}</span>
-          </div>
-          {activeBlockerActions.length > 0 && !effectiveReadOnly ? (
-            <div className="gws-actions">
-              {activeBlockerActions.filter(action => action.id !== 'done' || !canCompleteCurrentStep || currentStep === 'client').map(action => (
-                <button
-                  key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
-                  type="button"
-                  className="gws-btn is-ghost is-sm"
-                  disabled={busy}
-                  onClick={() => void handleBlockerAction(action)}
-                >
-                  {action.id === 'copy-for-admin' ? <Copy size={13} aria-hidden="true" /> : null}
-                  <span>{action.label || action.id}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <InlineBanner
+          tone="attention"
+          role="alert"
+          title={describeBlocker(setup.blocker, t)}
+          actions={
+            activeBlockerActions.length > 0 && !effectiveReadOnly ? (
+              <>
+                {activeBlockerActions.filter(action => action.id !== 'done' || !canCompleteCurrentStep || currentStep === 'client').map(action => (
+                  <button
+                    key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
+                    type="button"
+                    className="gws-btn is-ghost is-sm"
+                    disabled={busy}
+                    onClick={() => void handleBlockerAction(action)}
+                  >
+                    {action.id === 'copy-for-admin' ? <Copy size={13} aria-hidden="true" /> : null}
+                    <span>{action.label || action.id}</span>
+                  </button>
+                ))}
+              </>
+            ) : undefined
+          }
+        />
       ) : null}
 
       {/* Private client credential entry (step === 'client' or explicit quick path) */}
@@ -2358,13 +2333,8 @@ export function GoogleSetupWizard({
       ) : null}
 
       {resumeRetryNotice}
-      {notice ? <p className="gws-notice" role="status">{notice}</p> : null}
-      {error ? (
-        <div className="gws-error" role="alert">
-          <ShieldAlert size={15} aria-hidden="true" />
-          <span>{error}</span>
-        </div>
-      ) : null}
+      {notice ? <InlineBanner tone="live" role="status" compact title={notice} /> : null}
+      {error ? <InlineBanner tone="danger" role="alert" compact title={error} /> : null}
 
       {/* Footer actions */}
       {!effectiveReadOnly ? (

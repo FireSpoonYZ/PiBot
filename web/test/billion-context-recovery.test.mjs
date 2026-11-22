@@ -10,8 +10,8 @@ import {
   computeOverflowRecoveryBudget,
   computePreflightTargetTokens,
   countMessageTokens,
-  setRequestBudget,
-  withRequestBudget,
+  setBillionContextOutputBudget,
+  withBillionContextOutputRepair,
 } from '../../host-core/request-context.js';
 import { openRuntime } from '../../host-core/runtime.js';
 import { openAICompletionsApi } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.lazy.js';
@@ -20,7 +20,6 @@ import { registerApiProvider } from '../../host-core/node_modules/@earendil-work
 import { createAssistantMessageEventStream } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js';
 import { getCurrentTools } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
 import { estimateMessageTokens } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/estimate.js';
-import { isContextOverflow } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/overflow.js';
 
 const BC_PACKAGE_ROOT = fileURLToPath(new URL('../../plugins/billion-context', import.meta.url));
 const BC_INSTALLATION_ID = 'inst-billion-context';
@@ -51,7 +50,7 @@ async function sendProjectedRequest({
   api = 'openai-responses', compat, tokenCount = 494_900, billionContext = true, options,
 } = {}) {
   const responses = api === 'openai-responses';
-  const provider = withRequestBudget(responses ? openAIResponsesApi() : openAICompletionsApi());
+  const provider = withBillionContextOutputRepair(responses ? openAIResponsesApi() : openAICompletionsApi());
   const model = {
     id: MODEL_ID, api, provider: 'openai', baseUrl: 'https://openai.example.test/v1',
     reasoning: false, input: ['text'], contextWindow: 500_000, maxTokens: 1_024,
@@ -62,7 +61,7 @@ async function sendProjectedRequest({
       api, provider: model.provider, model: model.id, usage: { ...ZERO_USAGE, totalTokens: 499_000 } },
     { role: 'user', content: 'Current question', timestamp: 2 },
   ];
-  setRequestBudget(messages, tokenCount, model.contextWindow, undefined, { billionContext });
+  if (billionContext) setBillionContextOutputBudget(messages, tokenCount, model.contextWindow);
 
   let body;
   const result = await provider.streamSimple(model, { messages: [...messages] }, {
@@ -114,12 +113,24 @@ test('Billion Context restores SDK-clamped OpenAI wire limits from the projected
   }
 });
 
-test('Billion Context reports a recognizable overflow before sending an OpenAI floor-only request', async () => {
-  const { body, result } = await sendProjectedRequest({ tokenCount: 496_002 });
-  assert.equal(body, undefined);
-  assert.equal(result.stopReason, 'error');
-  assert.match(result.errorMessage, /context_length_exceeded/);
-  assert.equal(isContextOverflow(result), true);
+test('Billion Context sends overestimated requests with the configured output cap', async (t) => {
+  for (const [api, field] of [
+    ['openai-responses', 'max_output_tokens'],
+    ['openai-completions', 'max_completion_tokens'],
+    ['openai-completions', 'max_tokens'],
+  ]) {
+    for (const tokenCount of [496_002, 500_000, 600_000]) {
+      await t.test(`${field}: ${tokenCount}`, async () => {
+        const { body, result } = await sendProjectedRequest({
+          api, tokenCount,
+          compat: api === 'openai-completions' ? { maxTokensField: field } : undefined,
+        });
+        assert.equal(result.stopReason, 'stop', result.errorMessage);
+        assert.equal(body[field], 1_024);
+        assert.ok(JSON.stringify(body).includes('Current question'));
+      });
+    }
+  }
 });
 
 test('Billion Context preserves explicit and omitted OpenAI Responses limits', async (t) => {
@@ -127,6 +138,7 @@ test('Billion Context preserves explicit and omitted OpenAI Responses limits', a
     ['ordinary request', { billionContext: false }, 16],
     ['explicit request cap', { options: { maxTokens: 16 } }, 16],
     ['explicit cap above the floor', { options: { maxTokens: 32 } }, 32],
+    ['explicit cap without estimated room', { tokenCount: 600_000, options: { maxTokens: 32 } }, 32],
     ['configured model cap', { tokenCount: 400_000, options: { maxTokens: 2_048 } }, 1_024],
     ['sampling override', { options: { samplingParams: { max_output_tokens: 16 } } }, 16],
     ['replacement hook', { options: { onPayload: (payload) => ({ ...payload, max_output_tokens: 16 }) } }, 16],
@@ -662,13 +674,13 @@ async function plantFoldableHistory({
 }
 
 // ============================================================================
-// 1) Local budget overflow after large foldable plain-text history + real tool:
-//    - Oversized main request is never sent to the provider
+// 1) Preflight compaction after large foldable plain-text history + real tool:
+//    - The main request uses the smaller context when compaction succeeds
 //    - Chunked summary requests stay within budget and carry no main tools
 //    - Original requestId finishes as done via Runtime.wait & getSubmission with full answerText
 //    - Side-effectful test tool executes exactly once (count === 1)
 // ============================================================================
-test('Billion Context recovery (1): local budget overflow folds old plain-text history via budgeted tool-less summaries without re-running side-effect tool', async () => {
+test('Billion Context preflight folds old history via budgeted tool-less summaries without re-running side-effect tool', async () => {
   const MODEL_CONTEXT_WINDOW = 64_000;
   const fixture = await openRecoveryFixture({
     label: 's1-local-overflow',
@@ -1149,19 +1161,22 @@ test('Billion Context recovery (3A): failed/0-block same-turn compress does not 
 });
 
 // ============================================================================
-// 3B) Uncompressible opaque overflow (no foldable old plain-text history):
-//     - Oversized main request is never sent to provider
-//     - Recovery terminates without repeated retries or tool re-execution
+// 3B) An irreducible input still reaches the provider intact despite its local estimate.
 // ============================================================================
-test('A latest user input that cannot fit is not truncated or sent repeatedly', async (t) => {
+test('A latest user input above the estimated window is sent intact', async (t) => {
   const fixture = await openRecoveryFixture({ label: 'irreducible', contextWindow: 24_000 });
   t.after(() => fixture.close());
   const requestId = 'req-irreducible';
   const input = makeFoldableText('THIS_USER_INPUT_MUST_STAY_INTACT', 120_000);
   await fixture.runtime.submit(fixture.bot.botId, { requestId, text: input, origin: USER_ORIGIN });
   const result = await fixture.waitForSubmission(fixture.bot.botId, requestId);
-  assert.equal(result.status, 'unanswered');
-  assert.equal(fixture.allRequests.length, 0);
+  assert.equal(result.status, 'done');
+  assert.equal(fixture.mainRequests.length, 1);
+  assert.equal(fixture.summaryRequests.length, 0);
+  const request = fixture.mainRequests[0];
+  assert.ok(request.estTokens > 24_000);
+  const received = extractMessageText(findLastRealUserMessage(request.messages));
+  assert.ok(received.endsWith(input), 'the full user text follows the Billion Context reference tag');
 });
 
 test('Opt-in autoFold compacts below the hard window without adding model nudges', async (t) => {

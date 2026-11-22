@@ -1,4 +1,6 @@
-/* 桌面发送记录。状态、当前动作和按需展开的详情分层显示。 */
+/* Desktop PendingPanel — flat hairline cards aligned with Android PendingInbox rhythm.
+ * Pure Wave 1 semantic tokens (zero hardcoded hex/rgb values). */
+
 .desktop-shell .pending-panel {
   flex: 1;
   min-height: 0;
@@ -6,12 +8,15 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--ground);
+  color: var(--ink-primary);
 }
 
 .desktop-shell .pending-panel-head {
   flex: none;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line-subtle, var(--line));
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--ground);
 }
 
 .desktop-shell .pending-panel-heading {
@@ -19,84 +24,142 @@
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px 16px;
+  gap: var(--space-2) var(--space-4);
 }
 
-.desktop-shell .pending-panel-heading h3 { margin: 0; font-size: 16px; }
-.desktop-shell .pending-context,
-.desktop-shell .pending-record-meta,
-.desktop-shell .pending-extra-actions {
+.desktop-shell .pending-panel-title-group {
+  min-width: 0;
+  flex: 1;
+}
+
+.desktop-shell .pending-panel-heading h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.desktop-shell .pending-context {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 10px;
+  gap: var(--space-1) 10px;
+  margin-top: var(--space-1);
+  overflow-wrap: anywhere;
 }
 
-.desktop-shell .pending-context { margin-top: 4px; overflow-wrap: anywhere; }
+.desktop-shell .pending-context-name {
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+}
+
 .desktop-shell .pending-context-link {
   padding: 0;
+  min-height: 0;
   border: 0;
   background: transparent;
-  color: var(--brand, var(--accent));
-  font-size: 12px;
+  color: var(--signal-primary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
 }
-
-.desktop-shell .pending-context-link:hover { text-decoration: underline; }
 
 .desktop-shell .pending-panel-body {
-  gap: 10px;
-  padding: 12px 16px 16px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-5);
 }
 
-.desktop-shell .pending-panel-body > .secondary-button { align-self: flex-start; }
-.desktop-shell .pending-panel-body > .empty-state { margin: 0; }
-.desktop-shell .pending-panel-body > .error-banner { flex-wrap: wrap; }
-.desktop-shell .pending-panel-body > .error-banner > .pending-tech { flex-basis: 100%; }
+.desktop-shell .pending-load-more {
+  align-self: flex-start;
+  min-height: 34px;
+  padding: 6px var(--space-4);
+  font-size: var(--text-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
 
+/* Focused record container: full hairline border + soft primary tint (no left accent bar). */
 .desktop-shell .pending-focused {
-  padding-inline-start: 12px;
-  border-inline-start: 2px solid var(--brand, var(--accent));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--signal-primary-border);
+  background: var(--signal-primary-soft);
 }
 
 .desktop-shell .pending-focused h4 {
   margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--signal-primary);
 }
 
-.desktop-shell .pending-records:empty { display: none; }
+.desktop-shell .pending-focused-empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+/* Flat card stack aligned with PendingInbox rhythm. */
+.desktop-shell .pending-records {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.desktop-shell .pending-records:empty {
+  display: none;
+}
+
 .desktop-shell .pending-record {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 0 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line-subtle, var(--line));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+  box-shadow: none;
 }
 
-.desktop-shell .pending-record-copy { min-width: 0; }
-.desktop-shell .pending-record-meta { margin-top: 2px; }
-.desktop-shell .pending-record .status { font-weight: 600; }
-.desktop-shell .pending-state-pending,
-.desktop-shell .pending-state-unconfirmed,
-.desktop-shell .pending-outcome-unconfirmed { color: var(--warn); }
-.desktop-shell .pending-state-pending::before,
-.desktop-shell .pending-state-unconfirmed::before,
-.desktop-shell .pending-outcome-unconfirmed::before { background: var(--warn); }
-.desktop-shell .pending-state-sending { color: var(--brand, var(--accent)); }
-.desktop-shell .pending-state-sending::before { background: var(--brand, var(--accent)); }
-.desktop-shell .pending-state-accepted,
-.desktop-shell .pending-outcome-responded { color: var(--ok); }
-.desktop-shell .pending-state-accepted::before,
-.desktop-shell .pending-outcome-responded::before { background: var(--ok); }
-.desktop-shell .pending-state-rejected { color: var(--danger); }
-.desktop-shell .pending-state-rejected::before { background: var(--danger); }
+.desktop-shell .pending-record-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.desktop-shell .pending-record-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  overflow-wrap: anywhere;
+}
+
+.desktop-shell .pending-record-time {
+  flex: none;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
 
 .desktop-shell .pending-text {
-  margin: 4px 0 0;
-  font-size: 13px;
+  margin: 0;
+  font-size: var(--text-sm);
   line-height: 1.5;
+  color: var(--ink-primary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   display: -webkit-box;
@@ -105,46 +168,271 @@
   overflow: hidden;
 }
 
+.desktop-shell .pending-record-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: 2px;
+}
+
+.desktop-shell .pending-record-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-secondary);
+}
+
+.desktop-shell .pending-record-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  flex: none;
+}
+
+.desktop-shell .pending-state-pending,
+.desktop-shell .pending-state-unconfirmed,
+.desktop-shell .pending-outcome-unconfirmed {
+  color: var(--state-attention);
+}
+
+.desktop-shell .pending-state-sending {
+  color: var(--signal-primary);
+}
+
+.desktop-shell .pending-state-accepted,
+.desktop-shell .pending-outcome-responded {
+  color: var(--state-live);
+}
+
+.desktop-shell .pending-state-rejected,
+.desktop-shell .pending-outcome-not-sent {
+  color: var(--state-danger);
+}
+
+.desktop-shell .pending-state-cancelled {
+  color: var(--ink-tertiary);
+}
+
+.desktop-shell .pending-record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 .desktop-shell .pending-primary-action,
-.desktop-shell .pending-quiet-button,
-.desktop-shell .pending-extra-actions .secondary-button {
+.desktop-shell .pending-secondary-action,
+.desktop-shell .pending-quiet-button {
   min-height: 32px;
-  padding: 5px 12px;
-  font-size: 12px;
+  padding: 5px 14px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
 }
 
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) {
+/* Single flat expandable technical details disclosure (zero nested details). */
+.desktop-shell .pending-panel .pending-tech {
+  margin-top: 2px;
   border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
   background: transparent;
+  padding-top: 6px;
 }
 
-.desktop-shell .pending-record-more,
-.desktop-shell .pending-record > .pending-tech { grid-column: 1 / -1; }
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > summary {
+.desktop-shell .pending-panel .pending-tech > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   width: fit-content;
-  padding: 4px 0;
+  padding: 2px 0;
   border: 0;
-  color: var(--muted);
-  font-size: 12px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > summary:hover,
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts)[open] > summary { color: var(--text); }
-
-.desktop-shell .pending-panel :is(.pending-record-more, .pending-tech, .pending-receipts) > :not(summary) {
-  margin: 4px 0 0;
+.desktop-shell .pending-panel .pending-tech > summary::-webkit-details-marker {
+  display: none;
 }
 
-.desktop-shell .pending-more-content {
-  padding: 4px 0 0 12px;
-  border-inline-start: 1px solid var(--line-subtle, var(--line));
+.desktop-shell .pending-panel .pending-tech[open] > summary {
+  color: var(--ink-primary);
 }
 
-.desktop-shell .pending-extra-actions { margin-bottom: 4px; }
-.desktop-shell .pending-tech-body { display: flex; flex-direction: column; gap: 4px; }
+.desktop-shell .pending-tech-chevron {
+  flex: none;
+  color: var(--ink-tertiary);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.desktop-shell .pending-panel .pending-tech[open] > summary .pending-tech-chevron {
+  transform: rotate(90deg);
+}
+
+.desktop-shell .pending-tech-body {
+  margin-top: 6px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
 .desktop-shell .pending-mono {
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
   overflow-wrap: anywhere;
 }
 
-.desktop-shell .pending-panel .pending-receipts > summary { font-size: 13px; }
+.desktop-shell .pending-raw-block {
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.desktop-shell .pending-raw-label {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-tertiary);
+}
+
+.desktop-shell .pending-raw-content {
+  margin: 0;
+  padding: var(--space-2) 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: var(--radius-xs);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--ink-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* History operation receipts collapsible toggle (aligned with PendingInbox .pending-done). */
+.desktop-shell .pending-receipts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.desktop-shell .pending-receipts-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 5px var(--space-3);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-default);
+  background: var(--surface-raised);
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
+
+/* Calm empty state aligned with PendingInbox. */
+.desktop-shell .pending-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border-default);
+  background: var(--surface-1);
+  color: var(--ink-secondary);
+  text-align: center;
+}
+
+.desktop-shell .pending-empty-state h4 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.desktop-shell .pending-empty-state p {
+  margin: 0;
+  max-width: 420px;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--ink-secondary);
+}
+
+/* Hover & tactile press feedback. */
+@media (hover: hover) and (pointer: fine) {
+  .desktop-shell .pending-context-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .desktop-shell .pending-panel .pending-tech > summary:hover {
+    color: var(--ink-primary);
+  }
+
+  .desktop-shell .pending-receipts-toggle:hover:not(:disabled) {
+    background: var(--surface-1);
+    border-color: var(--border-strong);
+    color: var(--ink-primary);
+  }
+}
+
+.desktop-shell .pending-primary-action:active:not(:disabled),
+.desktop-shell .pending-secondary-action:active:not(:disabled),
+.desktop-shell .pending-quiet-button:active:not(:disabled),
+.desktop-shell .pending-load-more:active:not(:disabled),
+.desktop-shell .pending-receipts-toggle:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-shell .pending-primary-action,
+  .desktop-shell .pending-secondary-action,
+  .desktop-shell .pending-quiet-button,
+  .desktop-shell .pending-load-more,
+  .desktop-shell .pending-receipts-toggle,
+  .desktop-shell .pending-panel .pending-tech > summary,
+  .desktop-shell .pending-tech-chevron {
+    transition: none;
+  }
+
+  .desktop-shell .pending-primary-action:active:not(:disabled),
+  .desktop-shell .pending-secondary-action:active:not(:disabled),
+  .desktop-shell .pending-quiet-button:active:not(:disabled),
+  .desktop-shell .pending-load-more:active:not(:disabled),
+  .desktop-shell .pending-receipts-toggle:active:not(:disabled) {
+    transform: none;
+  }
+}

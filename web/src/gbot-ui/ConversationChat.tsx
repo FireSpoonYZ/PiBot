@@ -7,7 +7,7 @@
 // 名字一律用 BotRecord.role / 用户自然名，任何技术 ID 不出现在可视/aria/title。
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { MoreHorizontal } from 'lucide-react';
+import { MoreHorizontal, Quote } from 'lucide-react';
 import type {
   BotRecord,
   MessageMember,
@@ -230,8 +230,15 @@ export function ConversationMessage({
             className="conversation-chat-message__quote"
             title={replyQuote.text}
           >
-            <span className="conversation-chat-message__quote-author">
-              {replyQuote.author}
+            <span className="conversation-chat-message__quote-head">
+              <Quote
+                aria-hidden="true"
+                className="conversation-chat-message__quote-icon"
+                size={13}
+              />
+              <span className="conversation-chat-message__quote-author">
+                {replyQuote.author}
+              </span>
             </span>
             <span className="conversation-chat-message__quote-text">
               {replyQuote.text}
@@ -351,7 +358,7 @@ export function ConversationTimeDivider({
     }
   }
   return (
-    <div className="conversation-chat-time" role="separator">
+    <div className="conversation-chat-time tabular-nums" role="separator">
       {formatDividerTime(ms, t)}
     </div>
   );

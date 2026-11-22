@@ -1,7 +1,8 @@
-/* F1 统一浮层提示（NoticeLayer）样式：
- * - position: fixed 浮于底栏与软键盘之上，不参与文档流，避免任何布局跳动（CLS = 0）。
- * - 同时兼容移动端（web/src/styles.css）、桌面端（desktop/web/src/app.css）与中心管理页（center-web/styles.css）主题 token。
- * - 所有入场/退场与交互动效仅使用 transform 与 opacity，绝不动画化尺寸或边距。
+/* Unified Global Toast Layer (NoticeLayer) Styles.
+ * - Sole global toast layer (`z-index: var(--z-toast, 500)`).
+ * - Fixed floating surface above bottom chrome & soft keyboard (CLS = 0).
+ * - Interruptible CSS transitions with `@starting-style` (no restart-from-zero keyframes).
+ * - Zero raw color literals; consumes canonical design-system tokens.
  */
 
 .notice-layer-root {
@@ -12,13 +13,10 @@
     var(--ime-bottom, 0px) +
       max(
         var(--bottom-chrome, 0px),
-        max(
-          var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px),
-          0px
-        )
+        var(--bottom, max(calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px))
       ) + 12px
   );
-  z-index: var(--notice-layer-z, var(--z-toast, 400));
+  z-index: var(--notice-layer-z, var(--z-toast, 500));
   width: min(calc(100vw - 24px), 440px);
   max-width: calc(100% - 24px);
   margin-inline: auto;
@@ -31,6 +29,26 @@
   font-family: var(--font-sans, system-ui, -apple-system, "Noto Sans SC", sans-serif);
 }
 
+/* Keep toasts strictly above fullscreen Browser / Shower bottom bars (Takeover, Esc, remote keys)
+ * and ignore any stale chat-composer --bottom-chrome while fullscreen tools are mounted. */
+body:has(.bb-panel--fullscreen, .bot-browser-dialog, .grok-computer-screen, .shower-theater) .notice-layer-root {
+  bottom: calc(
+    var(--ime-bottom, 0px) +
+      var(--bottom, max(calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px)) +
+      76px
+  );
+}
+
+@media (max-width: 640px) {
+  body:has(.bb-panel--fullscreen .bb-input-dock) .notice-layer-root {
+    bottom: calc(
+      var(--ime-bottom, 0px) +
+        var(--bottom, max(calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px)) +
+        120px
+    );
+  }
+}
+
 .notice-layer-root *,
 .notice-layer-root *::before,
 .notice-layer-root *::after {
@@ -38,59 +56,82 @@
 }
 
 .notice-layer-card {
-  --notice-accent: var(
-    --color-info,
-    var(--color-primary, var(--brand, var(--primary, var(--accent))))
-  );
-  --notice-surface: var(--color-surface-2, var(--surface-elevated, var(--card, var(--bg))));
-  --notice-line: var(--color-line, var(--line));
+  --notice-accent: var(--state-info, var(--color-info, var(--signal-primary, var(--accent))));
+  --notice-soft: var(--state-info-soft, var(--signal-primary-soft, var(--surface-1)));
+  --notice-border: var(--state-info-border, var(--border-default, var(--line)));
+  --notice-ink: var(--state-info-ink, var(--ink-primary, var(--text)));
+  --notice-surface: var(--surface-overlay, var(--color-surface-2, var(--surface-elevated, var(--bg))));
+
   pointer-events: auto;
   display: flex;
   flex-direction: column;
   gap: var(--space-2, 8px);
   padding: 10px 12px;
-  border-radius: var(--radius-md, 14px);
-  border: 1px solid color-mix(in srgb, var(--notice-accent) 24%, var(--notice-line));
-  background: color-mix(in srgb, var(--notice-surface) 95%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  color: var(--color-text, var(--text));
-  box-shadow: var(
-    --shadow-md,
-    0 10px 28px color-mix(in srgb, var(--color-scrim, black) 30%, transparent)
-  );
+  border-radius: var(--radius-md, 12px);
+  border: 1px solid var(--notice-border);
+  background: color-mix(in srgb, var(--notice-surface) 92%, var(--notice-soft));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  box-shadow: var(--shadow-float);
   font-size: var(--text-sm, 0.8125rem);
   line-height: 1.45;
   overflow-wrap: anywhere;
-  will-change: transform, opacity;
-  animation: notice-layer-enter 200ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  outline: none;
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition:
+    opacity var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-base, 220ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+@starting-style {
+  .notice-layer-card {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.97);
+  }
+}
+
+.notice-layer-card:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
 }
 
 .notice-layer-card.is-info {
-  --notice-accent: var(
-    --color-info,
-    var(--color-primary, var(--brand, var(--primary, var(--accent))))
-  );
+  --notice-accent: var(--state-info, var(--color-info, var(--signal-primary, var(--accent))));
+  --notice-soft: var(--state-info-soft, var(--signal-primary-soft));
+  --notice-border: var(--state-info-border, var(--border-default));
+  --notice-ink: var(--state-info-ink, var(--ink-primary));
 }
 
 .notice-layer-card.is-warning {
-  --notice-accent: var(--color-warning, var(--warning, var(--warn)));
-  border-color: color-mix(in srgb, var(--notice-accent) 32%, var(--notice-line));
+  --notice-accent: var(--state-attention, var(--color-warning, var(--warn)));
+  --notice-soft: var(--state-attention-soft, var(--warn-soft));
+  --notice-border: var(--state-attention-border, var(--border-default));
+  --notice-ink: var(--state-attention-ink, var(--ink-primary));
 }
 
 .notice-layer-card.is-error {
-  --notice-accent: var(--color-danger, var(--danger));
-  border-color: color-mix(in srgb, var(--notice-accent) 30%, var(--notice-line));
+  --notice-accent: var(--state-danger, var(--color-danger, var(--danger)));
+  --notice-soft: var(--state-danger-soft, var(--danger-soft));
+  --notice-border: var(--state-danger-border, var(--border-default));
+  --notice-ink: var(--state-danger-ink, var(--ink-primary));
 }
 
 .notice-layer-card.is-success {
-  --notice-accent: var(--color-success, var(--success, var(--ok, var(--accent))));
-  border-color: color-mix(in srgb, var(--notice-accent) 26%, var(--notice-line));
+  --notice-accent: var(--state-live, var(--color-success, var(--ok)));
+  --notice-soft: var(--state-live-soft, var(--ok-soft));
+  --notice-border: var(--state-live-border, var(--border-default));
+  --notice-ink: var(--state-live-ink, var(--ink-primary));
 }
 
 .notice-layer-card.is-exiting {
   pointer-events: none;
-  animation: notice-layer-exit 160ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  opacity: 0;
+  transform: translate3d(0, 8px, 0) scale(0.97);
+  transition:
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-row {
@@ -105,11 +146,11 @@
   flex: none;
   width: 24px;
   height: 24px;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
+  border-radius: var(--radius-full, 999px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--notice-accent) 14%, transparent);
+  background: var(--notice-soft);
   color: var(--notice-accent);
   margin-top: 1px;
 }
@@ -131,7 +172,7 @@
 }
 
 .notice-layer-title {
-  color: var(--color-text, var(--text));
+  color: var(--ink-primary, var(--color-text, var(--text)));
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
   line-height: 1.45;
@@ -148,14 +189,14 @@
   border: 0;
   border-radius: var(--radius-sm, 8px);
   background: transparent;
-  color: var(--color-text-muted, var(--muted));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   font: inherit;
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-medium, 500);
   line-height: 1.3;
   cursor: pointer;
   touch-action: manipulation;
-  transition: opacity var(--dur-fast, 150ms) ease;
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-detail-toggle::before {
@@ -187,10 +228,10 @@
   max-width: 144px;
   padding: 0 11px;
   margin: 0;
-  border: 0;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
-  background: color-mix(in srgb, var(--notice-accent) 14%, transparent);
-  color: var(--notice-accent);
+  border: 1px solid var(--notice-border);
+  border-radius: var(--radius-full, 999px);
+  background: var(--notice-soft);
+  color: var(--notice-ink);
   font: inherit;
   font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-semibold, 600);
@@ -201,8 +242,8 @@
   cursor: pointer;
   touch-action: manipulation;
   transition:
-    opacity var(--dur-fast, 150ms) ease,
-    transform var(--dur-fast, 150ms) ease;
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-action::before {
@@ -223,18 +264,19 @@
   padding: 0;
   margin: 0;
   border: 0;
-  border-radius: var(--radius-full, var(--radius-pill, 999px));
+  border-radius: var(--radius-full, 999px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--notice-line) 55%, transparent);
-  color: var(--color-text-muted, var(--muted));
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   font: inherit;
   cursor: pointer;
   touch-action: manipulation;
   transition:
-    opacity var(--dur-fast, 150ms) ease,
-    transform var(--dur-fast, 150ms) ease;
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .notice-layer-dismiss::before {
@@ -253,28 +295,32 @@
   flex-shrink: 0;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .notice-layer-action:hover,
-  .notice-layer-dismiss:hover,
   .notice-layer-detail-toggle:hover {
-    opacity: 0.82;
+    opacity: 0.84;
+  }
+  .notice-layer-dismiss:hover {
+    background: var(--border-subtle, var(--line));
+    color: var(--ink-primary, var(--text));
   }
 }
 
 .notice-layer-action:active,
 .notice-layer-dismiss:active {
-  opacity: 0.7;
-  transform: scale(0.95);
+  opacity: 0.78;
+  transform: scale(0.97);
 }
 
 .notice-layer-detail-toggle:active {
-  opacity: 0.7;
+  transform: none;
+  opacity: 0.72;
 }
 
 .notice-layer-action:focus-visible,
 .notice-layer-dismiss:focus-visible,
 .notice-layer-detail-toggle:focus-visible {
-  outline: 2px solid var(--color-primary, var(--brand, var(--primary, var(--accent))));
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
   outline-offset: 2px;
 }
 
@@ -286,48 +332,26 @@
   overscroll-behavior: contain;
   padding: var(--space-2, 8px) 10px;
   border-radius: var(--radius-sm, 8px);
-  border: 1px solid color-mix(in srgb, var(--notice-line) 80%, transparent);
-  background: var(--color-surface-1, var(--surface));
-  color: var(--color-text-muted, var(--muted));
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-inset, var(--color-surface-1, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   font-family: var(--font-mono, ui-monospace, Consolas, monospace);
   font-size: var(--text-xs, 0.75rem);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
-  animation: notice-layer-detail-in 150ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  transition:
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-@keyframes notice-layer-enter {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 12px, 0) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-}
-
-@keyframes notice-layer-exit {
-  from {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: translate3d(0, 8px, 0) scale(0.97);
-  }
-}
-
-@keyframes notice-layer-detail-in {
-  from {
+@starting-style {
+  .notice-layer-detail-code {
     opacity: 0;
     transform: translate3d(0, -4px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
   }
 }
 

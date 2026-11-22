@@ -1054,14 +1054,17 @@ export function OnboardingPermissions() {
       },
       error => {
         if (!mounted.current || seq !== actionSeq.current) return;
-        setActionError(errorText(error) || t('权限操作失败，请重试', 'Permission action failed, please retry'));
+        setActionError(
+          errorText(error) ||
+            t('无法打开系统权限设置，请稍后重试或在系统设置中手动开启。', 'Could not open system permission settings. Try again or enable it in OS settings.'),
+        );
       },
     ).finally(() => {
       if (mounted.current && seq === actionSeq.current) setPending(null);
     });
   };
 
-  // 已存绑定的失败恢复入口：不自动重试、不把 requested 当就绪；错误走同一条 ErrorNotice。
+  // 已存绑定的失败恢复入口：不自动重试、不把 requested 当就绪；错误走同一条 Notice 通道。
   const repair = () => {
     if (pending) return;
     const seq = ++actionSeq.current;
@@ -1077,7 +1080,10 @@ export function OnboardingPermissions() {
       },
       error => {
         if (mounted.current && seq === actionSeq.current) {
-          setActionError(errorText(error) || t('修复绑定失败，请重试', 'Binding repair failed, please retry'));
+          setActionError(
+            errorText(error) ||
+              t('修复本机节点绑定失败，请确认中心在线且凭据有效后重试。', 'Could not repair local host binding. Check that the center is reachable and credentials are valid, then retry.'),
+          );
         }
       },
     ).finally(() => {
@@ -1085,14 +1091,44 @@ export function OnboardingPermissions() {
     });
   };
 
-  const shizuku: { tone: 'neutral' | 'warning' | 'success'; label: string; action?: OnboardingActionName; button?: string } | undefined = status
+  const shizuku:
+    | {
+        tone: 'neutral' | 'warning' | 'success';
+        label: string;
+        detail: string;
+        action?: OnboardingActionName;
+        button?: string;
+      }
+    | undefined = status
     ? !status.shizukuInstalled
-      ? { tone: 'neutral', label: t('未安装', 'Not installed'), action: 'shizuku-manager', button: t('打开管理器', 'Open manager') }
+      ? {
+          tone: 'neutral',
+          label: t('未安装', 'Not installed'),
+          detail: t('可选增强能力；安装并启动 Shizuku 后可用于系统级操作', 'Optional; install and start Shizuku for system-level automation'),
+          action: 'shizuku-manager',
+          button: t('打开管理器', 'Open manager'),
+        }
       : !status.shizukuRunning
-        ? { tone: 'warning', label: t('未运行', 'Not running'), action: 'shizuku-manager', button: t('去启动', 'Start') }
+        ? {
+            tone: 'warning',
+            label: t('未运行', 'Not running'),
+            detail: t('重启手机后需在 Shizuku 管理器中重新启动服务', 'After a reboot, start the service again in Shizuku manager'),
+            action: 'shizuku-manager',
+            button: t('启动服务', 'Start service'),
+          }
         : !status.shizukuGranted
-          ? { tone: 'warning', label: t('未授权', 'Not granted'), action: 'shizuku-permission', button: t('授权', 'Grant') }
-          : { tone: 'success', label: t('已授权', 'Granted') }
+          ? {
+              tone: 'warning',
+              label: t('未授权', 'Not granted'),
+              detail: t('向 PiBot 授予 Shizuku 权限以启用对应功能', 'Grant Shizuku permission to PiBot to enable these features'),
+              action: 'shizuku-permission',
+              button: t('授予权限', 'Grant access'),
+            }
+          : {
+              tone: 'success',
+              label: t('已授权', 'Granted'),
+              detail: t('Shizuku 服务正在运行并已授权', 'Shizuku service is running and authorized'),
+            }
     : undefined;
 
   useEffect(() => {
@@ -1115,8 +1151,8 @@ export function OnboardingPermissions() {
     notify({
       id: 'onboarding:permissions-stale',
       tone: 'warning',
-      title: t('上次查询失败，以下状态可能不是最新', 'Last check failed — status below may be stale'),
-      action: { label: t('重试', 'Retry'), onClick: refresh },
+      title: t('权限状态刷新失败，当前显示上次结果，请重新检查。', 'Could not refresh permissions — showing previous status. Recheck to update.'),
+      action: { label: t('重新检查', 'Recheck'), onClick: refresh },
     });
   }, [statusFailed, status, refresh, t, notify, dismiss]);
 
@@ -1135,25 +1171,39 @@ export function OnboardingPermissions() {
     t('已停止', 'Stopped'),
   ];
 
+  const localHostSubtitle = !host
+    ? <Skeleton variant="text" width={110} height={12} inline />
+    : host.phase === 'failed'
+      ? (host.deviceId
+        ? t(`${host.deviceId} · 节点启动失败，请检查中心连接或修复绑定`, `${host.deviceId} · Failed to start; check center or repair binding`)
+        : t('节点启动失败，请检查中心连接或修复绑定', 'Failed to start; check center or repair binding'))
+      : host.restartRequired
+        ? (host.deviceId
+          ? t(`${host.deviceId} · 配置已更新，请重启客户端生效`, `${host.deviceId} · Restart client to apply updated config`)
+          : t('配置已更新，请重启客户端生效', 'Restart client to apply updated config'))
+        : (host.deviceId || t('未分配设备标识', 'No device ID assigned'));
+
   return (
     <Section
-      title={t('通知与后台运行', 'Alerts & background')}
+      title={t('本机权限与节点状态', 'Permissions & local host')}
       action={
         <button type="button" className="bs-link" onClick={refresh}>
-          {t('刷新', 'Refresh')}
+          {t('刷新状态', 'Refresh status')}
         </button>
       }
-      hint={t('通知与电池优化影响消息提醒与后台连接；Shizuku 重启后需在管理器中重新启动，权限只影响对应功能，可先完成聊天连接再处理。',
-        'Notifications and battery affect alerts and background connection; after a reboot Shizuku must be started in its manager again. Permissions only affect their own features — chat works without them.')}
+      hint={t('各项权限只影响对应功能，未开启不影响普通对话；从系统设置返回后状态会自动更新。',
+        'Permissions only affect their own features — chat still works without them. Status updates when you return from system settings.')}
     >
       {statusFailed && !status ? (
         <Row
           icon={<ShieldCheck />}
-          title={t('无法读取权限状态', 'Cannot read permission status')}
+          title={t('无法读取本机权限状态', 'Could not read device permissions')}
+          subtitle={t('系统权限服务暂时未响应，请点击重新检查，或前往系统设置核对应用权限。',
+            'System permission service did not respond. Recheck now or verify permissions in OS settings.')}
           trailing={
             <span className="ob-perm-trailing is-compact">
               <button type="button" className="hst-btn" onClick={refresh}>
-                {t('重试', 'Retry')}
+                {t('重新检查', 'Recheck')}
               </button>
             </span>
           }
@@ -1162,116 +1212,151 @@ export function OnboardingPermissions() {
         <>
           <Row
             icon={<Bell />}
-            title={t('通知', 'Notifications')}
+            title={
+              <span className="hst-entry-label">
+                <span>{t('通知', 'Notifications')}</span>
+                {status ? (
+                  <Badge tone={status.notificationsGranted ? 'success' : 'warning'}>
+                    {status.notificationsGranted ? t('已开启', 'On') : t('未开启', 'Off')}
+                  </Badge>
+                ) : null}
+              </span>
+            }
             subtitle={
               <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
-                {!status ? <Skeleton variant="text" width={76} height={12} inline /> : null}
+                {!status ? (
+                  <Skeleton variant="text" width={96} height={12} inline />
+                ) : status.notificationsGranted ? (
+                  t('已允许发送消息与任务提醒', 'Message and task alerts are enabled')
+                ) : (
+                  t('开启后可及时接收消息与任务提醒', 'Enable to receive message and task alerts')
+                )}
               </ReservedSlot>
             }
             trailing={
-              <span className="ob-perm-trailing is-compact">
-                {!status ? (
+              !status ? (
+                <span className="ob-perm-trailing is-compact">
                   <Skeleton variant="pill" width={64} height={24} />
-                ) : status.notificationsGranted ? (
-                  <Badge tone="success">{t('已开启', 'On')}</Badge>
-                ) : (
+                </span>
+              ) : !status.notificationsGranted ? (
+                <span className="ob-perm-trailing is-compact">
                   <button
                     type="button"
                     className="hst-btn"
                     disabled={pending !== null}
                     onClick={() => run('notifications')}
                   >
-                    {t('开启', 'Enable')}
+                    {t('开启通知', 'Enable alerts')}
                   </button>
-                )}
-              </span>
+                </span>
+              ) : undefined
             }
           />
           <Row
             icon={<BatteryCharging />}
-            title={t('后台运行', 'Background run')}
+            title={
+              <span className="hst-entry-label">
+                <span>{t('后台运行', 'Background run')}</span>
+                {status ? (
+                  <Badge tone={status.batteryUnrestricted ? 'success' : 'warning'}>
+                    {status.batteryUnrestricted ? t('不受限制', 'Unrestricted') : t('受限', 'Restricted')}
+                  </Badge>
+                ) : null}
+              </span>
+            }
             subtitle={
               <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
                 {!status ? (
-                  <Skeleton variant="text" width={96} height={12} inline />
-                ) : !status.batteryUnrestricted ? (
-                  t('受系统电池优化限制', 'Restricted by battery optimization')
-                ) : null}
+                  <Skeleton variant="text" width={110} height={12} inline />
+                ) : status.batteryUnrestricted ? (
+                  t('已豁免电池优化，后台连接可保持稳定', 'Exempt from battery optimization for steady background sync')
+                ) : (
+                  t('系统电池优化可能中断后台连接，请设为不受限制', 'Battery optimization may pause background sync; set to unrestricted')
+                )}
               </ReservedSlot>
             }
             trailing={
-              <span className="ob-perm-trailing">
-                {!status ? (
+              !status ? (
+                <span className="ob-perm-trailing is-compact">
                   <Skeleton variant="pill" width={72} height={24} />
-                ) : status.batteryUnrestricted ? (
-                  <Badge tone="success">{t('不受限制', 'Unrestricted')}</Badge>
-                ) : (
+                </span>
+              ) : !status.batteryUnrestricted ? (
+                <span className="ob-perm-trailing is-compact">
                   <button
                     type="button"
                     className="hst-btn"
                     disabled={pending !== null}
                     onClick={() => run('battery-settings')}
                   >
-                    {t('去设置', 'Open settings')}
+                    {t('电池设置', 'Battery settings')}
                   </button>
-                )}
-              </span>
+                </span>
+              ) : undefined
             }
           />
           <Row
             icon={<ShieldCheck />}
-            title="Shizuku"
+            title={
+              <span className="hst-entry-label">
+                <span>Shizuku</span>
+                {shizuku ? <Badge tone={shizuku.tone}>{shizuku.label}</Badge> : null}
+              </span>
+            }
             subtitle={
               <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
-                {!status ? (
-                  <Skeleton variant="text" width={96} height={12} inline />
-                ) : status.shizukuInstalled && !status.shizukuRunning ? (
-                  t('需在 Shizuku 管理器中启动', 'Start it in the Shizuku manager')
-                ) : null}
+                {!shizuku ? <Skeleton variant="text" width={110} height={12} inline /> : shizuku.detail}
               </ReservedSlot>
             }
             trailing={
-              <span className="ob-perm-trailing">
-                {!shizuku ? (
+              !shizuku ? (
+                <span className="ob-perm-trailing is-compact">
                   <Skeleton variant="pill" width={64} height={24} />
-                ) : shizuku.action ? (
-                  <>
-                    <Badge tone={shizuku.tone}>{shizuku.label}</Badge>
-                    <button
-                      type="button"
-                      className="hst-btn"
-                      disabled={pending !== null}
-                      onClick={() => run(shizuku.action!)}
-                    >
-                      {shizuku.button}
-                    </button>
-                  </>
-                ) : (
-                  <Badge tone={shizuku.tone}>{shizuku.label}</Badge>
-                )}
-              </span>
+                </span>
+              ) : shizuku.action ? (
+                <span className="ob-perm-trailing is-compact">
+                  <button
+                    type="button"
+                    className="hst-btn"
+                    disabled={pending !== null}
+                    onClick={() => run(shizuku.action!)}
+                  >
+                    {shizuku.button}
+                  </button>
+                </span>
+              ) : undefined
             }
           />
           <Row
             icon={<Server />}
-            title={t('本机节点', 'Local host')}
+            title={
+              <span className="hst-entry-label">
+                <span>{t('本机节点', 'Local host')}</span>
+                {host ? (
+                  host.phase === 'failed' ? (
+                    <Badge tone="danger">{hostPhaseLabel(host.phase, t)}</Badge>
+                  ) : host.restartRequired ? (
+                    <Badge tone="warning">{t('需重启', 'Restart needed')}</Badge>
+                  ) : (
+                    <Badge tone={host.phase === 'running' ? 'success' : 'neutral'}>
+                      <LabelStack active={hostPhaseLabel(host.phase, t)} labels={hostPhaseLabels} />
+                    </Badge>
+                  )
+                ) : null}
+              </span>
+            }
             subtitle={
               <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
-                {!host ? <Skeleton variant="text" width={110} height={12} inline /> : (host.deviceId ?? null)}
+                {localHostSubtitle}
               </ReservedSlot>
             }
             trailing={
-              <span className="ob-perm-trailing">
-                {host?.restartRequired && <Badge tone="warning">{t('需重启', 'Restart required')}</Badge>}
-                {host ? (
-                  <Badge tone={host.phase === 'running' ? 'success' : host.phase === 'failed' ? 'danger' : 'neutral'}>
-                    <LabelStack active={hostPhaseLabel(host.phase, t)} labels={hostPhaseLabels} />
-                  </Badge>
-                ) : (
-                  <Skeleton variant="pill" width={58} height={22} />
-                )}
-                {/* 客户端 ready 也可能 Host 保存失败：有已存绑定即可显式修复。 */}
-                {centerConn.hasSavedCenter && (
+              !host ? (
+                <span className="ob-perm-trailing is-compact">
+                  <Skeleton variant="pill" width={64} height={24} />
+                </span>
+              ) : centerConn.hasSavedCenter ? (
+                <span className="ob-perm-trailing is-compact">
+                  {/* 客户端 ready 也可能 Host 保存失败：有已存绑定即可显式修复。 */}
                   <button
                     type="button"
                     className="hst-btn"
@@ -1283,18 +1368,24 @@ export function OnboardingPermissions() {
                       labels={[t('修复中…', 'Repairing…'), t('修复绑定', 'Repair binding')]}
                     />
                   </button>
-                )}
-              </span>
+                </span>
+              ) : undefined
             }
           />
           {repairResult && !repairResult.hostConfigured && (
             <div className="hst-row-static">
-              <span className="ob-note">{t('本机绑定未完成，可用已存凭据重试', 'Local binding incomplete — you can retry with saved credentials')}</span>
+              <span className="ob-note">
+                {t('本机节点绑定尚未完成，请确认中心在线后再次点击「修复绑定」重试。',
+                  'Local host binding is still incomplete. Verify the center is reachable, then tap Repair binding again.')}
+              </span>
             </div>
           )}
           {repairResult && repairResult.hostConfigured && !repairResult.connectionRequested && (
             <div className="hst-row-static">
-              <span className="ob-note">{t('已保存设备绑定，等待连接', 'Device bound, connection pending')}</span>
+              <span className="ob-note">
+                {t('已保存本机绑定，等待建立连接。可返回「中心连接」查看或手动重连。',
+                  'Local binding saved; waiting to connect. Open Center connection to check or reconnect.')}
+              </span>
             </div>
           )}
           <PairWarnings warnings={repairResult?.warnings} />

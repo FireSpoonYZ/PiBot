@@ -30,19 +30,22 @@
   background: transparent;
   border-radius: var(--radius-md, 12px);
   padding: var(--space-2, 8px) var(--space-3, 12px);
-  color: var(--color-text, var(--text));
-  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .gbot-conversation-row:hover {
-    background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+    background: var(--signal-primary-soft, var(--color-primary-soft, var(--accent-soft, var(--selection))));
   }
 }
 .gbot-conversation-row:active {
-  background: var(--color-selection, var(--selection));
+  background: var(--signal-selection, var(--color-selection, var(--selection)));
+  transform: scale(0.985);
 }
 .gbot-conversation-row[data-active] {
-  background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+  background: var(--signal-primary-soft, var(--color-primary-soft, var(--accent-soft, var(--selection))));
 }
 .gbot-conversation-row.hub-bot-row {
   min-height: 54px;
@@ -106,12 +109,11 @@
   min-width: 200px;
   max-width: min(280px, calc(100vw - var(--space-4, 16px)));
   padding: var(--space-1, 4px);
-  border: 1px solid var(--color-line, var(--line));
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
   border-radius: var(--radius-md, 12px);
-  background: var(--color-surface-2, var(--surface-elevated, var(--surface)));
-  color: var(--color-text, var(--text));
-  box-shadow: 0 22px 54px -20px var(--color-scrim, color-mix(in srgb, var(--text) 45%, transparent)),
-    0 1px 2px color-mix(in srgb, var(--color-text, var(--text)) 10%, transparent);
+  background: var(--surface-overlay, var(--color-surface-2, var(--surface-elevated, var(--surface))));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  box-shadow: var(--shadow-popover);
   opacity: 0;
   transform: translateY(-3px) scale(0.97);
   transform-origin: top left;
@@ -167,32 +169,32 @@
     font-size: var(--text-md, .9375rem);
   }
 }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .baby-grok-bot-context-menu__item:hover:not(:disabled) {
-    background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+    background: var(--signal-primary-soft, var(--color-primary-soft, var(--accent-soft, var(--selection))));
   }
 }
 .baby-grok-bot-context-menu__item:active:not(:disabled) {
-  background: var(--color-selection, var(--selection));
+  background: var(--signal-selection, var(--color-selection, var(--selection)));
 }
 .baby-grok-bot-context-menu__item:focus-visible {
-  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--brand, var(--accent))));
   outline-offset: -2px;
-  background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+  background: var(--signal-primary-soft, var(--color-primary-soft, var(--accent-soft, var(--selection))));
 }
 .baby-grok-bot-context-menu__item:disabled {
-  color: var(--color-text-muted, var(--muted));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   opacity: 0.72;
   cursor: not-allowed;
 }
 .baby-grok-bot-context-menu__item--danger,
 .baby-grok-bot-context-menu__item[data-danger] {
-  color: var(--color-danger, var(--danger));
+  color: var(--state-danger, var(--color-danger, var(--danger)));
 }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .baby-grok-bot-context-menu__item--danger:hover:not(:disabled),
   .baby-grok-bot-context-menu__item[data-danger]:hover:not(:disabled) {
-    background: var(--danger-soft, color-mix(in srgb, var(--color-danger, var(--danger)) 12%, transparent));
+    background: var(--state-danger-soft, var(--danger-soft, color-mix(in srgb, var(--color-danger, var(--danger)) 12%, transparent)));
   }
 }
 .baby-grok-bot-context-menu__item--danger:active:not(:disabled),
@@ -272,7 +274,20 @@
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-full, 999px);
-  background: var(--color-selection, var(--selection));
-  color: var(--color-text, var(--text));
+  background: var(--signal-selection, var(--color-selection, var(--selection)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
   font-weight: var(--weight-semibold, 600);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gbot-conversation-row,
+  .baby-grok-bot-context-menu[data-ready],
+  .baby-grok-bot-context-menu__item {
+    transition: none;
+  }
+
+  .gbot-conversation-row:active {
+    transform: none;
+  }
 }

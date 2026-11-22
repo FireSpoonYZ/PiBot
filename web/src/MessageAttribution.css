@@ -1,75 +1,79 @@
-/* Unified Bot session 来源徽标（共享作用域类 .msg-attr）。
-   只负责紧凑来源标签视觉；不改动聊天气泡布局本身。 */
+/* Unified Bot session source attribution (shared .msg-attr scope).
+ * Single quiet inline metadata line — zero competing pills. */
 .msg-attr {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   flex-wrap: wrap;
-  gap: var(--space-1, 4px);
-  font-size: 11px;
-  line-height: 1.2;
-  color: var(--color-text-muted, var(--muted));
+  gap: 0 var(--space-1, 4px);
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.35;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
   margin-bottom: var(--space-1, 4px);
-}
-.msg-attr-sender {
-  font-weight: var(--weight-semibold, 600);
-  color: var(--color-text, var(--text));
-}
-.msg-attr-channel {
-  font-size: 10px;
-  font-weight: var(--weight-semibold, 600);
-  padding: 1px 6px;
-  border-radius: var(--radius-full, 999px);
-  background: var(--chip-bg, color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 14%, var(--color-surface-1, var(--surface))));
-  color: var(--color-primary, var(--brand, var(--accent)));
-}
-.msg-attr-dir,
-.msg-attr-category {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: var(--radius-full, 999px);
-  background: var(--chip-bg, color-mix(in srgb, var(--color-text-muted, var(--muted)) 14%, transparent));
-}
-.bot-chat-bubble.user:not(.is-peer) .msg-attr {
-  color: inherit;
-}
-.bot-chat-bubble.user:not(.is-peer) .msg-attr-sender,
-.bot-chat-bubble.user:not(.is-peer) .msg-attr-bot .msg-attr-sender {
-  color: inherit;
-}
-.bot-chat-bubble.user:not(.is-peer) .msg-attr-channel,
-.bot-chat-bubble.user:not(.is-peer) .msg-attr-dir,
-.bot-chat-bubble.user:not(.is-peer) .msg-attr-category {
-  background: color-mix(in srgb, currentColor 18%, transparent);
-  color: inherit;
-}
-.msg-attr-out .msg-attr-dir {
-  color: var(--color-primary, var(--brand, var(--accent)));
-}
-.msg-attr-host .msg-attr-channel {
-  background: var(--chip-bg, color-mix(in srgb, var(--color-text-muted, var(--muted)) 14%, transparent));
-  color: var(--color-text-muted, var(--muted));
-}
-.msg-attr-bot .msg-attr-sender {
-  color: var(--color-primary, var(--brand, var(--accent)));
+  overflow-wrap: anywhere;
 }
 
-/* 协作过程（dm/room 触发的生成）：与投递给用户的回答气泡视觉区分，不算送达。
-   类挂在共享 ChatTurn 渲染上，desktop/mobile 复用同一组样式。 */
-.bot-chat-bubble.is-collab {
-  border-style: dashed;
-  background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 78%, var(--color-bg, var(--bg, transparent)));
+.msg-attr-sender {
+  min-width: 0;
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  overflow-wrap: anywhere;
 }
+
+.msg-attr-sep {
+  flex: none;
+  color: var(--ink-muted, var(--color-text-subtle, var(--muted)));
+  user-select: none;
+}
+
+.msg-attr-channel,
+.msg-attr-dir,
+.msg-attr-category {
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+  font-weight: var(--weight-regular, 400);
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.msg-attr-out .msg-attr-dir {
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+}
+
+.msg-attr-bot .msg-attr-sender {
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.msg-attr-host .msg-attr-channel {
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+/* Collaborative turn wrapper (shared across desktop/mobile). */
+.bot-chat-bubble.is-collab {
+  border: 1px dashed var(--border-default, var(--color-line, var(--line)));
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+}
+
 .bot-chat-collab {
   padding: var(--space-2, 8px) var(--space-3, 12px);
   margin: var(--space-1, 4px) 0;
-  border: 1px dashed var(--color-line, var(--line));
+  border: 1px dashed var(--border-default, var(--color-line, var(--line)));
   border-radius: var(--radius-md, 12px);
-  background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 78%, var(--color-bg, var(--bg, transparent)));
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
 }
+
 .bot-chat-collab-label {
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
   font-weight: var(--weight-semibold, 600);
-  letter-spacing: 0.02em;
-  color: var(--color-text-muted, var(--muted));
+  letter-spacing: 0.01em;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
   margin-bottom: var(--space-1, 4px);
 }

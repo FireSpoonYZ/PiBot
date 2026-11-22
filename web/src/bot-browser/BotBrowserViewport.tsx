@@ -249,14 +249,22 @@ export function BotBrowserViewport({
     // Shift+Escape exits remote keyboard focus without trapping keyboard-only users.
     if (ev.key === 'Escape' && ev.shiftKey) {
       ev.preventDefault();
+      ev.stopPropagation();
       stage?.blur();
       onExitStageFocus?.();
+      if (typeof document !== 'undefined' && (!stage || document.activeElement === stage || document.activeElement === document.body)) {
+        const fallback = stage?.closest('section, main, [role="dialog"], [role="region"]');
+        if (fallback instanceof HTMLElement) {
+          fallback.focus({ preventScroll: true });
+        }
+      }
       return;
     }
 
     const special = mapKeyboardEventKey(ev.key);
     if (special) {
       ev.preventDefault();
+      if (special === 'Escape') ev.stopPropagation();
       onInput({ kind: 'key', key: special });
       return;
     }

@@ -16,7 +16,9 @@ Windows x64、Linux amd64 和 macOS Apple Silicon（13.5+）的发行包分别�
 
 首次配置分步显示登记、自启动、本机 Host 和客户端连接状态。注册成功后的启动失败保留身份及凭据，可针对失败步骤重试。普通重连不重新启用用户已关闭的自启动；已配置为其他中心/身份时，需显式重新配对，不因浏览另一个中心改写 Host。
 
-设置页分别显示中心认证、服务登记、进程运行、本机就绪及 Host 中心在线状态，并提供启动、停止、重启、自启动与移除服务。关闭客户端窗口不会停止已经运行的 Host。
+设置页分别显示中心认证、服务登记、进程运行、本机就绪及 Host 中心在线状态，并提供启动、停止、重启、自启动与移除服务。打开 PiBot 时，客户端会在后台启动已配对、已登记且处于停止状态的本机 Host。系统登录或开机自启由设置页的独立开关控制。
+
+Windows 和 Linux 在系统托盘可用时显示 PiBot 托盘。关闭主窗口会收起窗口，可从托盘菜单选择「Open PiBot」恢复。点「Quit Client」退出桌面客户端后，正在运行的本机 Host 会继续处理任务，其他已授权设备仍可通过 Center 操作本机 Bot。
 
 ## 各平台的当前差异
 
@@ -68,7 +70,7 @@ macOS 没有安装器生命周期：安装准备通过后，客户端先用当�
 
 - **交互与前提**：采用「一次入组（`pibot-clipboard-v1:...`）+ 每设备独立开关」。需先升级 Center 至支持 `/v1/link` `X-PiBot-Clipboard-V1: 1` 隔离中继的版本；仅实时在线投递，无离线补发或历史记录。
 - **范围与安全边界**：仅同步 `≤ 64 KiB` 的非空 UTF-8 纯文本，端到端 `XChaCha20-Poly1305` 加密；敏感/密码管理器标记按平台尽力跳过（best-effort），硬拦截含 `pibot1.` 或 `pibot-clipboard-v1:` 的文本；不同步文件/图片/富文本，不做自动粘贴注入，也不向 Bot、Host 工具或 MCP 暴露。
-- **托盘与进程语义**：运行在桌面客户端（Tauri 原生进程）而非 `pibot-host`；同步已开启且系统托盘可用时，关闭主窗口会留在托盘。托盘显示连接状态，并可暂停、恢复本机同步。完全退出客户端会停止同步，不停止 `pibot-host`，也不会主动清空剪贴板；Linux 下能否继续粘贴 PiBot 持有的文本取决于是否有独立剪贴板管理器。托盘不显示正文或组码。
+- **托盘与进程语义**：剪贴板同步由桌面客户端运行。同步开启后，PiBot 托盘可显示连接状态并暂停、恢复本机同步。退出客户端会结束同步，`pibot-host` 会继续运行。Linux 下能否继续粘贴 PiBot 持有的文本取决于是否有独立剪贴板管理器。
 - **平台实现**：
   - **Windows**：独立工作线程 `HWND_MESSAGE` + `AddClipboardFormatListener`（无焦点抢占），仅读 `CF_UNICODETEXT`，跳过 `CF_HDROP` 与监控/历史/云同步排除格式；写入附带 `PiBot.ClipboardSync.OwnWrite.v1` 防回环标记。
   - **Linux**：仅监听常规 `CLIPBOARD`（绝不监听 `PRIMARY`）。Wayland 探测 `ext-data-control` / `wlr-data-control`，**不支持该协议的合成器直接返回 `Unsupported`，不回退 XWayland**；X11 使用 `XFixes` + 未映射 `InputOnly` 窗口，支持单次与 `INCR` 读写；写入附带 `application/x-pibot-clipboard-sync` 标记。

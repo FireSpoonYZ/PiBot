@@ -1,0 +1,399 @@
+/* Unified Design System Tokens — Warm Mineral Stone (Light) / Obsidian Moss (Dark).
+ * Pure CSS custom properties + browser-surface base rules (NO page-layout resets),
+ * so BOTH `web/src/styles.css` and `desktop/web/src/app.css` can `@import` it cleanly.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ------------------------------------------------------------------ */
+  /* Surfaces — Monotonic Elevation (Light: Warm Mineral Stone)          */
+  /* ------------------------------------------------------------------ */
+  --ground: #F7F6F2;
+  --shell-rail: #ECEAE2;
+  --surface-inset: #E8E6DE;
+  --surface-1: #F0EFE9;
+  --surface-raised: #FFFFFF;
+  --surface-overlay: #FFFFFF;
+
+  /* ------------------------------------------------------------------ */
+  /* Ink                                                                 */
+  /* ------------------------------------------------------------------ */
+  --ink-primary: #1D201C;
+  --ink-secondary: #525851;
+  --ink-tertiary: #5F665E;
+  --ink-muted: #888F86;
+
+  /* ------------------------------------------------------------------ */
+  /* Borders                                                             */
+  /* ------------------------------------------------------------------ */
+  --border-subtle: rgba(29, 32, 28, 0.08);
+  --border-default: rgba(29, 32, 28, 0.13);
+  --border-strong: rgba(29, 32, 28, 0.22);
+
+  /* ------------------------------------------------------------------ */
+  /* Signal / Primary Accent                                             */
+  /* ------------------------------------------------------------------ */
+  --signal-primary: #1F5C4E;
+  --signal-primary-hover: #184A3E;
+  --signal-primary-ink: #F8FAF9;
+  --signal-primary-soft: rgba(31, 92, 78, 0.11);
+  --signal-primary-border: rgba(31, 92, 78, 0.26);
+  --signal-selection: rgba(31, 92, 78, 0.14);
+
+  /* ------------------------------------------------------------------ */
+  /* Semantic States                                                     */
+  /* ------------------------------------------------------------------ */
+  --state-live: #1E7E52;
+  --state-live-soft: rgba(30, 126, 82, 0.11);
+  --state-live-ink: #135336;
+  --state-live-border: rgba(30, 126, 82, 0.26);
+
+  --state-attention: #A85B10;
+  --state-attention-soft: rgba(168, 91, 16, 0.11);
+  --state-attention-ink: #703B08;
+  --state-attention-border: rgba(168, 91, 16, 0.28);
+
+  --state-danger: #B33A3A;
+  --state-danger-soft: rgba(179, 58, 58, 0.11);
+  --state-danger-ink: #7A2323;
+  --state-danger-border: rgba(179, 58, 58, 0.26);
+
+  --state-info: #2B5D8C;
+  --state-info-soft: rgba(43, 93, 140, 0.11);
+  --state-info-ink: #1B3E5E;
+  --state-info-border: rgba(43, 93, 140, 0.26);
+
+  /* ------------------------------------------------------------------ */
+  /* Scrim, Media & Always-Dark Live Stage Tokens                        */
+  /* ------------------------------------------------------------------ */
+  --scrim: rgba(18, 20, 18, 0.44);
+  --image-outline: rgba(0, 0, 0, 0.1);
+  --media-badge-bg: rgba(24, 26, 24, 0.88);
+  --media-badge-fg: #F8FAF9;
+  --media-badge-border: rgba(247, 246, 242, 0.92);
+
+  --stage-dark-ground: #0E100E;
+  --stage-dark-surface: #171A17;
+  --stage-dark-raised: #202420;
+  --stage-dark-border: rgba(255, 255, 255, 0.12);
+  --stage-dark-ink: #ECEEE9;
+  --stage-dark-ink-muted: #9BA399;
+
+  /* ------------------------------------------------------------------ */
+  /* Elevation Shadows                                                   */
+  /* ------------------------------------------------------------------ */
+  --shadow-control: 0 1px 2px rgba(29, 32, 28, 0.06);
+  --shadow-popover:
+    0 0 0 1px rgba(29, 32, 28, 0.07),
+    0 2px 6px -1px rgba(29, 32, 28, 0.06),
+    0 8px 20px -4px rgba(29, 32, 28, 0.08);
+  --shadow-float:
+    0 0 0 1px rgba(29, 32, 28, 0.08),
+    0 4px 12px -2px rgba(29, 32, 28, 0.08),
+    0 12px 28px -6px rgba(29, 32, 28, 0.10);
+
+  /* ------------------------------------------------------------------ */
+  /* Typography Scale                                                    */
+  /* ------------------------------------------------------------------ */
+  --font-sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+    "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans SC",
+    "Source Han Sans SC", Ubuntu, Cantarell, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas,
+    "Noto Sans Mono CJK SC", "Liberation Mono", monospace;
+  --mono: var(--font-mono);
+
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 600;
+
+  /* ------------------------------------------------------------------ */
+  /* Spacing (4px Grid) & Concentric Radii                               */
+  /* ------------------------------------------------------------------ */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+  --radius-pill: 999px;
+
+  /* ------------------------------------------------------------------ */
+  /* Unified Z-Index Ladder                                              */
+  /* ------------------------------------------------------------------ */
+  --z-sticky: 10;
+  --z-popover: 100;
+  --z-dropdown: 100;
+  --z-drawer: 200;
+  --z-sheet: 250;
+  --z-dialog: 300;
+  --z-fullscreen: 400;
+  --z-lightbox: 450;
+  --z-viewer: 450;
+  --z-toast: 500;
+
+  /* ------------------------------------------------------------------ */
+  /* Motion Physics & Touch Targets                                      */
+  /* ------------------------------------------------------------------ */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --dur-press: 120ms;
+  --dur-fast: 150ms;
+  --dur-base: 220ms;
+  --dur-sheet: 300ms;
+
+  --tap-min: 44px;
+
+  /* ------------------------------------------------------------------ */
+  /* Safe Areas (on :root so portaled overlays inherit --bottom cleanly) */
+  /* ------------------------------------------------------------------ */
+  --top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --bottom: max(
+    calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)),
+    0px
+  );
+  --safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+  --safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+
+  /* ------------------------------------------------------------------ */
+  /* Legacy Compatibility Alias Bridge (zero self-referencing cycles)    */
+  /* ------------------------------------------------------------------ */
+  --color-bg: var(--ground);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-raised);
+  --color-surface-3: var(--surface-inset);
+  --color-text: var(--ink-primary);
+  --color-text-muted: var(--ink-secondary);
+  --color-text-subtle: var(--ink-tertiary);
+  --color-line: var(--border-default);
+  --color-primary: var(--signal-primary);
+  --color-on-primary: var(--signal-primary-ink);
+  --color-primary-soft: var(--signal-primary-soft);
+  --color-selection: var(--signal-selection);
+  --color-danger: var(--state-danger);
+  --color-warning: var(--state-attention);
+  --color-success: var(--state-live);
+  --color-info: var(--state-info);
+  --color-scrim: var(--scrim);
+  --color-media-badge-bg: var(--media-badge-bg);
+  --color-media-badge-fg: var(--media-badge-fg);
+  --color-media-badge-border: var(--media-badge-border);
+
+  --bg: var(--ground);
+  --surface: var(--surface-1);
+  --surface-elevated: var(--surface-raised);
+  --surface-glass: var(--surface-overlay);
+  --text: var(--ink-primary);
+  --muted: var(--ink-secondary);
+  --line: var(--border-default);
+  --line-subtle: var(--border-subtle);
+  --brand: var(--signal-primary);
+  --brand-soft: var(--signal-primary-soft);
+  --accent: var(--signal-primary);
+  --accent-strong: var(--signal-primary-hover);
+  --accent-soft: var(--signal-primary-soft);
+  --selection: var(--signal-selection);
+  --danger: var(--state-danger);
+  --danger-soft: var(--state-danger-soft);
+  --ok: var(--state-live);
+  --ok-soft: var(--state-live-soft);
+  --warn: var(--state-attention);
+  --warn-soft: var(--state-attention-soft);
+  --warning: var(--state-attention);
+  --shadow-sm: var(--shadow-control);
+  --shadow-md: var(--shadow-popover);
+  --shadow-lg: var(--shadow-float);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ground: #141614;
+  --shell-rail: #101210;
+  --surface-inset: #0D0F0D;
+  --surface-1: #1B1E1B;
+  --surface-raised: #232723;
+  --surface-overlay: #2B302B;
+
+  --ink-primary: #ECEEE9;
+  --ink-secondary: #A8B0A6;
+  --ink-tertiary: #959E93;
+  --ink-muted: #5F665D;
+
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-default: rgba(255, 255, 255, 0.11);
+  --border-strong: rgba(255, 255, 255, 0.19);
+
+  --signal-primary: #5AB89F;
+  --signal-primary-hover: #6EC6AE;
+  --signal-primary-ink: #0C1F1A;
+  --signal-primary-soft: rgba(90, 184, 159, 0.15);
+  --signal-primary-border: rgba(90, 184, 159, 0.32);
+  --signal-selection: rgba(90, 184, 159, 0.18);
+
+  --state-live: #4FC38E;
+  --state-live-soft: rgba(79, 195, 142, 0.14);
+  --state-live-ink: #A9E8CA;
+  --state-live-border: rgba(79, 195, 142, 0.30);
+
+  --state-attention: #E5A44D;
+  --state-attention-soft: rgba(229, 164, 77, 0.15);
+  --state-attention-ink: #F5CFA0;
+  --state-attention-border: rgba(229, 164, 77, 0.30);
+
+  --state-danger: #EB7A72;
+  --state-danger-soft: rgba(235, 122, 114, 0.15);
+  --state-danger-ink: #F8C0BC;
+  --state-danger-border: rgba(235, 122, 114, 0.30);
+
+  --state-info: #6CA6DC;
+  --state-info-soft: rgba(108, 166, 220, 0.15);
+  --state-info-ink: #BDD8F1;
+  --state-info-border: rgba(108, 166, 220, 0.30);
+
+  --scrim: rgba(0, 0, 0, 0.62);
+  --image-outline: rgba(255, 255, 255, 0.1);
+  --media-badge-bg: rgba(20, 22, 20, 0.92);
+  --media-badge-border: rgba(255, 255, 255, 0.18);
+
+  --shadow-control: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-popover:
+    0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 8px 24px rgba(0, 0, 0, 0.42);
+  --shadow-float:
+    0 0 0 1px rgba(255, 255, 255, 0.10),
+    0 14px 36px rgba(0, 0, 0, 0.48);
+
+  --color-surface-3: var(--surface-overlay);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"],
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --ground: #141614;
+    --shell-rail: #101210;
+    --surface-inset: #0D0F0D;
+    --surface-1: #1B1E1B;
+    --surface-raised: #232723;
+    --surface-overlay: #2B302B;
+
+    --ink-primary: #ECEEE9;
+    --ink-secondary: #A8B0A6;
+    --ink-tertiary: #959E93;
+    --ink-muted: #5F665D;
+
+    --border-subtle: rgba(255, 255, 255, 0.07);
+    --border-default: rgba(255, 255, 255, 0.11);
+    --border-strong: rgba(255, 255, 255, 0.19);
+
+    --signal-primary: #5AB89F;
+    --signal-primary-hover: #6EC6AE;
+    --signal-primary-ink: #0C1F1A;
+    --signal-primary-soft: rgba(90, 184, 159, 0.15);
+    --signal-primary-border: rgba(90, 184, 159, 0.32);
+    --signal-selection: rgba(90, 184, 159, 0.18);
+
+    --state-live: #4FC38E;
+    --state-live-soft: rgba(79, 195, 142, 0.14);
+    --state-live-ink: #A9E8CA;
+    --state-live-border: rgba(79, 195, 142, 0.30);
+
+    --state-attention: #E5A44D;
+    --state-attention-soft: rgba(229, 164, 77, 0.15);
+    --state-attention-ink: #F5CFA0;
+    --state-attention-border: rgba(229, 164, 77, 0.30);
+
+    --state-danger: #EB7A72;
+    --state-danger-soft: rgba(235, 122, 114, 0.15);
+    --state-danger-ink: #F8C0BC;
+    --state-danger-border: rgba(235, 122, 114, 0.30);
+
+    --state-info: #6CA6DC;
+    --state-info-soft: rgba(108, 166, 220, 0.15);
+    --state-info-ink: #BDD8F1;
+    --state-info-border: rgba(108, 166, 220, 0.30);
+
+    --scrim: rgba(0, 0, 0, 0.62);
+    --image-outline: rgba(255, 255, 255, 0.1);
+    --media-badge-bg: rgba(20, 22, 20, 0.92);
+    --media-badge-border: rgba(255, 255, 255, 0.18);
+
+    --shadow-control: 0 0 0 1px rgba(255, 255, 255, 0.08);
+    --shadow-popover:
+      0 0 0 1px rgba(255, 255, 255, 0.10),
+      0 8px 24px rgba(0, 0, 0, 0.42);
+    --shadow-float:
+      0 0 0 1px rgba(255, 255, 255, 0.10),
+      0 14px 36px rgba(0, 0, 0, 0.48);
+
+    --color-surface-3: var(--surface-overlay);
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/* Browser-Surface Base Rules (token-only, zero color literals below)    */
+/* -------------------------------------------------------------------- */
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  caret-color: var(--signal-primary);
+}
+
+::selection {
+  background: var(--signal-selection);
+  color: var(--ink-primary);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: var(--radius-full);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-strong);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

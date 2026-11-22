@@ -4,6 +4,7 @@ import { Star } from 'lucide-react';
 import type { CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { ModelCatalogEntry } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import { ActionBar } from '../components/ui';
 import { ErrorNotice, errorText, useText } from '../ui';
 import { Badge, Chips, Row, SearchField } from './primitives';
 import './model-picker.css';
@@ -133,6 +134,7 @@ export function ModelPicker({
               className={`model-picker-star${starred ? ' is-starred' : ''}`}
               aria-label={starred ? t(`取消收藏 ${model.name}`, `Unstar ${model.name}`) : t(`收藏 ${model.name}`, `Star ${model.name}`)}
               aria-pressed={starred}
+              aria-busy={pendingStar === model.modelRef || undefined}
               disabled={pendingStar === model.modelRef}
               onClick={event => {
                 event.stopPropagation();
@@ -163,7 +165,12 @@ export function ModelPicker({
           onChange={setScope}
           options={[
             { value: 'all', label: t('全部', 'All') },
-            { value: 'starred', label: t('★ 收藏', '★ Starred') },
+            {
+              value: 'starred',
+              label: catalog.starredModels.length > 0
+                ? t(`★ 收藏 (${catalog.starredModels.length})`, `★ Starred (${catalog.starredModels.length})`)
+                : t('★ 收藏', '★ Starred'),
+            },
           ]}
         />
       </div>
@@ -194,22 +201,33 @@ export function ModelPicker({
               {t('尚未配置可用模型或服务商', 'No models or providers configured yet')}
             </p>
             {onOpenCenterAdmin ? (
-              <button type="button" className="bs-btn is-primary is-small" onClick={onOpenCenterAdmin}>
-                {t('去配置模型与服务商 →', 'Configure models & providers →')}
-              </button>
+              <ActionBar align="start">
+                <button type="button" className="bs-btn is-primary is-small" onClick={onOpenCenterAdmin}>
+                  {t('去配置模型与服务商 →', 'Configure models & providers →')}
+                </button>
+              </ActionBar>
             ) : null}
           </div>
         ) : totalMatched === 0 ? (
           <div className="model-picker-empty">
             <p className="model-picker-empty-text">
               {scope === 'starred' && catalog.starredModels.length === 0
-                ? t('暂无收藏模型，可切换到「全部」后点亮星标', 'No starred models yet; switch to All and star models')
+                ? t('���无收藏模型，可切换到「全部」后点亮星标', 'No starred models yet; switch to All and star models')
                 : t('没有匹配的模型', 'No matching models')}
             </p>
-            {scope === 'starred' ? (
-              <button type="button" className="bs-btn is-ghost is-small" onClick={() => setScope('all')}>
-                {t('查看全部模型', 'Show all models')}
-              </button>
+            {scope === 'starred' || query.trim() ? (
+              <ActionBar align="start">
+                {query.trim() ? (
+                  <button type="button" className="bs-btn is-ghost is-small" onClick={() => setQuery('')}>
+                    {t('清空搜索', 'Clear search')}
+                  </button>
+                ) : null}
+                {scope === 'starred' ? (
+                  <button type="button" className="bs-btn is-ghost is-small" onClick={() => setScope('all')}>
+                    {t('查看全部模型', 'Show all models')}
+                  </button>
+                ) : null}
+              </ActionBar>
             ) : null}
           </div>
         ) : (

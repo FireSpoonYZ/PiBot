@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type RefObject, type TouchEvent } from 'react';
+import { useEffect, useMemo, useRef, type RefObject, type TouchEvent } from 'react';
 import { PanelLeft, Plus, RefreshCw, Search, Sparkles, Users, X } from 'lucide-react';
-import { mobileHaptic } from '../native/tauri-host';
-import type { ConnectionPhase } from '../connection';
+import { ConnectionStatusPopover, type ConnectionPhase } from '../connection';
+import { PopoverMenu } from '../components/ui';
 import { useNotice } from '../notice';
 import { Skeleton, SkeletonRow, useBottomChromeMeasure, useFlipList } from '../layout';
 import {
@@ -19,7 +19,7 @@ import {
 } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { humanizeError, useText } from '../ui';
-import { PlatformLogoIcon, type BotPreviewMeta, type UnifiedBotItem } from '../hub/shared';
+import { PlatformLogoIcon, type UnifiedBotItem } from '../hub/shared';
 import { Chips } from '../bot-settings/primitives';
 import { HubPrimaryHero } from './HubParts';
 import type { HubContextMenuState, HubListEntry } from './types';
@@ -75,11 +75,9 @@ export interface HubScreenProps {
   unreadConversationKeys: ReadonlySet<string>;
   knownBots: ConversationBot[];
   onOpenScopeConversation(room: ScopeConversation, openSettings: boolean): void;
-  botMetaMap: Record<string, BotPreviewMeta>;
-  clearedMap: Record<string, number>;
-  scopeForBot(bot: UnifiedBotItem): string;
   searchQuery: string;
   onChangeSearchQuery(next: string): void;
+  hasUpdate?: boolean;
 }
 
 export function HubScreen({
@@ -129,15 +127,12 @@ export function HubScreen({
   unreadConversationKeys,
   knownBots,
   onOpenScopeConversation,
-  botMetaMap,
-  clearedMap,
-  scopeForBot,
   searchQuery,
   onChangeSearchQuery,
+  hasUpdate = false,
 }: HubScreenProps) {
   const t = useText();
   const { notify, dismiss } = useNotice();
-  const [connPopoverOpen, setConnPopoverOpen] = useState(false);
 
   const bottomBarRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -158,21 +153,6 @@ export function HubScreen({
     onTriggerRefresh,
     onOpenCenterSettings,
   };
-
-  useEffect(() => {
-    if (!visible || connectionPhase === 'online' || hubAddMenuOpen) {
-      setConnPopoverOpen(false);
-    }
-  }, [visible, connectionPhase, hubAddMenuOpen]);
-
-  useEffect(() => {
-    if (!connPopoverOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setConnPopoverOpen(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverOpen]);
 
   // H5: 群聊加载失败走 F1 浮层通知，带重试按钮；成功或离页立即清除。
   useEffect(() => {
@@ -241,27 +221,23 @@ export function HubScreen({
         ? botsHydrated
         : botsHydrated && (roomConversationsHydrated || (!hasConfiguredCenter && !hasLocalHost));
 
-  const statusText =
-    connectionPhase === 'connecting'
-      ? t('连接中…', 'Connecting…')
-      : connectionPhase === 'offline'
-        ? t('离线', 'Offline')
-        : t('连接异常', 'Connection issue');
-
-  const statusHeading =
-    connectionPhase === 'connecting'
-      ? (ipcReconnecting ? t('正在恢复本地服务…', 'Reconnecting local service…') : t('正在恢复连接…', 'Reconnecting…'))
-      : connectionPhase === 'offline'
-        ? t('与中心未连接', 'Disconnected from center')
-        : t('中心连接异常', 'Center connection issue');
-
-  const statusDescription =
-    connectionDetail.trim() ||
-    (connectionPhase === 'connecting'
-      ? t('正在同步中心连接与远端设备在线状态。', 'Syncing center connection and remote device availability.')
-      : connectionPhase === 'offline'
-        ? t('当前未连接到中心，远端设备状态待确认。', 'Not connected to center; remote device status is pending.')
-        : t('中心连接出现错误，请检查网络或中心配置。', 'Center connection failed. Check your network or center settings.'));
+  const addMenuItems = useMemo(
+    () => [
+      {
+        key: 'new-bot',
+        label: t('新建 Bot', 'New Bot'),
+        icon: <Sparkles size={18} aria-hidden="true" />,
+        onSelect: () => onOpenCreateBot(false),
+      },
+      {
+        key: 'new-group',
+        label: t('创建群聊', 'Create Group Chat'),
+        icon: <Users size={18} aria-hidden="true" />,
+        onSelect: () => onOpenCreateGroup(),
+      },
+    ],
+    [t, onOpenCreateBot, onOpenCreateGroup],
+  );
 
   return (
     <main
@@ -274,36 +250,35 @@ export function HubScreen({
           type="button"
           ref={navigationTriggerRef}
           className="hub-circle-btn hub-left-trigger"
-          aria-label={t('打开侧边栏', 'Open sidebar')}
+          aria-label={hasUpdate ? t('打开侧边栏（有可用更新）', 'Open sidebar (update available)') : t('打开侧边栏', 'Open sidebar')}
           aria-haspopup="dialog"
           aria-expanded={leftDrawerOpen}
           onClick={onOpenLeftDrawer}
         >
-          <PanelLeft size={20} strokeWidth={2} />
+          <PanelLeft size={20} strokeWidth={2} aria-hidden="true" />
+          {hasUpdate ? <span className="hub-drawer-update-dot" aria-hidden="true" /> : null}
         </button>
 
-        {connectionPhase === 'online' ? (
-          <h1 className={`hub-top-title${titleObscured ? ' is-obscured' : ''}`}>PiBot</h1>
-        ) : (
-          <button
-            type="button"
-            className={`hub-top-title hub-top-status-btn is-${connectionPhase}${titleObscured ? ' is-obscured' : ''}`}
-            aria-haspopup="dialog"
-            aria-expanded={connPopoverOpen}
-            aria-label={`${statusText} - ${t('查看连接详情', 'View connection details')}`}
-            onClick={() => {
-              if (hubAddMenuOpen) onCloseHubAddMenu();
-              setConnPopoverOpen(v => !v);
-            }}
-          >
-            {connectionPhase === 'connecting' ? (
-              <RefreshCw size={15} strokeWidth={2.2} className="hub-top-status-spin" aria-hidden="true" />
-            ) : (
-              <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
-            )}
-            <span className="hub-top-status-label">{statusText}</span>
-          </button>
-        )}
+        <div className={`hub-top-center${titleObscured ? ' is-obscured' : ''}`}>
+          {connectionPhase === 'online' ? (
+            <h1 className="hub-top-title">PiBot</h1>
+          ) : (
+            <>
+              <h1 className="sr-only">PiBot</h1>
+              <ConnectionStatusPopover
+                phase={connectionPhase}
+                reason={connectionDetail.trim() || null}
+                label={connectionPhase === 'connecting' && ipcReconnecting ? t('恢复服务中', 'Reconnecting') : undefined}
+                onRetry={onTriggerRefresh}
+                retrying={hubRefreshing}
+                onOpenSettings={onOpenCenterSettings}
+                align="end"
+                side="bottom"
+                compact
+              />
+            </>
+          )}
+        </div>
 
         {(() => {
           const isSpinning = hubRefreshing;
@@ -333,6 +308,7 @@ export function HubScreen({
               <RefreshCw
                 size={17}
                 strokeWidth={2.3}
+                aria-hidden="true"
                 style={
                   !isSpinning && pullDistance > 0
                     ? { transform: `rotate(${Math.round(pullDistance * 3.8)}deg)` }
@@ -343,95 +319,30 @@ export function HubScreen({
           );
         })()}
 
-        <button
-          type="button"
-          className="hub-circle-btn hub-add-btn"
-          aria-label={t('新建', 'New')}
-          aria-haspopup="menu"
-          aria-expanded={hubAddMenuOpen}
-          onClick={() => {
-            setConnPopoverOpen(false);
-            onToggleHubAddMenu();
+        <PopoverMenu
+          open={hubAddMenuOpen}
+          onOpenChange={next => {
+            if (next) {
+              if (!hubAddMenuOpen) onToggleHubAddMenu();
+            } else if (hubAddMenuOpen) {
+              onCloseHubAddMenu();
+            }
           }}
-        >
-          <Plus size={22} strokeWidth={2.2} />
-        </button>
-
-        {connPopoverOpen && connectionPhase !== 'online' && (
-          <>
-            <div className="grok-menu-backdrop" onClick={() => setConnPopoverOpen(false)} />
-            <div
-              className="hub-conn-popover"
-              role="dialog"
-              aria-label={t('连接状态详情', 'Connection status details')}
+          align="end"
+          side="bottom"
+          ariaLabel={t('新建', 'New')}
+          items={addMenuItems}
+          trigger={({ triggerProps }) => (
+            <button
+              type="button"
+              className="hub-circle-btn hub-add-btn"
+              aria-label={t('新建', 'New')}
+              {...triggerProps}
             >
-              <div className={`hub-conn-popover-head is-${connectionPhase}`}>
-                {connectionPhase === 'connecting' ? (
-                  <RefreshCw size={15} className="hub-top-status-spin" aria-hidden="true" />
-                ) : (
-                  <span className={`hub-top-status-dot is-${connectionPhase}`} aria-hidden="true" />
-                )}
-                <span>{statusHeading}</span>
-              </div>
-              <p className="hub-conn-popover-desc">{statusDescription}</p>
-              <p className="hub-conn-popover-hint">
-                {t('提示：在首页下拉也可立即检查并尝试恢复连接。', 'Tip: Pull down on Hub to check and retry connecting.')}
-              </p>
-              <div className="hub-conn-popover-actions">
-                <button
-                  type="button"
-                  className="hub-conn-popover-btn"
-                  onClick={() => {
-                    setConnPopoverOpen(false);
-                    onTriggerRefresh();
-                  }}
-                >
-                  {t('立即重试', 'Retry now')}
-                </button>
-                <button
-                  type="button"
-                  className="hub-conn-popover-btn is-primary"
-                  onClick={() => {
-                    setConnPopoverOpen(false);
-                    onOpenCenterSettings();
-                  }}
-                >
-                  {t('去设置', 'Settings')}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-
-        {hubAddMenuOpen && (
-          <>
-            <div className="grok-menu-backdrop" onClick={onCloseHubAddMenu} />
-            <div className="grok-floating-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  onCloseHubAddMenu();
-                  onOpenCreateBot(false);
-                }}
-              >
-                <Sparkles size={19} />
-                <span>{t('新建 Bot', 'New Bot')}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  onCloseHubAddMenu();
-                  onOpenCreateGroup();
-                }}
-              >
-                <Users size={19} />
-                <span>{t('创建群聊', 'Create Group Chat')}</span>
-              </button>
-            </div>
-          </>
-        )}
+              <Plus size={22} strokeWidth={2.2} aria-hidden="true" />
+            </button>
+          )}
+        />
       </header>
 
       <div
@@ -451,7 +362,7 @@ export function HubScreen({
               offline={botIsOffline(primaryBot)}
               label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
               onOpen={() => onOpenBotChat(primaryBot)}
-              onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: primaryBot }); }}
+              onOpenMenu={(position) => onOpenContextMenu({ ...position, bot: primaryBot })}
             />
           ) : !botsHydrated ? (
             <div
@@ -545,7 +456,7 @@ export function HubScreen({
                         />
                       }
                       onOpen={() => onOpenScopeConversation(room, false)}
-                      onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, room }); }}
+                      onOpenMenu={(position) => onOpenContextMenu({ ...position, room })}
                     />
                   );
                   return (
@@ -569,7 +480,6 @@ export function HubScreen({
                   );
                 }
                 const item = entry.bot!;
-                const meta = botMetaMap[item.key];
                 const offline = botIsOffline(item);
                 const statusUnknown = item.hostKind === 'local' ? !hasLocalHost : !remoteConnected;
                 const isRemoteConnecting = item.hostKind === 'remote' && connectionPhase === 'connecting';
@@ -585,21 +495,10 @@ export function HubScreen({
                     : offline
                       ? t('离线', 'Offline')
                       : t('在线', 'Online');
-                const cachedPreview = meta?.lastText?.trim();
-                // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
-                const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
-                  (cachedPreview === meta?.subtitle?.trim() ||
-                   cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…'); // i18n-ok
-                const itemScopeKey = scopeForBot(item);
-                const isClearNotice = ((itemScopeKey && clearedMap[itemScopeKey] !== undefined) || clearedMap[item.key] !== undefined) &&
-                  (cachedPreview === '对话已清空' || cachedPreview === 'History cleared'); // i18n-ok
-                const preview = item.lastPreview?.trim() ||
-                  (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
                 const rowNode = (
                   <ConversationRow
                     className="hub-bot-row"
                     title={item.role}
-                    preview={preview}
                     timestamp={entry.sortMs || null}
                     connectionLabel={connectionLabel}
                     unread={unreadConversationKeys.has(entry.pinKey)}
@@ -615,7 +514,7 @@ export function HubScreen({
                       </span>
                     }
                     onOpen={() => onOpenBotChat(item)}
-                    onOpenMenu={(position) => { mobileHaptic('longPress'); onOpenContextMenu({ ...position, bot: item }); }}
+                    onOpenMenu={(position) => onOpenContextMenu({ ...position, bot: item })}
                   />
                 );
                 return (
@@ -645,13 +544,13 @@ export function HubScreen({
 
       <footer ref={bottomBarRef} className="hub-bottom-bar">
         <label className="hub-search-box">
-          <Search size={18} className="hub-search-icon" />
+          <Search size={18} className="hub-search-icon" aria-hidden="true" />
           <input
             type="search"
             value={searchQuery}
             onChange={e => onChangeSearchQuery(e.target.value)}
-            placeholder={t('搜索', 'Search')}
-            aria-label={t('搜索 Bot', 'Search bots')}
+            placeholder={t('搜索 Bot 或群聊', 'Search bots or groups')}
+            aria-label={t('搜索 Bot 或群聊', 'Search bots and groups')}
           />
           {searchQuery && (
             <button
@@ -660,7 +559,7 @@ export function HubScreen({
               onClick={() => onChangeSearchQuery('')}
               aria-label={t('清除搜索', 'Clear search')}
             >
-              <X size={16} />
+              <X size={16} aria-hidden="true" />
             </button>
           )}
         </label>

@@ -16,6 +16,10 @@ export interface HostStatus {
   centerUrl: string | null;
   deviceId: string | null;
   autostart?: boolean | null;
+  /** 服务仍有登记，与系统自启动开关独立。 */
+  serviceRegistered?: boolean | null;
+  /** 本次打开客户端时自动启动本机 Host 失败。 */
+  startupError?: { code?: string; message?: string } | null;
   /** 自启动范围：仅安装用户登录后运行。 */
   autostartScope?: 'user-login' | 'system-boot';
   platform?: 'windows' | 'linux' | 'macos';

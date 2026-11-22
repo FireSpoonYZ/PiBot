@@ -11,7 +11,7 @@ use std::{
   net::{SocketAddr, TcpStream},
   path::{Path, PathBuf},
   process::{Command, Stdio},
-  sync::{mpsc, Mutex},
+  sync::{atomic::{AtomicBool, Ordering}, mpsc, Mutex},
   thread,
   time::{Duration, Instant},
 };
@@ -60,6 +60,56 @@ const SECRET_ENV_KEYS: &[&str] = &[
 ];
 static HOST_CONTROL_LOCK: Mutex<()> = Mutex::new(());
 const CONTROL_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable", "setup-shower", "remove"];
+
+#[derive(Default)]
+pub struct HostStartup {
+  cancelled: AtomicBool,
+  error: Mutex<Option<BridgeError>>,
+}
+
+/// One background attempt per desktop launch. Explicit service controls take
+/// precedence if the startup worker is still waiting for the control lock.
+pub fn start_configured_host(app: &AppHandle) {
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    let _ = run_blocking(move || {
+      let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+      let startup = app.state::<HostStartup>();
+      let mut launcher = |action: &str| {
+        let timeout = if action == "status" { STATUS_TIMEOUT } else { control_timeout(action) };
+        run_launcher(&[action.to_string()], None, timeout)
+      };
+      let result = start_registered_host(&mut launcher, &startup.cancelled);
+      if !startup.cancelled.load(Ordering::Acquire) {
+        *startup.error.lock().unwrap() = result.err()
+          .filter(|error| error.code != "HOST_LAUNCHER_MISSING");
+      }
+      Ok(())
+    }).await;
+  });
+}
+
+fn start_registered_host(launcher: &mut LauncherCall<'_>, cancelled: &AtomicBool) -> Result<(), BridgeError> {
+  if cancelled.load(Ordering::Acquire) {
+    return Ok(());
+  }
+  let status = launcher("status")?;
+  // Older launchers only report autostart. A reported false/unknown registration
+  // must never fall back to autostart and restore a removed service.
+  let registered = match status.get("serviceRegistered") {
+    Some(value) => value.as_bool() == Some(true),
+    None => status.get("autostart").and_then(Value::as_bool) == Some(true),
+  };
+  if registered
+    && status.get("configured").and_then(Value::as_bool) == Some(true)
+    && status.get("running").and_then(Value::as_bool) == Some(false)
+    && !status.get("configError").is_some_and(|error| !error.is_null())
+    && !cancelled.load(Ordering::Acquire)
+  {
+    launcher("start")?;
+  }
+  Ok(())
+}
 
 fn invalid(message: &str) -> BridgeError {
   BridgeError::new("INVALID_ARGUMENT", message, "not-sent")
@@ -620,7 +670,7 @@ fn start_or_restart() -> Result<Value, BridgeError> {
 }
 
 #[tauri::command]
-pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError> {
+pub async fn desktop_host_status(app: AppHandle, webview: Webview) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
   let mut status = run_blocking(|| {
     let mut status = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
@@ -646,6 +696,11 @@ pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError>
     .get("running")
     .and_then(Value::as_bool)
     .unwrap_or(false);
+  if !running && status.get("configured").and_then(Value::as_bool) == Some(true) {
+    if let Some(error) = app.state::<HostStartup>().error.lock().unwrap().as_ref() {
+      status["startupError"] = json!({ "code": error.code, "message": error.message });
+    }
+  }
   let control_url = status
     .get("controlUrl")
     .and_then(Value::as_str)
@@ -1104,12 +1159,16 @@ pub async fn desktop_host_control(
   }
   let timeout = control_timeout(&action);
   let marker_root = bridge::resolve_client_data_root(&app)?;
+  if matches!(action.as_str(), "start" | "stop" | "restart" | "remove" | "setup-shower") {
+    app.state::<HostStartup>().cancelled.store(true, Ordering::Release);
+  }
   run_blocking(move || {
     let _guard = HOST_CONTROL_LOCK.lock().unwrap();
     let result = run_launcher(&[action.clone()], None, timeout)?;
     if matches!(action.as_str(), "stop" | "disable" | "enable" | "remove") {
       set_autostart_pending(Path::new(&marker_root), None)?;
     }
+    *app.state::<HostStartup>().error.lock().unwrap() = None;
     Ok(result)
   }).await
 }
@@ -1121,6 +1180,71 @@ mod tests {
   use super::*;
 
   type Answer = Box<dyn FnMut(&str) -> Result<Value, BridgeError>>;
+
+  #[test]
+  fn desktop_startup_starts_registered_host_with_autostart_disabled() {
+    let mut calls = Vec::new();
+    let result = start_registered_host(&mut |action| {
+      calls.push(action.to_string());
+      Ok(match action {
+        "status" => json!({ "configured": true, "running": false, "serviceRegistered": true, "autostart": false }),
+        "start" => json!({ "status": "started" }),
+        _ => panic!("unexpected startup action: {action}"),
+      })
+    }, &AtomicBool::new(false));
+    assert!(result.is_ok());
+    assert_eq!(calls, ["status", "start"]);
+  }
+
+  #[test]
+  fn desktop_startup_preserves_running_unpaired_removed_and_unknown_hosts() {
+    for status in [
+      json!({ "configured": true, "running": true, "serviceRegistered": true }),
+      json!({ "configured": false, "running": false, "serviceRegistered": true }),
+      json!({ "configured": true, "running": false, "serviceRegistered": false, "autostart": true }),
+      json!({ "configured": true, "running": false, "serviceRegistered": null, "autostart": true }),
+      json!({ "configured": true, "running": null, "serviceRegistered": true }),
+      json!({ "configured": true, "running": false, "serviceRegistered": true, "configError": { "code": "CONFIG_INVALID" } }),
+      json!({ "configured": true, "running": false, "autostart": false }),
+    ] {
+      let mut calls = Vec::new();
+      start_registered_host(&mut |action| {
+        calls.push(action.to_string());
+        Ok(status.clone())
+      }, &AtomicBool::new(false)).unwrap();
+      assert_eq!(calls, ["status"], "{status}");
+    }
+  }
+
+  #[test]
+  fn desktop_startup_supports_legacy_registered_host_and_propagates_start_failure() {
+    let mut calls = Vec::new();
+    let error = start_registered_host(&mut |action| {
+      calls.push(action.to_string());
+      match action {
+        "status" => Ok(json!({ "configured": true, "running": false, "autostart": true })),
+        "start" => Err(BridgeError::new("START_FAILED", "could not start Host", "responded")),
+        _ => panic!("unexpected startup action: {action}"),
+      }
+    }, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(error.code, "START_FAILED");
+    assert_eq!(calls, ["status", "start"]);
+  }
+
+  #[test]
+  fn explicit_host_control_cancels_startup_before_or_during_status_probe() {
+    for already_cancelled in [false, true] {
+      let cancelled = AtomicBool::new(already_cancelled);
+      let mut calls = Vec::new();
+      start_registered_host(&mut |action| {
+        calls.push(action.to_string());
+        cancelled.store(true, Ordering::Release);
+        Ok(json!({ "configured": true, "running": false, "serviceRegistered": true }))
+      }, &cancelled).unwrap();
+      let expected = if already_cancelled { Vec::<String>::new() } else { vec!["status".to_string()] };
+      assert_eq!(calls, expected);
+    }
+  }
 
   /// Runs the update cycle against a scripted launcher. Returns the result
   /// and the call order, with `swap` recorded where the bundle was replaced.

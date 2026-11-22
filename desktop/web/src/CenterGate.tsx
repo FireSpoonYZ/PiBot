@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Copy, ExternalLink } from 'lucide-react';
+import { ChevronRight, Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
@@ -105,17 +105,66 @@ export function useCenterConnection(): CenterConnection {
 
 export type DesktopTheme = 'light' | 'dark' | 'system';
 
+const THEME_COLOR_LIGHT = '#F7F6F2';
+const THEME_COLOR_DARK = '#141614';
+
 const readDesktopTheme = (): DesktopTheme => {
   const value = localStorage.getItem('desktop-theme');
   return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
 };
 
+const resolveDesktopTheme = (theme: DesktopTheme): 'light' | 'dark' => {
+  if (theme === 'dark' || theme === 'light') return theme;
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light';
+};
+
+const syncDesktopThemeColor = (resolved: 'light' | 'dark') => {
+  if (typeof document === 'undefined') return;
+  const color = resolved === 'dark' ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
+  let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    document.head?.appendChild(meta);
+  }
+  if (meta.getAttribute('content') !== color) {
+    meta.setAttribute('content', color);
+  }
+};
+
 const applyDesktopTheme = (theme: DesktopTheme) => {
+  if (typeof document === 'undefined') return;
+  const resolved = resolveDesktopTheme(theme);
   document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = resolved;
+  syncDesktopThemeColor(resolved);
+};
+
+const subscribeSystemTheme = (onChange: () => void): (() => void) => {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
+  const mql = window.matchMedia('(prefers-color-scheme: dark)');
+  if (typeof mql.addEventListener === 'function') {
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }
+  if (typeof mql.addListener === 'function') {
+    mql.addListener(onChange);
+    return () => mql.removeListener(onChange);
+  }
+  return () => {};
 };
 
 export function useDesktopTheme(): { theme: DesktopTheme; setTheme: (theme: DesktopTheme) => void } {
   const [theme, setThemeState] = useState<DesktopTheme>(readDesktopTheme);
+  useEffect(() => {
+    applyDesktopTheme(theme);
+    if (theme !== 'system') return;
+    return subscribeSystemTheme(() => applyDesktopTheme('system'));
+  }, [theme]);
   const setTheme = (next: DesktopTheme) => {
     localStorage.setItem('desktop-theme', next);
     applyDesktopTheme(next);
@@ -129,7 +178,10 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   // 主题应用放在真实桌面入口挂载处：本模块会被 BotSettings -> openCenterManagement 间接导入，
   // 而 BotSettings 可被手机端引用，模块加载即写 data-theme 会污染移动端。
   useLayoutEffect(() => {
-    applyDesktopTheme(readDesktopTheme());
+    const stored = readDesktopTheme();
+    applyDesktopTheme(stored);
+    if (stored !== 'system') return;
+    return subscribeSystemTheme(() => applyDesktopTheme('system'));
   }, []);
   const [url, setUrl] = useState(() => localStorage.getItem('center-url') ?? '');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-device-id') ?? '');
@@ -912,9 +964,14 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           placeholder={matchesSaved ? t('已保存凭据，留空使用已存令牌', 'Saved credentials — leave blank to reuse') : ''}
         />
       </label>
-      <details className="gate-advanced">
-        <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
-        <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+      <details className="gate-sub-advanced">
+        <summary>
+          <span>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</span>
+          <ChevronRight size={14} className="gate-chevron" aria-hidden="true" />
+        </summary>
+        <div className="gate-advanced-body">
+          <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+        </div>
       </details>
       {host && isNewHost(host) && offerAdopt && (
         <label className="gate-check">
@@ -956,7 +1013,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           const state = pairStepState(index);
           return (
             <li key={label} className={`gate-step ${state}`} aria-current={state === 'active' ? 'step' : undefined}>
-              <span className="gate-step-dot" aria-hidden />
+              <span className="gate-step-dot" aria-hidden="true" />
               <span className="gate-step-label">{label}</span>
               {state === 'error' && index > 0 && pairedRef.current && (
                 <button
@@ -977,7 +1034,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
         })}
       </ol>
       {pairWarnings.length > 0 && (
-        <ul className="gate-warnings">
+        <ul className="gate-warnings" role="alert">
           {pairWarnings.map((warning, index) => (
             <li key={index}>{warning}</li>
           ))}
@@ -1036,8 +1093,11 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
           : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
       </button>
-      <details className="gate-advanced">
-        <summary>{t('本机名称与证书', 'Computer name and certificate')}</summary>
+      <details className="gate-sub-advanced">
+        <summary>
+          <span>{t('本机名称与证书', 'Computer name and certificate')}</span>
+          <ChevronRight size={14} className="gate-chevron" aria-hidden="true" />
+        </summary>
         <div className="gate-advanced-fields">
           <label className="gate-field">
             <span>{t('本机名称（可选）', 'Computer name (optional)')}</span>
@@ -1100,18 +1160,27 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           onAction={canRetryPaired ? retryPaired : undefined}
         />
         <details className="gate-advanced">
-          <summary>{t('其他连接方式', 'Other ways to connect')}</summary>
+          <summary>
+            <span>{t('其他连接方式', 'Other ways to connect')}</span>
+            <ChevronRight size={15} className="gate-chevron" aria-hidden="true" />
+          </summary>
           <div className="gate-advanced-fields">
             {hostAvailable && (
-              <details className="gate-advanced">
-                <summary>{t('使用所有者口令初始化首台设备', 'Initialize first device with owner password')}</summary>
-                {passwordForm}
+              <details className="gate-sub-advanced">
+                <summary>
+                  <span>{t('使用所有者口令初始化首台设备', 'Initialize first device with owner password')}</span>
+                  <ChevronRight size={14} className="gate-chevron" aria-hidden="true" />
+                </summary>
+                <div className="gate-advanced-body">{passwordForm}</div>
               </details>
             )}
             {hostAvailable && (
-              <details className="gate-advanced">
-                <summary>{t('手动设备令牌连接', 'Connect with manual device token')}</summary>
-                {manualForm}
+              <details className="gate-sub-advanced">
+                <summary>
+                  <span>{t('手动设备令牌连接', 'Connect with manual device token')}</span>
+                  <ChevronRight size={14} className="gate-chevron" aria-hidden="true" />
+                </summary>
+                <div className="gate-advanced-body">{manualForm}</div>
               </details>
             )}
             {hostAvailable && host?.platform === 'windows' && (
@@ -1144,7 +1213,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
                   className="secondary-button gate-manage"
                   onClick={() => void invoke('desktop_open_center', { url: managementUrl }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
                 >
-                  <ExternalLink size={14} />
+                  <ExternalLink size={14} aria-hidden="true" />
                   {t('在浏览器打开中心管理', 'Open center management in browser')}
                 </button>
               )}
@@ -1153,10 +1222,16 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
               <div className="gate-client-id">
                 <span className="gate-client-label">{t('本客户端标识', 'Client ID')}</span>
                 <code>{status.clientId}</code>
-                <button type="button" className="icon-button" onClick={copyClientId} title={t('复制', 'Copy')}>
-                  <Copy size={14} />
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={copyClientId}
+                  title={t('复制', 'Copy')}
+                  aria-label={t('复制客户端标识', 'Copy client ID')}
+                >
+                  <Copy size={14} aria-hidden="true" />
                 </button>
-                {copied && <span className="gate-copied">{t('已复制', 'Copied')}</span>}
+                {copied && <span className="gate-copied" role="status">{t('已复制', 'Copied')}</span>}
               </div>
             )}
           </div>

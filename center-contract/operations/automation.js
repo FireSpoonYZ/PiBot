@@ -545,7 +545,7 @@ export const operations = [
     destructive: true,
   }),
 
-  // ---- Center Webhooks (safe metadata/events read + non-secret/non-target-redirect update/delete) ----
+  // ---- Center Webhooks (metadata/events read + non-secret update/delete) ----
   defineOperation({
     name: 'automation_webhook_list',
     description: 'List configured Center webhook routes without exposing any Bearer tokens or token hashes.',
@@ -572,12 +572,24 @@ export const operations = [
 
   defineOperation({
     name: 'automation_webhook_update',
-    description: 'Update safe non-secret configuration (name, instruction, enabled) of an existing Center webhook route. Preserves the trusted target deviceId/botId and never issues or rotates Bearer tokens.',
+    description: 'Update non-secret configuration (name, instruction, enabled, target deviceId/botId) of an existing Center webhook route. Never issues, exposes, or rotates Bearer tokens.',
     properties: {
       id: {
         type: 'string',
         pattern: WEBHOOK_ID_PATTERN,
         description: 'Webhook route ID.',
+      },
+      deviceId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Updated target Host device ID.',
+      },
+      botId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Updated target Bot ID.',
       },
       name: {
         type: 'string',
@@ -589,7 +601,7 @@ export const operations = [
         type: 'string',
         minLength: 1,
         maxLength: 8000,
-        description: 'Updated instruction delivered to the existing target Bot.',
+        description: 'Updated instruction delivered to the target Bot.',
       },
       enabled: {
         type: 'boolean',

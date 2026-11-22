@@ -8,8 +8,8 @@
   width: 100%;
   min-width: 0;
   border-radius: var(--radius-md, 12px);
-  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 10%, transparent);
-  transition: box-shadow var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+  background: var(--signal-primary-soft, color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 10%, transparent));
+  transition: box-shadow var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
 .gbot-sortable-pinned-chat > :first-child {
@@ -20,7 +20,7 @@
 
 .gbot-sortable-pinned-chat[data-dragging="true"] {
   z-index: var(--z-sticky, 10);
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--color-text, var(--text)) 16%, transparent);
+  box-shadow: var(--shadow-float);
   opacity: 0.96;
   transition: none;
 }
