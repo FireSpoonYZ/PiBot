@@ -12,6 +12,7 @@ export interface AgySession {
 	conversationId: string;
 	lastStepIdx: number;
 	lastMessageCount?: number;
+	turnRecallHook?: true;
 }
 
 type StoreMap = Record<string, AgySession>;
@@ -29,10 +30,12 @@ function narrowStoreMap(parsed: unknown): StoreMap {
 		if (typeof conversationId !== "string") continue;
 		const idx = (value as { lastStepIdx?: unknown }).lastStepIdx;
 		const mc = (value as { lastMessageCount?: unknown }).lastMessageCount;
+		const turnRecallHook = (value as { turnRecallHook?: unknown }).turnRecallHook;
 		clean[key] = {
 			conversationId,
 			lastStepIdx: typeof idx === "number" && Number.isFinite(idx) ? idx : -1,
 			lastMessageCount: typeof mc === "number" && Number.isFinite(mc) ? mc : 0,
+			...(turnRecallHook === true ? { turnRecallHook } : {}),
 		};
 	}
 	return clean;
@@ -66,6 +69,7 @@ export class SessionStore {
 			conversationId: s.conversationId,
 			lastStepIdx: s.lastStepIdx ?? -1,
 			lastMessageCount: s.lastMessageCount ?? 0,
+			...(s.turnRecallHook ? { turnRecallHook: true } : {}),
 		};
 	}
 
@@ -102,12 +106,15 @@ export class SessionStore {
 		} catch {
 			/* missing or corrupt */
 		}
+		const writtenKeys = [...this.#dirty];
+		const removedKeys = [...this.#removed];
+		if (writtenKeys.length === 0 && removedKeys.length === 0) return;
 		const merged: StoreMap = { ...disk };
-		for (const key of this.#dirty) {
+		for (const key of writtenKeys) {
 			const entry = this.#cache[key];
 			if (entry) merged[key] = entry;
 		}
-		for (const key of this.#removed) {
+		for (const key of removedKeys) {
 			delete merged[key];
 		}
 
@@ -117,8 +124,13 @@ export class SessionStore {
 				mode: 0o600,
 			});
 			await fs.promises.rename(tmp, this.#path);
-			this.#dirty.clear();
-			this.#removed.clear();
+			// Another session can finish while the write is in flight.
+			for (const key of writtenKeys) {
+				if (this.#cache[key] === merged[key]) this.#dirty.delete(key);
+			}
+			for (const key of removedKeys) {
+				if (this.#cache[key] === undefined) this.#removed.delete(key);
+			}
 		} catch (err) {
 			try {
 				await fs.promises.unlink(tmp);

@@ -7,7 +7,9 @@ Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模�
 - **中心单账号、设备侧执行工具**：`agy` 仅在 Center 进程中运行；Host 工具（文件、Shell、Shower、Vault 等）仍在已配对设备本机执行。Center 在隔离 profile 中生成受限的 `pibot-center` 专用 Agent，并动态注入 `pibot-bridge` MCP server，只暴露当前对话声明的 Host 工具，再通过标准 `toolCall` / `toolResult` 往返设备侧。
 - **独立 Profile 隔离**：Center 专用配置/会话目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`，专用工作目录为 `<CENTER_DATA_ROOT>/antigravity/workspace`。严禁指向宿主机日常 `~/.gemini`，不得复制或抽取个人 Google token，也不得使用全局 `permissions.deny`。
 - **持久化目录**：专用 home 与 `agy` 会话必须位于已有持久数据目录（Docker 为 `/data`，Linux DEB/systemd 为 `/var/lib/pibot-center`）。
-- **轮级路由与辅助上下文传递**：继续沿用现有 JSON `messages` 封包，不新增配置项；ACP 不从旧版 Host 路由文本前缀猜测可信路由元数据，完整路由行为仍要求 Host 与 Center 成对更新。普通人类 `primary` 轮不带合成路由消息；非默认来源/目标由 Host 在插件最终投影头部前插瞬态 `SystemMessage`（`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，不含其他 section、工具、`requestId` 或原始冻结轮 JSON，永不作为 `user` 消息追加），ACP 从 transcript 提取该 `host-turn-routing` section 并**按轮置于真实本轮输入之前**，**不**并入首轮粘性的原始 system prompt。对于更新后的 Host/Center，末尾的 `bcContextMaterial` / `bcSummaryMaterial` 条目以及末尾合成的 Hindsight recall、Billion Context 提醒均作为辅助上下文保留，不替代或当作最新用户输入文本或图片；主会话流式输出、MCP 隔离、设备+会话隔离、鉴权校验、工具续接（`toolCall`/`toolResult` 挂起续跑不重发 prompt）、已绑定会话恢复、已存储历史与冻结轮持久化均保持不变。
+- **轮级路由与辅助上下文传递**：继续沿用现有 JSON `messages` 封包，不新增配置项；ACP 不从旧版 Host 路由文本前缀猜测可信路由元数据，完整路由行为仍要求 Host 与 Center 成对更新。普通人类 `primary` 轮不带合成路由消息；非默认来源/目标由 Host 在插件最终投影头部前插瞬态 `SystemMessage`（`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，不含其他 section、工具、`requestId` 或原始冻结轮 JSON，永不作为 `user` 消息追加），ACP 从 transcript 提取该 `host-turn-routing` section 并**按轮置于真实本轮输入之前**，**不**并入首轮粘性的原始 system prompt。`bcContextMaterial`、`bcSummaryMaterial` 和 Billion Context 提醒继续作为辅助上下文传递。
+- **Hindsight 自动召回**由插件在临时请求消息上标记 `hindsightRecall: true`。Center 按 `auxiliaryIndices` 识别来源，通过 AGY `PreInvocation` hook 将当前用户轮的 recall 作为 `ephemeralMessage` 注入，并从普通 ACP prompt 和历史摘要中排除召回文本。同一次 native 推理挂起等待工具时沿用这一轮的绑定，完成或取消后释放。召回为空时发送普通用户轮。AGY 的本地诊断日志仍可能记录注入文本，模型自行引用的内容属于正常模型输出。
+- **旧 ACP 会话迁移**在工具续接完成后的首个用户轮发生。Center 使用 PiBot 的上下文摘要恢复此前的普通对话，创建配置了 hook 的 native 会话，并在 prompt 成功或进入工具等待后保存新绑定。PiBot 会话 ID 和记录继续沿用。旧版 Hindsight 渲染内容也可在已识别为辅助的消息中按轮提取。
 
 ### 新旧 Host 流传输契约、升级顺序与旧格式歧义边界
 
@@ -26,6 +28,7 @@ Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模�
   2. **新 Center + 老 Host（兼容过渡）**：老 Host 请求不含 `turnContext`，新 Center 自动走旧版兼容路径——可正确识别非零时间戳 `user` 与合法图片 `user`（含文图/纯图）后接 SDK 追加的常规 `system`（全部 `system` 工具增删照常生效），且 `toolResult` 后接 `system` 时绝不会错误回退到更早的 `user` 消息。
   3. **老 Center + 新 Host（不兼容，禁止）**：老 Center 对 `POST /api/host/antigravity/stream` 顶层字段执行严格白名单校验（仅允许 `sessionId`/`modelId`/`messages`/`reasoning`），会以 HTTP 400 `INVALID_ARGUMENT` 拒绝新版 Host 发出的 `turnContext`。滚动升级时务必先完成 Center 升级并就绪，再升级各设备 Host。
   4. **托管 Billion Context 既有安装升级（`1.0.2` → `1.0.3`）**：Center 启动不会自动覆盖已安装的旧版 Billion Context 插件包，且 Host 按 `targetVersion` 缓存插件版本；因此**已启用托管 Billion Context 的既有安装需在 Center 中显式将 Billion Context 更新到 `1.0.3`**，以获得精确的辅助消息来源。此操作**不需要重建会话或数据库**；**未启用 Billion Context 的部署不需要进行这一操作**。
+  5. **托管 Hindsight 既有安装可更新到 `1.2.1`**。新版插件识别当前 Host 的主会话输入并在请求中标记自动召回。构建产物为 `build/builtin-plugins/hindsight.tgz`，通过 Center 的插件更新入口应用。
 
 - **无法消除的旧格式歧义（仅老 Host 过渡期存在）**：
   - 在老 Host（未发送 `turnContext`）的旧线格式中，一条位于既有历史消息之后、无图片块、无 `bcContextMaterial`/`bcSummaryMaterial` 标记且 `timestamp === 0` 的纯文本 `user` 消息，与旧版插件注入的未标记 `timestamp === 0` 合成辅助消息（例如 Hindsight recall 或 Billion Context 尾部 nudge）在传输载荷上可能**完全同形**，Center 无法仅凭旧线格式做到无损区分。
