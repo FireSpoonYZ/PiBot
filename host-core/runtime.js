@@ -30,8 +30,7 @@ import {
   countMessageTokens,
   estimateContextTokensHost,
   budgetRequestTokens,
-  setRequestBudget,
-  isLocalBudgetOverflowError,
+  setBillionContextOutputBudget,
   createBaseProjectionReplacer,
   resolveRequestOutputCap,
   computePreflightTargetTokens,
@@ -889,17 +888,17 @@ export async function openRuntime(options) {
     } catch (err) {
       if (context.abortSignal?.aborted || err instanceof durable.SessionFailed ||
           err?.code === 'CENTER_OFFLINE' || err?.code === 'BOT_CONTEXT_REQUIRED') throw err;
-      return { status: 'summary_failed' };
+      return null;
     }
     context.abortSignal?.throwIfAborted();
     if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-    if (result?.status !== 'compacted') return result ? { status: result.status } : null;
+    if (result?.status !== 'compacted') return null;
 
     const projection = replacer.replace(result.messages);
-    if (!projection) return { status: 'no_range' };
+    if (!projection) return null;
     const total = measure(projection);
     if (total >= contextWindow || total >= measure(messages) || (reason === 'overflow' && total >= targetTokens)) {
-      return { status: 'still_over_limit' };
+      return null;
     }
     const baseTokens = measure(result.messages);
     const saved = await harness.commit(async (tx) => {
@@ -910,16 +909,11 @@ export async function openRuntime(options) {
     }, context);
     if (!saved) return null;
     recovery.baseMessages = result.messages;
-    return { status: 'compacted', messages: projection, total };
+    return { messages: projection, total };
   }
 
-  // Selected after each Bot's plugin hooks, so this check sees their complete request.
-  // SDK 已用 estimateContext（权威 usage + 尾部估计）做阈值压缩与溢出重试；这里的
-  // 最终守卫在 provider 边界返回标准 overflow，交给 SDK 自动压缩并至多重试一次；
-  // prepared.tokenCount 是 prepareContext 后
-  // 有效请求的 SDK 估计基线，插件 beforeRequest 之后再用同一有序子序列 + 增量
-  // 对齐当前 messages——新增的插件内容计入、被替换的投影只计有效值，
-  // 绝不做整包 JSON 估算，也绝不误杀后台压缩期间的正常请求。
+  // Selected after each Bot's plugin hooks so BC sees the complete request.
+  // Estimates guide optional compaction and output repair; only the provider rejects overflow.
   const finalBudgetExtension = defineExtension({ name: 'cap-final-budget', hooks: [hook(GenerationTask, {
     async beforeRequest(request, api, context) {
       try {
@@ -934,22 +928,21 @@ export async function openRuntime(options) {
             context.abortSignal,
           );
         }
-        let total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
         const recovery = requestRecoveryState.get(api.taskId);
         const eligible = Boolean(recovery && recovery.cutoff === prepared.cutoff);
         let compacted;
         if (eligible) {
+          let total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
           const target = recovery.preflightTarget;
           if (total >= target || recovery.bcProvider.autoFold) {
             compacted = await compactModelRequest(request.messages, recovery, 'preflight', target,
               prepared.contextWindow, api, context);
-            if (compacted?.messages) total = compacted.total;
+            if (compacted) total = compacted.total;
           }
+          setBillionContextOutputBudget(compacted?.messages ?? request.messages, total, prepared.contextWindow);
         }
-        const nextRequest = compacted?.messages ? { ...request, messages: compacted.messages } : request;
-        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status, { billionContext: eligible });
-        // Managed oversize requests go through the final guard so Durable can still run its native fallback.
-        await decisions.checkBudget(nextRequest, api, context, eligible);
+        const nextRequest = compacted ? { ...request, messages: compacted.messages } : request;
+        await decisions.checkPreparedRequest(api, context);
         if (nextRequest !== request) return nextRequest;
       } catch (err) {
         antigravityTurnProvenance.delete(api.taskId);
@@ -962,7 +955,7 @@ export async function openRuntime(options) {
       }
     },
     async recoverContextOverflow({ model, messages, error, cutoff }, api, context) {
-      if (context.abortSignal?.aborted || !online || closing || isLocalBudgetOverflowError(error)) return;
+      if (context.abortSignal?.aborted || !online || closing) return;
       const recovery = requestRecoveryState.get(api.taskId);
       if (!recovery || recovery.cutoff !== cutoff || recovery.overflowAttempted) return;
       recovery.overflowAttempted = true;
@@ -975,12 +968,12 @@ export async function openRuntime(options) {
       try {
         const result = await compactModelRequest(messages, recovery, 'overflow', targetTokens,
           effectiveContextWindow, api, context);
-        if (!result?.messages || !online || closing) return;
+        if (!result || !online || closing) return;
         const nextRequest = { messages: result.messages };
-        await decisions.checkBudget(nextRequest, api, context, true);
+        await decisions.checkPreparedRequest(api, context);
         context.abortSignal?.throwIfAborted();
         if (!online || closing) return;
-        setRequestBudget(result.messages, result.total, effectiveContextWindow, undefined, { billionContext: true });
+        setBillionContextOutputBudget(result.messages, result.total, effectiveContextWindow);
         return nextRequest;
       } catch (err) {
         requestRecoveryState.delete(api.taskId);

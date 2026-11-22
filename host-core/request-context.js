@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from 'node:util';
 import { defineDoc } from '@earendil-works/pi-durable';
 import { clampMaxTokensToContext, resolveSamplingParams } from '@earendil-works/pi-ai/api/simple-options';
 import { calculateContextTokens, estimateMessageTokens } from '@earendil-works/pi-ai/utils/estimate';
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 
 // Request budgeting is independent of any context-preparation provider.
 export const RequestContext = defineDoc({
@@ -16,28 +15,17 @@ export const RequestContext = defineDoc({
 });
 
 const requestBudgets = new WeakMap();
-const localBudgetErrors = new WeakSet();
 const OPENAI_CONTEXT_SAFETY_TOKENS = 4096;
 const openAIOutputLimits = new Map([
   ['openai-responses', { fields: ['max_output_tokens'], minimum: 16 }],
   ['openai-completions', { fields: ['max_completion_tokens', 'max_tokens'], minimum: 1 }],
 ]);
-const contextRecoveryMessages = {
-  no_range: '没有足够的旧内容可以压缩。',
-  summary_failed: '自动压缩未能生成可用摘要。',
-  still_over_limit: '自动压缩后仍然超限。',
-};
-
-export function setRequestBudget(messages, tokenCount, contextWindow, recoveryStatus, { billionContext = false } = {}) {
+export function setBillionContextOutputBudget(messages, tokenCount, contextWindow) {
   // The SDK copies the messages array but preserves its message objects.
   const last = Array.isArray(messages) ? messages.at(-1) : undefined;
   if (last && typeof last === 'object') {
-    requestBudgets.set(last, { tokenCount, contextWindow, recoveryStatus, billionContext });
+    requestBudgets.set(last, { tokenCount, contextWindow });
   }
-}
-
-export function isLocalBudgetOverflowError(message) {
-  return Boolean(message && typeof message === 'object' && localBudgetErrors.has(message));
 }
 
 export function resolveRequestOutputCap(modelMaxTokens, requestMaxTokens) {
@@ -69,42 +57,24 @@ function withBillionContextOutputBudget(model, context, options, budget) {
       if (clampMaxTokensToContext(model, context, requested) > outputLimit.minimum) return replacement;
 
       // A preserved assistant's usage may still describe the history before BC projected it.
-      if (available <= outputLimit.minimum) {
-        throw new Error(`context_length_exceeded: 上下文约 ${budget.tokenCount} tokens，` +
-          `模型的 ${budget.contextWindow} tokens 窗口无法为本次请求预留足够的输出空间。`);
-      }
-      return { ...payload, [field]: Math.min(Math.floor(maxTokens), available) };
+      // Estimates are advisory: let the provider judge requests without estimated output room.
+      const outputCap = available > outputLimit.minimum
+        ? Math.min(Math.floor(maxTokens), available)
+        : Math.floor(maxTokens);
+      return { ...payload, [field]: outputCap };
     },
   };
 }
 
-export function withRequestBudget(provider) {
-  const guard = (method) => (model, context, options) => {
-    const budget = requestBudgets.get(context.messages.at(-1));
-    if (!budget || budget.tokenCount < budget.contextWindow) {
-      const requestOptions = budget?.billionContext && method === 'streamSimple'
-        ? withBillionContextOutputBudget(model, context, options, budget)
-        : options;
-      return provider[method](model, context, requestOptions);
-    }
-    const error = {
-      role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: 'error',
-      errorMessage: 'context_length_exceeded: 上下文约 ' + budget.tokenCount +
-        ' tokens，达到模型配置的 ' + budget.contextWindow + ' tokens 上限。' +
-        (Object.hasOwn(contextRecoveryMessages, budget.recoveryStatus) ? contextRecoveryMessages[budget.recoveryStatus] : '') +
-        '请缩短输入或手动压缩对话。',
-      timestamp: Date.now(),
-    };
-    localBudgetErrors.add(error);
-    const stream = createAssistantMessageEventStream();
-    stream.push({ type: 'error', reason: 'error', error });
-    stream.end();
-    return stream;
+export function withBillionContextOutputRepair(provider) {
+  return {
+    ...provider,
+    streamSimple(model, context, options) {
+      const budget = requestBudgets.get(context.messages.at(-1));
+      const requestOptions = budget ? withBillionContextOutputBudget(model, context, options, budget) : options;
+      return provider.streamSimple(model, context, requestOptions);
+    },
   };
-  return { ...provider, stream: guard('stream'), streamSimple: guard('streamSimple') };
 }
 
 export function countMessageTokens({ text = '', thinkingTokens = 0 }) {

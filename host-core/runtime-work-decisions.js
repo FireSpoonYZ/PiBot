@@ -2439,7 +2439,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     }, WORK_ERRORS, toolContext);
   }
 
-  async function checkBudget(_request, api, toolContext, allowOverflowRecovery = false) {
+  async function checkPreparedRequest(api, toolContext) {
     return guarded(async () => {
       const harness = getHarness();
       const coordNativeId = await workCoordinationId(api, toolContext);
@@ -2454,14 +2454,6 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         // The manager can reuse the same task's projection when only non-contributing entries advance the cutoff.
         if (!prepared || prepared.taskId !== String(api.taskId)) {
           throw new Error('work context projection does not match the prepared request');
-        }
-        // The final provider guard prevents oversized dispatch and allows SDK overflow recovery for managed views.
-        if (!allowOverflowRecovery && prepared.tokenCount >= prepared.contextWindow) {
-          const failure = { code: 'CONTEXT_LIMIT', message: 'work context projection reaches the model context window' };
-          // 请求级预算失败：只结算本 pending，不落 scope 级 error 闸门
-          // （error 闸门会无限阻断后续新请求；reconcile 走 lastError/结算路径）。
-          settleFailedDecision(state, current, failure);
-          return failure;
         }
         return null;
       }, toolContext);
@@ -2600,7 +2592,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return coordinationIdFor(await sessions.getTurn(api, toolContext));
   }
 
-  return { resume, close, nudge, beforeRequest, checkBudget, publishWork, passWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
+  return { resume, close, nudge, beforeRequest, checkPreparedRequest, publishWork, passWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
     interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,

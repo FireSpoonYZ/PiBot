@@ -11,7 +11,7 @@ import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generati
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
 import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
-import { withRequestBudget } from './request-context.js';
+import { withBillionContextOutputRepair } from './request-context.js';
 
 const DEFAULT_CONTEXT_WINDOW = 256 * 1024;
 const DEFAULT_MAX_TOKENS = 1024;
@@ -251,7 +251,7 @@ export function parseRuntimeConfig(raw) {
   const normalized = normalizeRuntimeConfig(raw);
   const models = createModels();
   for (const provider of normalized.providers) {
-    models.setProvider(withRequestBudget(buildProvider(provider)));
+    models.setProvider(withBillionContextOutputRepair(buildProvider(provider)));
   }
   const extensions = resolveRuntimeExtensions(normalized);
   const hindsight = extensions.hindsight?.enabled ? extensions.hindsight.config : undefined;
@@ -427,7 +427,7 @@ export function syncModelsFromRuntimeConfig(models, raw) {
   const normalized = normalizeRuntimeConfig(raw);
   models.clearProviders();
   for (const provider of normalized.providers) {
-    models.setProvider(withRequestBudget(buildProvider(provider)));
+    models.setProvider(withBillionContextOutputRepair(buildProvider(provider)));
   }
   return normalized;
 }
@@ -524,7 +524,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver, stream
   });
   const models = existingModels ?? createModels();
   models.clearProviders();
-  for (const provider of built) models.setProvider(withRequestBudget(provider));
+  for (const provider of built) models.setProvider(withBillionContextOutputRepair(provider));
   return { models, botModels };
 }
 

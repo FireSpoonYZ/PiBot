@@ -874,14 +874,14 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 - `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
 - 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
 
-BC 接管当前会话后，Host 不再提前触发 SDK 的阈值／后台压缩，保留手动 `/compact` 和 SDK 原生溢出兜底。对支持预压的模型路径，Host 在插件和 Durable 贡献之后计量实际模型视图；较大的请求可以先让 BC 折叠旧历史，再重建并复核预算。模型尚未输出就明确拒绝超限时，可以在同一个生成任务里用较小的视图重试，不重投用户消息、不重跑工具。BC 不删除原始历史；窗口估计也不是 provider 接受请求的保证。
+BC 接管当前会话后，由 BC 负责发送前压缩，手动 `/compact` 和 SDK 原生溢出兜底继续适用。支持预压缩的模型可以根据请求估算先折叠旧历史。模型服务判定上下文是否超限。模型尚未输出就返回超限时，Host 可以在同一个生成任务里用较小的视图重试，沿用已提交的用户消息和工具结果。BC 保留原始历史。
 
 pi-durable 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败需要按当前生成任务的取消保护处理；此前内嵌实现的故障验收不等于新插件链路已验证。
 
 ### 当前约定：自动压缩与失败闭环
 
 - **压缩**：未被 BC 接管的会话维持 SDK 默认阈值、后台与溢出压缩。中心全局启用 BC 后为没有显式绑定的既有/新 Bot 默认开启绑定；显式关闭和已有 overrides 保留。SDK 写入新上下文边界时，BC 重建当前投影，不删除原文。
-- **预算**：prepare 与最终守卫都用 cutoff 视图的 SDK usage+尾部估计，插件投影按有序子序列 + 增量计费；真实越限才 CONTEXT_LIMIT，不按整包 JSON 误杀。
+- **预算**使用 cutoff 视图的 SDK usage 和尾部估计，插件投影按有序子序列和增量计量。该估算用于压缩与输出预算调整。
 - **失败**：只结算本冻结请求批；诊断写 GenerationFailureState 家族（String(taskId) 键、固定安全文案），并向原请求 replyTo 发普通 bot-author `[Host 执行失败]` 回执（前缀只是标签，不提供可信 Host 身份，信封 author 仍是实际 Bot）。旧 scope 闸门错误经迁移边界封存、不重放 backlog，新到消息正常执行。已实跑：委派发起方插入 >20k token 填充后手动 compact，恢复接收方后收到一次稳定 messageId 的 MODEL_REQUIRED 普通 bot 回信（replyTo 原请求），发起方在原 primary 自动报告错误；修复模型后无 resumeWork/无重发旧请求，同一 DM 新请求与回信成功，双方 lastError 归零；Host 重启未重复发失败回执。
 - **LIVE**：blocking 与手动压缩显示 compacting（手动 compacting.startedAt 与原生任务一致），后台压缩不抢占 running；失败展示安全 failed.error；计时用冻结轮 frozenAt / nativeTask.startedAt，不取历史用户消息日期。
 
@@ -934,7 +934,7 @@ Bot 消息通信是异步的：`send_to` 落账后立即返回 stored 回执，�
 
 `read_scope` 页为 `{deviceId,botId,scopeId,items,nextCursor}`。整页超过字节预算只在 item 边界缩短，游标从**最后实际返回**的 localId 继续，不能跳过未显示条目；未缩页时保留查询 nextCursor。`list_scopes` 同样按完整 scope 截页，不输出损坏/半截 JSON。单个 scope 经 JSON 转义后也可能超过 50KiB：若当前页已有可返回前缀，则返回该前缀，nextOffset 指向首个未返回的 scope；若从当前 offset 开始的第一项就放不下，则返回 `isError:true` 的 `RESPONSE_TOO_LARGE` 工具错误。不跳过 scope、不截断标识符，也不返回 nextOffset 不前进的空成功页。
 
-预览限制不修改 `messages.sqlite` 信封、`MessageLog.history/inbox/replies` 原文或 `workHistory` 原始来源 Entries。需要完整正文时由已授权的 Host 原始查询读取；模型上下文原文过大则按前述 CONTEXT_LIMIT 阻塞，不通过截断假装已经处理。
+`messages.sqlite` 信封、`MessageLog.history/inbox/replies` 原文和 `workHistory` 原始来源 Entries 均保留完整记录。需要完整正文时，由已授权的 Host 原始查询读取。
 
 ### 本机 HTTP、客户端和 CLI
 

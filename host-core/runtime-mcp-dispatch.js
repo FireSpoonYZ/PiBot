@@ -24,11 +24,7 @@ import {
 } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
 import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
-import {
-  assertValidAntigravityTurnContext,
-  countRequestTokens,
-  setRequestBudget,
-} from './request-context.js';
+import { assertValidAntigravityTurnContext } from './request-context.js';
 import {
   MCP_DISPATCH_EXTENSION_NAME,
   MCP_SAFE_TOOL_POLICY,
@@ -183,10 +179,6 @@ export function createMcpDispatchExtension({
           const agentState = await harness.snapshot(AgentDoc, api.conversationId, context);
           assertMcpSafeAgentState(agentState);
           assertMcpSafeProviderRequest(request);
-          if (Array.isArray(request?.messages)) {
-            const total = countRequestTokens(request);
-            setRequestBudget(request.messages, total, model.contextWindow);
-          }
           return undefined;
         } catch (err) {
           if (!context?.abortSignal?.aborted) {
