@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft, CheckCircle2, ChevronRight, HelpCircle, Loader2, Pencil, Trash2, X } from 'lucide-react';
 import { ActionBar, ConfirmDialog } from '../components/ui';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
@@ -197,6 +197,7 @@ export function TaskDetailView({
   const [editConflict, setEditConflict] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const deleteBtnRef = useRef<HTMLButtonElement>(null);
   const [adoptionPending, setAdoptionPending] = useState<'keep' | 'redo' | 'dismiss' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const adoptionBusy = adoptionPending !== null;
@@ -752,6 +753,7 @@ export function TaskDetailView({
 
               <ActionBar align="between" className="req-edit-actions">
                 <button
+                  ref={deleteBtnRef}
                   type="button"
                   className="tb-danger-link"
                   disabled={saving || deleting}
@@ -986,7 +988,9 @@ export function TaskDetailView({
         cancelLabel={t('取消', 'Cancel')}
         confirmLabel={deleting ? t('删除中…', 'Deleting…') : t('删除任务', 'Delete task')}
         onCancel={() => {
-          if (!deleting) setDeleteConfirmOpen(false);
+          if (deleting) return;
+          setDeleteConfirmOpen(false);
+          requestAnimationFrame(() => deleteBtnRef.current?.focus());
         }}
         onConfirm={() => void handleConfirmDeleteTask()}
       />

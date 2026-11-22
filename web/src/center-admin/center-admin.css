@@ -760,11 +760,18 @@ a.ca-btn:focus {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
+  flex-wrap: wrap !important;
   gap: 8px;
+  max-width: 100%;
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--ca-border);
+}
+
+.ca-form-actions > .ca-inline-row,
+.ca-modal-footer > .ca-inline-row {
+  flex-wrap: wrap !important;
+  max-width: 100%;
 }
 
 .ca-grid-2 {
@@ -1125,8 +1132,9 @@ a.ca-btn:focus {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
+  flex-wrap: wrap !important;
   gap: var(--space-2, 8px);
+  max-width: 100%;
   margin-top: var(--space-1, 4px);
   padding-top: var(--space-3, 12px);
   border-top: 1px solid var(--ca-border);
@@ -1388,7 +1396,7 @@ a.ca-btn:focus {
 
 .ca-menu-pop {
   position: fixed;
-  z-index: calc(var(--z-dialog, 300) + 10);
+  z-index: var(--z-dropdown, 100);
   min-width: 156px;
   max-width: min(260px, calc(100vw - 16px));
   max-height: calc(100dvh - 16px);
@@ -1401,6 +1409,7 @@ a.ca-btn:focus {
   padding: var(--space-1, 4px);
   display: flex;
   flex-direction: column;
+  outline: none;
 }
 
 .ca-menu-item {
@@ -1730,7 +1739,12 @@ a.ca-btn:focus {
 
 .ca-form-actions-between {
   justify-content: space-between;
-  flex-wrap: wrap;
+  flex-wrap: wrap !important;
+}
+
+.ca-form-actions-between > .ca-inline-row:last-child {
+  margin-left: auto;
+  justify-content: flex-end;
 }
 
 /* Provider Drawer Model List */

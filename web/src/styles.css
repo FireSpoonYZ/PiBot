@@ -86,7 +86,8 @@
   --surface-elevated: var(--color-surface-2);
   --danger-soft: color-mix(in srgb, var(--color-danger) 12%, transparent);
   --top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
-  --bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --raw-safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --bottom: max(0px, calc(var(--raw-safe-bottom) - var(--ime-bottom, 0px)));
 }
 :root[data-theme=dark] {
   color-scheme: dark;
@@ -412,11 +413,11 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 /* Drawers and sheets share typography, not nested card scaffolding. */
 @keyframes dialog-top-pop-in { from { opacity: 0; transform: translateX(-50%) scale(.96); } to { opacity: 1; transform: translateX(-50%) scale(1); } }
 .dialog-overlay { position: fixed; inset: 0; z-index: calc(var(--z-dialog) - 1); background: var(--color-scrim); animation: fade-in var(--dur-fast) var(--ease-out); }
-.dialog-content { position: fixed; z-index: var(--z-dialog); left: 50%; top: calc(var(--top, 0px) + min(14vh, 96px)); transform: translateX(-50%); background: var(--bg); border: 1px solid var(--color-line); width: min(560px,calc(100% - var(--space-8))); max-height: calc(var(--viewport-height,100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--bottom, 0px), var(--ime-bottom, 0px)) - var(--space-4)); border-radius: var(--radius-lg); display: flex; flex-direction: column; outline: none; overflow: hidden; overscroll-behavior: contain; box-shadow: 0 12px 32px color-mix(in srgb, var(--color-scrim) 24%, transparent); }
+.dialog-content { position: fixed; z-index: var(--z-dialog); left: 50%; top: calc(var(--top, 0px) + min(14vh, 96px)); transform: translateX(-50%); background: var(--bg); border: 1px solid var(--color-line); width: min(560px,calc(100% - var(--space-8))); max-height: calc(var(--viewport-height,100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--raw-safe-bottom), var(--ime-bottom, 0px)) - var(--space-4)); border-radius: var(--radius-lg); display: flex; flex-direction: column; outline: none; overflow: hidden; overscroll-behavior: contain; box-shadow: 0 12px 32px color-mix(in srgb, var(--color-scrim) 24%, transparent); }
 .dialog-content:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
-.dialog-content.bs-confirm-dialog, .ui-overlay-content.is-center { top: calc(var(--top, 0px) + min(14vh, 96px)); transform: translateX(-50%); max-height: calc(var(--viewport-height,100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--bottom, 0px), var(--ime-bottom, 0px)) - var(--space-4)); }
+.dialog-content.bs-confirm-dialog, .ui-overlay-content.is-center { top: calc(var(--top, 0px) + min(14vh, 96px)); transform: translateX(-50%); max-height: calc(var(--viewport-height,100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--raw-safe-bottom), var(--ime-bottom, 0px)) - var(--space-4)); }
 .ui-overlay-content.is-center { animation-name: dialog-top-pop-in; }
-.dialog-content.sheet { top: auto; bottom: var(--ime-bottom, 0px); transform: translateX(-50%); width: min(640px,100%); height: auto; border-bottom: 0; border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: max(calc(var(--bottom) - var(--ime-bottom, 0px)), 0px); max-height: calc(var(--viewport-height,100dvh) - var(--top) - var(--ime-bottom, 0px) - 18px); transition: height var(--dur-base) var(--ease-out), max-height var(--dur-base) var(--ease-out); }
+.dialog-content.sheet { top: auto; bottom: var(--ime-bottom, 0px); transform: translateX(-50%); width: min(640px,100%); height: auto; border-bottom: 0; border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: var(--bottom); max-height: calc(var(--viewport-height,100dvh) - var(--top) - var(--ime-bottom, 0px) - 18px); transition: height var(--dur-base) var(--ease-out), max-height var(--dur-base) var(--ease-out); }
 .ui-overlay-content.is-sheet, .bs-sheet { height: auto; transition: height var(--dur-base) var(--ease-out), max-height var(--dur-base) var(--ease-out); }
 .dialog-content.drawer { left: 0; top: 0; bottom: 0; transform: none; border-left: 0; border-block: 0; border-radius: 0 var(--radius-lg) var(--radius-lg) 0; width: min(360px,88%); max-height: none; padding-block: var(--top) var(--bottom); }
 .sheet-handle { height: var(--space-1); width: 36px; border-radius: var(--radius-full); background: var(--line); margin: 10px auto var(--space-1); flex: none; }

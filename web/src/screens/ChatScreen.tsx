@@ -112,6 +112,120 @@ const CHAT_IMAGE_ERROR_NOTICE_ID = 'chat-image-error';
 const CHAT_TASK_ACTION_ERROR_NOTICE_ID = 'chat-task-action-error';
 const CHAT_OFFLINE_NOTICE_ID = 'chat-offline-notice';
 
+function isImeOrPreventedKeyEvent(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.isComposing || event.keyCode === 229;
+}
+
+function getEnabledMenuItems(menuEl: HTMLElement | null): HTMLElement[] {
+  if (!menuEl) return [];
+  return Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+}
+
+function useMenuKeyboard({
+  open,
+  menuRef,
+  triggerRef,
+  onClose,
+}: {
+  open: boolean;
+  menuRef: RefObject<HTMLDivElement | null>;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const openFrameRef = useRef<number | null>(null);
+
+  const dismiss = useCallback((restoreFocus: boolean) => {
+    if (openFrameRef.current !== null) {
+      cancelAnimationFrame(openFrameRef.current);
+      openFrameRef.current = null;
+    }
+    const trigger = triggerRef.current;
+    onCloseRef.current();
+    if (restoreFocus && trigger?.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, [triggerRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    openFrameRef.current = requestAnimationFrame(() => {
+      openFrameRef.current = null;
+      const menu = menuRef.current;
+      if (!menu?.isConnected) return;
+      const firstItem = getEnabledMenuItems(menu)[0];
+      (firstItem ?? menu).focus({ preventScroll: true });
+    });
+    return () => {
+      if (openFrameRef.current !== null) {
+        cancelAnimationFrame(openFrameRef.current);
+        openFrameRef.current = null;
+      }
+    };
+  }, [open, menuRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    return registerOverlayBackHandler(() => dismiss(true));
+  }, [open, dismiss]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismiss(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, dismiss]);
+
+  const onMenuKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) {
+        return;
+      }
+      if (event.key === 'Tab') {
+        dismiss(false);
+        return;
+      }
+      const menuItems = getEnabledMenuItems(menuRef.current);
+      if (menuItems.length === 0) return;
+
+      const activeIndex = menuItems.indexOf(document.activeElement as HTMLElement);
+      let nextIndex: number | null = null;
+      switch (event.key) {
+        case 'ArrowDown':
+          nextIndex = activeIndex === -1 ? 0 : (activeIndex + 1) % menuItems.length;
+          break;
+        case 'ArrowUp':
+          nextIndex =
+            activeIndex === -1
+              ? menuItems.length - 1
+              : (activeIndex - 1 + menuItems.length) % menuItems.length;
+          break;
+        case 'Home':
+          nextIndex = 0;
+          break;
+        case 'End':
+          nextIndex = menuItems.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      menuItems[nextIndex]?.focus({ preventScroll: true });
+    },
+    [menuRef, dismiss],
+  );
+
+  return { onMenuKeyDown };
+}
+
 export interface ChatScreenProps {
   visible: boolean;
   anyDrawerOpen: boolean;
@@ -450,6 +564,11 @@ export function ChatScreen({
   const [remoteFloatingDockEl, setRemoteFloatingDockEl] = useState<HTMLDivElement | null>(null);
 
   const composerAreaRef = useRef<HTMLElement | null>(null);
+  const connTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
+  const localPlusTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const localPlusMenuRef = useRef<HTMLDivElement | null>(null);
   useBottomChromeMeasure(composerAreaRef, visible);
 
   const tRef = useRef(t);
@@ -587,56 +706,45 @@ export function ChatScreen({
     if (composerMenuOpenRef.current) actionsRef.current.onCloseComposerMenu();
   }, [localSlashVisible]);
 
-  useEffect(() => {
-    if (!connPopoverVisible) return;
-    return registerOverlayBackHandler(() => setConnPopoverOpen(false));
-  }, [connPopoverVisible]);
+  const closeConnPopover = useCallback((restoreFocus: boolean) => {
+    const trigger = connTriggerRef.current;
+    setConnPopoverOpen(false);
+    if (restoreFocus && trigger?.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, []);
 
   useEffect(() => {
     if (!connPopoverVisible) return;
+    return registerOverlayBackHandler(() => closeConnPopover(true));
+  }, [connPopoverVisible, closeConnPopover]);
+
+  useEffect(() => {
+    if (!connPopoverVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
-        setConnPopoverOpen(false);
+        closeConnPopover(true);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverVisible]);
+  }, [connPopoverVisible, closeConnPopover]);
 
-  useEffect(() => {
-    if (!topMenuVisible) return;
-    return registerOverlayBackHandler(() => actionsRef.current.onCloseChatTopMenu());
-  }, [topMenuVisible]);
+  const { onMenuKeyDown: onMoreMenuKeyDown } = useMenuKeyboard({
+    open: topMenuVisible,
+    menuRef: moreMenuRef,
+    triggerRef: moreTriggerRef,
+    onClose: onCloseChatTopMenu,
+  });
 
-  useEffect(() => {
-    if (!topMenuVisible) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        actionsRef.current.onCloseChatTopMenu();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [topMenuVisible]);
-
-  useEffect(() => {
-    if (!localPlusMenuVisible) return;
-    return registerOverlayBackHandler(() => actionsRef.current.onCloseComposerMenu());
-  }, [localPlusMenuVisible]);
-
-  useEffect(() => {
-    if (!localPlusMenuVisible) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        actionsRef.current.onCloseComposerMenu();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [localPlusMenuVisible]);
+  const { onMenuKeyDown: onLocalPlusMenuKeyDown } = useMenuKeyboard({
+    open: localPlusMenuVisible,
+    menuRef: localPlusMenuRef,
+    triggerRef: localPlusTriggerRef,
+    onClose: onCloseComposerMenu,
+  });
 
   useEffect(() => {
     if (!localSlashVisible) return;
@@ -646,6 +754,7 @@ export function ChatScreen({
   useEffect(() => {
     if (!localSlashVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         dismissLocalSlash();
@@ -1045,6 +1154,7 @@ export function ChatScreen({
                 {connectionPhase !== 'online' ? (
                   <button
                     type="button"
+                    ref={connTriggerRef}
                     className={`grok-chat-pill-sub is-conn-trigger is-${connectionPhase}`}
                     aria-haspopup="dialog"
                     aria-expanded={connPopoverVisible}
@@ -1085,6 +1195,7 @@ export function ChatScreen({
 
         <button
           type="button"
+          ref={moreTriggerRef}
           className="grok-floating-circle-btn grok-chat-header-more"
           aria-label={t('更多选项', 'More options')}
           aria-haspopup="menu"
@@ -1151,10 +1262,18 @@ export function ChatScreen({
         {topMenuVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={onCloseChatTopMenu} />
-            <div className="grok-floating-menu" role="menu">
+            <div
+              ref={moreMenuRef}
+              className="grok-floating-menu"
+              role="menu"
+              aria-label={t('更多选项', 'More options')}
+              tabIndex={-1}
+              onKeyDown={onMoreMenuKeyDown}
+            >
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 style={{ whiteSpace: 'nowrap' }}
                 onClick={() => onOpenBotProfile(activeBot)}
               >
@@ -1166,6 +1285,7 @@ export function ChatScreen({
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 style={{ whiteSpace: 'nowrap' }}
                 onClick={() => onOpenBotDmList(activeBot)}
               >
@@ -1178,6 +1298,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   style={{ whiteSpace: 'nowrap' }}
                   onClick={() => {
                     onCloseChatTopMenu();
@@ -1193,6 +1314,7 @@ export function ChatScreen({
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseChatTopMenu();
@@ -1208,6 +1330,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onSetPrimaryBot(activeBot)}
                 >
@@ -1221,6 +1344,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onRequestArchiveBot(activeBot)}
                 >
@@ -1234,6 +1358,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onUnarchiveBot(activeBot)}
                 >
@@ -1247,6 +1372,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   className="danger"
                   style={{ whiteSpace: 'nowrap' }}
                   onClick={() => onRequestDeleteBot(activeBot)}
@@ -1263,6 +1389,7 @@ export function ChatScreen({
                   <button
                     type="button"
                     role="menuitem"
+                    tabIndex={-1}
                     className="danger"
                     style={{ whiteSpace: 'nowrap' }}
                     onClick={() => {
@@ -1726,10 +1853,18 @@ export function ChatScreen({
             )}
 
             {localPlusMenuVisible && (
-              <div className="bot-plus-popover" role="menu">
+              <div
+                ref={localPlusMenuRef}
+                className="bot-plus-popover"
+                role="menu"
+                aria-label={t('更多操作', 'More actions')}
+                tabIndex={-1}
+                onKeyDown={onLocalPlusMenuKeyDown}
+              >
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   style={{ whiteSpace: 'nowrap' }}
                   className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
                   aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
@@ -1756,6 +1891,7 @@ export function ChatScreen({
                   <button
                     type="button"
                     role="menuitem"
+                    tabIndex={-1}
                     style={{ whiteSpace: 'nowrap' }}
                     className={activeBot.hostKind === 'remote' ? 'is-unsupported' : undefined}
                     aria-disabled={activeBot.hostKind === 'remote' ? 'true' : undefined}
@@ -1782,6 +1918,7 @@ export function ChatScreen({
                 <button
                   type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   className="danger"
                   style={{ whiteSpace: 'nowrap' }}
                   disabled={Boolean(activeEditing)}
@@ -1849,6 +1986,7 @@ export function ChatScreen({
             <div className="grok-composer-row">
               <button
                 type="button"
+                ref={localPlusTriggerRef}
                 className={`grok-composer-plus-circle${localPlusMenuVisible ? ' active' : ''}`}
                 aria-label={t('更多操作', 'More actions')}
                 aria-haspopup="menu"
@@ -1902,7 +2040,13 @@ export function ChatScreen({
                     onPickLocalImages('photos', files);
                   }}
                   onKeyDown={e => {
-                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    if (e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    if (localSlashVisible && e.key === 'Escape') {
+                      setLocalSlashDismissedText(effectiveLocalDraft);
+                      if (slash.onKeyDown(e)) return;
+                      e.preventDefault();
+                      return;
+                    }
                     if (e.key === 'Escape' && activeEditing && !editSubmitting) {
                       e.preventDefault();
                       onCancelEditTurn();

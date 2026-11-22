@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { LabelStack } from '../layout';
 import { useText } from '../ui';
 import { readTabCache, writeTabCache } from './cache';
@@ -28,6 +29,7 @@ import {
   useUiLocale,
 } from './primitives';
 import type {
+  CenterAdminTab,
   CenterBotRef,
   CenterDevice,
   WebhookEvent,
@@ -79,10 +81,14 @@ export function WebhooksTab({
   api,
   active = true,
   cacheKey = 'default',
+  onRegisterNavGuard,
+  onNavigateTab,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
+  onRegisterNavGuard?: (guard: ((nextTab: CenterAdminTab) => boolean) | null) => void;
+  onNavigateTab?: (tab: CenterAdminTab) => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
@@ -121,6 +127,7 @@ export function WebhooksTab({
   const [tokenCopied, setTokenCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState<'token' | 'curl' | null>(null);
   const [discardTokenOpen, setDiscardTokenOpen] = useState(false);
+  const [pendingTargetTab, setPendingTargetTab] = useState<CenterAdminTab | null>(null);
 
   // Single top-level destructive confirmation
   const [confirmAction, setConfirmAction] = useState<'rotate' | 'delete' | null>(null);
@@ -135,6 +142,15 @@ export function WebhooksTab({
   const loadGenRef = useRef(0);
   const eventsGenRef = useRef(0);
   const copyTimerRef = useRef<number | null>(null);
+  const editorOpenRef = useRef(editorOpen);
+  editorOpenRef.current = editorOpen;
+  const hookBusyRef = useRef(hookBusy);
+  hookBusyRef.current = hookBusy;
+  const revealedTokenRef = useRef(revealedToken);
+  revealedTokenRef.current = revealedToken;
+  const tokenCopiedRef = useRef(tokenCopied);
+  tokenCopiedRef.current = tokenCopied;
+  const requestCloseEditorRef = useRef<() => void>(() => {});
 
   const { showNotice, clearNotice } = useCaTabNotices('webhooks', active);
 
@@ -288,6 +304,8 @@ export function WebhooksTab({
   }, [active, editorOpen, loadWebhookEventsForRoutes, routes]);
 
   const resetTokenReveal = () => {
+    revealedTokenRef.current = null;
+    tokenCopiedRef.current = false;
     setRevealedToken(null);
     setTokenCopied(false);
     setCopiedKind(null);
@@ -295,20 +313,60 @@ export function WebhooksTab({
 
   const closeEditorImmediately = () => {
     setDiscardTokenOpen(false);
+    setPendingTargetTab(null);
     setConfirmAction(null);
     setEditorError('');
+    editorOpenRef.current = false;
     resetTokenReveal();
     setEditorOpen(false);
   };
 
   const requestCloseEditor = () => {
-    if (hookBusy) return;
-    if (revealedToken && !tokenCopied) {
+    if (hookBusyRef.current) return;
+    if (revealedTokenRef.current && !tokenCopiedRef.current) {
+      setPendingTargetTab(null);
       setDiscardTokenOpen(true);
       return;
     }
     closeEditorImmediately();
   };
+  requestCloseEditorRef.current = requestCloseEditor;
+
+  const handleConfirmDiscardToken = () => {
+    const targetTab = pendingTargetTab;
+    closeEditorImmediately();
+    if (targetTab) {
+      onNavigateTab?.(targetTab);
+    }
+  };
+
+  // Block tab switches while create/rotate/save is in flight or an uncopied one-time token is shown
+  useEffect(() => {
+    if (!active || !onRegisterNavGuard) return;
+    const guard = (nextTab: CenterAdminTab): boolean => {
+      if (hookBusyRef.current) {
+        return false;
+      }
+      if (editorOpenRef.current && revealedTokenRef.current && !tokenCopiedRef.current) {
+        setPendingTargetTab(nextTab);
+        setDiscardTokenOpen(true);
+        return false;
+      }
+      return true;
+    };
+    onRegisterNavGuard(guard);
+    return () => {
+      onRegisterNavGuard(null);
+    };
+  }, [active, onRegisterNavGuard]);
+
+  // Intercept app/hardware Back while editor is open (blocks during busy, prompts if token uncopied)
+  useEffect(() => {
+    if (!active || !editorOpen) return;
+    return registerOverlayBackHandler(() => {
+      requestCloseEditorRef.current();
+    });
+  }, [active, editorOpen]);
 
   const openCreateWebhook = () => {
     setEditingRoute(null);
@@ -318,7 +376,9 @@ export function WebhooksTab({
     setHookInstruction('');
     setHookEnabled(true);
     setEditorError('');
+    setPendingTargetTab(null);
     resetTokenReveal();
+    editorOpenRef.current = true;
     setEditorOpen(true);
   };
 
@@ -329,7 +389,9 @@ export function WebhooksTab({
     setHookInstruction(route.instruction);
     setHookEnabled(route.enabled);
     setEditorError('');
+    setPendingTargetTab(null);
     resetTokenReveal();
+    editorOpenRef.current = true;
     setEditorOpen(true);
   };
 
@@ -344,6 +406,7 @@ export function WebhooksTab({
       setEditorError(t('无法自动复制到剪贴板，请手动选中上方一次性密钥进行复制。', 'Could not copy to clipboard automatically. Select and copy the one-time token above manually.'));
       return;
     }
+    tokenCopiedRef.current = true;
     setTokenCopied(true);
     setCopiedKind(kind);
     if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
@@ -369,6 +432,7 @@ export function WebhooksTab({
       return;
     }
 
+    hookBusyRef.current = true;
     setHookBusy(true);
     setEditorError('');
     try {
@@ -383,7 +447,7 @@ export function WebhooksTab({
         setRoutes(prev => prev.map(r => (r.id === updated.id ? updated : r)));
         setEditingRoute(updated);
         setNotice(t(`已保存 Webhook「${updated.name}」`, `Saved webhook "${updated.name}"`));
-        if (!revealedToken || tokenCopied) {
+        if (!revealedTokenRef.current || tokenCopiedRef.current) {
           closeEditorImmediately();
         }
       } else {
@@ -394,9 +458,12 @@ export function WebhooksTab({
           instruction: hookInstruction.trim(),
           enabled: hookEnabled,
         });
+        const nextRevealed = { url: receipt.route.url, token: receipt.token };
         setRoutes(prev => [...prev, receipt.route]);
         setEditingRoute(receipt.route);
-        setRevealedToken({ url: receipt.route.url, token: receipt.token });
+        revealedTokenRef.current = nextRevealed;
+        tokenCopiedRef.current = false;
+        setRevealedToken(nextRevealed);
         setTokenCopied(false);
         setCopiedKind(null);
         setNotice(t(`已创建 Webhook「${receipt.route.name}」，请复制保存下方一次性密钥`, `Created webhook "${receipt.route.name}". Copy and store the one-time token below.`));
@@ -405,6 +472,7 @@ export function WebhooksTab({
       const reason = errorMessage(err, t('请稍后重试', 'Please try again'));
       setEditorError(t(`保存 Webhook 失败：${reason}。请检查输入或中心连接后重试。`, `Failed to save webhook: ${reason}. Check your inputs or center connection and retry.`));
     } finally {
+      hookBusyRef.current = false;
       setHookBusy(false);
     }
   };
@@ -431,14 +499,18 @@ export function WebhooksTab({
 
   const handleRotateWebhookToken = async () => {
     if (!editingRoute) return;
+    hookBusyRef.current = true;
     setHookBusy(true);
     setEditorError('');
     try {
       const receipt = await api.rotateWebhookToken(editingRoute.id);
+      const nextRevealed = { url: receipt.route.url, token: receipt.token };
       setConfirmAction(null);
       setEditingRoute(receipt.route);
       setRoutes(prev => prev.map(r => (r.id === receipt.route.id ? receipt.route : r)));
-      setRevealedToken({ url: receipt.route.url, token: receipt.token });
+      revealedTokenRef.current = nextRevealed;
+      tokenCopiedRef.current = false;
+      setRevealedToken(nextRevealed);
       setTokenCopied(false);
       setCopiedKind(null);
       setNotice(t('已生成新的 Bearer 密钥，旧密钥已立即失效', 'New Bearer token generated; the previous token is now invalid'));
@@ -447,6 +519,7 @@ export function WebhooksTab({
       const reason = errorMessage(err, t('请求失败', 'Request failed'));
       setEditorError(t(`轮换密钥失败：${reason}。请重试。`, `Failed to rotate token: ${reason}. Please retry.`));
     } finally {
+      hookBusyRef.current = false;
       setHookBusy(false);
     }
   };
@@ -454,6 +527,7 @@ export function WebhooksTab({
   const handleDeleteWebhook = async () => {
     if (!editingRoute) return;
     const deleted = editingRoute;
+    hookBusyRef.current = true;
     setHookBusy(true);
     setEditorError('');
     try {
@@ -472,6 +546,7 @@ export function WebhooksTab({
       const reason = errorMessage(err, t('请求失败', 'Request failed'));
       setEditorError(t(`删除 Webhook 失败：${reason}。请检查中心连接后重试。`, `Failed to delete webhook: ${reason}. Check your center connection and retry.`));
     } finally {
+      hookBusyRef.current = false;
       setHookBusy(false);
     }
   };
@@ -793,8 +868,11 @@ export function WebhooksTab({
           confirmLabel={t('放弃密钥并离开', 'Discard Token & Leave')}
           cancelLabel={t('留下并复制', 'Stay and Copy')}
           danger
-          onCancel={() => setDiscardTokenOpen(false)}
-          onConfirm={closeEditorImmediately}
+          onCancel={() => {
+            setDiscardTokenOpen(false);
+            setPendingTargetTab(null);
+          }}
+          onConfirm={handleConfirmDiscardToken}
         />
       </div>
     );

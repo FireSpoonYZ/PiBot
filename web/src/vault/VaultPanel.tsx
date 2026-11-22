@@ -1,5 +1,5 @@
 // 单 Bot 密码库面板：零闪烁乐观授权、主密码解锁/创建、+ 新增凭据并授权、全局操作收纳于底部。
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, Lock, Plus, RefreshCw } from 'lucide-react';
 import type {
   ExternalVaultControlInput,
@@ -11,7 +11,7 @@ import type {
   VaultStatus,
 } from '../../../host-core/index.js';
 import { Badge, Disclosure, Switch } from '../bot-settings/primitives';
-import { ActionBar, ConfirmDialog } from '../components/ui';
+import { ActionBar, Button } from '../components/ui';
 import { useNotice } from '../notice';
 import { ErrorNotice, useText } from '../ui';
 import './VaultPanel.css';
@@ -78,9 +78,31 @@ function VaultSession({
   const callRef = useRef(call);
   const revisionRef = useRef<number | null>(null);
   const extRevisionRef = useRef<number | null>(null);
+  const deleteConfirmId = useId();
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const shouldRestoreDeleteFocusRef = useRef(false);
   callRef.current = call;
   revisionRef.current = revision;
   extRevisionRef.current = extRevision;
+
+  const cancelDelete = () => {
+    shouldRestoreDeleteFocusRef.current = true;
+    setDeletingTarget(null);
+  };
+
+  useEffect(() => {
+    if (deletingTarget) {
+      deleteCancelRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (shouldRestoreDeleteFocusRef.current) {
+      shouldRestoreDeleteFocusRef.current = false;
+      if (deleteTriggerRef.current?.isConnected) {
+        deleteTriggerRef.current.focus({ preventScroll: true });
+      }
+    }
+  }, [deletingTarget]);
 
   function clearForms() {
     if (!root.current) return;
@@ -241,6 +263,9 @@ function VaultSession({
       }
     } catch (err) {
       if (!active.current) return;
+      if (input.action === 'delete') {
+        shouldRestoreDeleteFocusRef.current = true;
+      }
       setDeletingTarget(null);
       const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
       if (code === 'VAULT_LOCKED') {
@@ -429,6 +454,7 @@ function VaultSession({
             onClick={() => {
               clearForms();
               setEditor(null);
+              shouldRestoreDeleteFocusRef.current = false;
               setDeletingTarget(null);
               setChangingPassword(v => !v);
             }}
@@ -584,6 +610,7 @@ function VaultSession({
                 clearForms();
                 setEditor('new');
                 setAllowed(true);
+                shouldRestoreDeleteFocusRef.current = false;
                 setDeletingTarget(null);
               }}
             >
@@ -759,21 +786,78 @@ function VaultSession({
             <ActionBar align="end" className="vault-actions">
               {editing ? (
                 <button
+                  ref={deleteTriggerRef}
                   className="bs-btn is-danger is-small"
                   type="button"
                   disabled={disabled}
-                  onClick={() => setDeletingTarget(editing)}
+                  aria-expanded={deletingTarget?.secretRef === editing.secretRef}
+                  aria-controls={deletingTarget?.secretRef === editing.secretRef ? deleteConfirmId : undefined}
+                  onClick={() => {
+                    if (deletingTarget?.secretRef === editing.secretRef) {
+                      deleteCancelRef.current?.focus({ preventScroll: true });
+                    } else {
+                      shouldRestoreDeleteFocusRef.current = false;
+                      setDeletingTarget(editing);
+                    }
+                  }}
                 >
                   {t('删除凭据', 'Delete credential')}
                 </button>
               ) : null}
-              <button className="bs-btn is-ghost is-small" type="button" onClick={() => setEditor(null)}>
+              <button
+                className="bs-btn is-ghost is-small"
+                type="button"
+                onClick={() => {
+                  shouldRestoreDeleteFocusRef.current = false;
+                  setDeletingTarget(null);
+                  setEditor(null);
+                }}
+              >
                 {t('取消', 'Cancel')}
               </button>
               <button className="bs-btn is-primary is-small" type="submit" disabled={disabled || revision === null}>
                 {editing ? t('保存修改', 'Save changes') : t('保存并授权', 'Save & authorize')}
               </button>
             </ActionBar>
+
+            {deletingTarget && editing && deletingTarget.secretRef === editing.secretRef ? (
+              <div
+                id={deleteConfirmId}
+                className="vault-delete-confirm"
+                role="region"
+                aria-label={t(`确认删除凭据「${deletingTarget.label}」`, `Confirm deleting credential "${deletingTarget.label}"`)}
+              >
+                <p>
+                  <strong>{t(`删除凭据「${deletingTarget.label}」？`, `Delete credential "${deletingTarget.label}"?`)}</strong>
+                </p>
+                <p className="vault-hint">
+                  {t(`删除「${deletingTarget.label}」后无法恢复，此 Host 上所有 Bot 都将立即失去该凭据的使用权限。`, `Deleting "${deletingTarget.label}" cannot be undone. All Bots on this Host will immediately lose access to this credential.`)}
+                </p>
+                <ActionBar align="end" className="vault-actions">
+                  <Button
+                    ref={deleteCancelRef}
+                    variant="secondary"
+                    size="sm"
+                    disabled={disabled}
+                    onClick={cancelDelete}
+                  >
+                    {t('取消', 'Cancel')}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    loading={busy}
+                    disabled={disabled || revision === null}
+                    onClick={() => {
+                      if (!deletingTarget || revision === null) return;
+                      void execute({ action: 'delete', expectedRevision: revision, secretRef: deletingTarget.secretRef });
+                    }}
+                  >
+                    {t('确认删除', 'Confirm delete')}
+                  </Button>
+                </ActionBar>
+              </div>
+            ) : null}
           </fieldset>
         </form>
       ) : null}
@@ -804,6 +888,7 @@ function VaultSession({
                           clearForms();
                           setEditor(item);
                           setAllowed(isAllowed);
+                          shouldRestoreDeleteFocusRef.current = false;
                           setDeletingTarget(null);
                         }}
                       >
@@ -837,25 +922,6 @@ function VaultSession({
           {renderGlobalManagementBody()}
         </Disclosure>
       ) : null}
-
-      <ConfirmDialog
-        open={deletingTarget !== null}
-        danger
-        busy={busy}
-        title={deletingTarget ? t(`删除凭据「${deletingTarget.label}」？`, `Delete credential "${deletingTarget.label}"?`) : ''}
-        description={
-          deletingTarget
-            ? t(`删除「${deletingTarget.label}」后无法恢复，此 Host 上所有 Bot 都将立即失去该凭据的使用权限。`, `Deleting "${deletingTarget.label}" cannot be undone. All Bots on this Host will immediately lose access to this credential.`)
-            : ''
-        }
-        confirmLabel={t('删除凭据', 'Delete credential')}
-        cancelLabel={t('取消', 'Cancel')}
-        onCancel={() => setDeletingTarget(null)}
-        onConfirm={() => {
-          if (!deletingTarget || revision === null) return;
-          void execute({ action: 'delete', expectedRevision: revision, secretRef: deletingTarget.secretRef });
-        }}
-      />
     </section>
   );
 }

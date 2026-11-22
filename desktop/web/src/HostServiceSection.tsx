@@ -2,7 +2,7 @@
 import { Check, Copy, RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Switch } from '../../../web/src/bot-settings/primitives';
-import { ConfirmDialog } from '../../../web/src/components/ui';
+import { ActionBar, Button, Dialog } from '../../../web/src/components/ui';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { hostControl, hostErrorText, hostStatus, type HostControlAction, type HostStatus } from './hostService';
 
@@ -67,7 +67,7 @@ export function useHostService(active = true) {
   }, [active, load]);
 
   const run = useCallback(async (action: HostControlAction) => {
-    if (actionInFlight.current) return false;
+    if (!live.current || actionInFlight.current) return false;
     actionInFlight.current = true;
     setBusy(action);
     setActionError('');
@@ -86,7 +86,9 @@ export function useHostService(active = true) {
     }
   }, [load, t]);
 
-  const clearActionError = useCallback(() => setActionError(''), []);
+  const clearActionError = useCallback(() => {
+    if (live.current) setActionError('');
+  }, []);
 
   const running = host?.running;
   const processLabel = running === true ? t('运行中', 'Running') : running === false ? t('已停止', 'Stopped') : t('状态未知', 'Unknown');
@@ -196,15 +198,20 @@ export function HostServiceSection({
   const resolvedService = service ?? internalService;
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [copiedDiag, setCopiedDiag] = useState(false);
+  const mountedRef = useRef(true);
   const copyDiagTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { host, loadError, actionError, clearActionError, busy, load, run } = resolvedService;
   const state = describeHostService(host, loadError, t);
 
-  useEffect(() => () => {
-    if (copyDiagTimerRef.current !== null) {
-      clearTimeout(copyDiagTimerRef.current);
-      copyDiagTimerRef.current = null;
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyDiagTimerRef.current !== null) {
+        clearTimeout(copyDiagTimerRef.current);
+        copyDiagTimerRef.current = null;
+      }
+    };
   }, []);
 
   const autoLabel = host?.autostartScope === 'user-login' || host?.platform === 'windows' || host?.platform === 'macos'
@@ -261,11 +268,12 @@ export function HostServiceSection({
       ...diagnosticExtra,
     };
     void navigator.clipboard?.writeText(JSON.stringify(payload, null, 2)).then(() => {
+      if (!mountedRef.current) return;
       setCopiedDiag(true);
       if (copyDiagTimerRef.current !== null) clearTimeout(copyDiagTimerRef.current);
       copyDiagTimerRef.current = setTimeout(() => {
         copyDiagTimerRef.current = null;
-        setCopiedDiag(false);
+        if (mountedRef.current) setCopiedDiag(false);
       }, 1800);
     }).catch(() => {});
   };
@@ -332,7 +340,9 @@ export function HostServiceSection({
         </div>
       )}
 
-      <ErrorNotice compact error={actionError} onDismiss={clearActionError} />
+      {!confirmRemove && (
+        <ErrorNotice compact error={actionError} onDismiss={clearActionError} />
+      )}
 
       <details className="settings-diagnostics">
         <summary>{t('服务诊断、日志与高级控制', 'Diagnostics, logs & advanced controls')}</summary>
@@ -380,7 +390,10 @@ export function HostServiceSection({
                     type="button"
                     className="secondary-button danger-outline"
                     disabled={busy !== null}
-                    onClick={() => setConfirmRemove(true)}
+                    onClick={() => {
+                      clearActionError();
+                      setConfirmRemove(true);
+                    }}
                   >
                     <Trash2 size={13} aria-hidden />
                     {t('移除服务登记', 'Remove service')}
@@ -418,24 +431,49 @@ export function HostServiceSection({
         </div>
       </details>
 
-      <ConfirmDialog
+      <Dialog
         open={confirmRemove}
-        danger
-        busy={busy === 'remove'}
-        title={t('移除本机服务登记', 'Remove local service registration')}
-        description={t(
-          '移除登记会立即停止本机后台服务；您的配对凭据与对话数据会保留，后续仍可重新启用。',
-          'Removing registration immediately stops the local background service. Your pairing credentials and chat data are preserved for recovery.',
-        )}
-        confirmLabel={t('确认移除服务', 'Remove service')}
-        cancelLabel={t('取消', 'Cancel')}
-        onCancel={() => setConfirmRemove(false)}
-        onConfirm={() => {
-          void run('remove').then((removed) => {
-            if (removed) setConfirmRemove(false);
-          });
+        onOpenChange={(open) => {
+          if (!open && busy !== 'remove') {
+            setConfirmRemove(false);
+            clearActionError();
+          }
         }}
-      />
+        title={t('移除本机服务登记', 'Remove local service registration')}
+        overlayClassName="bs-confirm-overlay"
+        className="bs-confirm-dialog"
+        closeDisabled={busy === 'remove'}
+      >
+        <p className="secondary">
+          {t('移除登记会立即停止本机后台服务；您的配对凭据与对话数据会保留，后续仍可重新启用。', 'Removing registration immediately stops the local background service. Your pairing credentials and chat data are preserved for recovery.')}
+        </p>
+        <ErrorNotice compact error={actionError} onDismiss={clearActionError} />
+        <ActionBar align="end" className="ui-confirm-actions">
+          <Button
+            variant="secondary"
+            disabled={busy === 'remove'}
+            onClick={() => {
+              setConfirmRemove(false);
+              clearActionError();
+            }}
+          >
+            {t('取消', 'Cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            loading={busy === 'remove'}
+            disabled={busy !== null}
+            onClick={() => {
+              void run('remove').then((removed) => {
+                if (!mountedRef.current) return;
+                if (removed) setConfirmRemove(false);
+              });
+            }}
+          >
+            {t('确认移除服务', 'Remove service')}
+          </Button>
+        </ActionBar>
+      </Dialog>
     </section>
   );
 }

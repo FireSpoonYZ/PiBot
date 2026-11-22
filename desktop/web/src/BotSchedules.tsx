@@ -1,8 +1,8 @@
 // 使用 Host 的调度规则与时区预览执行时间。保存仍走 scheduleTask 的 CAS 协议。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { CalendarClock, ChevronLeft, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { getDefaultScheduleCalendar, ScheduleRule, type ScheduleCalendarDescription, type ScheduleRepeat } from '../../../host-core/schedule-calendar.js';
-import { ActionBar, ConfirmDialog, IconButton, Switch, useDirtyForm } from '../../../web/src/components/ui';
+import { ActionBar, IconButton, Switch, useDirtyForm } from '../../../web/src/components/ui';
 import { toError } from './api';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import './BotSchedules.css';
@@ -171,6 +171,10 @@ export function BotSchedules({
   const [notice, setNotice] = useState<string | null>(null);
   const [editing, setEditing] = useState<'new' | 'edit' | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ScheduleTaskItem | null>(null);
+  const deleteConfirmIdPrefix = useId();
+  const deleteTriggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const deleteCancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const restoreDeleteFocusIdRef = useRef<string | null>(null);
   /** 自定义星期选择展开态：repeat=weekly 且非周一~五/周末预设时为 true。 */
   const [customWeekdays, setCustomWeekdays] = useState(false);
   const [draft, setDraft] = useState<ScheduleDraft>({
@@ -199,6 +203,16 @@ export function BotSchedules({
       mountedRef.current = false;
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (pendingDelete) {
+      deleteCancelButtonRef.current?.focus();
+    } else if (restoreDeleteFocusIdRef.current) {
+      const targetId = restoreDeleteFocusIdRef.current;
+      restoreDeleteFocusIdRef.current = null;
+      deleteTriggerRefs.current.get(targetId)?.focus();
+    }
+  }, [pendingDelete]);
 
   const loadSchedules = useCallback(async () => {
     if (!online) return;
@@ -257,6 +271,8 @@ export function BotSchedules({
     initialDraftSnapshotRef.current = JSON.stringify(nextDraft);
     setDraft(nextDraft);
     setCustomWeekdays(false);
+    restoreDeleteFocusIdRef.current = null;
+    setPendingDelete(null);
     setEditing('new');
     setError(null);
     setNotice(null);
@@ -286,9 +302,17 @@ export function BotSchedules({
     initialDraftSnapshotRef.current = JSON.stringify(nextDraft);
     setDraft(nextDraft);
     setCustomWeekdays(task.repeat === 'weekly' && key !== '1,2,3,4,5' && key !== '6,7');
+    restoreDeleteFocusIdRef.current = null;
+    setPendingDelete(null);
     setEditing('edit');
     setError(null);
     setNotice(null);
+  }
+
+  function cancelPendingDelete(taskId: string) {
+    if (busy) return;
+    restoreDeleteFocusIdRef.current = taskId;
+    setPendingDelete(null);
   }
 
   async function toggleEnabled(task: ScheduleTaskItem) {
@@ -328,12 +352,14 @@ export function BotSchedules({
           revision: task.revision,
         },
       });
+      restoreDeleteFocusIdRef.current = null;
       setPendingDelete(null);
       setEditing(null);
       setNotice(`已删除定时任务「${task.title}」。`);
       await loadSchedules();
     } catch (e) {
       if (mountedRef.current) {
+        restoreDeleteFocusIdRef.current = task.id;
         setPendingDelete(null);
         setError(`删除定时任务失败：${toError(e).message}，请刷新后重试。`);
       }
@@ -489,15 +515,6 @@ export function BotSchedules({
                   type="text"
                   maxLength={80}
                   className="bot-sched-text-input"
-                  style={{
-                    width: '100%',
-                    border: 0,
-                    background: 'transparent',
-                    padding: 0,
-                    fontSize: '0.9rem',
-                    color: 'var(--text)',
-                    outline: 'none',
-                  }}
                   value={draft.title}
                   disabled={busy}
                   placeholder="例如：每日早报汇总 / 定时代码巡检"
@@ -715,6 +732,8 @@ export function BotSchedules({
             const isEnabled = task.enabled !== false;
             const taskTitle = task.title || '未命名定时任务';
             const nextRun = formatNextRun(task.nextRunAt, timeZone, Boolean(task.date));
+            const confirmingDelete = pendingDelete?.id === task.id;
+            const deleteTitleId = `${deleteConfirmIdPrefix}-${task.id}`;
             return (
               <section
                 key={task.id}
@@ -769,19 +788,63 @@ export function BotSchedules({
                         编辑任务
                       </button>
                       <button
+                        ref={(el) => {
+                          if (el) deleteTriggerRefs.current.set(task.id, el);
+                          else deleteTriggerRefs.current.delete(task.id);
+                        }}
                         type="button"
                         className="bot-sched-ghost-btn"
                         style={{
                           color: 'var(--danger)',
                           borderColor: 'color-mix(in srgb, var(--danger) 35%, var(--line))',
                         }}
-                        disabled={!online || busy}
-                        onClick={() => setPendingDelete(task)}
+                        disabled={!online || busy || confirmingDelete}
+                        onClick={() => {
+                          restoreDeleteFocusIdRef.current = null;
+                          setPendingDelete(task);
+                        }}
                       >
                         <Trash2 size={13} aria-hidden="true" />
                         删除任务
                       </button>
                     </ActionBar>
+                    {confirmingDelete ? (
+                      <div
+                        className="bot-sched-inline-confirm"
+                        role="region"
+                        aria-labelledby={deleteTitleId}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape' && !busy) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            cancelPendingDelete(task.id);
+                          }
+                        }}
+                      >
+                        <p className="bot-sched-inline-confirm-text" id={deleteTitleId}>
+                          {`确定删除定时任务「${taskTitle}」？删除后将不再按计划执行，且无法撤销。`}
+                        </p>
+                        <ActionBar align="end" className="bot-sched-inline-confirm-actions" style={{ flexWrap: 'nowrap' }}>
+                          <button
+                            ref={deleteCancelButtonRef}
+                            type="button"
+                            className="bot-sched-ghost-btn"
+                            disabled={busy}
+                            onClick={() => cancelPendingDelete(task.id)}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            className="bot-sched-danger-btn"
+                            disabled={!online || busy}
+                            onClick={() => void deleteTask(task)}
+                          >
+                            {busy ? '删除中…' : '删除任务'}
+                          </button>
+                        </ActionBar>
+                      </div>
+                    ) : null}
                   </div>
                 </details>
               </section>
@@ -789,26 +852,6 @@ export function BotSchedules({
           })}
         </div>
       )}
-
-      <ConfirmDialog
-        open={pendingDelete !== null}
-        title="删除定时任务"
-        description={
-          pendingDelete
-            ? `确定删除定时任务「${pendingDelete.title || '未命名定时任务'}」？删除后将不再按计划执行，且无法撤销。`
-            : ''
-        }
-        danger
-        busy={busy}
-        cancelLabel="取消"
-        confirmLabel={busy ? '删除中…' : '删除任务'}
-        onCancel={() => {
-          if (!busy) setPendingDelete(null);
-        }}
-        onConfirm={() => {
-          if (pendingDelete) void deleteTask(pendingDelete);
-        }}
-      />
     </div>
   );
 }

@@ -3,10 +3,8 @@
  * --bottom 提升到 :root，确保挂载在 document.body 上的 Radix Portal 也能继承软键盘让位。
  * 外壳容器使用 overflow: clip（附 hidden 回退），防止焦点或 scrollIntoView 误滚根节点。 */
 :root {
-  --bottom: max(
-    calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)),
-    0px
-  );
+  --raw-safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --bottom: max(0px, calc(var(--raw-safe-bottom) - var(--ime-bottom, 0px)));
 }
 html, body {
   overflow: hidden;

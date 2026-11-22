@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Check,
@@ -277,12 +277,30 @@ export function GroupSettings({
     requestId: string;
     expectedRevision: number;
   } | null>(null);
+  const dissolveHeadingId = useId();
+  const dissolveToggleButtonRef = useRef<HTMLButtonElement>(null);
+  const dissolveTriggerButtonRef = useRef<HTMLButtonElement>(null);
+  const dissolveCancelButtonRef = useRef<HTMLButtonElement>(null);
+  const dissolveConfirmHeadingRef = useRef<HTMLElement>(null);
+  const dissolveConfirmWasOpenRef = useRef(false);
 
   useLayoutEffect(() => {
     if (titleEditing) titleInputRef.current?.focus();
     else if (titleWasEditingRef.current) titleEditButtonRef.current?.focus();
     titleWasEditingRef.current = titleEditing;
   }, [titleEditing]);
+
+  useLayoutEffect(() => {
+    const isConfirmVisible = managementOpen && confirmDeleteOpen;
+    if (isConfirmVisible) {
+      (dissolveCancelButtonRef.current ?? dissolveConfirmHeadingRef.current)?.focus();
+    } else if (dissolveConfirmWasOpenRef.current && managementOpen) {
+      const trigger = dissolveTriggerButtonRef.current;
+      if (trigger && !trigger.disabled) trigger.focus();
+      else dissolveToggleButtonRef.current?.focus();
+    }
+    dissolveConfirmWasOpenRef.current = isConfirmVisible;
+  }, [managementOpen, confirmDeleteOpen]);
 
   // 被动 prop 刷新：未改名时同步名称显示；未处于成员编辑时同步成员列表。
   useEffect(() => {
@@ -809,6 +827,7 @@ export function GroupSettings({
         },
       });
       if (!mountedRef.current || sessionKey(membersApi.identity) !== localSess) return;
+      dissolveConfirmWasOpenRef.current = false;
       setDeleteFrozenAttempt(null);
       setConfirmDeleteOpen(false);
       onDeleted?.();
@@ -845,6 +864,7 @@ export function GroupSettings({
       const latest = await membersApi.call(id, 'getScopeState', { scopeId: scope.scope.scopeId });
       if (!mountedRef.current || sessionKey(membersApi.identity) !== localSess) return;
       if (isScopeDeleted(latest)) {
+        dissolveConfirmWasOpenRef.current = false;
         setDeleteFrozenAttempt(null);
         setConfirmDeleteOpen(false);
         onDeleted?.();
@@ -862,6 +882,7 @@ export function GroupSettings({
     } catch (e) {
       if (!mountedRef.current || sessionKey(membersApi.identity) !== localSess) return;
       if (errorCodeOf(e) === 'SCOPE_NOT_FOUND') {
+        dissolveConfirmWasOpenRef.current = false;
         setDeleteFrozenAttempt(null);
         setConfirmDeleteOpen(false);
         onDeleted?.();
@@ -1298,6 +1319,7 @@ export function GroupSettings({
             <section className="scope-settings-section" aria-label="解散并删除群聊">
               <div className="scope-settings-card">
                 <button
+                  ref={dissolveToggleButtonRef}
                   type="button"
                   className="scope-settings-management-row"
                   aria-expanded={managementOpen}
@@ -1337,6 +1359,7 @@ export function GroupSettings({
                     ) : null}
                     <ActionBar align="end" style={{ flexWrap: 'nowrap' }}>
                       <button
+                        ref={dissolveTriggerButtonRef}
                         type="button"
                         className="secondary-button danger-outline scope-compact-btn"
                         disabled={preparingDelete || deleting || !wOnline}
@@ -1351,8 +1374,15 @@ export function GroupSettings({
 
                 {managementOpen && confirmDeleteOpen ? (
                   <div
-                    role="alertdialog"
-                    aria-label="确认解散并删除群聊"
+                    role="region"
+                    aria-labelledby={dissolveHeadingId}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape' && !deleting) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        cancelDeleteRoom();
+                      }
+                    }}
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
@@ -1364,7 +1394,9 @@ export function GroupSettings({
                   >
                     <div className="scope-delete-confirm-head">
                       <Trash2 size={16} aria-hidden="true" />
-                      <strong>确认解散并删除群聊「{displayTitle}」？</strong>
+                      <strong id={dissolveHeadingId} ref={dissolveConfirmHeadingRef} tabIndex={-1}>
+                        确认解散并删除群聊「{displayTitle}」？
+                      </strong>
                     </div>
                     <p className="scope-delete-confirm-desc">
                       {desktop
@@ -1413,6 +1445,7 @@ export function GroupSettings({
                       style={{ flexWrap: 'nowrap' }}
                     >
                       <button
+                        ref={dissolveCancelButtonRef}
                         type="button"
                         className="secondary-button scope-compact-btn"
                         disabled={deleting}

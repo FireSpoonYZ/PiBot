@@ -7,7 +7,6 @@ import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
-  CaDisclosure,
   CaModal,
   CaNotice,
   CaRefreshBar,
@@ -24,6 +23,34 @@ import type {
 } from './types';
 
 type TranslateFn = ReturnType<typeof useText>;
+
+const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_SIGNATURE_LENGTH = 64 * 1024;
+const MAX_NOTES_LENGTH = 32 * 1024;
+const SEMVER_RE =
+  /^v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const SHA256_RE = /^[0-9a-f]{64}$/i;
+const SOURCE_COMMIT_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/i;
+
+type ReleaseFieldKey =
+  | 'file'
+  | 'version'
+  | 'sourceCommit'
+  | 'versionCode'
+  | 'signature'
+  | 'notes'
+  | 'sha256';
+type ReleaseFieldErrors = Partial<Record<ReleaseFieldKey, string>>;
+
+const RELEASE_FIELD_ORDER: readonly ReleaseFieldKey[] = [
+  'file',
+  'version',
+  'sourceCommit',
+  'versionCode',
+  'signature',
+  'notes',
+  'sha256',
+];
 
 const PLATFORMS: readonly ClientReleasePlatform[] = ['windows', 'linux', 'macos', 'android'];
 
@@ -144,13 +171,23 @@ export function ReleasesTab({
   const [relSha256, setRelSha256] = useState('');
   const [relSize, setRelSize] = useState(0);
   const [relVersionCode, setRelVersionCode] = useState('');
-  const [relSourceCommit, setRelSourceCommit] = useState('manual');
+  const [relSourceCommit, setRelSourceCommit] = useState('');
   const [relSignature, setRelSignature] = useState('');
-  const [relAutoPublish, setRelAutoPublish] = useState(true);
+  const [publishImmediately, setPublishImmediately] = useState(false);
   const [relBusy, setRelBusy] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [uploadNeedsBrowser, setUploadNeedsBrowser] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<ReleaseFieldErrors>({});
+  const [shaDisclosureOpen, setShaDisclosureOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sigFileInputRef = useRef<HTMLInputElement | null>(null);
+  const dropzoneRef = useRef<HTMLDivElement | null>(null);
+  const versionInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceCommitInputRef = useRef<HTMLInputElement | null>(null);
+  const versionCodeInputRef = useRef<HTMLInputElement | null>(null);
+  const signatureInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const notesInputRef = useRef<HTMLInputElement | null>(null);
+  const sha256InputRef = useRef<HTMLInputElement | null>(null);
 
   const hasLoadedRef = useRef(hasLoaded);
   const cacheKeyRef = useRef(cacheKey);
@@ -257,14 +294,64 @@ export function ReleasesTab({
     return releases.filter(r => r.platform === platformFilter);
   }, [platformFilter, releases]);
 
+  const clearFieldError = useCallback((field: ReleaseFieldKey) => {
+    setFieldErrors(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }, []);
+
+  const focusField = (field: ReleaseFieldKey) => {
+    const map: Record<ReleaseFieldKey, HTMLElement | null> = {
+      file: dropzoneRef.current,
+      version: versionInputRef.current,
+      sourceCommit: sourceCommitInputRef.current,
+      versionCode: versionCodeInputRef.current,
+      signature: signatureInputRef.current,
+      notes: notesInputRef.current,
+      sha256: sha256InputRef.current,
+    };
+    const el = map[field];
+    if (el) {
+      el.focus();
+      return;
+    }
+    if (field === 'sha256') {
+      setShaDisclosureOpen(true);
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(() => {
+          sha256InputRef.current?.focus();
+        });
+      }
+    }
+  };
+
   const handlePlatformChange = (nextPlatform: ClientReleasePlatform) => {
     setRelPlatform(nextPlatform);
     const spec = PLATFORM_SPECS[nextPlatform];
-    if (!spec.arches.includes(relArch)) {
-      setRelArch(spec.arches[0]);
+    const nextArch = spec.arches.includes(relArch) ? relArch : spec.arches[0];
+    const nextFormat = spec.formats.includes(relFormat) ? relFormat : spec.formats[0];
+    setRelArch(nextArch);
+    setRelFormat(nextFormat);
+    if (nextFormat !== 'apk') {
+      setRelVersionCode('');
+      clearFieldError('versionCode');
+    } else {
+      setRelSignature('');
+      clearFieldError('signature');
     }
-    if (!spec.formats.includes(relFormat)) {
-      setRelFormat(spec.formats[0]);
+  };
+
+  const handleFormatChange = (nextFormat: ClientReleaseFormat) => {
+    setRelFormat(nextFormat);
+    if (nextFormat !== 'apk') {
+      setRelVersionCode('');
+      clearFieldError('versionCode');
+    } else {
+      setRelSignature('');
+      clearFieldError('signature');
     }
   };
 
@@ -281,17 +368,29 @@ export function ReleasesTab({
     setRelSha256('');
     setRelSize(0);
     setRelVersionCode('');
-    setRelSourceCommit('manual');
+    setRelSourceCommit('');
     setRelSignature('');
-    setRelAutoPublish(true);
+    setPublishImmediately(false);
     setUploadError('');
     setUploadNeedsBrowser(false);
+    setFieldErrors({});
+    setShaDisclosureOpen(false);
   };
 
   const openUploadModal = () => {
     setUploadError('');
     setUploadNeedsBrowser(false);
+    setFieldErrors({});
     setUploadModalOpen(true);
+  };
+
+  const handleSigFileSelected = async (file: File | undefined) => {
+    if (!file) return;
+    const sigText = await file.text().catch(() => '');
+    if (sigText.trim()) {
+      setRelSignature(sigText.trim());
+      clearFieldError('signature');
+    }
   };
 
   const handleFilesSelected = async (fileList: FileList | File[]) => {
@@ -300,18 +399,25 @@ export function ReleasesTab({
     const files = Array.from(fileList);
     if (files.length === 0) return;
 
+    let effectiveFormat: ClientReleaseFormat = relFormat;
+
     for (const f of files) {
       const lower = f.name.toLowerCase();
       if (lower.endsWith('.json')) {
         try {
           const parsed = JSON.parse(await f.text()) as Record<string, unknown>;
-          if (typeof parsed.version === 'string') setRelVersion(parsed.version);
+          if (typeof parsed.version === 'string') {
+            setRelVersion(parsed.version);
+            clearFieldError('version');
+          }
+          let parsedPlatform: ClientReleasePlatform | undefined;
           if (
             parsed.platform === 'windows' ||
             parsed.platform === 'linux' ||
             parsed.platform === 'macos' ||
             parsed.platform === 'android'
           ) {
+            parsedPlatform = parsed.platform;
             setRelPlatform(parsed.platform);
           }
           if (parsed.arch === 'x86_64' || parsed.arch === 'aarch64') setRelArch(parsed.arch);
@@ -321,40 +427,85 @@ export function ReleasesTab({
             parsed.format === 'app' ||
             parsed.format === 'apk'
           ) {
+            effectiveFormat = parsed.format;
             setRelFormat(parsed.format);
+          } else if (parsedPlatform) {
+            effectiveFormat = PLATFORM_SPECS[parsedPlatform].formats[0];
+            setRelFormat(effectiveFormat);
           }
-          if (typeof parsed.notes === 'string') setRelNotes(parsed.notes);
-          if (typeof parsed.sourceCommit === 'string') setRelSourceCommit(parsed.sourceCommit);
-          if (typeof parsed.signature === 'string') setRelSignature(parsed.signature);
-          if (typeof parsed.versionCode === 'number') setRelVersionCode(String(parsed.versionCode));
-          if (typeof parsed.sha256 === 'string') setRelSha256(parsed.sha256);
+          if (typeof parsed.notes === 'string') {
+            setRelNotes(parsed.notes);
+            clearFieldError('notes');
+          }
+          if (typeof parsed.sourceCommit === 'string') {
+            setRelSourceCommit(parsed.sourceCommit);
+            clearFieldError('sourceCommit');
+          }
+          if (effectiveFormat === 'apk') {
+            setRelSignature('');
+            clearFieldError('signature');
+            if (typeof parsed.versionCode === 'number') {
+              setRelVersionCode(String(parsed.versionCode));
+              clearFieldError('versionCode');
+            }
+          } else {
+            setRelVersionCode('');
+            clearFieldError('versionCode');
+            if (typeof parsed.signature === 'string') {
+              setRelSignature(parsed.signature);
+              clearFieldError('signature');
+            }
+          }
+          if (typeof parsed.sha256 === 'string') {
+            setRelSha256(parsed.sha256);
+            clearFieldError('sha256');
+          }
           if (typeof parsed.size === 'number') setRelSize(parsed.size);
         } catch {
           setUploadError(t(`无法解析元数据文件 ${f.name}：JSON 格式无效。请检查文件内容后重新拖入。`, `Failed to parse metadata file ${f.name}: invalid JSON. Check the file and drop it again.`));
         }
       } else if (lower.endsWith('.sig')) {
         const sigText = await f.text().catch(() => '');
-        if (sigText) setRelSignature(sigText.trim());
+        if (sigText.trim()) {
+          setRelSignature(sigText.trim());
+          clearFieldError('signature');
+        }
       } else {
         const gen = ++hashGenRef.current;
         setReleaseFile(f);
         setRelSize(f.size);
         setRelSha256('');
+        clearFieldError('file');
         const inferred = inferFromFilename(f.name);
-        if (inferred.version) setRelVersion(inferred.version);
+        if (inferred.version) {
+          setRelVersion(inferred.version);
+          clearFieldError('version');
+        }
         if (inferred.platform) setRelPlatform(inferred.platform);
         if (inferred.arch) setRelArch(inferred.arch);
-        if (inferred.format) setRelFormat(inferred.format);
+        if (inferred.format) {
+          effectiveFormat = inferred.format;
+          setRelFormat(inferred.format);
+          if (inferred.format !== 'apk') {
+            setRelVersionCode('');
+            clearFieldError('versionCode');
+          } else {
+            setRelSignature('');
+            clearFieldError('signature');
+          }
+        }
         setHashing(true);
         try {
           const sha = await computeSha256Hex(f, t);
           if (gen === hashGenRef.current) {
             setRelSha256(sha);
+            clearFieldError('sha256');
           }
         } catch (err) {
           if (gen === hashGenRef.current) {
             const reason = errorMessage(err, t('浏览器计算失败', 'Browser digest failed'));
-            setUploadError(t(`自动计算 SHA-256 失败：${reason}。可在下方「高级校验元数据」中手动填入 SHA-256。`, `Failed to compute SHA-256: ${reason}. You can enter the SHA-256 manually under Advanced verification metadata below.`));
+            setShaDisclosureOpen(true);
+            setUploadError(t(`自动计算 SHA-256 失败：${reason}。可在下方「SHA-256 校验值」中手动填入。`, `Failed to compute SHA-256: ${reason}. You can enter the SHA-256 manually below.`));
           }
         } finally {
           if (gen === hashGenRef.current) {
@@ -367,52 +518,102 @@ export function ReleasesTab({
 
   const handleUploadRelease = async (e: React.FormEvent) => {
     e.preventDefault();
+    setUploadError('');
+    setUploadNeedsBrowser(false);
+
+    const isApk = relFormat === 'apk';
+    const trimmedVersion = relVersion.trim();
+    const trimmedCommit = relSourceCommit.trim();
+    const trimmedSignature = relSignature.trim();
+    const trimmedNotes = relNotes.trim();
+    const trimmedSha256 = relSha256.trim();
+    const trimmedCode = relVersionCode.trim();
+    const parsedCode = /^[1-9]\d*$/.test(trimmedCode) ? Number(trimmedCode) : NaN;
+    const artifactSize = releaseFile ? relSize || releaseFile.size : 0;
+
+    const nextErrors: ReleaseFieldErrors = {};
+
     if (!releaseFile) {
-      setUploadError(t('无法上传：尚未选择安装包文件。请点击或拖入安装包后重试。', 'Cannot upload: no package file selected. Choose or drop an artifact file first.'));
-      return;
+      nextErrors.file = t('请先选择或拖入安装包文件。', 'Choose or drop an artifact file first.');
+    } else if (!Number.isSafeInteger(artifactSize) || artifactSize < 1 || artifactSize > MAX_ARTIFACT_BYTES) {
+      nextErrors.file = t('安装包大小无效（须大于 0 且不超过 2 GiB）。', 'Artifact size must be greater than 0 and at most 2 GiB.');
     }
-    if (!relVersion.trim()) {
-      setUploadError(t('无法上传：未填写版本号。请输入语义化版本号（如 1.4.0）。', 'Cannot upload: version is missing. Enter a version string such as 1.4.0.'));
-      return;
+
+    if (!trimmedVersion) {
+      nextErrors.version = t('请填写语义化版本号（如 1.4.0）。', 'Enter a semantic version (e.g. 1.4.0).');
+    } else if (!SEMVER_RE.test(trimmedVersion)) {
+      nextErrors.version = t('版本号必须符合语义化版本格式（如 1.4.0）。', 'Version must be a valid semver string (e.g. 1.4.0).');
     }
-    if (hashing || !relSha256.trim()) {
-      setUploadError(t('无法上传：SHA-256 校验值尚未就绪。请等待计算完成或在高级元数据中填入。', 'Cannot upload: SHA-256 digest is not ready yet. Wait for hashing to finish or enter it under Advanced metadata.'));
-      return;
+
+    if (!trimmedCommit) {
+      nextErrors.sourceCommit = t('请填写 40 位或 64 位十六进制源码提交哈希。', 'Enter a 40- or 64-character hex source commit hash.');
+    } else if (!SOURCE_COMMIT_RE.test(trimmedCommit)) {
+      nextErrors.sourceCommit = t('源码提交哈希必须为 40 位或 64 位十六进制字符（0-9, a-f）。', 'Source commit must be a 40- or 64-character hexadecimal hash (0-9, a-f).');
     }
-    const parsedCode = relVersionCode.trim() ? Number(relVersionCode.trim()) : undefined;
-    if (relFormat === 'apk' && (!parsedCode || !Number.isSafeInteger(parsedCode) || parsedCode < 1)) {
-      setUploadError(t('无法上传 Android APK：缺少正整数 versionCode。请展开下方「高级校验元数据」填写 versionCode。', 'Cannot upload Android APK: positive integer versionCode is required. Expand Advanced verification metadata below to set it.'));
+
+    if (isApk) {
+      if (!trimmedCode || !Number.isSafeInteger(parsedCode) || parsedCode < 1) {
+        nextErrors.versionCode = t('Android APK 必须填写正整数 versionCode（如 10400）。', 'Android APK requires a positive integer versionCode (e.g. 10400).');
+      }
+    } else {
+      if (!trimmedSignature) {
+        nextErrors.signature = t('桌面端安装包必须提供 .sig 更新签名（可拖入或选择 .sig 文件）。', 'Desktop releases require a .sig update signature before submitting.');
+      } else if (trimmedSignature.length > MAX_SIGNATURE_LENGTH) {
+        nextErrors.signature = t('更新签名内容不能超过 64 KiB。', 'Update signature cannot exceed 64 KiB.');
+      }
+    }
+
+    if (trimmedNotes.length > MAX_NOTES_LENGTH) {
+      nextErrors.notes = t('更新说明不能超过 32 KiB。', 'Release notes cannot exceed 32 KiB.');
+    }
+
+    if (hashing) {
+      nextErrors.sha256 = t('SHA-256 校验值正在计算中，请稍候。', 'SHA-256 checksum is still computing. Please wait.');
+    } else if (!trimmedSha256) {
+      nextErrors.sha256 = t('缺少 SHA-256 校验值，请等待自动计算或手动填入。', 'SHA-256 checksum is required. Wait for hashing or enter it manually.');
+    } else if (!SHA256_RE.test(trimmedSha256)) {
+      nextErrors.sha256 = t('SHA-256 必须为 64 位十六进制字符串。', 'SHA-256 must be a 64-character hexadecimal string.');
+    }
+
+    if (Object.keys(nextErrors).length > 0) {
+      setFieldErrors(nextErrors);
+      if (nextErrors.sha256) {
+        setShaDisclosureOpen(true);
+      }
+      const firstInvalid = RELEASE_FIELD_ORDER.find(key => Boolean(nextErrors[key]));
+      if (firstInvalid) {
+        focusField(firstInvalid);
+      }
       return;
     }
 
+    setFieldErrors({});
     const meta: ClientReleaseMetadata = {
-      version: relVersion.trim(),
+      version: trimmedVersion,
       platform: relPlatform,
       arch: relArch,
       format: relFormat,
-      size: relSize || releaseFile.size,
-      sha256: relSha256.trim().toLowerCase(),
-      sourceCommit: relSourceCommit.trim() || 'manual',
-      ...(relNotes.trim() ? { notes: relNotes.trim() } : {}),
-      ...(relPlatform !== 'android' && relSignature.trim() ? { signature: relSignature.trim() } : {}),
-      ...(parsedCode ? { versionCode: parsedCode } : {}),
+      size: artifactSize,
+      sha256: trimmedSha256.toLowerCase(),
+      sourceCommit: trimmedCommit.toLowerCase(),
+      ...(trimmedNotes ? { notes: trimmedNotes } : {}),
+      ...(!isApk ? { signature: trimmedSignature } : {}),
+      ...(isApk ? { versionCode: parsedCode } : {}),
     };
 
     setRelBusy(true);
-    setUploadError('');
-    setUploadNeedsBrowser(false);
     try {
-      const created = await api.createClientRelease(meta, releaseFile);
+      const created = await api.createClientRelease(meta, releaseFile!);
       let finalRecord = created;
-      if (relAutoPublish) {
+      if (publishImmediately) {
         finalRecord = await api.publishClientRelease(created.id, { published: true });
       }
       setReleases(prev => [finalRecord, ...prev.filter(r => r.id !== finalRecord.id)]);
-      const wasAutoPublished = relAutoPublish;
+      const wasPublishedImmediately = publishImmediately;
       resetUploadForm();
       setUploadModalOpen(false);
       setNotice(
-        wasAutoPublished
+        wasPublishedImmediately
           ? t(`版本 v${finalRecord.version} 已上传并发布`, `Release v${finalRecord.version} uploaded and published`)
           : t(`版本 v${finalRecord.version} 已上传并保存为草稿`, `Release v${finalRecord.version} uploaded as draft`),
       );
@@ -625,6 +826,7 @@ export function ReleasesTab({
           if (!nextOpen && !relBusy) {
             setUploadError('');
             setUploadNeedsBrowser(false);
+            setFieldErrors({});
             setUploadModalOpen(false);
           }
         }}
@@ -633,7 +835,7 @@ export function ReleasesTab({
         variant="modal"
         wide
       >
-        <form className="ca-form-stack" onSubmit={e => void handleUploadRelease(e)}>
+        <form className="ca-form-stack" noValidate onSubmit={e => void handleUploadRelease(e)}>
           {uploadError && (
             <CaNotice
               tone="danger"
@@ -661,41 +863,62 @@ export function ReleasesTab({
             }}
           />
 
-          <div
-            role="button"
-            tabIndex={0}
-            className={`ca-dropzone ${dragging ? 'is-dragging' : ''}`}
-            onClick={() => fileInputRef.current?.click()}
-            onKeyDown={e => {
-              if (e.key === 'Enter' || e.key === ' ') {
+          <input
+            ref={sigFileInputRef}
+            type="file"
+            className="ca-hidden"
+            accept=".sig,text/plain"
+            onChange={e => {
+              void handleSigFileSelected(e.target.files?.[0]);
+              e.target.value = '';
+            }}
+          />
+
+          <div className="ca-field">
+            <div
+              ref={dropzoneRef}
+              role="button"
+              tabIndex={0}
+              aria-invalid={Boolean(fieldErrors.file) || undefined}
+              aria-describedby={fieldErrors.file ? 'ca-release-file-error' : undefined}
+              className={`ca-dropzone ${dragging ? 'is-dragging' : ''}`}
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
+              onDragOver={e => {
                 e.preventDefault();
-                fileInputRef.current?.click();
-              }
-            }}
-            onDragOver={e => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={e => {
-              e.preventDefault();
-              setDragging(false);
-              if (e.dataTransfer.files.length > 0) void handleFilesSelected(e.dataTransfer.files);
-            }}
-          >
-            <Upload size={20} aria-hidden="true" className="ca-dropzone-icon" />
-            <div className="ca-dropzone-title ca-num">
-              {releaseFile
-                ? `${releaseFile.name} (${formatBytes(relSize || releaseFile.size)})`
-                : t('点击或拖入安装包文件（.exe / .deb / .app.tar.gz / .apk）', 'Click or drop a package file (.exe / .deb / .app.tar.gz / .apk)')}
+                setDragging(true);
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={e => {
+                e.preventDefault();
+                setDragging(false);
+                if (e.dataTransfer.files.length > 0) void handleFilesSelected(e.dataTransfer.files);
+              }}
+            >
+              <Upload size={20} aria-hidden="true" className="ca-dropzone-icon" />
+              <div className="ca-dropzone-title ca-num">
+                {releaseFile
+                  ? `${releaseFile.name} (${formatBytes(relSize || releaseFile.size)})`
+                  : t('点击或拖入安装包文件（.exe / .deb / .app.tar.gz / .apk）', 'Click or drop a package file (.exe / .deb / .app.tar.gz / .apk)')}
+              </div>
+              <div className="ca-muted ca-mt-1">
+                {hashing
+                  ? t('正在计算 SHA-256 校验值…', 'Computing SHA-256 checksum…')
+                  : releaseFile
+                    ? t('点击或拖入新文件以替换当前安装包（也可补充拖入 release.json / .sig）', 'Click or drop another file to replace (you can also drop release.json / .sig)')
+                    : t('可同时拖入 release.json 与 .sig 自动填充发布与签名元数据', 'Drop release.json and .sig alongside the package to auto-fill metadata')}
+              </div>
             </div>
-            <div className="ca-muted ca-mt-1">
-              {hashing
-                ? t('正在计算 SHA-256 校验值…', 'Computing SHA-256 checksum…')
-                : releaseFile
-                  ? t('点击或拖入新文件以替换当前安装包（也可补充拖入 release.json / .sig）', 'Click or drop another file to replace (you can also drop release.json / .sig)')
-                  : t('可同时拖入 release.json 与 .sig 自动填充发布与签名元数据', 'Drop release.json and .sig alongside the package to auto-fill metadata')}
-            </div>
+            {fieldErrors.file && (
+              <p id="ca-release-file-error" className="ca-error-text" role="alert">
+                {fieldErrors.file}
+              </p>
+            )}
           </div>
 
           <div className="ca-grid-2">
@@ -705,12 +928,23 @@ export function ReleasesTab({
               </label>
               <input
                 id="ca-release-version"
+                ref={versionInputRef}
                 type="text"
                 className="ca-input ca-mono ca-num"
+                aria-invalid={Boolean(fieldErrors.version) || undefined}
+                aria-describedby={fieldErrors.version ? 'ca-release-version-error' : undefined}
                 placeholder={t('例如 1.4.0', 'e.g. 1.4.0')}
                 value={relVersion}
-                onChange={e => setRelVersion(e.target.value)}
+                onChange={e => {
+                  setRelVersion(e.target.value);
+                  clearFieldError('version');
+                }}
               />
+              {fieldErrors.version && (
+                <p id="ca-release-version-error" className="ca-error-text" role="alert">
+                  {fieldErrors.version}
+                </p>
+              )}
             </div>
 
             <div className="ca-field">
@@ -759,7 +993,7 @@ export function ReleasesTab({
                 id="ca-release-format"
                 className="ca-select ca-mono"
                 value={relFormat}
-                onChange={e => setRelFormat(e.target.value as ClientReleaseFormat)}
+                onChange={e => handleFormatChange(e.target.value as ClientReleaseFormat)}
               >
                 {formatOptions.map(fmt => (
                   <option key={fmt} value={fmt}>
@@ -770,95 +1004,198 @@ export function ReleasesTab({
             </div>
           </div>
 
+          {relFormat === 'apk' ? (
+            <div className="ca-grid-2">
+              <div className="ca-field">
+                <label className="ca-field-label" htmlFor="ca-release-commit">
+                  {t('源码提交 (sourceCommit)', 'Source Commit (sourceCommit)')} <span className="ca-req">*</span>
+                </label>
+                <input
+                  id="ca-release-commit"
+                  ref={sourceCommitInputRef}
+                  type="text"
+                  className="ca-input ca-mono"
+                  aria-invalid={Boolean(fieldErrors.sourceCommit) || undefined}
+                  aria-describedby={fieldErrors.sourceCommit ? 'ca-release-commit-error' : undefined}
+                  placeholder={t('40 或 64 位十六进制 Git 提交哈希', '40- or 64-character hex Git commit hash')}
+                  value={relSourceCommit}
+                  onChange={e => {
+                    setRelSourceCommit(e.target.value);
+                    clearFieldError('sourceCommit');
+                  }}
+                />
+                {fieldErrors.sourceCommit && (
+                  <p id="ca-release-commit-error" className="ca-error-text" role="alert">
+                    {fieldErrors.sourceCommit}
+                  </p>
+                )}
+              </div>
+
+              <div className="ca-field">
+                <label className="ca-field-label" htmlFor="ca-release-version-code">
+                  {t('Android versionCode', 'Android versionCode')} <span className="ca-req">*</span>
+                </label>
+                <input
+                  id="ca-release-version-code"
+                  ref={versionCodeInputRef}
+                  type="number"
+                  min={1}
+                  step={1}
+                  className="ca-input ca-num"
+                  aria-invalid={Boolean(fieldErrors.versionCode) || undefined}
+                  aria-describedby={fieldErrors.versionCode ? 'ca-release-version-code-error' : undefined}
+                  placeholder={t('例如 10400', 'e.g. 10400')}
+                  value={relVersionCode}
+                  onChange={e => {
+                    setRelVersionCode(e.target.value);
+                    clearFieldError('versionCode');
+                  }}
+                />
+                {fieldErrors.versionCode && (
+                  <p id="ca-release-version-code-error" className="ca-error-text" role="alert">
+                    {fieldErrors.versionCode}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="ca-field">
+              <label className="ca-field-label" htmlFor="ca-release-commit">
+                {t('源码提交 (sourceCommit)', 'Source Commit (sourceCommit)')} <span className="ca-req">*</span>
+              </label>
+              <input
+                id="ca-release-commit"
+                ref={sourceCommitInputRef}
+                type="text"
+                className="ca-input ca-mono"
+                aria-invalid={Boolean(fieldErrors.sourceCommit) || undefined}
+                aria-describedby={fieldErrors.sourceCommit ? 'ca-release-commit-error' : undefined}
+                placeholder={t('40 或 64 位十六进制 Git 提交哈希', '40- or 64-character hex Git commit hash')}
+                value={relSourceCommit}
+                onChange={e => {
+                  setRelSourceCommit(e.target.value);
+                  clearFieldError('sourceCommit');
+                }}
+              />
+              {fieldErrors.sourceCommit && (
+                <p id="ca-release-commit-error" className="ca-error-text" role="alert">
+                  {fieldErrors.sourceCommit}
+                </p>
+              )}
+            </div>
+          )}
+
+          {relFormat !== 'apk' && (
+            <div className="ca-field">
+              <div className="ca-field-head">
+                <label className="ca-field-label" htmlFor="ca-release-sig">
+                  {t('更新签名 (.sig 内容)', 'Update Signature (.sig content)')} <span className="ca-req">*</span>
+                </label>
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-ghost ca-btn-sm"
+                  onClick={() => sigFileInputRef.current?.click()}
+                >
+                  {t('选择 .sig 文件', 'Choose .sig file')}
+                </button>
+              </div>
+              <textarea
+                id="ca-release-sig"
+                ref={signatureInputRef}
+                rows={2}
+                className="ca-textarea ca-mono"
+                aria-invalid={Boolean(fieldErrors.signature) || undefined}
+                aria-describedby={fieldErrors.signature ? 'ca-release-sig-error' : undefined}
+                placeholder={t('拖入或选择 .sig 文件自动填充，或粘贴更新签名内容', 'Drop or choose a .sig file to auto-fill, or paste the signature content')}
+                value={relSignature}
+                onChange={e => {
+                  setRelSignature(e.target.value);
+                  clearFieldError('signature');
+                }}
+              />
+              {fieldErrors.signature && (
+                <p id="ca-release-sig-error" className="ca-error-text" role="alert">
+                  {fieldErrors.signature}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="ca-field">
             <label className="ca-field-label" htmlFor="ca-release-notes">
               {t('更新说明（可选）', 'Release Notes (optional)')}
             </label>
             <input
               id="ca-release-notes"
+              ref={notesInputRef}
               type="text"
               className="ca-input"
+              aria-invalid={Boolean(fieldErrors.notes) || undefined}
+              aria-describedby={fieldErrors.notes ? 'ca-release-notes-error' : undefined}
               placeholder={t('简述此版本修复或新增内容', 'Briefly describe fixes or new features')}
               value={relNotes}
-              onChange={e => setRelNotes(e.target.value)}
+              onChange={e => {
+                setRelNotes(e.target.value);
+                clearFieldError('notes');
+              }}
             />
+            {fieldErrors.notes && (
+              <p id="ca-release-notes-error" className="ca-error-text" role="alert">
+                {fieldErrors.notes}
+              </p>
+            )}
           </div>
 
           <label className="ca-check-label">
             <input
               type="checkbox"
-              checked={relAutoPublish}
-              onChange={e => setRelAutoPublish(e.target.checked)}
+              checked={publishImmediately}
+              onChange={e => setPublishImmediately(e.target.checked)}
             />
-            <span>{t('上传后立即发布给客户端检查更新', 'Publish immediately for client update checks')}</span>
+            <span>{t('上传后立即发布给客户端检查更新（默认保存为草稿）', 'Publish immediately for client update checks (saves as draft by default)')}</span>
           </label>
 
-          {relFormat === 'apk' && !relVersionCode.trim() && (
-            <p className="ca-field-help">
-              {t('Android APK 上传前需展开下方「高级校验元数据」填写正整数 versionCode。', 'Android APK requires a positive integer versionCode under Advanced verification metadata below.')}
-            </p>
-          )}
-
-          <CaDisclosure title={t('高级校验元数据（versionCode / sourceCommit / SHA-256 / 签名）', 'Advanced verification metadata (versionCode / sourceCommit / SHA-256 / signature)')}>
-            <div className="ca-form-stack">
-              <div className="ca-grid-2">
+          <div className="ca-disclosure">
+            <button
+              type="button"
+              className="ca-disclosure-btn"
+              aria-expanded={shaDisclosureOpen}
+              onClick={() => setShaDisclosureOpen(prev => !prev)}
+            >
+              <span>
+                {shaDisclosureOpen ? '▾' : '▸'}{' '}
+                {t('SHA-256 校验值（自动计算，可展开核对或修改）', 'SHA-256 checksum (auto-computed, expand to inspect or edit)')}
+              </span>
+            </button>
+            {shaDisclosureOpen && (
+              <div className="ca-disclosure-body smooth-expand-mount">
                 <div className="ca-field">
-                  <label className="ca-field-label" htmlFor="ca-release-version-code">
-                    {t('Android versionCode（APK 必填）', 'Android versionCode (required for APK)')}
+                  <label className="ca-field-label" htmlFor="ca-release-sha256">
+                    SHA-256 <span className="ca-req">*</span>
                   </label>
                   <input
-                    id="ca-release-version-code"
-                    type="number"
-                    className="ca-input ca-num"
-                    placeholder={t('例如 10400', 'e.g. 10400')}
-                    value={relVersionCode}
-                    onChange={e => setRelVersionCode(e.target.value)}
-                  />
-                </div>
-                <div className="ca-field">
-                  <label className="ca-field-label" htmlFor="ca-release-commit">
-                    {t('源码提交 (sourceCommit)', 'Source Commit (sourceCommit)')}
-                  </label>
-                  <input
-                    id="ca-release-commit"
+                    id="ca-release-sha256"
+                    ref={sha256InputRef}
                     type="text"
                     className="ca-input ca-mono"
-                    value={relSourceCommit}
-                    onChange={e => setRelSourceCommit(e.target.value)}
+                    aria-invalid={Boolean(fieldErrors.sha256) || undefined}
+                    aria-describedby={fieldErrors.sha256 ? 'ca-release-sha256-error' : undefined}
+                    placeholder={t('选择安装包后自动计算', 'Computed automatically after selecting a package')}
+                    value={relSha256}
+                    onChange={e => {
+                      setRelSha256(e.target.value);
+                      clearFieldError('sha256');
+                    }}
                   />
+                  {fieldErrors.sha256 && (
+                    <p id="ca-release-sha256-error" className="ca-error-text" role="alert">
+                      {fieldErrors.sha256}
+                    </p>
+                  )}
                 </div>
               </div>
-
-              <div className="ca-field">
-                <label className="ca-field-label" htmlFor="ca-release-sha256">
-                  SHA-256
-                </label>
-                <input
-                  id="ca-release-sha256"
-                  type="text"
-                  className="ca-input ca-mono"
-                  placeholder={t('选择安装包后自动计算', 'Computed automatically after selecting a package')}
-                  value={relSha256}
-                  onChange={e => setRelSha256(e.target.value)}
-                />
-              </div>
-
-              {relPlatform !== 'android' && (
-                <div className="ca-field">
-                  <label className="ca-field-label" htmlFor="ca-release-sig">
-                    {t('更新签名 (.sig 内容，可选)', 'Update Signature (.sig content, optional)')}
-                  </label>
-                  <textarea
-                    id="ca-release-sig"
-                    rows={2}
-                    className="ca-textarea ca-mono"
-                    value={relSignature}
-                    onChange={e => setRelSignature(e.target.value)}
-                  />
-                </div>
-              )}
-            </div>
-          </CaDisclosure>
+            )}
+          </div>
 
           <div className="ca-modal-footer">
             <button
@@ -868,6 +1205,7 @@ export function ReleasesTab({
               onClick={() => {
                 setUploadError('');
                 setUploadNeedsBrowser(false);
+                setFieldErrors({});
                 setUploadModalOpen(false);
               }}
             >
@@ -876,7 +1214,7 @@ export function ReleasesTab({
             <button
               type="submit"
               className="ca-btn ca-btn-primary"
-              disabled={relBusy || hashing || !releaseFile}
+              disabled={relBusy || hashing}
             >
               <LabelStack
                 active={
@@ -884,7 +1222,7 @@ export function ReleasesTab({
                     ? t('上传中…', 'Uploading…')
                     : hashing
                       ? t('计算校验中…', 'Hashing…')
-                      : relAutoPublish
+                      : publishImmediately
                         ? t('上传并发布', 'Upload & Publish')
                         : t('上传为草稿', 'Upload Draft')
                 }

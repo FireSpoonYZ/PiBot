@@ -23,7 +23,7 @@ import { HostServiceSection, useHostService } from './HostServiceSection';
 import { ClientUpdateSection } from '../../../web/src/ClientUpdateSection';
 import { ClipboardSyncSection } from '../../../web/src/ClipboardSyncSection';
 import { Switch } from '../../../web/src/bot-settings/primitives';
-import { ConfirmDialog, Segmented } from '../../../web/src/components/ui';
+import { ActionBar, Button, Dialog, InlineNotice, Segmented } from '../../../web/src/components/ui';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
@@ -148,16 +148,31 @@ export interface SettingsPanelProps {
 
 function ArchivedBots({
   bridge,
+  transportConnected,
   onOpenHistory,
 }: {
   bridge?: BotChatsArchiveBridge | null;
+  transportConnected: boolean;
   onOpenHistory?: (bot: BotDirectoryEntry) => void;
 }) {
   const t = useText();
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmDeleteBot, setConfirmDeleteBot] = useState<BotDirectoryEntry | null>(null);
   const [error, setError] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const mountedRef = useRef(true);
+  const liveRef = useRef({ bridge, transportConnected });
+  liveRef.current = { bridge, transportConnected };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const items = bridge?.archivedBots ?? [];
+  const bridgeOnline = Boolean(transportConnected && bridge?.online);
 
   const deviceNameOf = (bot: BotDirectoryEntry) =>
     bridge?.devices.find((item) => item.deviceId === bot.deviceId)?.displayName
@@ -165,28 +180,87 @@ function ArchivedBots({
     || t('未命名设备', 'Unnamed device');
 
   const run = async (bot: BotDirectoryEntry, action: 'restore' | 'delete') => {
-    if (!bridge || busy) return;
-    const key = JSON.stringify([bot.deviceId, bot.botId]);
+    if (busy) return;
+    const { bridge: currentBridge, transportConnected: currentConnected } = liveRef.current;
+    const currentBot = currentBridge?.archivedBots.find(
+      (item) => item.deviceId === bot.deviceId && item.botId === bot.botId,
+    ) ?? null;
+
+    if (action === 'delete') {
+      setDeleteError('');
+      if (!currentConnected || !currentBridge?.online) {
+        setDeleteError(t('永久删除失败 · 当前连接已断开，请恢复连接后再试。', 'Permanent delete failed · Connection is offline. Reconnect and try again.'));
+        return;
+      }
+      if (!currentBot) {
+        setDeleteError(t('永久删除失败 · 未在当前归档列表中找到该智能体，请刷新确认。', 'Permanent delete failed · Target agent is no longer in the archived list. Refresh to verify.'));
+        return;
+      }
+      if (!currentBot.online) {
+        setDeleteError(t('永久删除失败 · 目标设备当前离线，请待设备恢复在线后再试。', 'Permanent delete failed · Target device is currently offline. Retry when it is back online.'));
+        return;
+      }
+      if (currentBot.isPrimary) {
+        setDeleteError(t('永久删除失败 · 主智能体不可永久删除。', 'Permanent delete failed · Primary agent cannot be permanently deleted.'));
+        return;
+      }
+    } else {
+      setError('');
+      if (!currentConnected || !currentBridge?.online || !currentBot || !currentBot.online) {
+        setError(t('恢复失败 · 当前连接或目标设备离线，请恢复在线后重试。', 'Restore failed · Connection or target device is offline. Reconnect and try again.'));
+        return;
+      }
+    }
+
+    const key = JSON.stringify([currentBot.deviceId, currentBot.botId]);
     setBusy(key);
-    setError('');
     try {
       if (action === 'restore') {
-        await bridge.unarchiveBot(bot);
+        await currentBridge.unarchiveBot(currentBot);
       } else {
-        await bridge.deleteBot(bot);
+        const result = (await currentBridge.deleteBot(currentBot)) as unknown;
+        if (!mountedRef.current) return;
+        const { bridge: afterBridge, transportConnected: afterConnected } = liveRef.current;
+        const afterBot = afterBridge?.archivedBots.find(
+          (item) => item.deviceId === currentBot.deviceId && item.botId === currentBot.botId,
+        ) ?? null;
+        if (result === false || !afterConnected || !afterBridge || !afterBridge.online || (afterBot && !afterBot.online)) {
+          setDeleteError(t('永久删除失败 · 连接已断开，未能确认删除结果，请恢复连接后刷新归档列表确认。', 'Permanent delete failed · Connection dropped before deletion could be confirmed. Reconnect and refresh the archive list to verify.'));
+          return;
+        }
+        setDeleteError('');
         setConfirmDeleteBot(null);
       }
     } catch (failure) {
-      const prefix = action === 'restore'
-        ? t('恢复失败 · ', 'Restore failed · ')
-        : t('永久删除失败 · ', 'Permanent delete failed · ');
-      setError(prefix + (failure instanceof Error ? failure.message : String(failure)));
+      if (!mountedRef.current) return;
+      const message = failure instanceof Error ? failure.message : String(failure);
+      if (action === 'restore') {
+        setError(t('恢复失败 · ', 'Restore failed · ') + message);
+      } else {
+        setDeleteError(t('永久删除失败 · ', 'Permanent delete failed · ') + message);
+      }
     } finally {
-      setBusy(null);
+      if (mountedRef.current) setBusy(null);
     }
   };
 
-  const confirmDeleteDevice = confirmDeleteBot ? deviceNameOf(confirmDeleteBot) : '';
+  const liveDeleteBot = confirmDeleteBot
+    ? items.find(
+        (item) =>
+          item.deviceId === confirmDeleteBot.deviceId &&
+          item.botId === confirmDeleteBot.botId,
+      ) ?? null
+    : null;
+  const targetDeleteBot = liveDeleteBot ?? confirmDeleteBot;
+  const deleteTargetMissing = Boolean(confirmDeleteBot && !liveDeleteBot);
+  const deleteTargetOnline = Boolean(
+    bridgeOnline && liveDeleteBot && liveDeleteBot.online && !liveDeleteBot.isPrimary,
+  );
+  const confirmDeleteBusy = Boolean(
+    confirmDeleteBot &&
+      busy === JSON.stringify([confirmDeleteBot.deviceId, confirmDeleteBot.botId]),
+  );
+  const confirmDeleteDevice = targetDeleteBot ? deviceNameOf(targetDeleteBot) : '';
 
   return (
     <section className="settings-section">
@@ -195,7 +269,7 @@ function ArchivedBots({
         <button
           type="button"
           className="secondary-button"
-          disabled={!bridge?.online || bridge.loading}
+          disabled={!bridgeOnline || bridge?.loading}
           onClick={() => bridge?.refresh()}
         >
           <RefreshCw size={13} aria-hidden />
@@ -215,7 +289,7 @@ function ArchivedBots({
         <div className="settings-row-group">
           {items.map((bot) => {
             const key = JSON.stringify([bot.deviceId, bot.botId]);
-            const online = Boolean(bridge?.online && bot.online);
+            const online = Boolean(bridgeOnline && bot.online);
             const device = deviceNameOf(bot);
             const expiry = archiveExpiryAt(bot.archivedAt);
             return (
@@ -262,6 +336,7 @@ function ArchivedBots({
                     disabled={!online || busy !== null}
                     onClick={() => {
                       setError('');
+                      setDeleteError('');
                       setConfirmDeleteBot(bot);
                     }}
                   >
@@ -275,24 +350,69 @@ function ArchivedBots({
         </div>
       )}
 
-      <ConfirmDialog
+      <Dialog
         open={confirmDeleteBot !== null}
-        danger
-        busy={confirmDeleteBot !== null && busy === JSON.stringify([confirmDeleteBot.deviceId, confirmDeleteBot.botId])}
-        title={t('永久删除智能体', 'Permanently delete agent')}
-        description={confirmDeleteBot
-          ? t(
-              `将永久删除 ${confirmDeleteDevice} 上的「${confirmDeleteBot.role}」及其全部聊天历史，此操作无法撤销。`,
-              `Permanently delete "${confirmDeleteBot.role}" on ${confirmDeleteDevice} and all its chat history? This cannot be undone.`,
-            )
-          : ''}
-        confirmLabel={t('确认永久删除', 'Delete permanently')}
-        cancelLabel={t('取消', 'Cancel')}
-        onCancel={() => setConfirmDeleteBot(null)}
-        onConfirm={() => {
-          if (confirmDeleteBot) void run(confirmDeleteBot, 'delete');
+        onOpenChange={(open) => {
+          if (!open && !confirmDeleteBusy) {
+            setConfirmDeleteBot(null);
+            setDeleteError('');
+          }
         }}
-      />
+        title={t('永久删除智能体', 'Permanently delete agent')}
+        overlayClassName="bs-confirm-overlay"
+        className="bs-confirm-dialog"
+        closeDisabled={confirmDeleteBusy}
+      >
+        <p className="secondary">
+          {targetDeleteBot
+            ? t(`将永久删除 ${confirmDeleteDevice} 上的「${targetDeleteBot.role}」及其全部聊天历史，此操作无法撤销。`, `Permanently delete "${targetDeleteBot.role}" on ${confirmDeleteDevice} and all its chat history? This cannot be undone.`)
+            : ''}
+        </p>
+        {confirmDeleteBot && !deleteTargetOnline && (
+          <InlineNotice
+            tone="warning"
+            title={
+              deleteTargetMissing
+                ? t('未在当前归档列表中找到该智能体', 'Agent not found in current archived list')
+                : !bridgeOnline
+                  ? t('当前连接已断开，无法永久删除', 'Connection lost — cannot permanently delete')
+                  : liveDeleteBot?.isPrimary
+                    ? t('主智能体不可永久删除', 'Primary agent cannot be permanently deleted')
+                    : t('目标设备当前离线，无法永久删除', 'Target device is offline — cannot permanently delete')
+            }
+            description={
+              deleteTargetMissing
+                ? t('该智能体可能已被恢复或删除，请关闭后刷新归档列表确认。', 'It may have already been restored or deleted. Close this dialog and refresh the archived list to verify.')
+                : liveDeleteBot?.isPrimary
+                  ? undefined
+                  : t('请待中心连接与目标设备恢复在线后再执行删除。', 'Wait until both the center connection and target device are online before deleting.')
+            }
+          />
+        )}
+        <ErrorNotice compact error={deleteError} onDismiss={() => setDeleteError('')} />
+        <ActionBar align="end" className="ui-confirm-actions">
+          <Button
+            variant="secondary"
+            disabled={confirmDeleteBusy}
+            onClick={() => {
+              setConfirmDeleteBot(null);
+              setDeleteError('');
+            }}
+          >
+            {t('取消', 'Cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            loading={confirmDeleteBusy}
+            disabled={confirmDeleteBusy || !deleteTargetOnline}
+            onClick={() => {
+              if (targetDeleteBot) void run(targetDeleteBot, 'delete');
+            }}
+          >
+            {t('确认永久删除', 'Delete permanently')}
+          </Button>
+        </ActionBar>
+      </Dialog>
     </section>
   );
 }
@@ -420,13 +540,18 @@ function CustomCaSection({
   const [busy, setBusy] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [error, setError] = useState('');
+  const mountedRef = useRef(true);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => () => {
-    if (savedTimerRef.current !== null) {
-      clearTimeout(savedTimerRef.current);
-      savedTimerRef.current = null;
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (savedTimerRef.current !== null) {
+        clearTimeout(savedTimerRef.current);
+        savedTimerRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -442,27 +567,34 @@ function CustomCaSection({
     setSavedOk(false);
     try {
       await onSaveCenterCa(caDraft);
+      if (!mountedRef.current) return;
       setDirty(false);
       setSavedOk(true);
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => {
         savedTimerRef.current = null;
-        setSavedOk(false);
+        if (mountedRef.current) setSavedOk(false);
       }, 2000);
     } catch (failure) {
+      if (!mountedRef.current) return;
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
   return (
     <div className="diagnostics-block">
-      <p className="metadata">
+      <p id="desktop-custom-ca-pem-hint" className="metadata">
         {t('仅用于自建 HTTPS 中心的私有根证书（PEM 格式）。', 'Only needed for self-hosted HTTPS centers using a private root certificate (PEM format).')}
       </p>
       <div className="settings-connect" style={{ marginTop: 'var(--space-2)' }}>
+        <label htmlFor="desktop-custom-ca-pem">
+          {t('自定义 CA 根证书（PEM）', 'Custom CA root certificate (PEM)')}
+        </label>
         <textarea
+          id="desktop-custom-ca-pem"
+          aria-describedby="desktop-custom-ca-pem-hint"
           value={caDraft}
           disabled={busy || !centerStatus?.savedConnection}
           onChange={(event) => {
@@ -499,14 +631,19 @@ export function SettingsPanel(props: SettingsPanelProps) {
   const [copiedClientId, setCopiedClientId] = useState(false);
   const [centerBusy, setCenterBusy] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
   const copyClientIdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hostService = useHostService(activeTab === 'connection');
 
-  useEffect(() => () => {
-    if (copyClientIdTimerRef.current !== null) {
-      clearTimeout(copyClientIdTimerRef.current);
-      copyClientIdTimerRef.current = null;
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copyClientIdTimerRef.current !== null) {
+        clearTimeout(copyClientIdTimerRef.current);
+        copyClientIdTimerRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -536,6 +673,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
   const deviceCount = devices.items.length > 0
     ? devices.items.length
     : (props.archiveBridge?.devices.length ?? 0);
+  const hasMoreDevices = devices.nextCursor !== null;
 
   const handleDisconnectCenter = async () => {
     if (centerBusy) return;
@@ -543,18 +681,19 @@ export function SettingsPanel(props: SettingsPanelProps) {
     try {
       await props.onDisconnectCenter();
     } finally {
-      setCenterBusy(false);
+      if (mountedRef.current) setCenterBusy(false);
     }
   };
 
   const copyClientId = () => {
     if (!centerStatus?.clientId) return;
     void navigator.clipboard?.writeText(centerStatus.clientId).then(() => {
+      if (!mountedRef.current) return;
       setCopiedClientId(true);
       if (copyClientIdTimerRef.current !== null) clearTimeout(copyClientIdTimerRef.current);
       copyClientIdTimerRef.current = setTimeout(() => {
         copyClientIdTimerRef.current = null;
-        setCopiedClientId(false);
+        if (mountedRef.current) setCopiedClientId(false);
       }, 1500);
     }).catch(() => {});
   };
@@ -695,7 +834,9 @@ export function SettingsPanel(props: SettingsPanelProps) {
                       <span>
                         {devices.busy && !devices.loaded && deviceCount === 0
                           ? t('正在读取设备…', 'Loading devices…')
-                          : t(`已接入 ${deviceCount} 台设备`, `${deviceCount} connected ${deviceCount === 1 ? 'device' : 'devices'}`)}
+                          : hasMoreDevices
+                            ? t(`已接入 ${deviceCount}+ 台设备`, `${deviceCount}+ connected devices`)
+                            : t(`已接入 ${deviceCount} 台设备`, `${deviceCount} connected ${deviceCount === 1 ? 'device' : 'devices'}`)}
                       </span>
                       <span className="metadata" style={{ display: 'block' }}>
                         {t('配对新设备、重命名或移除设备请前往中心管理', 'Pair, rename, or remove devices in Center Admin')}
@@ -869,6 +1010,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
 
               <ArchivedBots
                 bridge={props.archiveBridge}
+                transportConnected={props.transportConnected}
                 onOpenHistory={props.onOpenArchivedBotHistory}
               />
 

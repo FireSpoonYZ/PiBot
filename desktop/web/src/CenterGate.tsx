@@ -907,7 +907,6 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const showPairSteps = pairPhase !== 'idle' || pairSteps !== undefined;
   const caTextareaStyle = {
     width: '100%',
-    marginTop: 8,
     padding: '10px 12px',
     borderRadius: 'var(--radius-md)',
     fontFamily: 'var(--font-mono)',
@@ -957,7 +956,26 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
       </label>
       <details style={hairlineDetailsStyle}>
         <summary style={hairlineSummaryStyle}>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
-        <textarea style={caTextareaStyle} value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+        <div className="gate-advanced-fields">
+          <div className="gate-field">
+            <label htmlFor="center-gate-manual-ca-pem" style={{ fontSize: 13, fontWeight: 600 }}>
+              {t('自签 CA 根证书（PEM 格式，可选）', 'Self-signed CA root certificate (PEM format, optional)')}
+            </label>
+            <textarea
+              id="center-gate-manual-ca-pem"
+              aria-describedby="center-gate-manual-ca-pem-hint"
+              style={caTextareaStyle}
+              value={ca}
+              disabled={busy || showerBusy}
+              onChange={e => setCa(e.target.value)}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              rows={4}
+            />
+            <p id="center-gate-manual-ca-pem-hint" className="gate-hint">
+              {t('粘贴完整 PEM 根证书内容（包含 BEGIN/END CERTIFICATE 标记）；使用公共可信 HTTPS 证书时留空即可。', 'Paste the full PEM root certificate including BEGIN/END CERTIFICATE markers; leave blank for publicly trusted HTTPS certificates.')}
+            </p>
+          </div>
+        </div>
       </details>
       {host && isNewHost(host) && offerAdopt && (
         <label className="gate-check">
@@ -1107,10 +1125,24 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
             <span>{t('本机名称（可选）', 'Computer name (optional)')}</span>
             <input maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
           </label>
-          <label className="gate-field">
-            <span>{t('自签 CA 证书（可选）', 'Self-signed CA certificate (optional)')}</span>
-            <textarea style={caTextareaStyle} value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
-          </label>
+          <div className="gate-field">
+            <label htmlFor="center-gate-password-ca-pem" style={{ fontSize: 13, fontWeight: 600 }}>
+              {t('自签 CA 证书（PEM 格式，可选）', 'Self-signed CA certificate (PEM format, optional)')}
+            </label>
+            <textarea
+              id="center-gate-password-ca-pem"
+              aria-describedby="center-gate-password-ca-pem-hint"
+              style={caTextareaStyle}
+              value={ca}
+              disabled={busy || showerBusy}
+              onChange={e => setCa(e.target.value)}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              rows={4}
+            />
+            <p id="center-gate-password-ca-pem-hint" className="gate-hint">
+              {t('粘贴完整 PEM 根证书内容（包含 BEGIN/END CERTIFICATE 标记）；使用公共可信 HTTPS 证书时留空即可。', 'Paste the full PEM root certificate including BEGIN/END CERTIFICATE markers; leave blank for publicly trusted HTTPS certificates.')}
+            </p>
+          </div>
         </div>
       </details>
       <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">

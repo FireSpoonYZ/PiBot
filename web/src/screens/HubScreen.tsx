@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type RefObject, type TouchEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+  type TouchEvent,
+} from 'react';
 import { PanelLeft, Plus, RefreshCw, Search, Sparkles, Users, X } from 'lucide-react';
 import { mobileHaptic } from '../native/tauri-host';
 import type { ConnectionPhase } from '../connection';
@@ -28,6 +37,120 @@ import type { HubContextMenuState, HubListEntry } from './types';
 const HUB_ROOMS_ERROR_NOTICE_ID = 'hub-rooms-error';
 const HUB_PINS_ERROR_NOTICE_ID = 'hub-pins-error';
 const HUB_ACTION_ERROR_NOTICE_ID = 'hub-action-error';
+
+function isImeOrPreventedKeyEvent(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.isComposing || event.keyCode === 229;
+}
+
+function getEnabledMenuItems(menuEl: HTMLElement | null): HTMLElement[] {
+  if (!menuEl) return [];
+  return Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+}
+
+function useMenuKeyboard({
+  open,
+  menuRef,
+  triggerRef,
+  onClose,
+}: {
+  open: boolean;
+  menuRef: RefObject<HTMLDivElement | null>;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const openFrameRef = useRef<number | null>(null);
+
+  const dismiss = useCallback((restoreFocus: boolean) => {
+    if (openFrameRef.current !== null) {
+      cancelAnimationFrame(openFrameRef.current);
+      openFrameRef.current = null;
+    }
+    const trigger = triggerRef.current;
+    onCloseRef.current();
+    if (restoreFocus && trigger?.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, [triggerRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    openFrameRef.current = requestAnimationFrame(() => {
+      openFrameRef.current = null;
+      const menu = menuRef.current;
+      if (!menu?.isConnected) return;
+      const firstItem = getEnabledMenuItems(menu)[0];
+      (firstItem ?? menu).focus({ preventScroll: true });
+    });
+    return () => {
+      if (openFrameRef.current !== null) {
+        cancelAnimationFrame(openFrameRef.current);
+        openFrameRef.current = null;
+      }
+    };
+  }, [open, menuRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    return registerOverlayBackHandler(() => dismiss(true));
+  }, [open, dismiss]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismiss(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, dismiss]);
+
+  const onMenuKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) {
+        return;
+      }
+      if (event.key === 'Tab') {
+        dismiss(false);
+        return;
+      }
+      const menuItems = getEnabledMenuItems(menuRef.current);
+      if (menuItems.length === 0) return;
+
+      const activeIndex = menuItems.indexOf(document.activeElement as HTMLElement);
+      let nextIndex: number | null = null;
+      switch (event.key) {
+        case 'ArrowDown':
+          nextIndex = activeIndex === -1 ? 0 : (activeIndex + 1) % menuItems.length;
+          break;
+        case 'ArrowUp':
+          nextIndex =
+            activeIndex === -1
+              ? menuItems.length - 1
+              : (activeIndex - 1 + menuItems.length) % menuItems.length;
+          break;
+        case 'Home':
+          nextIndex = 0;
+          break;
+        case 'End':
+          nextIndex = menuItems.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      menuItems[nextIndex]?.focus({ preventScroll: true });
+    },
+    [menuRef, dismiss],
+  );
+
+  return { onMenuKeyDown };
+}
 
 export interface HubScreenProps {
   visible: boolean;
@@ -142,6 +265,9 @@ export function HubScreen({
 
   const bottomBarRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLUListElement | null>(null);
+  const connTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const hubAddTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const hubAddMenuRef = useRef<HTMLDivElement | null>(null);
   useBottomChromeMeasure(bottomBarRef, visible);
 
   const flipKeys = useMemo(() => visibleHubItems.map(entry => entry.pinKey), [visibleHubItems]);
@@ -171,39 +297,38 @@ export function HubScreen({
   const connPopoverVisible = visible && connPopoverOpen && connectionPhase !== 'online' && !anyDrawerOpen;
   const hubAddMenuVisible = visible && hubAddMenuOpen && !anyDrawerOpen;
 
+  const closeConnPopover = useCallback((restoreFocus: boolean) => {
+    const trigger = connTriggerRef.current;
+    setConnPopoverOpen(false);
+    if (restoreFocus && trigger?.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, []);
+
   useEffect(() => {
     if (!connPopoverVisible) return;
-    return registerOverlayBackHandler(() => setConnPopoverOpen(false));
-  }, [connPopoverVisible]);
+    return registerOverlayBackHandler(() => closeConnPopover(true));
+  }, [connPopoverVisible, closeConnPopover]);
 
   useEffect(() => {
     if (!connPopoverVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
-        setConnPopoverOpen(false);
+        closeConnPopover(true);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connPopoverVisible]);
+  }, [connPopoverVisible, closeConnPopover]);
 
-  useEffect(() => {
-    if (!hubAddMenuVisible) return;
-    return registerOverlayBackHandler(() => actionsRef.current.onCloseHubAddMenu());
-  }, [hubAddMenuVisible]);
-
-  useEffect(() => {
-    if (!hubAddMenuVisible) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        actionsRef.current.onCloseHubAddMenu();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hubAddMenuVisible]);
+  const { onMenuKeyDown: onHubAddMenuKeyDown } = useMenuKeyboard({
+    open: hubAddMenuVisible,
+    menuRef: hubAddMenuRef,
+    triggerRef: hubAddTriggerRef,
+    onClose: onCloseHubAddMenu,
+  });
 
   // H5: 群聊加载失败走 F1 浮层通知，带重试按钮；成功或离页立即清除。
   useEffect(() => {
@@ -328,6 +453,7 @@ export function HubScreen({
         ) : (
           <button
             type="button"
+            ref={connTriggerRef}
             className={`hub-top-title hub-top-status-btn is-${connectionPhase}${titleObscured ? ' is-obscured' : ''}`}
             style={{ whiteSpace: 'nowrap', minWidth: 0 }}
             aria-haspopup="dialog"
@@ -387,6 +513,7 @@ export function HubScreen({
 
         <button
           type="button"
+          ref={hubAddTriggerRef}
           className="hub-circle-btn hub-add-btn"
           style={{ flexShrink: 0 }}
           aria-label={t('新建', 'New')}
@@ -451,10 +578,18 @@ export function HubScreen({
         {hubAddMenuVisible && (
           <>
             <div className="grok-menu-backdrop" onClick={onCloseHubAddMenu} />
-            <div className="grok-floating-menu" role="menu">
+            <div
+              ref={hubAddMenuRef}
+              className="grok-floating-menu"
+              role="menu"
+              aria-label={t('新建', 'New')}
+              tabIndex={-1}
+              onKeyDown={onHubAddMenuKeyDown}
+            >
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseHubAddMenu();
@@ -469,6 +604,7 @@ export function HubScreen({
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 style={{ whiteSpace: 'nowrap' }}
                 onClick={() => {
                   onCloseHubAddMenu();

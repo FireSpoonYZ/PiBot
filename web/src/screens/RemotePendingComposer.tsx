@@ -7,6 +7,7 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Mic, Plus, RefreshCw, Square, Trash2, X, Zap } from 'lucide-react';
@@ -135,6 +136,120 @@ const PORTALED_QUEUE_WRAP_STYLE: CSSProperties = {
   pointerEvents: 'auto',
   animation: 'grok-pop-up 180ms var(--ease-out) both',
 };
+
+function isImeOrPreventedKeyEvent(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.isComposing || event.keyCode === 229;
+}
+
+function getEnabledMenuItems(menuEl: HTMLElement | null): HTMLElement[] {
+  if (!menuEl) return [];
+  return Array.from(menuEl.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'));
+}
+
+function useMenuKeyboard({
+  open,
+  menuRef,
+  triggerRef,
+  onClose,
+}: {
+  open: boolean;
+  menuRef: RefObject<HTMLDivElement | null>;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const openFrameRef = useRef<number | null>(null);
+
+  const dismiss = useCallback((restoreFocus: boolean) => {
+    if (openFrameRef.current !== null) {
+      cancelAnimationFrame(openFrameRef.current);
+      openFrameRef.current = null;
+    }
+    const trigger = triggerRef.current;
+    onCloseRef.current();
+    if (restoreFocus && trigger?.isConnected && !trigger.disabled) {
+      trigger.focus({ preventScroll: true });
+    }
+  }, [triggerRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    openFrameRef.current = requestAnimationFrame(() => {
+      openFrameRef.current = null;
+      const menu = menuRef.current;
+      if (!menu?.isConnected) return;
+      const firstItem = getEnabledMenuItems(menu)[0];
+      (firstItem ?? menu).focus({ preventScroll: true });
+    });
+    return () => {
+      if (openFrameRef.current !== null) {
+        cancelAnimationFrame(openFrameRef.current);
+        openFrameRef.current = null;
+      }
+    };
+  }, [open, menuRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    return registerOverlayBackHandler(() => dismiss(true));
+  }, [open, dismiss]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dismiss(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, dismiss]);
+
+  const onMenuKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) {
+        return;
+      }
+      if (event.key === 'Tab') {
+        dismiss(false);
+        return;
+      }
+      const menuItems = getEnabledMenuItems(menuRef.current);
+      if (menuItems.length === 0) return;
+
+      const activeIndex = menuItems.indexOf(document.activeElement as HTMLElement);
+      let nextIndex: number | null = null;
+      switch (event.key) {
+        case 'ArrowDown':
+          nextIndex = activeIndex === -1 ? 0 : (activeIndex + 1) % menuItems.length;
+          break;
+        case 'ArrowUp':
+          nextIndex =
+            activeIndex === -1
+              ? menuItems.length - 1
+              : (activeIndex - 1 + menuItems.length) % menuItems.length;
+          break;
+        case 'Home':
+          nextIndex = 0;
+          break;
+        case 'End':
+          nextIndex = menuItems.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      menuItems[nextIndex]?.focus({ preventScroll: true });
+    },
+    [menuRef, dismiss],
+  );
+
+  return { onMenuKeyDown };
+}
 
 export interface RemotePendingComposerProps {
   api: DesktopPanelApi;
@@ -516,6 +631,8 @@ export function RemotePendingComposer({
   const [sendingNow, setSendingNow] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const plusTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const plusMenuRef = useRef<HTMLDivElement | null>(null);
   /** 停止与发送并存、独立：不被 attempt/上传/草稿/action.busy 锁禁，只防重复。 */
   const stopBusy = Boolean(stopping);
   const runAbort = async () => {
@@ -967,22 +1084,12 @@ export function RemotePendingComposer({
     popoverActionsRef.current.onFloatingDockActiveChange?.(false);
   }, []);
 
-  useEffect(() => {
-    if (!plusMenuVisible) return;
-    return registerOverlayBackHandler(() => closeComposerMenu());
-  }, [plusMenuVisible, closeComposerMenu]);
-
-  useEffect(() => {
-    if (!plusMenuVisible) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeComposerMenu();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [plusMenuVisible, closeComposerMenu]);
+  const { onMenuKeyDown: onPlusMenuKeyDown } = useMenuKeyboard({
+    open: plusMenuVisible,
+    menuRef: plusMenuRef,
+    triggerRef: plusTriggerRef,
+    onClose: closeComposerMenu,
+  });
 
   useEffect(() => {
     if (!slashMenuVisible) return;
@@ -992,6 +1099,7 @@ export function RemotePendingComposer({
   useEffect(() => {
     if (!slashMenuVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeOrPreventedKeyEvent(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         dismissSlash();
@@ -1272,10 +1380,18 @@ export function RemotePendingComposer({
       )}
 
       {plusMenuVisible && (
-        <div className="bot-plus-popover" role="menu">
+        <div
+          ref={plusMenuRef}
+          className="bot-plus-popover"
+          role="menu"
+          aria-label={t('更多操作', 'More actions')}
+          tabIndex={-1}
+          onKeyDown={onPlusMenuKeyDown}
+        >
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             style={{ whiteSpace: 'nowrap' }}
             disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
             onClick={() => {
@@ -1296,6 +1412,7 @@ export function RemotePendingComposer({
             <button
               type="button"
               role="menuitem"
+              tabIndex={-1}
               style={{ whiteSpace: 'nowrap' }}
               disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
               onClick={() => {
@@ -1316,6 +1433,7 @@ export function RemotePendingComposer({
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             className="danger"
             style={{ whiteSpace: 'nowrap' }}
             disabled={Boolean(editingTurn)}
@@ -1393,6 +1511,7 @@ export function RemotePendingComposer({
       <div className="grok-composer-row">
         <button
           type="button"
+          ref={plusTriggerRef}
           className={`grok-composer-plus-circle${plusMenuVisible ? ' active' : ''}`}
           aria-label={t('更多操作', 'More actions')}
           aria-haspopup="menu"
@@ -1444,7 +1563,13 @@ export function RemotePendingComposer({
               pickRemoteImages('photos', files);
             }}
             onKeyDown={e => {
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.defaultPrevented || e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (slashMenuVisible && e.key === 'Escape') {
+                setSlashDismissedText(effectiveText);
+                if (slash.onKeyDown(e)) return;
+                e.preventDefault();
+                return;
+              }
               if (e.key === 'Escape' && editingTurn && !editSubmitting) {
                 e.preventDefault();
                 onCancelEditTurn?.();

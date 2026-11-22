@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { ExternalLink } from 'lucide-react';
 import { useText } from '../ui';
@@ -6,7 +6,7 @@ import './center-admin.css';
 import { clearCenterAdminCache, getCenterAdminScopeKey } from './cache';
 import { CapabilitiesTab } from './CapabilitiesTab';
 import { DevicesTab } from './DevicesTab';
-import { GoogleTab } from './GoogleTab';
+import { GoogleTab, clearPendingGoogleFlow } from './GoogleTab';
 import { ProvidersTab } from './ProvidersTab';
 import { ReleasesTab } from './ReleasesTab';
 import { VaultTab } from './VaultTab';
@@ -138,12 +138,35 @@ export function CenterAdminPanel({
 
   const currentTab: CenterAdminTab = normalizeCenterAdminTab(activeTab ?? internalTab);
 
-  const selectTab = (next: CenterAdminTab) => {
-    if (activeTab === undefined) {
-      setInternalTab(next);
-    }
-    onTabChange?.(next);
-  };
+  const navGuardRef = useRef<((nextTab: CenterAdminTab) => boolean) | null>(null);
+
+  const registerNavGuard = useCallback(
+    (guard: ((nextTab: CenterAdminTab) => boolean) | null) => {
+      navGuardRef.current = guard;
+    },
+    [],
+  );
+
+  const commitTabChange = useCallback(
+    (next: CenterAdminTab) => {
+      if (activeTab === undefined) {
+        setInternalTab(next);
+      }
+      onTabChange?.(next);
+    },
+    [activeTab, onTabChange],
+  );
+
+  const selectTab = useCallback(
+    (next: CenterAdminTab) => {
+      if (next === currentTab) return;
+      if (navGuardRef.current && !navGuardRef.current(next)) {
+        return;
+      }
+      commitTabChange(next);
+    },
+    [commitTabChange, currentTab],
+  );
 
   const tabs: readonly { id: CenterAdminTab; label: string }[] = useMemo(
     () => [
@@ -167,6 +190,7 @@ export function CenterAdminPanel({
     const prev = prevScopeRef.current;
     if (prev !== scopeKey) {
       clearCenterAdminCache(prev);
+      clearPendingGoogleFlow(prev);
       prevScopeRef.current = scopeKey;
     }
   }, [scopeKey]);
@@ -175,6 +199,7 @@ export function CenterAdminPanel({
     if (typeof window === 'undefined') return;
     const handleUnauth = () => {
       clearCenterAdminCache(scopeKey);
+      clearPendingGoogleFlow(scopeKey);
     };
     window.addEventListener('center-unauthenticated', handleUnauth);
     return () => window.removeEventListener('center-unauthenticated', handleUnauth);
@@ -226,7 +251,15 @@ export function CenterAdminPanel({
       case 'vault':
         return <VaultTab api={api} active cacheKey={scopeKey} />;
       case 'webhooks':
-        return <WebhooksTab api={api} active cacheKey={scopeKey} />;
+        return (
+          <WebhooksTab
+            api={api}
+            active
+            cacheKey={scopeKey}
+            onRegisterNavGuard={registerNavGuard}
+            onNavigateTab={commitTabChange}
+          />
+        );
       case 'releases':
         return (
           <ReleasesTab

@@ -45,7 +45,7 @@ function sameNavTarget<S extends string>(a: NavEntry<S>, b: NavEntry<S>): boolea
   if (a.screen === 'settings') {
     return (a.settingsPage ?? 'overview') === (b.settingsPage ?? 'overview');
   }
-  if (a.screen === 'tasks' && (a.taskId !== undefined || b.taskId !== undefined)) {
+  if (a.screen === 'tasks') {
     return (a.taskId ?? null) === (b.taskId ?? null);
   }
   if (a.botKey !== undefined && b.botKey !== undefined) {

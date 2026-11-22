@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import {
   ArrowLeft,
@@ -9,6 +9,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
 import { readTabCache, writeTabCache } from './cache';
@@ -32,6 +33,7 @@ import {
 } from './primitives';
 import { SchemaConfigForm } from './SchemaConfigForm';
 import type {
+  ActionDescriptor,
   BotCapabilityConfig,
   CapabilityKind,
   CapabilityTool,
@@ -42,6 +44,7 @@ import type {
   InstallationConfig,
   InstallationSkillFilesResponse,
   JsonObject,
+  JsonSchema,
   McpOAuthStart,
   Operation,
   PackageVersion,
@@ -134,6 +137,14 @@ function countEnabledBots(
   return count;
 }
 
+function actionHasInputFields(schema: JsonSchema): boolean {
+  if (typeof schema === 'boolean') return false;
+  if (schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)) {
+    return Object.keys(schema.properties).length > 0;
+  }
+  return false;
+}
+
 export function CapabilitiesTab({
   api,
   active = true,
@@ -148,6 +159,7 @@ export function CapabilitiesTab({
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
   const t = useText();
+  const idPrefix = useId();
   const defaultSkillMarkdown = t('# 技能说明\n\n描述此技能的目标、触发时机与执行步骤。\n', '# Skill Guide\n\nDescribe the goal, triggers, and execution steps for this skill.\n');
 
   const initialCache = useMemo(
@@ -290,16 +302,22 @@ export function CapabilitiesTab({
   const [probeBusy, setProbeBusy] = useState(false);
   const [probeResult, setProbeResult] = useState('');
   const [toolsResult, setToolsResult] = useState<CapabilityTool[] | null>(null);
+  const [detailActions, setDetailActions] = useState<ActionDescriptor[]>([]);
+  const [actionDrafts, setActionDrafts] = useState<Record<string, JsonObject>>({});
+  const [runningActionId, setRunningActionId] = useState<string | null>(null);
+  const [actionResults, setActionResults] = useState<Record<string, { ok: boolean; output: string }>>({});
   const [deployments, setDeployments] = useState<DeploymentReceipt[]>([]);
   const [updates, setUpdates] = useState<PackageVersion[] | null>(null);
   const [updateArtifactFile, setUpdateArtifactFile] = useState<File | null>(null);
   const [updateArtifactInputKey, setUpdateArtifactInputKey] = useState(0);
   const [operation, setOperation] = useState<Operation | null>(null);
 
+  const oauthFlowGenRef = useRef(0);
   const oauthTimerRef = useRef<number | null>(null);
   const opTimerRef = useRef<number | null>(null);
 
   const stopTimers = useCallback(() => {
+    oauthFlowGenRef.current += 1;
     if (oauthTimerRef.current !== null) {
       window.clearTimeout(oauthTimerRef.current);
       oauthTimerRef.current = null;
@@ -462,12 +480,17 @@ export function CapabilitiesTab({
         const bindingsPromise = api
           .getInstallationBotBindings(instId, activeBots)
           .catch(() => ({} as Record<string, BotCapabilityConfig>));
+        const actionsPromise =
+          inst.kind === 'skill'
+            ? Promise.resolve([] as ActionDescriptor[])
+            : api.listActions(instId).catch(() => [] as ActionDescriptor[]);
 
-        const [cfg, sFiles, deps, bindingsRec] = await Promise.all([
+        const [cfg, sFiles, deps, bindingsRec, actionsList] = await Promise.all([
           cfgPromise,
           filesPromise,
           depsPromise,
           bindingsPromise,
+          actionsPromise,
         ]);
         if (selectedIdRef.current !== instId) return;
 
@@ -486,6 +509,7 @@ export function CapabilitiesTab({
         setEnabledBotCounts(prev => ({ ...prev, [instId]: enabledCount }));
         setDetailConfig(cfg);
         setDetailGlobalDraft(cfg?.globalConfig ?? {});
+        setDetailActions(actionsList);
         setSkillFilesRes(sFiles);
         if (sFiles) {
           setSkillFilesDraft({ ...sFiles.files });
@@ -516,6 +540,11 @@ export function CapabilitiesTab({
       setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
       setDetailConfig(null);
       setDetailGlobalDraft({});
+      setDetailActions([]);
+      setActionDrafts({});
+      setRunningActionId(null);
+      setActionResults({});
+      setDetailBusy(false);
       setSkillFilesRes(null);
       setSkillFilesDraft({});
       setBotBindings(new Map());
@@ -544,10 +573,27 @@ export function CapabilitiesTab({
     selectedIdRef.current = null;
     detailBindingsLoadedForRef.current = null;
     setDetailInst(null);
+    setDetailActions([]);
+    setActionDrafts({});
+    setRunningActionId(null);
+    setActionResults({});
+    setDetailBusy(false);
+    setOauthFlow(null);
+    setOauthStatus('');
     setDetailError('');
     setDetailNotice('');
     clearNotice('op-error');
   }, [clearNotice, setDetailError, setDetailNotice, stopTimers]);
+
+  const closeDetailViewRef = useRef(closeDetailView);
+  closeDetailViewRef.current = closeDetailView;
+  const hasDetail = selectedId !== null;
+  useEffect(() => {
+    if (!active || !hasDetail) return;
+    return registerOverlayBackHandler(() => {
+      closeDetailViewRef.current();
+    });
+  }, [active, hasDetail]);
 
   const watchOperation = useCallback(
     (operationId: string, onDone?: () => void) => {
@@ -991,23 +1037,32 @@ export function CapabilitiesTab({
       setDetailError(t('请先选择一个可用 Bot 作为 OAuth 授权身份', 'Select an available Bot to authorize OAuth.'));
       return;
     }
+    const instId = detailInst.installationId;
+    const gen = ++oauthFlowGenRef.current;
+    if (oauthTimerRef.current !== null) {
+      window.clearTimeout(oauthTimerRef.current);
+      oauthTimerRef.current = null;
+    }
     setDetailBusy(true);
     setDetailError('');
     try {
-      const started = await api.startMcpOAuth(detailInst.installationId, targetBot);
+      const started = await api.startMcpOAuth(instId, targetBot);
+      if (gen !== oauthFlowGenRef.current) return;
       setOauthFlow(started);
       setOauthStatus('pending');
-      if (oauthTimerRef.current !== null) window.clearTimeout(oauthTimerRef.current);
       const poll = async () => {
+        if (gen !== oauthFlowGenRef.current) return;
         try {
           const st = await api.getMcpOAuthFlow(started.flowId);
+          if (gen !== oauthFlowGenRef.current) return;
           setOauthStatus(st.error ? `${st.status}: ${st.error}` : st.status);
           if (st.status === 'complete') {
             setDetailNotice(t('OAuth 授权已完成，正在自动启用…', 'OAuth authorized, enabling automatically…'));
-            const accepted = await api.enableInstallation(detailInst.installationId, {
+            const accepted = await api.enableInstallation(instId, {
               requestId: newRequestId(),
               validationBot: targetBot,
             });
+            if (gen !== oauthFlowGenRef.current) return;
             watchOperation(accepted.operationId);
             return;
           }
@@ -1015,14 +1070,93 @@ export function CapabilitiesTab({
             oauthTimerRef.current = window.setTimeout(() => void poll(), 1200);
           }
         } catch (pErr) {
+          if (gen !== oauthFlowGenRef.current) return;
           setOauthStatus(errorMessage(pErr, t('查询授权状态失败', 'Failed to check OAuth status')));
         }
       };
       oauthTimerRef.current = window.setTimeout(() => void poll(), 1500);
     } catch (err) {
+      if (gen !== oauthFlowGenRef.current) return;
       setDetailError(errorMessage(err, t('启动 OAuth 授权失败，请重试', 'Failed to start OAuth authorization. Please retry.')));
     } finally {
-      setDetailBusy(false);
+      if (gen === oauthFlowGenRef.current) setDetailBusy(false);
+    }
+  };
+
+  const handleLogoutMcpOAuth = async (targetOverride?: { deviceId: string; botId: string }) => {
+    if (!detailInst || detailBusy) return;
+    const targetBot = targetOverride ?? parseBotKey(selectedValidationBotKey);
+    if (!targetBot) {
+      setDetailError(t('请先选择一个 Bot 再断开 OAuth 授权', 'Select a Bot before disconnecting OAuth.'));
+      return;
+    }
+    const instId = detailInst.installationId;
+    oauthFlowGenRef.current += 1;
+    if (oauthTimerRef.current !== null) {
+      window.clearTimeout(oauthTimerRef.current);
+      oauthTimerRef.current = null;
+    }
+    setDetailBusy(true);
+    setDetailError('');
+    setDetailNotice('');
+    try {
+      await api.logoutMcpOAuth(instId, targetBot);
+      if (selectedIdRef.current !== instId) return;
+      setOauthFlow(null);
+      setOauthStatus('');
+      await loadDetail(instId);
+      if (selectedIdRef.current !== instId) return;
+      setDetailNotice(t('已断开该 Bot 的 OAuth 授权', 'Disconnected OAuth authorization for this Bot'));
+      void loadAll().catch(() => {});
+    } catch (err) {
+      if (selectedIdRef.current !== instId) return;
+      setDetailError(errorMessage(err, t('断开 OAuth 授权失败，请重试', 'Failed to disconnect OAuth. Please retry.')));
+    } finally {
+      if (selectedIdRef.current === instId) setDetailBusy(false);
+    }
+  };
+
+  const handleRunAction = async (descriptor: ActionDescriptor) => {
+    if (!detailInst || runningActionId !== null) return;
+    const targetBot = parseBotKey(selectedValidationBotKey);
+    if (!targetBot) {
+      setDetailError(t('请先选择一个可用 Bot 再执行扩展操作', 'Select an available Bot before running an extension action.'));
+      return;
+    }
+    const instId = detailInst.installationId;
+    const inputPayload: JsonObject = actionHasInputFields(descriptor.inputSchema)
+      ? (actionDrafts[descriptor.id] ?? {})
+      : {};
+    setRunningActionId(descriptor.id);
+    setDetailError('');
+    setDetailNotice('');
+    try {
+      const res = await api.runAction(instId, descriptor.id, {
+        requestId: newRequestId(),
+        deviceId: targetBot.deviceId,
+        botId: targetBot.botId,
+        input: inputPayload,
+      });
+      if (selectedIdRef.current !== instId) return;
+      const formatted =
+        typeof res.result === 'string'
+          ? res.result
+          : JSON.stringify(res.result ?? null, null, 2);
+      setActionResults(prev => ({
+        ...prev,
+        [descriptor.id]: { ok: true, output: formatted },
+      }));
+      setDetailNotice(t(`操作「${descriptor.title || descriptor.id}」执行完成`, `Action "${descriptor.title || descriptor.id}" completed`));
+    } catch (err) {
+      if (selectedIdRef.current !== instId) return;
+      const msg = errorMessage(err, t('执行操作失败，请确认扩展与所选 Bot 均已启用后重试', 'Failed to run action. Confirm both the extension and selected Bot are enabled, then retry.'));
+      setActionResults(prev => ({
+        ...prev,
+        [descriptor.id]: { ok: false, output: msg },
+      }));
+      setDetailError(msg);
+    } finally {
+      if (selectedIdRef.current === instId) setRunningActionId(null);
     }
   };
 
@@ -1280,11 +1414,12 @@ export function CapabilitiesTab({
               {/* OAuth authorization for center-hosted OAuth MCP */}
               {(needsOAuth || activeDetail.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded) && (
                 <div className="ca-cred-box ca-form-stack">
-                  <div className="ca-field-label">
+                  <label className="ca-field-label" htmlFor={`${idPrefix}-oauth-bot`}>
                     {t('OAuth 身份授权（选择可用 Bot 完成授权即可启用）', 'OAuth authorization (choose an available Bot to authorize and enable)')}
-                  </div>
+                  </label>
                   <div className="ca-inline-row ca-wrap">
                     <select
+                      id={`${idPrefix}-oauth-bot`}
                       className="ca-select ca-oauth-bot-select"
                       value={selectedValidationBotKey}
                       onChange={e => setSelectedValidationBotKey(e.target.value)}
@@ -1311,6 +1446,14 @@ export function CapabilitiesTab({
                       onClick={() => void handleEnableInDetail()}
                     >
                       {t('重试全局启用', 'Retry enable')}
+                    </button>
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-danger ca-btn-sm"
+                      disabled={detailBusy || !selectedValidationBotKey}
+                      onClick={() => void handleLogoutMcpOAuth()}
+                    >
+                      {t('断开授权', 'Disconnect OAuth')}
                     </button>
                   </div>
                   {oauthFlow && (
@@ -1511,6 +1654,7 @@ export function CapabilitiesTab({
                       <div className="ca-inline-row ca-probe-actions">
                         {activeBots.length > 1 && (
                           <select
+                            aria-label={t('选择探测 Bot', 'Select Bot for probe')}
                             className="ca-select ca-probe-select"
                             value={selectedValidationBotKey}
                             onChange={e => setSelectedValidationBotKey(e.target.value)}
@@ -1555,6 +1699,91 @@ export function CapabilitiesTab({
                       </div>
                     )}
                   </div>
+
+                  {detailActions.length > 0 && (
+                    <div className="ca-disclosure ca-form-stack" style={{ marginTop: 4 }}>
+                      <div className="ca-inline-between ca-wrap">
+                        <div>
+                          <div className="ca-field-label">{t('扩展操作', 'Extension actions')}</div>
+                          <div className="ca-muted">
+                            {t('调用扩展声明的自定义操作并查看返回结果', 'Run descriptor-driven actions declared by this extension')}
+                          </div>
+                        </div>
+                        {activeBots.length > 0 && (
+                          <div className="ca-inline-row">
+                            <label className="ca-field-label" htmlFor={`${idPrefix}-action-bot`}>
+                              {t('执行 Bot', 'Target Bot')}
+                            </label>
+                            <select
+                              id={`${idPrefix}-action-bot`}
+                              className="ca-select ca-probe-select"
+                              disabled={runningActionId !== null}
+                              value={selectedValidationBotKey}
+                              onChange={e => setSelectedValidationBotKey(e.target.value)}
+                            >
+                              {activeBots.map(b => (
+                                <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
+                                  {b.deviceName || b.deviceId} / {b.name || b.botId}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+
+                      {detailActions.map(act => {
+                        const hasFields = actionHasInputFields(act.inputSchema);
+                        const isRunning = runningActionId === act.id;
+                        const result = actionResults[act.id];
+                        return (
+                          <div key={act.id} className="ca-cred-box ca-form-stack">
+                            <div className="ca-inline-between ca-wrap">
+                              <div>
+                                <div className="ca-field-label">{act.title || act.id}</div>
+                                <div className="ca-muted ca-mono">{act.id}</div>
+                              </div>
+                              {!hasFields && (
+                                <button
+                                  type="button"
+                                  className="ca-btn ca-btn-sm"
+                                  disabled={runningActionId !== null || !selectedValidationBotKey}
+                                  aria-busy={isRunning}
+                                  onClick={() => void handleRunAction(act)}
+                                >
+                                  <LabelStack
+                                    active={isRunning ? t('执行中…', 'Running…') : t('执行', 'Run')}
+                                    labels={[t('执行', 'Run'), t('执行中…', 'Running…')]}
+                                  />
+                                </button>
+                              )}
+                            </div>
+
+                            {hasFields && (
+                              <SchemaConfigForm
+                                schema={act.inputSchema}
+                                formData={actionDrafts[act.id] ?? {}}
+                                onChange={next => setActionDrafts(prev => ({ ...prev, [act.id]: next }))}
+                                api={api}
+                                disabled={runningActionId !== null || !selectedValidationBotKey}
+                                submitLabel={t('执行操作', 'Run action')}
+                                submitBusy={isRunning}
+                                onSubmit={() => void handleRunAction(act)}
+                              />
+                            )}
+
+                            {result && (
+                              <pre
+                                className={`ca-mono ${result.ok ? 'ca-muted' : 'ca-error-text'}`}
+                                style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 240, overflow: 'auto' }}
+                              >
+                                {result.output}
+                              </pre>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -1578,25 +1807,41 @@ export function CapabilitiesTab({
                 busyKeys={bindingBusyKeys}
                 onToggleBot={(devId, bId, checked) => void handleToggleBotBinding(devId, bId, checked)}
                 renderBotExtra={
-                  activeDetail.kind !== 'skill' && detailConfig
+                  activeDetail.kind !== 'skill' &&
+                  (detailConfig || needsOAuth || activeDetail.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded)
                     ? bot => {
                         const bc = botBindings.get(botKey(bot.deviceId, bot.botId));
-                        if (!bc?.enabled) return null;
-                        const overrideCount = Object.keys(bc.overrides ?? {}).length;
+                        const showOAuthDisconnect = Boolean(
+                          needsOAuth || activeDetail.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded,
+                        );
+                        if (!bc?.enabled && !showOAuthDisconnect) return null;
+                        const overrideCount = Object.keys(bc?.overrides ?? {}).length;
                         return (
                           <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
-                            {overrideCount > 0 && (
+                            {bc?.enabled && overrideCount > 0 && (
                               <span className="ca-pill ca-pill-info ca-num">
                                 {t(`${overrideCount} 项覆盖`, `${overrideCount} overridden`)}
                               </span>
                             )}
-                            <button
-                              type="button"
-                              className="ca-btn ca-btn-sm"
-                              onClick={() => openBotOverrideModal(bot)}
-                            >
-                              {t('配置覆盖', 'Overrides')}
-                            </button>
+                            {bc?.enabled && detailConfig && (
+                              <button
+                                type="button"
+                                className="ca-btn ca-btn-sm"
+                                onClick={() => openBotOverrideModal(bot)}
+                              >
+                                {t('配置覆盖', 'Overrides')}
+                              </button>
+                            )}
+                            {showOAuthDisconnect && (
+                              <button
+                                type="button"
+                                className="ca-btn ca-btn-danger ca-btn-sm"
+                                disabled={detailBusy}
+                                onClick={() => void handleLogoutMcpOAuth({ deviceId: bot.deviceId, botId: bot.botId })}
+                              >
+                                {t('断开授权', 'Disconnect OAuth')}
+                              </button>
+                            )}
                           </div>
                         );
                       }
@@ -1633,11 +1878,11 @@ export function CapabilitiesTab({
                 </div>
               )}
 
-              {activeDetail.source.type === 'npm' && (
+              {detailInst && detailInst.source.type === 'npm' && (
                 <div className="ca-form-stack">
                   <div className="ca-inline-between ca-wrap">
                     <span className="ca-muted">
-                      {t(`npm 包版本：v${activeDetail.targetVersion}`, `npm version: v${activeDetail.targetVersion}`)}
+                      {t(`npm 包版本：v${detailInst.targetVersion}`, `npm version: v${detailInst.targetVersion}`)}
                     </span>
                     <button
                       type="button"
@@ -1667,7 +1912,7 @@ export function CapabilitiesTab({
                 </div>
               )}
 
-              {activeDetail.source.type === 'artifact' && (
+              {detailInst && detailInst.source.type === 'artifact' && (
                 <div className="ca-form-stack">
                   <div className="ca-field">
                     <label className="ca-field-label" htmlFor="ca-cap-artifact-update">
@@ -1683,7 +1928,7 @@ export function CapabilitiesTab({
                       onChange={e => setUpdateArtifactFile(e.target.files?.[0] ?? null)}
                     />
                     <span className="ca-field-help">
-                      {t(`包 ID 须为 ${activeDetail.packageId}；原地更新保留原实例、启用状态与 Bot 绑定。`, `Package ID must match ${activeDetail.packageId}; in-place update preserves the installation ID, enable state, and Bot bindings.`)}
+                      {t(`包 ID 须为 ${detailInst.packageId}；原地更新保留原实例、启用状态与 Bot 绑定。`, `Package ID must match ${detailInst.packageId}; in-place update preserves the installation ID, enable state, and Bot bindings.`)}
                     </span>
                   </div>
                   <div className="ca-inline-row">

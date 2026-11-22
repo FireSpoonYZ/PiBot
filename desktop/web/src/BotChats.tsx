@@ -2,7 +2,7 @@
 // 设计依据 desktop-gui-fresh-argon-design §5.2/§5.3/§5.4；
 // 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
 // 保留 CAS、显式发送、结果未确认锁与离线只读语义。
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -2008,7 +2008,6 @@ function PrimaryChatPane({
   onLiveActivity,
   onOpenPrivateChats,
   onOpenSendRecords,
-  onRequestArchive,
   onOpenCenterAdmin,
   initialClearedThroughEntryId = 0,
   onClearedThroughEntryId,
@@ -2017,11 +2016,13 @@ function PrimaryChatPane({
   onInspectorRequestConsumed,
   sidebarCollapsed = false,
   onExpandSidebar,
+  expandSidebarButtonRef,
   questionnaireRequestId,
   onQuestionnaireFocused,
   transcriptVisible = true,
   centerInterrupted = false,
   pageActive = true,
+  chatWorkspaceActive = pageActive,
   knownBots,
   tasks = [],
   taskBots = [],
@@ -2056,7 +2057,6 @@ function PrimaryChatPane({
   /** 打开该 Bot 参与的私聊列表（只读，默认不选对话）。 */
   onOpenPrivateChats?: (bot: BotRecord) => void;
   onOpenSendRecords?: (target: SendRecordsTarget) => void;
-  onRequestArchive: () => void;
   onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
   initialClearedThroughEntryId?: number;
   onClearedThroughEntryId?: (cutoff: number) => void;
@@ -2065,11 +2065,13 @@ function PrimaryChatPane({
   onInspectorRequestConsumed?: (seq: number) => void;
   sidebarCollapsed?: boolean;
   onExpandSidebar?: () => void;
+  expandSidebarButtonRef?: RefObject<HTMLButtonElement | null>;
   questionnaireRequestId?: string;
   onQuestionnaireFocused?: (id: string) => void;
   transcriptVisible?: boolean;
   centerInterrupted?: boolean;
   pageActive?: boolean;
+  chatWorkspaceActive?: boolean;
   knownBots?: readonly KnownBotSummary[];
   tasks?: GlobalTask[];
   taskBots?: TaskBotOption[];
@@ -2113,6 +2115,12 @@ function PrimaryChatPane({
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
+  const browserOpen = inspectorTab === 'browser';
+  const inspectorWorkspaceVisible = pageActive && chatWorkspaceActive;
+  const inspectorWorkspaceVisibleRef = useRef(inspectorWorkspaceVisible);
+  inspectorWorkspaceVisibleRef.current = inspectorWorkspaceVisible;
+  const inspectorDialogOpen = inspectorWorkspaceVisible && inspectorTab !== null && !browserOpen;
+  const browserDialogOpen = inspectorWorkspaceVisible && browserOpen;
   const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
   const browserDestinationScope = `${sess}:${bot.deviceId}:${bot.botId}`;
   const openBrowserDestination = useCallback((value: BrowserDestination) => {
@@ -2149,8 +2157,9 @@ function PrimaryChatPane({
   const previousInspectorTabRef = useRef<InspectorTab | null>(null);
   const profileScrollRef = useRef(0);
 
-  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | 'clear' | null>(null);
+  const [manageAction, setManageAction] = useState<'setPrimary' | 'archive' | 'unarchive' | 'delete' | 'clear' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearDone, setClearDone] = useState(false);
@@ -2159,6 +2168,10 @@ function PrimaryChatPane({
   const cutoffRef = useRef<number>(initialCutoff);
   const onClearedThroughEntryIdRef = useRef(onClearedThroughEntryId);
   onClearedThroughEntryIdRef.current = onClearedThroughEntryId;
+  const archiveConfirmHeadingId = useId();
+  const archiveConfirmationRef = useRef<HTMLDivElement | null>(null);
+  const archiveCancelButtonRef = useRef<HTMLButtonElement | null>(null);
+  const manageArchiveButtonRef = useRef<HTMLButtonElement | null>(null);
   const deleteConfirmationRef = useRef<HTMLDivElement | null>(null);
   const manageDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
@@ -2384,6 +2397,7 @@ function PrimaryChatPane({
     const previous = previousInspectorTabRef.current;
     previousInspectorTabRef.current = inspectorTab;
     if (previous === 'management' && inspectorTab !== previous) {
+      setConfirmArchive(false);
       setConfirmDelete(false);
       setConfirmClear(false);
     }
@@ -2406,6 +2420,12 @@ function PrimaryChatPane({
   useLayoutEffect(() => {
     if (confirmDelete && inspectorTab === 'management') deleteConfirmationRef.current?.focus();
   }, [confirmDelete, inspectorTab]);
+
+  useLayoutEffect(() => {
+    if (confirmArchive && inspectorTab === 'management') {
+      (archiveCancelButtonRef.current ?? archiveConfirmationRef.current)?.focus();
+    }
+  }, [confirmArchive, inspectorTab]);
 
   /** 统一 Shower 面板的平台无关 RPC 适配：方法名/扁平参数由面板给出，身份仍取当前连接。 */
   const callShower = useCallback(
@@ -2446,6 +2466,39 @@ function PrimaryChatPane({
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
         setManageError(`设为主 Bot 失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
+      }
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
+  async function handleArchive() {
+    if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
+    manageInFlightRef.current = true;
+    setManageAction('archive');
+    setManageError(null);
+    try {
+      const updated = await api.call(identity, 'archiveBot', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      const archivedAt =
+        updated &&
+        typeof updated === 'object' &&
+        'archivedAt' in updated &&
+        typeof (updated as { archivedAt?: unknown }).archivedAt === 'string'
+          ? (updated as { archivedAt: string }).archivedAt
+          : new Date().toISOString();
+      setConfirmArchive(false);
+      onBotUpdated({
+        ...(updated && typeof updated === 'object' ? (updated as Partial<BotRecord>) : {}),
+        botId: bot.botId,
+        archivedAt,
+        isPrimary: false,
+      });
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(t(`归档失败：${tErr(e)}`, `Archive failed: ${tErr(e)}`));
         reportUnlessTargetOffline(api, e);
       }
     } finally {
@@ -3825,6 +3878,7 @@ function PrimaryChatPane({
       window.setTimeout(() => searchInputRef.current?.focus(), 0);
     }
     function onInspector() {
+      if (!inspectorWorkspaceVisibleRef.current) return;
       setActivePopover((cur) => (cur === 'search' ? cur : null));
       setInspectorTab((cur) => (cur ? null : 'profile'));
     }
@@ -3851,7 +3905,7 @@ function PrimaryChatPane({
    * - 其余落在抽屉外（遮罩/聊天区）的 Esc 才关闭紧凑浮层；普通宽屏并排不拦截。
    */
   useEffect(() => {
-    if (!inspectorTab || inspectorTab === 'browser' || !compactOverlay) return;
+    if (!inspectorDialogOpen || !compactOverlay) return;
     function onEsc(e: KeyboardEvent) {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
@@ -3860,7 +3914,7 @@ function PrimaryChatPane({
     }
     document.addEventListener('keydown', onEsc);
     return () => document.removeEventListener('keydown', onEsc);
-  }, [inspectorTab, compactOverlay]);
+  }, [inspectorDialogOpen, compactOverlay]);
 
   // 点击其它区域关闭「更多」菜单
   useEffect(() => {
@@ -4077,7 +4131,6 @@ function PrimaryChatPane({
         .find(pres => pres?.kind === 'google-browser-takeover') ?? null)
     : null;
   const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
-  const browserOpen = inspectorTab === 'browser';
   const inspectorTitle = inspectorPage?.label ??
     (isProfilePage
       ? '智能体资料'
@@ -4178,6 +4231,7 @@ function PrimaryChatPane({
       <header className="chat-header">
         {sidebarCollapsed && onExpandSidebar ? (
           <button
+            ref={expandSidebarButtonRef}
             type="button"
             className="icon-button"
             onClick={onExpandSidebar}
@@ -4203,7 +4257,7 @@ function PrimaryChatPane({
           onClick={() => openInspector('profile')}
           aria-label={t(`打开${bot.role}的智能体设置`, `Open settings for ${bot.role}`)}
           aria-haspopup="dialog"
-          aria-expanded={isProfilePage || Boolean(inspectorPage)}
+          aria-expanded={inspectorDialogOpen}
           title={t('智能体设置（Ctrl+.）', 'Bot settings (Ctrl+.)')}
         >
           <GrokBotAvatar
@@ -4571,6 +4625,7 @@ function PrimaryChatPane({
           <Dialog.Overlay className="desktop-dialog-overlay" />
           <Dialog.Content className="desktop-dialog confirm-action-dialog" onCloseAutoFocus={event => {
             event.preventDefault();
+            if (!inspectorWorkspaceVisibleRef.current) return;
             if (stopButtonRef.current && !stopButtonRef.current.disabled) stopButtonRef.current.focus();
             else stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
           }}>
@@ -4591,10 +4646,10 @@ function PrimaryChatPane({
       </Dialog.Root>
 
       <Dialog.Root
-        open={inspectorTab !== null && !browserOpen}
+        open={inspectorDialogOpen}
         modal={compactOverlay}
         onOpenChange={(open) => {
-          if (!open) setInspectorTab(null);
+          if (!open && inspectorWorkspaceVisibleRef.current) setInspectorTab(null);
         }}
       >
         <Dialog.Portal container={stageRef.current}>
@@ -4609,7 +4664,9 @@ function PrimaryChatPane({
             }}
             onCloseAutoFocus={(e) => {
               e.preventDefault();
-              stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+              if (inspectorWorkspaceVisibleRef.current) {
+                stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+              }
             }}
           >
             <div className="inspector-head">
@@ -4669,7 +4726,9 @@ function PrimaryChatPane({
                             <span className="inspector-link-label">{label}</span>
                             {id === 'model' ? (
                               <span className={'inspector-link-value' + (modelSummary.tone === 'warn' ? ' model-summary-warn' : ' metadata')}>
-                                {modelSummary.primaryText}
+                                <span className="inspector-model-name" title={modelSummary.primaryText}>
+                                  {modelSummary.primaryText}
+                                </span>
                                 {modelSummary.badgeText ? <span className="inspector-default-pill">{modelSummary.badgeText}</span> : null}
                               </span>
                             ) : null}
@@ -4702,19 +4761,28 @@ function PrimaryChatPane({
                           type="button"
                           className="secondary-button"
                           disabled={!online || manageBusy || slashBusy !== null || liveBusy}
-                          onClick={() => setConfirmClear(true)}
+                          onClick={() => {
+                            setConfirmArchive(false);
+                            setConfirmDelete(false);
+                            setConfirmClear(true);
+                          }}
                         >
                           {manageAction === 'clear' ? t('清空中…', 'Clearing…') : t('清空对话', 'Clear conversation')}
                         </button>
                       ) : null}
                       {!isArchived ? (
                         <button
+                          ref={manageArchiveButtonRef}
                           type="button"
                           className="secondary-button"
                           disabled={!online || manageBusy || isPrimary}
-                          onClick={onRequestArchive}
+                          onClick={() => {
+                            setConfirmClear(false);
+                            setConfirmDelete(false);
+                            setConfirmArchive(true);
+                          }}
                         >
-                          {t('归档智能体', 'Archive bot')}
+                          {manageAction === 'archive' ? t('正在归档…', 'Archiving…') : t('归档智能体', 'Archive bot')}
                         </button>
                       ) : (
                         <button
@@ -4731,7 +4799,11 @@ function PrimaryChatPane({
                         className="secondary-button danger-outline"
                         ref={manageDeleteButtonRef}
                         disabled={!online || manageBusy || isPrimary}
-                        onClick={() => setConfirmDelete(true)}
+                        onClick={() => {
+                          setConfirmArchive(false);
+                          setConfirmClear(false);
+                          setConfirmDelete(true);
+                        }}
                       >
                         {t('永久删除智能体', 'Delete bot permanently')}
                       </button>
@@ -4756,6 +4828,52 @@ function PrimaryChatPane({
                             onClick={() => setConfirmClear(false)}
                           >
                             取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {confirmArchive && !isArchived && !isPrimary ? (
+                      <div
+                        className="confirm-delete-banner confirm-archive-banner"
+                        role="region"
+                        aria-labelledby={archiveConfirmHeadingId}
+                        ref={archiveConfirmationRef}
+                        tabIndex={-1}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape' && !manageBusy) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setConfirmArchive(false);
+                            manageArchiveButtonRef.current?.focus();
+                          }
+                        }}
+                      >
+                        <span id={archiveConfirmHeadingId}>
+                          {t(
+                            `归档「${bot.role}」后，对话转为只读。归档满 ${ARCHIVE_RETENTION_DAYS} 天会自动清理，期间可在已归档智能体里恢复。`,
+                            `Archiving "${bot.role}" makes its chat read-only. It auto-deletes after ${ARCHIVE_RETENTION_DAYS} days and can be restored before then.`,
+                          )}
+                        </span>
+                        <div className="confirm-delete-actions">
+                          <button
+                            type="button"
+                            className="primary-button"
+                            disabled={!online || manageBusy}
+                            onClick={() => void handleArchive()}
+                          >
+                            {manageAction === 'archive' ? t('正在归档…', 'Archiving…') : t('确认归档', 'Confirm archive')}
+                          </button>
+                          <button
+                            ref={archiveCancelButtonRef}
+                            type="button"
+                            className="secondary-button"
+                            disabled={manageBusy}
+                            onClick={() => {
+                              setConfirmArchive(false);
+                              manageArchiveButtonRef.current?.focus();
+                            }}
+                          >
+                            {t('取消', 'Cancel')}
                           </button>
                         </div>
                       </div>
@@ -4821,7 +4939,12 @@ function PrimaryChatPane({
         </Dialog.Portal>
       </Dialog.Root>
 
-      <Dialog.Root open={browserOpen} onOpenChange={(open) => { if (!open) setInspectorTab(null); }}>
+      <Dialog.Root
+        open={browserDialogOpen}
+        onOpenChange={(open) => {
+          if (!open && inspectorWorkspaceVisibleRef.current) setInspectorTab(null);
+        }}
+      >
         <Dialog.Portal>
           <Dialog.Content
             className="bot-browser-dialog"
@@ -4834,7 +4957,9 @@ function PrimaryChatPane({
             }}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+              if (inspectorWorkspaceVisibleRef.current) {
+                stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+              }
             }}
           >
             <Dialog.Title className="sr-only">{t(`${bot.role} 的浏览器`, `${bot.role} browser`)}</Dialog.Title>
@@ -5217,7 +5342,50 @@ export function BotChats({
   const deleteBotFlight = useRef(false);
   const deleteGroupFlight = useRef(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const collapseSidebarBtnRef = useRef<HTMLButtonElement | null>(null);
+  const chatExpandSidebarBtnRef = useRef<HTMLButtonElement | null>(null);
+  const scopeExpandSidebarBtnRef = useRef<HTMLButtonElement | null>(null);
+  const emptyExpandSidebarBtnRef = useRef<HTMLButtonElement | null>(null);
+  const sidebarFocusRafRef = useRef<number | null>(null);
+  const stageRef = useRef(stage);
+  stageRef.current = stage;
   const topAddRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    return () => {
+      if (sidebarFocusRafRef.current !== null) {
+        window.cancelAnimationFrame(sidebarFocusRafRef.current);
+        sidebarFocusRafRef.current = null;
+      }
+    };
+  }, []);
+
+  const scheduleSidebarFocus = useCallback((fn: () => void) => {
+    if (sidebarFocusRafRef.current !== null) {
+      window.cancelAnimationFrame(sidebarFocusRafRef.current);
+    }
+    sidebarFocusRafRef.current = window.requestAnimationFrame(() => {
+      sidebarFocusRafRef.current = null;
+      fn();
+    });
+  }, []);
+
+  const handleCollapseSidebarClick = useCallback(() => {
+    setListCollapsed(true);
+    scheduleSidebarFocus(() => {
+      const target = stageRef.current
+        ? scopeExpandSidebarBtnRef.current ?? emptyExpandSidebarBtnRef.current
+        : chatExpandSidebarBtnRef.current ?? emptyExpandSidebarBtnRef.current;
+      target?.focus();
+    });
+  }, [scheduleSidebarFocus]);
+
+  const handleExpandSidebarClick = useCallback(() => {
+    setListCollapsed(false);
+    scheduleSidebarFocus(() => {
+      (collapseSidebarBtnRef.current ?? searchInputRef.current)?.focus();
+    });
+  }, [scheduleSidebarFocus]);
 
   const openModal = useCallback((next: ActiveBotChatsModal): boolean => {
     if (
@@ -5452,7 +5620,7 @@ export function BotChats({
 
   // Ctrl/Cmd+K 聚焦搜索 · Ctrl/Cmd+B 折叠列表 · Ctrl/Cmd+F 会话内搜索 · Ctrl/Cmd+. 工作台
   useEffect(() => {
-    if (!workspaceActive || boardActive || tasksActive) return;
+    if (!chatWorkspaceActive) return;
     function onKey(e: KeyboardEvent) {
       if (e.defaultPrevented || !(e.ctrlKey || e.metaKey)) return;
       const k = e.key.toLowerCase();
@@ -5466,14 +5634,14 @@ export function BotChats({
       } else if (k === 'f' && !stage && selected) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('botchats:chat-search'));
-      } else if (e.key === '.' && !stage && selected) {
+      } else if (e.key === '.' && !stage && selected && activeModal === null && activeModalRef.current === null) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('botchats:toggle-inspector'));
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [workspaceActive, boardActive, tasksActive, stage, selected]);
+  }, [chatWorkspaceActive, stage, selected, activeModal]);
 
   const missingPrimaryDevices = useMemo(
     () =>
@@ -5968,7 +6136,12 @@ export function BotChats({
 
   const deleteBotEntry = useCallback(
     async (targetBot: BotDirectoryEntry) => {
-      if (!identity || !api.transportConnected || targetBot.isPrimary) return;
+      if (!identity || !api.transportConnected) {
+        throw new Error(t('连接已断开，无法删除已归档智能体', 'Disconnected; unable to delete archived bot'));
+      }
+      if (targetBot.isPrimary) {
+        throw new Error(t('主智能体不可删除，请先将其他智能体设为主智能体', 'Primary bot cannot be deleted; set another bot as primary first'));
+      }
       const localSess = sessionRef.current;
       setBotActionError(null);
       const scope = readScopeFor(targetBot.deviceId, targetBot.botId);
@@ -6009,7 +6182,7 @@ export function BotChats({
         if (!deleted) scope.resume();
       }
     },
-    [api, identity, removePin, triggerLoadBots, refreshGroups, readScopeFor],
+    [api, identity, removePin, triggerLoadBots, refreshGroups, readScopeFor, t],
   );
 
   const openArchivedBotHistory = useCallback((targetBot: BotDirectoryEntry) => {
@@ -6729,9 +6902,10 @@ export function BotChats({
       }}
     >
       <button
+        ref={scopeExpandSidebarBtnRef}
         type="button"
         className="icon-button"
-        onClick={() => setListCollapsed(false)}
+        onClick={handleExpandSidebarClick}
         aria-label={t('展开对话列表', 'Expand conversation list')}
         title={t('展开对话列表（Ctrl+B）', 'Expand conversation list (Ctrl+B)')}
       >
@@ -6811,9 +6985,10 @@ export function BotChats({
               </div>
             </details>
             <button
+              ref={collapseSidebarBtnRef}
               type="button"
               className="icon-button"
-              onClick={() => setListCollapsed(true)}
+              onClick={handleCollapseSidebarClick}
               aria-label={t('收起对话列表', 'Collapse conversation list')}
               title={t('收起对话列表（Ctrl+B）', 'Collapse conversation list (Ctrl+B)')}
             >
@@ -7077,9 +7252,9 @@ export function BotChats({
             devicePlatform={selectedDevicePlatform}
             focusComposer={selected?.focusComposer}
             sidebarCollapsed={listCollapsed}
-            onExpandSidebar={() => setListCollapsed(false)}
+            onExpandSidebar={handleExpandSidebarClick}
+            expandSidebarButtonRef={chatExpandSidebarBtnRef}
             onOpenSendRecords={onOpenSendRecords}
-            onRequestArchive={() => openModal({ kind: 'archiveBot', bot: selectedBot, archiving: false })}
             onOpenCenterAdmin={onOpenCenterAdmin}
             questionnaireRequestId={selected?.questionnaire?.session === sess &&
               selected.questionnaire.conversationId === selectedBot.primaryConversationId
@@ -7189,7 +7364,8 @@ export function BotChats({
               if (failure) dismissTaskChatAction(failure);
             }}
             transcriptVisible={activeModal === null}
-            pageActive={pageActive && workspaceActive && !stage}
+            pageActive={chatWorkspaceActive && !stage}
+            chatWorkspaceActive={chatWorkspaceActive}
           />
           </div>
           );
@@ -7200,9 +7376,10 @@ export function BotChats({
             {onlineDevices.length > 0 ? t('或使用 Ctrl+K 快速搜索', 'Or press Ctrl+K to search') : null}
             {listCollapsed ? (
               <button
+                ref={emptyExpandSidebarBtnRef}
                 type="button"
                 className="secondary-button"
-                onClick={() => setListCollapsed(false)}
+                onClick={handleExpandSidebarClick}
                 aria-label={t('展开对话列表', 'Expand conversation list')}
                 title={t('展开对话列表（Ctrl+B）', 'Expand conversation list (Ctrl+B)')}
               >

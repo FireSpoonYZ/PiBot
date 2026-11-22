@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type * as React from 'react';
 import { AlertCircle, CheckCircle2, Loader2, Lock, QrCode as QrIcon, RefreshCw } from 'lucide-react';
 import { useText } from '../../web/src/ui';
 import { api, CenterApiError } from '../api';
@@ -7,6 +8,7 @@ import { QrCode } from '../components/QrCode';
 
 type LoginMode = 'qr' | 'password';
 type QrState = 'loading' | 'pending' | 'approved' | 'expired' | 'error';
+const LOGIN_MODES: readonly LoginMode[] = ['qr', 'password'];
 
 interface InlineErrorState {
   message: string;
@@ -53,6 +55,10 @@ function describePasswordError(
 export default function Login({ onSuccess }: { onSuccess?: () => void }) {
   const t = useText();
   const [mode, setMode] = useState<LoginMode>('qr');
+  const tabRefs = useRef<Record<LoginMode, HTMLButtonElement | null>>({
+    qr: null,
+    password: null,
+  });
 
   // QR login state
   const [challenge, setChallenge] = useState<QrLoginChallengeResponse | null>(null);
@@ -159,6 +165,25 @@ export default function Login({ onSuccess }: { onSuccess?: () => void }) {
     }
   };
 
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const count = LOGIN_MODES.length;
+    let nextIndex = -1;
+    if (event.key === 'ArrowRight') {
+      nextIndex = (index + 1) % count;
+    } else if (event.key === 'ArrowLeft') {
+      nextIndex = (index - 1 + count) % count;
+    } else if (event.key === 'Home') {
+      nextIndex = 0;
+    } else if (event.key === 'End') {
+      nextIndex = count - 1;
+    }
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextMode = LOGIN_MODES[nextIndex];
+    tabRefs.current[nextMode]?.focus();
+    switchMode(nextMode);
+  };
+
   return (
     <main className="cw-auth-page">
       <section className="cw-auth-card">
@@ -176,151 +201,161 @@ export default function Login({ onSuccess }: { onSuccess?: () => void }) {
 
         <div className="cw-segmented" role="tablist" aria-label={t('登录方式', 'Sign-in method')}>
           <button
+            ref={el => {
+              tabRefs.current.qr = el;
+            }}
             id="cw-login-tab-qr"
             type="button"
             role="tab"
             aria-selected={mode === 'qr'}
             aria-controls="cw-login-panel-qr"
+            tabIndex={mode === 'qr' ? 0 : -1}
             className={`cw-segmented-btn${mode === 'qr' ? ' is-active' : ''}`}
             onClick={() => switchMode('qr')}
+            onKeyDown={event => handleTabKeyDown(event, 0)}
           >
             <QrIcon size={14} aria-hidden="true" />
             <span>{t('扫码登录', 'QR code')}</span>
           </button>
           <button
+            ref={el => {
+              tabRefs.current.password = el;
+            }}
             id="cw-login-tab-password"
             type="button"
             role="tab"
             aria-selected={mode === 'password'}
             aria-controls="cw-login-panel-password"
+            tabIndex={mode === 'password' ? 0 : -1}
             className={`cw-segmented-btn${mode === 'password' ? ' is-active' : ''}`}
             onClick={() => switchMode('password')}
+            onKeyDown={event => handleTabKeyDown(event, 1)}
           >
             <Lock size={14} aria-hidden="true" />
             <span>{t('口令登录', 'Password')}</span>
           </button>
         </div>
 
-        {mode === 'qr' ? (
-          <div
-            id="cw-login-panel-qr"
-            role="tabpanel"
-            aria-labelledby="cw-login-tab-qr"
-            className="cw-auth-qr"
-          >
-            <div className={`cw-auth-qr-frame${showQrCode ? '' : ' cw-auth-qr-frame--surface'}`}>
-              {qrState === 'loading' && (
-                <div className="cw-auth-qr-state" role="status" aria-live="polite">
-                  <Loader2 size={18} className="cw-spin" aria-hidden="true" />
-                  <span>{t('正在生成二维码…', 'Generating QR code…')}</span>
-                </div>
-              )}
+        <div
+          id="cw-login-panel-qr"
+          role="tabpanel"
+          aria-labelledby="cw-login-tab-qr"
+          hidden={mode !== 'qr'}
+          className="cw-auth-qr"
+        >
+          <div className={`cw-auth-qr-frame${showQrCode ? '' : ' cw-auth-qr-frame--surface'}`}>
+            {qrState === 'loading' && (
+              <div className="cw-auth-qr-state" role="status" aria-live="polite">
+                <Loader2 size={18} className="cw-spin" aria-hidden="true" />
+                <span>{t('正在生成二维码…', 'Generating QR code…')}</span>
+              </div>
+            )}
 
-              {qrState === 'error' && (
-                <div className="cw-auth-qr-state">
-                  <AlertCircle size={20} aria-hidden="true" />
-                  <span>{t('二维码暂不可用', 'QR unavailable')}</span>
-                  <button
-                    type="button"
-                    className="cw-btn cw-btn--secondary cw-btn--sm"
-                    onClick={() => void loadChallenge()}
-                  >
-                    <RefreshCw size={13} aria-hidden="true" />
-                    <span>{t('重新生成', 'Retry')}</span>
-                  </button>
-                </div>
-              )}
-
-              {showQrCode && challenge && (
-                <QrCode value={challenge.qrCode} label={t('中心管理扫码登录二维码', 'Center Admin sign-in QR code')} />
-              )}
-
-              {qrState === 'expired' && (
+            {qrState === 'error' && (
+              <div className="cw-auth-qr-state">
+                <AlertCircle size={20} aria-hidden="true" />
+                <span>{t('二维码暂不可用', 'QR unavailable')}</span>
                 <button
                   type="button"
-                  className="cw-auth-qr-overlay"
+                  className="cw-btn cw-btn--secondary cw-btn--sm"
                   onClick={() => void loadChallenge()}
                 >
-                  <RefreshCw size={18} aria-hidden="true" />
-                  <span>{t('二维码已过期', 'QR code expired')}</span>
-                  <span className="cw-auth-qr-overlay-sub">{t('点击刷新', 'Click to refresh')}</span>
+                  <RefreshCw size={13} aria-hidden="true" />
+                  <span>{t('重新生成', 'Retry')}</span>
                 </button>
-              )}
-            </div>
-
-            {qrState === 'error' && qrError && (
-              <div className="cw-auth-alert" role="alert">
-                <span className="cw-auth-alert-title">{qrError.message}</span>
-                <span className="cw-auth-alert-hint">{qrError.hint}</span>
               </div>
             )}
 
-            {qrState === 'pending' && (
-              <p className="cw-auth-qr-meta">
-                {t(`有效期剩余 ${remainText} · 手机端「设置 → 扫一扫」`, `Expires in ${remainText} · Mobile Settings → Scan`)}
-              </p>
+            {showQrCode && challenge && (
+              <QrCode value={challenge.qrCode} label={t('中心管理扫码登录二维码', 'Center Admin sign-in QR code')} />
             )}
 
-            {qrState === 'approved' && (
-              <div className="cw-auth-status cw-auth-status--success" role="status" aria-live="polite">
-                <CheckCircle2 size={16} aria-hidden="true" />
-                <span>{t('已确认登录，正在进入…', 'Approved. Signing in…')}</span>
-              </div>
+            {qrState === 'expired' && (
+              <button
+                type="button"
+                className="cw-auth-qr-overlay"
+                onClick={() => void loadChallenge()}
+              >
+                <RefreshCw size={18} aria-hidden="true" />
+                <span>{t('二维码已过期', 'QR code expired')}</span>
+                <span className="cw-auth-qr-overlay-sub">{t('点击刷新', 'Click to refresh')}</span>
+              </button>
             )}
           </div>
-        ) : (
-          <form
-            id="cw-login-panel-password"
-            role="tabpanel"
-            aria-labelledby="cw-login-tab-password"
-            className="cw-auth-form"
-            onSubmit={event => {
-              event.preventDefault();
-              setPwdBusy(true);
-              setPwdError(null);
-              void api
-                .login({ password })
-                .then(() => {
-                  setPassword('');
-                  finishLogin();
-                })
-                .catch(err => setPwdError(describePasswordError(err, t)))
-                .finally(() => setPwdBusy(false));
-            }}
-          >
-            <div className="cw-auth-field">
-              <label className="cw-auth-label" htmlFor="cw-login-password">
-                <span>{t('所有者口令', 'Owner password')}</span>
-              </label>
-              <input
-                id="cw-login-password"
-                className="cw-input"
-                type="password"
-                autoComplete="current-password"
-                placeholder={t('请输入中心所有者口令', 'Enter center owner password')}
-                required
-                disabled={pwdBusy}
-                value={password}
-                onChange={event => {
-                  setPassword(event.target.value);
-                  if (pwdError) setPwdError(null);
-                }}
-              />
+
+          {qrState === 'error' && qrError && (
+            <div className="cw-auth-alert" role="alert">
+              <span className="cw-auth-alert-title">{qrError.message}</span>
+              <span className="cw-auth-alert-hint">{qrError.hint}</span>
             </div>
+          )}
 
-            {pwdError && (
-              <div className="cw-auth-alert" role="alert">
-                <span className="cw-auth-alert-title">{pwdError.message}</span>
-                <span className="cw-auth-alert-hint">{pwdError.hint}</span>
-              </div>
-            )}
+          {qrState === 'pending' && (
+            <p className="cw-auth-qr-meta">
+              {t(`有效期剩余 ${remainText} · 手机端「设置 → 扫一扫」`, `Expires in ${remainText} · Mobile Settings → Scan`)}
+            </p>
+          )}
 
-            <button className="cw-btn cw-btn--primary cw-btn--full" type="submit" disabled={pwdBusy}>
-              {pwdBusy && <Loader2 size={15} className="cw-spin" aria-hidden="true" />}
-              <span>{pwdBusy ? t('正在登录…', 'Signing in…') : t('登录', 'Sign in')}</span>
-            </button>
-          </form>
-        )}
+          {qrState === 'approved' && (
+            <div className="cw-auth-status cw-auth-status--success" role="status" aria-live="polite">
+              <CheckCircle2 size={16} aria-hidden="true" />
+              <span>{t('已确认登录，正在进入…', 'Approved. Signing in…')}</span>
+            </div>
+          )}
+        </div>
+
+        <form
+          id="cw-login-panel-password"
+          role="tabpanel"
+          aria-labelledby="cw-login-tab-password"
+          hidden={mode !== 'password'}
+          className="cw-auth-form"
+          onSubmit={event => {
+            event.preventDefault();
+            setPwdBusy(true);
+            setPwdError(null);
+            void api
+              .login({ password })
+              .then(() => {
+                setPassword('');
+                finishLogin();
+              })
+              .catch(err => setPwdError(describePasswordError(err, t)))
+              .finally(() => setPwdBusy(false));
+          }}
+        >
+          <div className="cw-auth-field">
+            <label className="cw-auth-label" htmlFor="cw-login-password">
+              <span>{t('所有者口令', 'Owner password')}</span>
+            </label>
+            <input
+              id="cw-login-password"
+              className="cw-input"
+              type="password"
+              autoComplete="current-password"
+              placeholder={t('请输入中心所有者口令', 'Enter center owner password')}
+              required
+              disabled={pwdBusy}
+              value={password}
+              onChange={event => {
+                setPassword(event.target.value);
+                if (pwdError) setPwdError(null);
+              }}
+            />
+          </div>
+
+          {pwdError && (
+            <div className="cw-auth-alert" role="alert">
+              <span className="cw-auth-alert-title">{pwdError.message}</span>
+              <span className="cw-auth-alert-hint">{pwdError.hint}</span>
+            </div>
+          )}
+
+          <button className="cw-btn cw-btn--primary cw-btn--full" type="submit" disabled={pwdBusy}>
+            {pwdBusy && <Loader2 size={15} className="cw-spin" aria-hidden="true" />}
+            <span>{pwdBusy ? t('正在登录…', 'Signing in…') : t('登录', 'Sign in')}</span>
+          </button>
+        </form>
       </section>
     </main>
   );

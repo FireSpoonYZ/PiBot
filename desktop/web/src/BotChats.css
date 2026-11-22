@@ -631,6 +631,7 @@
   font-size: 13px;
 }
 .confirm-delete-banner { border-color: var(--danger); }
+.confirm-archive-banner { border-color: var(--warn-line); }
 .archived-readonly-banner { border-color: var(--warn-line); }
 .confirm-delete-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .archived-pill {
@@ -1157,11 +1158,18 @@
 .inspector-link:focus-visible { outline-offset: -2px; }
 .inspector-link > svg { flex: none; color: var(--muted); }
 .inspector-link-label { flex: 1; min-width: 0; }
-.inspector-link-value {
+.inspector-link-value,
+.inspector-row-value {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   max-width: 48%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.inspector-model-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1170,7 +1178,9 @@
   color: var(--warn);
   font-weight: 500;
 }
-.inspector-default-pill {
+.inspector-default-pill,
+.inspector-link-value > .inspector-default-pill,
+.inspector-row-value > .inspector-default-pill {
   flex: none;
   flex-shrink: 0;
   padding: 1px 6px;

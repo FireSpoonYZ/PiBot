@@ -433,21 +433,96 @@
 .desktop-dialog .bot-sched-textarea-wrap {
   padding: 10px 14px 12px;
   border-bottom: 1px solid var(--line-subtle);
+  transition: background-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 .desktop-shell .bot-sched-textarea-wrap:last-child,
 .desktop-dialog .bot-sched-textarea-wrap:last-child { border-bottom: 0; }
+.desktop-shell .bot-sched-textarea-wrap:focus-within,
+.desktop-dialog .bot-sched-textarea-wrap:focus-within {
+  background: color-mix(in srgb, var(--color-primary) 4%, var(--surface-elevated));
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+.desktop-shell .bot-sched-textarea-wrap .bot-sched-text-input,
+.desktop-dialog .bot-sched-textarea-wrap .bot-sched-text-input,
 .desktop-shell .bot-sched-textarea-wrap textarea,
 .desktop-dialog .bot-sched-textarea-wrap textarea {
   width: 100%;
-  border: 0;
-  background: transparent;
-  padding: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 8px 10px;
   font-size: 0.9rem;
   line-height: 1.5;
   color: var(--text);
+  transition: border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+.desktop-shell .bot-sched-textarea-wrap textarea,
+.desktop-dialog .bot-sched-textarea-wrap textarea {
   resize: vertical;
-  outline: none;
   min-height: 72px;
+}
+.desktop-shell .bot-sched-textarea-wrap .bot-sched-text-input:focus-visible,
+.desktop-dialog .bot-sched-textarea-wrap .bot-sched-text-input:focus-visible,
+.desktop-shell .bot-sched-textarea-wrap textarea:focus-visible,
+.desktop-dialog .bot-sched-textarea-wrap textarea:focus-visible {
+  border-color: var(--color-primary);
+  background: var(--surface-elevated);
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+
+.desktop-shell .bot-sched-inline-confirm,
+.desktop-dialog .bot-sched-inline-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  justify-self: stretch;
+  box-sizing: border-box;
+  margin-top: var(--space-1);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  background: var(--danger-soft);
+}
+.desktop-shell .bot-sched-inline-confirm-text,
+.desktop-dialog .bot-sched-inline-confirm-text {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.desktop-shell .bot-sched-inline-confirm-actions,
+.desktop-dialog .bot-sched-inline-confirm-actions {
+  width: 100%;
+}
+.desktop-shell .bot-sched-danger-btn,
+.desktop-dialog .bot-sched-danger-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: var(--color-on-danger);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.desktop-shell .bot-sched-danger-btn:active:not(:disabled),
+.desktop-dialog .bot-sched-danger-btn:active:not(:disabled) {
+  transform: scale(0.975);
+  opacity: 0.92;
 }
 
 .desktop-shell .bot-sched-form-actions,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { ArrowLeft, Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
@@ -114,6 +114,7 @@ type ProvidersModal =
   | { kind: 'discover'; mode: 'remote' | 'restore' }
   | { kind: 'edit-model'; creating: boolean }
   | { kind: 'confirm-delete-provider' }
+  | { kind: 'confirm-clear-key' }
   | { kind: 'confirm-delete-model'; model: Model; returnToEdit: boolean };
 
 function deriveSlug(name: string, baseUrl: string, existingIds: Set<string>): string {
@@ -188,6 +189,7 @@ export function ProvidersTab({
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
+  const idPrefix = useId();
   const thinkingOptions = useMemo(() => getThinkingOptions(t), [t]);
   const codeModeOptions = useMemo(() => getCodeModeOptions(t), [t]);
 
@@ -218,6 +220,7 @@ export function ProvidersTab({
   tRef.current = t;
   const loadGenRef = useRef(0);
   const detailLoadGenRef = useRef(0);
+  const clearKeyGenRef = useRef(0);
   const flowGenRef = useRef(0);
 
   const { showNotice, clearNotice } = useCaTabNotices('providers', active);
@@ -271,6 +274,7 @@ export function ProvidersTab({
   const [togglingModelId, setTogglingModelId] = useState<string | null>(null);
   const [savingProvider, setSavingProvider] = useState(false);
   const [validatingProvider, setValidatingProvider] = useState(false);
+  const [clearingKey, setClearingKey] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // OAuth flow state
@@ -369,6 +373,7 @@ export function ProvidersTab({
     return () => {
       loadGenRef.current += 1;
       detailLoadGenRef.current += 1;
+      clearKeyGenRef.current += 1;
       flowGenRef.current += 1;
     };
   }, []);
@@ -396,6 +401,7 @@ export function ProvidersTab({
 
   const closeProviderDetail = useCallback(() => {
     detailLoadGenRef.current += 1;
+    clearKeyGenRef.current += 1;
     stopFlowPoll();
     setFlowId(null);
     setFlow(null);
@@ -403,6 +409,7 @@ export function ProvidersTab({
     setDetailError('');
     setDetailNotice('');
     setDetailLoading(false);
+    setClearingKey(false);
     setActiveModal(null);
     setConfirmError('');
     setDetailView({ mode: 'list' });
@@ -457,6 +464,8 @@ export function ProvidersTab({
 
   const openExistingProvider = (provider: Provider) => {
     detailLoadGenRef.current += 1;
+    clearKeyGenRef.current += 1;
+    setClearingKey(false);
     stopFlowPoll();
     setFlowId(null);
     setFlow(null);
@@ -485,6 +494,8 @@ export function ProvidersTab({
 
   const openCreateProvider = () => {
     detailLoadGenRef.current += 1;
+    clearKeyGenRef.current += 1;
+    setClearingKey(false);
     stopFlowPoll();
     setFlowId(null);
     setFlow(null);
@@ -802,6 +813,87 @@ export function ProvidersTab({
       );
     } finally {
       setSavingProvider(false);
+    }
+  };
+
+  const handleClearApiKey = async () => {
+    if (!edit || creating || !edit.credentialRef || !credential?.configured || clearingKey) return;
+    const targetProvider = edit;
+    const credRef = edit.credentialRef;
+    const expectedCredRevision = credential.revision;
+    const restoreNoKeyMode = !edit.native;
+    const clearGen = ++clearKeyGenRef.current;
+
+    setClearingKey(true);
+    setConfirmError('');
+    setDetailError('');
+    setDetailNotice('');
+    try {
+      await api.deleteCredential(credRef, {
+        expectedRevision: expectedCredRevision,
+        value: null,
+      });
+
+      if (clearGen === clearKeyGenRef.current) {
+        setKeyValue('');
+        setCredential({
+          credentialId: credRef,
+          configured: false,
+          revision: expectedCredRevision + 1,
+        });
+      }
+
+      let updatedProvider = targetProvider;
+      if (restoreNoKeyMode) {
+        try {
+          updatedProvider = await api.putProvider(targetProvider.id, {
+            expectedRevision: targetProvider.revision,
+            value: {
+              ...targetProvider,
+              credentialRef: null,
+            },
+          });
+          if (clearGen === clearKeyGenRef.current) {
+            setEdit(updatedProvider);
+            setCredential(null);
+          }
+        } catch (provErr) {
+          const fresh = await api.getProvider(targetProvider.id).catch(() => null);
+          await refreshPageData().catch(() => {});
+          if (clearGen === clearKeyGenRef.current) {
+            if (fresh) setEdit(fresh);
+            await loadProviderDetails(fresh ?? targetProvider).catch(() => {});
+            setActiveModal(null);
+            setDetailError(
+              errorMessage(provErr, t('密钥已清除，但恢复无密钥模式失败，请重新保存配置', 'API key was cleared, but restoring no-key mode failed. Please save settings again.')),
+            );
+          }
+          return;
+        }
+      }
+
+      await refreshPageData();
+      if (clearGen === clearKeyGenRef.current) {
+        setActiveModal(null);
+        await loadProviderDetails(updatedProvider);
+        if (clearGen === clearKeyGenRef.current) {
+          setDetailNotice(
+            restoreNoKeyMode
+              ? t('已清除 API 密钥，已恢复无密钥模式', 'API key cleared; no-key mode restored')
+              : t('已清除已保存的 API 密钥', 'Saved API key cleared'),
+          );
+        }
+      }
+    } catch (err) {
+      if (clearGen === clearKeyGenRef.current) {
+        setConfirmError(
+          errorMessage(err, t('清除密钥失败，请刷新后重试', 'Failed to clear API key. Refresh and try again.')),
+        );
+      }
+    } finally {
+      if (clearGen === clearKeyGenRef.current) {
+        setClearingKey(false);
+      }
     }
   };
 
@@ -1231,13 +1323,23 @@ export function ProvidersTab({
     const enabledCount = models.filter(m => m.enabled).length;
     const providerReady = !creating && isProviderReady(edit);
 
+    const baseUrlInputId = `${idPrefix}-provider-base-url`;
+    const apiKeyInputId = `${idPrefix}-provider-api-key`;
+    const customJsonInputId = `${idPrefix}-provider-custom-json`;
+    const displayNameInputId = `${idPrefix}-provider-name`;
+    const protocolSelectId = `${idPrefix}-provider-protocol`;
+    const providerIdInputId = `${idPrefix}-provider-id`;
+
     const baseUrlField = (
       <div className="ca-field">
-        <label className="ca-field-label">{t('API 地址 (Base URL)', 'API URL (Base URL)')}</label>
+        <label className="ca-field-label" htmlFor={baseUrlInputId}>
+          {t('API 地址 (Base URL)', 'API URL (Base URL)')}
+        </label>
         <input
+          id={baseUrlInputId}
           type="url"
           className="ca-input"
-          disabled={savingProvider}
+          disabled={savingProvider || clearingKey}
           placeholder={edit.native ? t('留空保持内置默认地址', 'Leave empty for built-in default URL') : 'https://api.example.com/v1'}
           value={edit.baseUrl}
           onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
@@ -1248,16 +1350,32 @@ export function ProvidersTab({
     const apiKeyField = supportsApiKey ? (
       <div className="ca-field">
         <div className="ca-field-head">
-          <label className="ca-field-label">API Key</label>
-          <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
-            {credential?.configured ? t('已保存密钥（不回显）', 'Key saved (hidden)') : t('未配置密钥', 'No key set')}
-          </span>
+          <label className="ca-field-label" htmlFor={apiKeyInputId}>API Key</label>
+          <div className="ca-inline-row">
+            <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
+              {credential?.configured ? t('已保存密钥（不回显）', 'Key saved (hidden)') : t('未配置密钥', 'No key set')}
+            </span>
+            {!creating && edit.credentialRef && credential?.configured && (
+              <button
+                type="button"
+                className="ca-btn ca-btn-danger ca-btn-sm"
+                disabled={savingProvider || validatingProvider || clearingKey}
+                onClick={() => {
+                  setConfirmError('');
+                  setActiveModal({ kind: 'confirm-clear-key' });
+                }}
+              >
+                {t('清除密钥', 'Clear key')}
+              </button>
+            )}
+          </div>
         </div>
         <input
+          id={apiKeyInputId}
           type="password"
           className="ca-input"
           autoComplete="new-password"
-          disabled={savingProvider}
+          disabled={savingProvider || clearingKey}
           placeholder={credential?.configured ? t('输入新密钥以替换现有密钥', 'Enter a new key to replace the existing one') : t('粘贴 API Key', 'Paste API Key')}
           value={keyValue}
           onChange={e => setKeyValue(e.target.value)}
@@ -1267,11 +1385,14 @@ export function ProvidersTab({
 
     const customJsonField = (
       <div className="ca-field">
-        <label className="ca-field-label">{t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}</label>
+        <label className="ca-field-label" htmlFor={customJsonInputId}>
+          {t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}
+        </label>
         <textarea
+          id={customJsonInputId}
           rows={4}
           className="ca-textarea ca-mono"
-          disabled={savingProvider}
+          disabled={savingProvider || clearingKey}
           value={customJson}
           onChange={e => setCustomJson(e.target.value)}
         />
@@ -1358,21 +1479,23 @@ export function ProvidersTab({
             <>
               <div className="ca-grid-2">
                 <div className="ca-field">
-                  <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
+                  <label className="ca-field-label" htmlFor={displayNameInputId}>{t('显示名称', 'Display name')}</label>
                   <input
+                    id={displayNameInputId}
                     type="text"
                     className="ca-input"
-                    disabled={savingProvider}
+                    disabled={savingProvider || clearingKey}
                     placeholder={t('如 SiliconFlow / 本地 Ollama', 'e.g. SiliconFlow / Local Ollama')}
                     value={edit.name}
                     onChange={e => setEdit({ ...edit, name: e.target.value })}
                   />
                 </div>
                 <div className="ca-field">
-                  <label className="ca-field-label">{t('API 协议', 'API protocol')}</label>
+                  <label className="ca-field-label" htmlFor={protocolSelectId}>{t('API 协议', 'API protocol')}</label>
                   <select
+                    id={protocolSelectId}
                     className="ca-select"
-                    disabled={savingProvider}
+                    disabled={savingProvider || clearingKey}
                     value={edit.api}
                     onChange={e => setEdit({ ...edit, api: e.target.value })}
                   >
@@ -1386,11 +1509,12 @@ export function ProvidersTab({
               </div>
               {creating && (
                 <div className="ca-field">
-                  <label className="ca-field-label">{t('服务商 ID（可选）', 'Provider ID (optional)')}</label>
+                  <label className="ca-field-label" htmlFor={providerIdInputId}>{t('服务商 ID（可选）', 'Provider ID (optional)')}</label>
                   <input
+                    id={providerIdInputId}
                     type="text"
                     className="ca-input ca-mono"
-                    disabled={savingProvider}
+                    disabled={savingProvider || clearingKey}
                     placeholder={t('留空则按名称自动生成', 'Leave blank to generate from name')}
                     value={edit.id}
                     onChange={e => {
@@ -2121,10 +2245,11 @@ export function ProvidersTab({
             {modelFormError && <CaNotice tone="danger">{modelFormError}</CaNotice>}
 
             <div className="ca-field">
-              <label className="ca-field-label">
+              <label className="ca-field-label" htmlFor={`${idPrefix}-model-id`}>
                 {t('模型 ID', 'Model ID')} <span className="ca-req">*</span>
               </label>
               <input
+                id={`${idPrefix}-model-id`}
                 type="text"
                 className="ca-input ca-mono"
                 disabled={!editModelCreating || modelSaving}
@@ -2136,8 +2261,9 @@ export function ProvidersTab({
             </div>
 
             <div className="ca-field">
-              <label className="ca-field-label">{t('显示名称（可选）', 'Display name (optional)')}</label>
+              <label className="ca-field-label" htmlFor={`${idPrefix}-model-name`}>{t('显示名称（可选）', 'Display name (optional)')}</label>
               <input
+                id={`${idPrefix}-model-name`}
                 type="text"
                 className="ca-input"
                 disabled={modelSaving}
@@ -2158,8 +2284,8 @@ export function ProvidersTab({
             </div>
 
             <div className="ca-field">
-              <label className="ca-field-label">{t('输入模态', 'Input modalities')}</label>
-              <div className="ca-check-group">
+              <span id={`${idPrefix}-model-modalities`} className="ca-field-label">{t('输入模态', 'Input modalities')}</span>
+              <div className="ca-check-group" role="group" aria-labelledby={`${idPrefix}-model-modalities`}>
                 {(['text', 'image', 'audio'] as const).map(mod => {
                   const label = mod === 'text' ? t('文本', 'Text') : mod === 'image' ? t('图片', 'Image') : t('音频', 'Audio');
                   const checked = modelDraft.input.includes(mod);
@@ -2186,8 +2312,9 @@ export function ProvidersTab({
             <CaDisclosure title={t('Token 上限（默认 256k / 16k）', 'Token limits (default 256k / 16k)')}>
               <div className="ca-grid-2">
                 <div className="ca-field">
-                  <label className="ca-field-label">{t('上下文窗口', 'Context window')}</label>
+                  <label className="ca-field-label" htmlFor={`${idPrefix}-model-ctx`}>{t('上下文窗口', 'Context window')}</label>
                   <input
+                    id={`${idPrefix}-model-ctx`}
                     type="number"
                     className="ca-input ca-num"
                     disabled={modelSaving}
@@ -2198,8 +2325,9 @@ export function ProvidersTab({
                   />
                 </div>
                 <div className="ca-field">
-                  <label className="ca-field-label">{t('最大输出 Token', 'Max output tokens')}</label>
+                  <label className="ca-field-label" htmlFor={`${idPrefix}-model-max-tokens`}>{t('最大输出 Token', 'Max output tokens')}</label>
                   <input
+                    id={`${idPrefix}-model-max-tokens`}
                     type="number"
                     className="ca-input ca-num"
                     disabled={modelSaving}
@@ -2213,7 +2341,11 @@ export function ProvidersTab({
             </CaDisclosure>
 
             <CaDisclosure title={t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}>
+              <label htmlFor={`${idPrefix}-model-extra-json`} className="sr-only">
+                {t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}
+              </label>
               <textarea
+                id={`${idPrefix}-model-extra-json`}
                 rows={4}
                 className="ca-textarea ca-mono"
                 disabled={modelSaving}
@@ -2382,6 +2514,40 @@ export function ProvidersTab({
           </div>
         </div>
       </CaModal>
+
+      {/* Single top-level modal slot: Confirm Clear API Key */}
+      <CaConfirmDialog
+        open={activeModal?.kind === 'confirm-clear-key' && Boolean(edit) && !creating}
+        title={t('清除 API 密钥', 'Clear API Key')}
+        description={
+          edit ? (
+            <>
+              <span>
+                {!edit.native
+                  ? t(`清除服务商「${edit.name || edit.id}」的已保存 API 密钥后，将从中心永久移除该密钥并恢复无密钥模式。`, `Clearing the saved API key for "${edit.name || edit.id}" permanently removes it from the center and restores no-key mode.`)
+                  : t(`清除服务商「${edit.name || edit.id}」的已保存 API 密钥后，将从中心永久移除该密钥；重新填写密钥或完成 OAuth 授权前无法通过密钥调用。`, `Clearing the saved API key for "${edit.name || edit.id}" permanently removes it from the center until you save a new key or sign in with OAuth.`)}
+              </span>
+              {confirmError ? (
+                <>
+                  <br />
+                  <span className="ca-error-text">{confirmError}</span>
+                </>
+              ) : null}
+            </>
+          ) : ''
+        }
+        confirmLabel={clearingKey ? t('清除中…', 'Clearing…') : t('清除密钥', 'Clear key')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={clearingKey}
+        onCancel={() => {
+          if (!clearingKey) {
+            setConfirmError('');
+            setActiveModal(null);
+          }
+        }}
+        onConfirm={() => void handleClearApiKey()}
+      />
 
       {/* Single top-level modal slot: Confirm Reset / Delete Provider */}
       <CaConfirmDialog

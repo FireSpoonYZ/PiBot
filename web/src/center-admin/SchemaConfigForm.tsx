@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import type * as React from 'react';
 import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
@@ -93,6 +93,7 @@ function CredentialField({
   const [saveError, setSaveError] = useState('');
 
   const trimmedId = value.trim();
+  const secretInputId = `${id}-secret`;
 
   useEffect(() => {
     let active = true;
@@ -183,32 +184,38 @@ function CredentialField({
         </span>
       </div>
       {trimmedId && !disabled && (
-        <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
-          <input
-            type="password"
-            className="ca-input"
-            style={{ flex: 1 }}
-            autoComplete="new-password"
-            placeholder={t('输入新密钥写入（仅保存到中心，不回显）', 'Enter a new secret (stored on center, never shown again)')}
-            value={secret}
-            disabled={busy}
-            onChange={e => {
-              setSecret(e.target.value);
-              if (saveError) setSaveError('');
-            }}
-          />
-          <button
-            type="button"
-            className="ca-btn ca-btn-secondary ca-btn-sm"
-            disabled={!secret || busy}
-            aria-busy={busy}
-            onClick={() => void handleSaveSecret()}
-          >
-            <LabelStack
-              active={busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
-              labels={[t('保存密钥', 'Save secret'), t('保存中…', 'Saving…')]}
+        <div className="ca-field">
+          <label htmlFor={secretInputId} className="ca-field-label">
+            {t('凭证密钥', 'Credential secret')}
+          </label>
+          <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+            <input
+              id={secretInputId}
+              type="password"
+              className="ca-input"
+              style={{ flex: 1 }}
+              autoComplete="new-password"
+              placeholder={t('输入新密钥写入（仅保存到中心，不回显）', 'Enter a new secret (stored on center, never shown again)')}
+              value={secret}
+              disabled={busy}
+              onChange={e => {
+                setSecret(e.target.value);
+                if (saveError) setSaveError('');
+              }}
             />
-          </button>
+            <button
+              type="button"
+              className="ca-btn ca-btn-secondary ca-btn-sm"
+              disabled={!secret || busy}
+              aria-busy={busy}
+              onClick={() => void handleSaveSecret()}
+            >
+              <LabelStack
+                active={busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
+                labels={[t('保存密钥', 'Save secret'), t('保存中…', 'Saving…')]}
+              />
+            </button>
+          </div>
         </div>
       )}
       {saveError && (
@@ -221,11 +228,15 @@ function CredentialField({
 }
 
 function StringArrayField({
+  id,
+  ariaLabelledBy,
   value,
   disabled,
   enumOptions,
   onChange,
 }: {
+  id: string;
+  ariaLabelledBy: string;
   value: string[];
   disabled?: boolean;
   enumOptions?: string[];
@@ -237,7 +248,7 @@ function StringArrayField({
   if (enumOptions && enumOptions.length > 0) {
     const selected = new Set(value);
     return (
-      <div className="ca-check-group">
+      <div className="ca-check-group" role="group" aria-labelledby={ariaLabelledBy}>
         {enumOptions.map(opt => (
           <label key={opt} className="ca-check-label">
             <input
@@ -266,7 +277,7 @@ function StringArrayField({
   };
 
   return (
-    <div className="ca-array-box">
+    <div className="ca-array-box" role={disabled ? 'group' : undefined} aria-labelledby={disabled ? ariaLabelledBy : undefined}>
       {value.length > 0 && (
         <div className="ca-tag-list">
           {value.map((item, idx) => (
@@ -289,6 +300,7 @@ function StringArrayField({
       {!disabled && (
         <div className={`ca-inline-row${value.length > 0 ? ' ca-mt-2' : ''}`} style={{ flexWrap: 'nowrap' }}>
           <input
+            id={id}
             type="text"
             className="ca-input"
             style={{ flex: 1 }}
@@ -350,6 +362,8 @@ export function SchemaConfigForm({
   error,
 }: SchemaConfigFormProps): React.JSX.Element {
   const t = useText();
+  const formIdPrefix = useId();
+  const rawJsonId = `${formIdPrefix}-raw-json`;
   const overrideMode = baseConfig !== undefined;
   const formDisabled = Boolean(disabled || submitBusy);
   const [rawOpen, setRawOpen] = useState(false);
@@ -450,7 +464,11 @@ export function SchemaConfigForm({
         : node.default;
 
     const fieldDisabled = formDisabled || (overrideMode && !hasOverride);
-    const inputId = `ca-field-${path.join('-').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const safePath = path
+      .map(seg => seg.replace(/[^a-zA-Z0-9]/g, ch => `_${ch.charCodeAt(0).toString(16)}_`))
+      .join('--');
+    const inputId = `${formIdPrefix}-field-${safePath}`;
+    const labelId = `${inputId}-label`;
 
     const updateField = (next: JsonValue | undefined) => {
       onChange(setAtPath(formData, path, next));
@@ -552,6 +570,8 @@ export function SchemaConfigForm({
       const arr = Array.isArray(effectiveVal) ? effectiveVal.map(v => String(v)) : [];
       control = (
         <StringArrayField
+          id={inputId}
+          ariaLabelledBy={labelId}
           value={arr}
           disabled={fieldDisabled}
           enumOptions={itemEnums}
@@ -644,13 +664,23 @@ export function SchemaConfigForm({
       );
     }
 
+    const isGroupControl =
+      node.type === 'array' && (Boolean(itemEnums && itemEnums.length > 0) || fieldDisabled);
+
     return (
       <div className="ca-field">
         <div className="ca-field-head">
-          <label htmlFor={inputId} className="ca-field-label">
-            {title}
-            {required && <span className="ca-req">*</span>}
-          </label>
+          {isGroupControl ? (
+            <span id={labelId} className="ca-field-label">
+              {title}
+              {required && <span className="ca-req">*</span>}
+            </span>
+          ) : (
+            <label htmlFor={inputId} className="ca-field-label">
+              {title}
+              {required && <span className="ca-req">*</span>}
+            </label>
+          )}
           {overrideMode && (
             <label className="ca-override-toggle">
               <input
@@ -719,7 +749,11 @@ export function SchemaConfigForm({
           </button>
           {rawOpen && (
             <div className="ca-disclosure-body smooth-expand-mount">
+              <label htmlFor={rawJsonId} className="sr-only">
+                {t('高级 JSON 配置', 'Advanced JSON config')}
+              </label>
               <textarea
+                id={rawJsonId}
                 rows={6}
                 className="ca-textarea ca-mono"
                 disabled={formDisabled}

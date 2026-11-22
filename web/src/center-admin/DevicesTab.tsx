@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { Archive, ArrowLeft, Check, Pencil, Plus, QrCode, RefreshCw, X } from 'lucide-react';
 import { registerOverlayBackHandler } from '../components/ui/overlayStack';
@@ -21,6 +21,7 @@ import {
   CaSwitch,
   CaToolbarSkeleton,
   CopyButton,
+  botKey,
   formatCountdown,
   formatTime,
   platformLabel,
@@ -35,9 +36,78 @@ import type {
   CenterBotRef,
   CenterDevice,
   CreatePairingCodeResponse,
+  DeviceRuntimeStatus,
   ModelPickerResponse,
   PairingCaState,
 } from './types';
+
+type TranslateFn = (zh: string, en: string) => string;
+
+function formatRuntimeSummary(
+  runtime: DeviceRuntimeStatus,
+  t: TranslateFn,
+): {
+  text: string;
+  pillTone: 'ok' | 'info' | 'warn' | 'danger' | 'muted';
+  showPill: boolean;
+  detailTitle?: string;
+} {
+  const rev = runtime.appliedRevision ?? runtime.desiredRevision;
+  const capErrCount = runtime.capabilityErrors.length;
+  const detailTitle =
+    runtime.error?.message ||
+    (capErrCount > 0
+      ? runtime.capabilityErrors.map(e => `${e.botId}: ${e.error.code}`).join('; ')
+      : undefined);
+
+  switch (runtime.status) {
+    case 'applied':
+      if (capErrCount > 0) {
+        return {
+          text: t(`已同步 · ${capErrCount} 项能力异常`, `Synced · ${capErrCount} capability ${capErrCount === 1 ? 'error' : 'errors'}`),
+          pillTone: 'warn',
+          showPill: true,
+          detailTitle,
+        };
+      }
+      return {
+        text: t(`配置已同步 (r${rev})`, `Config synced (r${rev})`),
+        pillTone: 'ok',
+        showPill: false,
+        detailTitle,
+      };
+    case 'applying':
+      return {
+        text: t(`正在应用配置 (r${runtime.desiredRevision})`, `Applying config (r${runtime.desiredRevision})`),
+        pillTone: 'info',
+        showPill: true,
+        detailTitle,
+      };
+    case 'waiting-idle':
+      return {
+        text: t(`等待空闲应用 (r${runtime.desiredRevision})`, `Waiting for idle (r${runtime.desiredRevision})`),
+        pillTone: 'warn',
+        showPill: true,
+        detailTitle,
+      };
+    case 'failed':
+      return {
+        text: runtime.error?.code
+          ? t(`配置应用失败 (${runtime.error.code})`, `Config apply failed (${runtime.error.code})`)
+          : t('配置应用失败', 'Config apply failed'),
+        pillTone: 'danger',
+        showPill: true,
+        detailTitle,
+      };
+    default:
+      return {
+        text: t(`配置待同步 (r${runtime.desiredRevision})`, `Sync pending (r${runtime.desiredRevision})`),
+        pillTone: 'muted',
+        showPill: false,
+        detailTitle,
+      };
+  }
+}
 
 interface PendingPairingState {
   id: string;
@@ -60,6 +130,7 @@ interface DevicesCacheData {
   bots: CenterBotRef[];
   picker: ModelPickerResponse | null;
   pendingPairing: PendingPairingState | null;
+  runtimeByDevice?: Record<string, DeviceRuntimeStatus>;
 }
 
 interface SavedBotProfileSnapshot {
@@ -73,6 +144,9 @@ interface SavedLearningScheduleSnapshot {
   skillEvery: number;
   intervalHours: number;
   minIdleHours: number;
+  staleAfterDays: number;
+  archiveAfterDays: number;
+  consolidate: boolean;
 }
 
 export function DevicesTab({
@@ -90,6 +164,7 @@ export function DevicesTab({
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
+  const idPrefix = useId();
 
   const initialCache = useMemo(
     () => readTabCache<DevicesCacheData>(cacheKey, 'devices')?.data ?? null,
@@ -102,6 +177,9 @@ export function DevicesTab({
   const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
   const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
   const [picker, setPicker] = useState<ModelPickerResponse | null>(() => initialCache?.picker ?? null);
+  const [runtimeByDevice, setRuntimeByDevice] = useState<Record<string, DeviceRuntimeStatus>>(
+    () => initialCache?.runtimeByDevice ?? {},
+  );
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const hasLoadedRef = useRef(hasLoaded);
@@ -109,10 +187,13 @@ export function DevicesTab({
   const activeRef = useRef(active);
   activeRef.current = active;
   const prevActiveRef = useRef(active);
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
   const tRef = useRef(t);
   tRef.current = t;
   const loadGenRef = useRef(0);
-  const cfgLoadGenRef = useRef(0);
+  const runtimeGenRef = useRef(0);
+  const botEditorGenRef = useRef(0);
 
   const { showNotice, clearNotice } = useCaTabNotices('devices', active);
 
@@ -193,12 +274,49 @@ export function DevicesTab({
   const [learnSkillEvery, setLearnSkillEvery] = useState(10);
   const [learnIntervalHours, setLearnIntervalHours] = useState(12);
   const [learnMinIdleHours, setLearnMinIdleHours] = useState(2);
+  const [learnStaleAfterDays, setLearnStaleAfterDays] = useState(14);
+  const [learnArchiveAfterDays, setLearnArchiveAfterDays] = useState(30);
+  const [learnConsolidate, setLearnConsolidate] = useState(false);
   const [savedLearningSchedule, setSavedLearningSchedule] = useState<SavedLearningScheduleSnapshot>({
     memoryEvery: 5,
     skillEvery: 10,
     intervalHours: 12,
     minIdleHours: 2,
+    staleAfterDays: 14,
+    archiveAfterDays: 30,
+    consolidate: false,
   });
+
+  const refreshRuntimeStatuses = useCallback(
+    async (deviceList: readonly CenterDevice[]) => {
+      if (deviceList.length === 0) {
+        runtimeGenRef.current += 1;
+        setRuntimeByDevice({});
+        return;
+      }
+      const gen = ++runtimeGenRef.current;
+      const entries = await Promise.all(
+        deviceList.map(d =>
+          api
+            .getDeviceRuntimeStatus(d.deviceId)
+            .then(st => [d.deviceId, st] as const)
+            .catch(() => null),
+        ),
+      );
+      if (gen !== runtimeGenRef.current) return;
+      setRuntimeByDevice(prev => {
+        const next: Record<string, DeviceRuntimeStatus> = {};
+        for (const d of deviceList) {
+          if (prev[d.deviceId]) next[d.deviceId] = prev[d.deviceId];
+        }
+        for (const entry of entries) {
+          if (entry) next[entry[0]] = entry[1];
+        }
+        return next;
+      });
+    },
+    [api],
+  );
 
   const loadAll = useCallback(async () => {
     const [sync, pickerRes, activeCodes] = await Promise.all([
@@ -212,6 +330,7 @@ export function DevicesTab({
     setDevices(mergedDevices);
     setBots(sync.bots ?? []);
     if (pickerRes) setPicker(pickerRes);
+    void refreshRuntimeStatuses(mergedDevices);
 
     // Sync first non-expired active pairing code if we do not already have a newer one with full code text
     if (activeCodes.length > 0) {
@@ -235,7 +354,7 @@ export function DevicesTab({
     setHasLoaded(true);
     setInitialError('');
     clearNotice('load-error');
-  }, [api, cacheKey, clearNotice]);
+  }, [api, cacheKey, clearNotice, refreshRuntimeStatuses]);
 
   const runLoad = useCallback(async () => {
     const gen = ++loadGenRef.current;
@@ -280,7 +399,8 @@ export function DevicesTab({
   useEffect(() => {
     return () => {
       loadGenRef.current += 1;
-      cfgLoadGenRef.current += 1;
+      runtimeGenRef.current += 1;
+      botEditorGenRef.current += 1;
     };
   }, []);
 
@@ -291,8 +411,47 @@ export function DevicesTab({
       bots,
       picker,
       pendingPairing,
+      runtimeByDevice,
     });
-  }, [bots, cacheKey, devices, hasLoaded, pendingPairing, picker]);
+  }, [bots, cacheKey, devices, hasLoaded, pendingPairing, picker, runtimeByDevice]);
+
+  const hasInFlightRuntime = useMemo(
+    () =>
+      devices.some(d => {
+        const st = runtimeByDevice[d.deviceId]?.status;
+        return st === 'pending' || st === 'applying' || st === 'waiting-idle';
+      }),
+    [devices, runtimeByDevice],
+  );
+
+  // Active-tab device runtime status polling (paused when tab is hidden)
+  useEffect(() => {
+    if (!active || devices.length === 0) return;
+    const intervalMs = hasInFlightRuntime ? 3000 : 15000;
+    const timer = window.setInterval(() => {
+      void refreshRuntimeStatuses(devicesRef.current);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [active, devices.length, hasInFlightRuntime, refreshRuntimeStatuses]);
+
+  // Poll active learning job status while viewing the Bot learning section
+  const activeLearningJobId = cfgLearning?.activeJob?.jobId ?? null;
+  useEffect(() => {
+    if (!active || !cfgBot || cfgTab !== 'learning' || !activeLearningJobId) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
+    const timer = window.setInterval(() => {
+      void api
+        .getBotLearningStatus(targetDeviceId, targetBotId)
+        .then(refreshed => {
+          if (botEditorGenRef.current !== gen) return;
+          setCfgLearning(refreshed);
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [active, activeLearningJobId, api, cfgBot, cfgTab]);
 
   // Countdown tick & pairing status poll (paused when tab is hidden)
   useEffect(() => {
@@ -334,9 +493,13 @@ export function DevicesTab({
   }, [nowMs, pendingPairing]);
 
   const closeBuiltinBotConfig = useCallback(() => {
-    cfgLoadGenRef.current += 1;
+    botEditorGenRef.current += 1;
     setCfgBot(null);
     setCfgLoading(false);
+    setCfgProfileBusy(false);
+    setCfgModelBusy(false);
+    setCfgLearningBusy(false);
+    setTogglingCapId(null);
     setCfgInlineError('');
     setCfgInlineNotice('');
   }, []);
@@ -567,10 +730,14 @@ export function DevicesTab({
 
   // In-page Bot configuration sub-view
   const openBuiltinBotConfig = async (bot: CenterBotRef) => {
-    const gen = ++cfgLoadGenRef.current;
+    const gen = ++botEditorGenRef.current;
     setActiveModal(null);
     setCfgBot(bot);
     setCfgTab('basic');
+    setCfgProfileBusy(false);
+    setCfgModelBusy(false);
+    setCfgLearningBusy(false);
+    setTogglingCapId(null);
     setCfgInlineError('');
     setCfgInlineNotice('');
     const initName = bot.name;
@@ -592,7 +759,7 @@ export function DevicesTab({
         api.listBotCapabilities(bot.deviceId, bot.botId).catch(() => [] as BotCapabilityEntry[]),
         api.getBotLearningStatus(bot.deviceId, bot.botId).catch(() => null),
       ]);
-      if (gen !== cfgLoadGenRef.current) return;
+      if (gen !== botEditorGenRef.current) return;
       if (modelCfg) setCfgModel(modelCfg);
       if (cwdCfg) {
         const nextCwd = cwdCfg.value ?? '';
@@ -608,23 +775,32 @@ export function DevicesTab({
           skillEvery: learningRes.settings.review.skillEvery,
           intervalHours: learningRes.settings.curator.intervalHours,
           minIdleHours: learningRes.settings.curator.minIdleHours,
+          staleAfterDays: learningRes.settings.curator.staleAfterDays,
+          archiveAfterDays: learningRes.settings.curator.archiveAfterDays,
+          consolidate: Boolean(learningRes.settings.curator.consolidate),
         };
         setLearnMemoryEvery(snap.memoryEvery);
         setLearnSkillEvery(snap.skillEvery);
         setLearnIntervalHours(snap.intervalHours);
         setLearnMinIdleHours(snap.minIdleHours);
+        setLearnStaleAfterDays(snap.staleAfterDays);
+        setLearnArchiveAfterDays(snap.archiveAfterDays);
+        setLearnConsolidate(snap.consolidate);
         setSavedLearningSchedule(snap);
       }
     } catch (err) {
-      if (gen !== cfgLoadGenRef.current) return;
+      if (gen !== botEditorGenRef.current) return;
       setCfgInlineError(errorMessage(err, t('读取 Bot 配置失败，请返回重试', 'Failed to load Bot settings. Return and try again.')));
     } finally {
-      if (gen === cfgLoadGenRef.current) setCfgLoading(false);
+      if (gen === botEditorGenRef.current) setCfgLoading(false);
     }
   };
 
   const handleSetBotModel = async (modelRef: string | null) => {
     if (!cfgBot || !cfgModel) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
     setCfgModelBusy(true);
     setCfgInlineError('');
     setCfgInlineNotice('');
@@ -632,21 +808,25 @@ export function DevicesTab({
       const nextOverrides = { ...cfgModel.overrides };
       if (modelRef) nextOverrides.modelRef = modelRef;
       else delete nextOverrides.modelRef;
-      const updated = await api.putBotModelConfig(cfgBot.deviceId, cfgBot.botId, {
+      const updated = await api.putBotModelConfig(targetDeviceId, targetBotId, {
         expectedRevision: cfgModel.revision,
         value: nextOverrides,
       });
-      setCfgModel(updated);
-      setCfgInlineNotice(
-        modelRef
-          ? t('已切换专属模型', 'Switched to dedicated model')
-          : t('已设为跟随全局默认模型', 'Set to follow global default model'),
-      );
+      if (botEditorGenRef.current === gen) {
+        setCfgModel(updated);
+        setCfgInlineNotice(
+          modelRef
+            ? t('已切换专属模型', 'Switched to dedicated model')
+            : t('已设为跟随全局默认模型', 'Set to follow global default model'),
+        );
+      }
       await loadAll();
     } catch (err) {
-      setCfgInlineError(errorMessage(err, t('保存模型设置失败，请重试', 'Failed to save model settings. Please try again.')));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('保存模型设置失败，请重试', 'Failed to save model settings. Please try again.')));
+      }
     } finally {
-      setCfgModelBusy(false);
+      if (botEditorGenRef.current === gen) setCfgModelBusy(false);
     }
   };
 
@@ -659,50 +839,79 @@ export function DevicesTab({
 
   const handleSaveBotProfileAndCwd = async () => {
     if (!cfgBot) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const targetBotKey = botKey(targetDeviceId, targetBotId);
+    const gen = botEditorGenRef.current;
     const trimmedName = cfgName.trim() || cfgBot.name;
     const trimmedDesc = cfgDesc.trim();
     const trimmedCwd = cfgCwd.trim();
+    const initialSavedCwd = savedProfile.cwd;
+    const initialCwdRev = cfgCwdRev;
+
     setCfgProfileBusy(true);
     setCfgInlineError('');
     setCfgInlineNotice('');
+    let profileSaved = false;
     try {
-      await api.updateBot(cfgBot.deviceId, cfgBot.botId, {
+      await api.updateBot(targetDeviceId, targetBotId, {
         name: trimmedName,
         description: trimmedDesc,
       });
-      let resolvedCwd = savedProfile.cwd;
+      profileSaved = true;
+      let resolvedCwd = initialSavedCwd;
       if (trimmedCwd) {
-        const nextCwd = await api.putBotCwd(cfgBot.deviceId, cfgBot.botId, {
-          expectedRevision: cfgCwdRev,
+        const nextCwd = await api.putBotCwd(targetDeviceId, targetBotId, {
+          expectedRevision: initialCwdRev,
           value: trimmedCwd,
         });
         resolvedCwd = nextCwd.value ?? '';
-        setCfgCwd(resolvedCwd);
-        setCfgCwdRev(nextCwd.revision);
+        if (botEditorGenRef.current === gen) {
+          setCfgCwd(resolvedCwd);
+          setCfgCwdRev(nextCwd.revision);
+        }
       }
-      setCfgName(trimmedName);
-      setCfgDesc(trimmedDesc);
-      setSavedProfile({ name: trimmedName, description: trimmedDesc, cwd: resolvedCwd });
-      setCfgBot(prev => (prev ? { ...prev, name: trimmedName, description: trimmedDesc, cwd: resolvedCwd } : prev));
+      if (botEditorGenRef.current === gen) {
+        setCfgName(trimmedName);
+        setCfgDesc(trimmedDesc);
+        setSavedProfile({ name: trimmedName, description: trimmedDesc, cwd: resolvedCwd });
+        setCfgBot(prev =>
+          prev && botKey(prev.deviceId, prev.botId) === targetBotKey
+            ? { ...prev, name: trimmedName, description: trimmedDesc, cwd: resolvedCwd }
+            : prev,
+        );
+      }
       await loadAll();
-      setCfgInlineNotice(t('基础信息与工作目录已保存', 'Profile and working directory saved'));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineNotice(t('基础信息与工作目录已保存', 'Profile and working directory saved'));
+      }
     } catch (err) {
-      setCfgInlineError(
-        errorMessage(err, t('保存基础信息或工作目录失败，请核对后重试', 'Failed to save profile or working directory. Check the inputs and try again.')),
-      );
+      if (profileSaved) {
+        void loadAll().catch(() => {});
+      }
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(
+          errorMessage(err, t('保存基础信息或工作目录失败，请核对后重试', 'Failed to save profile or working directory. Check the inputs and try again.')),
+        );
+      }
     } finally {
-      setCfgProfileBusy(false);
+      if (botEditorGenRef.current === gen) {
+        setCfgProfileBusy(false);
+      }
     }
   };
 
   const handleToggleBotCap = async (entry: BotCapabilityEntry, nextEnabled: boolean) => {
     if (!cfgBot) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
     setTogglingCapId(entry.installation.installationId);
     setCfgInlineError('');
     try {
       const updated = await api.putBotCapability(
-        cfgBot.deviceId,
-        cfgBot.botId,
+        targetDeviceId,
+        targetBotId,
         entry.installation.installationId,
         {
           expectedRevision: entry.config.revision,
@@ -710,31 +919,39 @@ export function DevicesTab({
           overrides: entry.config.overrides,
         },
       );
-      setCfgCaps(prev =>
-        prev.map(item =>
-          item.installation.installationId === entry.installation.installationId
-            ? { ...item, config: updated }
-            : item,
-        ),
-      );
+      if (botEditorGenRef.current === gen) {
+        setCfgCaps(prev =>
+          prev.map(item =>
+            item.installation.installationId === entry.installation.installationId
+              ? { ...item, config: updated }
+              : item,
+          ),
+        );
+      }
     } catch (err) {
-      setCfgInlineError(errorMessage(err, t('切换能力授权失败，请重试', 'Failed to update capability authorization. Please retry.')));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('切换能力授权失败，请重试', 'Failed to update capability authorization. Please retry.')));
+      }
     } finally {
-      setTogglingCapId(null);
+      if (botEditorGenRef.current === gen) setTogglingCapId(null);
     }
   };
 
   const handleToggleLearning = async (nextEnabled: boolean) => {
     if (!cfgBot || !cfgLearning) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
     setCfgLearningBusy(true);
     setCfgInlineError('');
     setCfgInlineNotice('');
     try {
-      const res = await api.configureBotLearning(cfgBot.deviceId, cfgBot.botId, cfgLearning.settings.revision, {
+      const res = await api.configureBotLearning(targetDeviceId, targetBotId, cfgLearning.settings.revision, {
         review: { enabled: nextEnabled },
       });
+      if (botEditorGenRef.current !== gen) return;
       setCfgLearning(prev =>
-        prev?.deviceId === cfgBot.deviceId && prev.botId === cfgBot.botId
+        prev?.deviceId === targetDeviceId && prev.botId === targetBotId
           ? { ...prev, settings: res.settings }
           : prev,
       );
@@ -744,31 +961,62 @@ export function DevicesTab({
           : t('已关闭自动反思', 'Automatic reflection disabled'),
       );
     } catch (err) {
-      setCfgInlineError(errorMessage(err, t('更新自动反思设置失败，请重试', 'Failed to update automatic reflection. Please try again.')));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('更新自动反思设置失败，请重试', 'Failed to update automatic reflection. Please try again.')));
+      }
     } finally {
-      setCfgLearningBusy(false);
+      if (botEditorGenRef.current === gen) setCfgLearningBusy(false);
     }
   };
 
   const handleTriggerReview = async (mode: 'review' | 'curate') => {
     if (!cfgBot) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
     setCfgLearningBusy(true);
     setCfgInlineError('');
     setCfgInlineNotice('');
     try {
-      const res = await api.triggerBotLearning(cfgBot.deviceId, cfgBot.botId, mode);
+      const res = await api.triggerBotLearning(targetDeviceId, targetBotId, mode);
+      const refreshed = await api.getBotLearningStatus(targetDeviceId, targetBotId).catch(() => null);
+      if (botEditorGenRef.current !== gen) return;
+      if (refreshed) setCfgLearning(refreshed);
       setCfgInlineNotice(
         res.reason ||
           (mode === 'review'
             ? t('已提交复盘任务', 'Review task submitted')
             : t('已提交整理任务', 'Curate task submitted')),
       );
-      const refreshed = await api.getBotLearningStatus(cfgBot.deviceId, cfgBot.botId).catch(() => null);
-      if (refreshed) setCfgLearning(refreshed);
     } catch (err) {
-      setCfgInlineError(errorMessage(err, t('触发学习任务失败，请确认 Bot 在线后重试', 'Failed to trigger learning task. Verify the Bot is online and retry.')));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('触发学习任务失败，请确认 Bot 在线后重试', 'Failed to trigger learning task. Verify the Bot is online and retry.')));
+      }
     } finally {
-      setCfgLearningBusy(false);
+      if (botEditorGenRef.current === gen) setCfgLearningBusy(false);
+    }
+  };
+
+  const handleCancelLearningJob = async (jobId: string) => {
+    if (!cfgBot || !jobId) return;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
+    setCfgLearningBusy(true);
+    setCfgInlineError('');
+    setCfgInlineNotice('');
+    try {
+      await api.cancelBotLearning(targetDeviceId, targetBotId, jobId);
+      const refreshed = await api.getBotLearningStatus(targetDeviceId, targetBotId).catch(() => null);
+      if (botEditorGenRef.current !== gen) return;
+      if (refreshed) setCfgLearning(refreshed);
+      setCfgInlineNotice(t('已请求取消学习任务', 'Cancellation requested for learning job'));
+    } catch (err) {
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('取消学习任务失败，请刷新后重试', 'Failed to cancel learning job. Refresh and retry.')));
+      }
+    } finally {
+      if (botEditorGenRef.current === gen) setCfgLearningBusy(false);
     }
   };
 
@@ -777,43 +1025,66 @@ export function DevicesTab({
     setLearnSkillEvery(savedLearningSchedule.skillEvery);
     setLearnIntervalHours(savedLearningSchedule.intervalHours);
     setLearnMinIdleHours(savedLearningSchedule.minIdleHours);
+    setLearnStaleAfterDays(savedLearningSchedule.staleAfterDays);
+    setLearnArchiveAfterDays(savedLearningSchedule.archiveAfterDays);
+    setLearnConsolidate(savedLearningSchedule.consolidate);
     setCfgInlineError('');
   };
 
   const handleSaveLearningAdvanced = async () => {
     if (!cfgBot || !cfgLearning) return;
-    const nextMemoryEvery = Number(learnMemoryEvery) || 5;
-    const nextSkillEvery = Number(learnSkillEvery) || 10;
-    const nextIntervalHours = Number(learnIntervalHours) || 12;
-    const nextMinIdleHours = Number(learnMinIdleHours) || 2;
+    const targetDeviceId = cfgBot.deviceId;
+    const targetBotId = cfgBot.botId;
+    const gen = botEditorGenRef.current;
+    const nextMemoryEvery = Math.max(1, Math.round(Number(learnMemoryEvery) || 5));
+    const nextSkillEvery = Math.max(1, Math.round(Number(learnSkillEvery) || 10));
+    const nextIntervalHours = Math.max(1, Math.round(Number(learnIntervalHours) || 12));
+    const parsedMinIdle = Number(learnMinIdleHours);
+    const nextMinIdleHours = Number.isFinite(parsedMinIdle) && parsedMinIdle >= 0 ? parsedMinIdle : 2;
+    const nextStaleAfterDays = Math.max(1, Math.round(Number(learnStaleAfterDays) || 14));
+    const nextArchiveAfterDays = Math.max(1, Math.round(Number(learnArchiveAfterDays) || 30));
+    const nextConsolidate = Boolean(learnConsolidate);
+
     setCfgLearningBusy(true);
     setCfgInlineError('');
     setCfgInlineNotice('');
     try {
-      const res = await api.configureBotLearning(cfgBot.deviceId, cfgBot.botId, cfgLearning.settings.revision, {
+      const res = await api.configureBotLearning(targetDeviceId, targetBotId, cfgLearning.settings.revision, {
         review: { memoryEvery: nextMemoryEvery, skillEvery: nextSkillEvery },
         curator: {
           intervalHours: nextIntervalHours,
           minIdleHours: nextMinIdleHours,
+          staleAfterDays: nextStaleAfterDays,
+          archiveAfterDays: nextArchiveAfterDays,
+          consolidate: nextConsolidate,
         },
       });
+      if (botEditorGenRef.current !== gen) return;
       setCfgLearning(prev => (prev ? { ...prev, settings: res.settings } : prev));
       const snap: SavedLearningScheduleSnapshot = {
         memoryEvery: res.settings.review.memoryEvery,
         skillEvery: res.settings.review.skillEvery,
         intervalHours: res.settings.curator.intervalHours,
         minIdleHours: res.settings.curator.minIdleHours,
+        staleAfterDays: res.settings.curator.staleAfterDays,
+        archiveAfterDays: res.settings.curator.archiveAfterDays,
+        consolidate: Boolean(res.settings.curator.consolidate),
       };
       setLearnMemoryEvery(snap.memoryEvery);
       setLearnSkillEvery(snap.skillEvery);
       setLearnIntervalHours(snap.intervalHours);
       setLearnMinIdleHours(snap.minIdleHours);
+      setLearnStaleAfterDays(snap.staleAfterDays);
+      setLearnArchiveAfterDays(snap.archiveAfterDays);
+      setLearnConsolidate(snap.consolidate);
       setSavedLearningSchedule(snap);
-      setCfgInlineNotice(t('学习周期参数已保存', 'Learning schedule parameters saved'));
+      setCfgInlineNotice(t('学习周期与整理参数已保存', 'Learning schedule and curator settings saved'));
     } catch (err) {
-      setCfgInlineError(errorMessage(err, t('保存学习参数失败，请检查数值后重试', 'Failed to save learning parameters. Check the values and try again.')));
+      if (botEditorGenRef.current === gen) {
+        setCfgInlineError(errorMessage(err, t('保存学习参数失败，请检查数值后重试', 'Failed to save learning parameters. Check the values and try again.')));
+      }
     } finally {
-      setCfgLearningBusy(false);
+      if (botEditorGenRef.current === gen) setCfgLearningBusy(false);
     }
   };
 
@@ -908,7 +1179,10 @@ export function DevicesTab({
       Number(learnMemoryEvery) !== savedLearningSchedule.memoryEvery ||
       Number(learnSkillEvery) !== savedLearningSchedule.skillEvery ||
       Number(learnIntervalHours) !== savedLearningSchedule.intervalHours ||
-      Number(learnMinIdleHours) !== savedLearningSchedule.minIdleHours;
+      Number(learnMinIdleHours) !== savedLearningSchedule.minIdleHours ||
+      Number(learnStaleAfterDays) !== savedLearningSchedule.staleAfterDays ||
+      Number(learnArchiveAfterDays) !== savedLearningSchedule.archiveAfterDays ||
+      learnConsolidate !== savedLearningSchedule.consolidate;
 
     return (
       <div className="ca-form-stack">
@@ -1006,8 +1280,9 @@ export function DevicesTab({
                   <div className="ca-section-body ca-form-stack">
                     <div className="ca-grid-2">
                       <div className="ca-field">
-                        <label className="ca-field-label">{t('Bot 名称', 'Bot Name')}</label>
+                        <label className="ca-field-label" htmlFor={`${idPrefix}-bot-name`}>{t('Bot 名称', 'Bot Name')}</label>
                         <input
+                          id={`${idPrefix}-bot-name`}
                           type="text"
                           className="ca-input"
                           disabled={cfgProfileBusy}
@@ -1016,8 +1291,9 @@ export function DevicesTab({
                         />
                       </div>
                       <div className="ca-field">
-                        <label className="ca-field-label">{t('简介', 'Description')}</label>
+                        <label className="ca-field-label" htmlFor={`${idPrefix}-bot-desc`}>{t('简介', 'Description')}</label>
                         <input
+                          id={`${idPrefix}-bot-desc`}
                           type="text"
                           className="ca-input"
                           disabled={cfgProfileBusy}
@@ -1028,10 +1304,11 @@ export function DevicesTab({
                     </div>
 
                     <div className="ca-field">
-                      <label className="ca-field-label">
+                      <label className="ca-field-label" htmlFor={`${idPrefix}-bot-cwd`}>
                         {t('工作目录 (CWD · 离线可修改，在线后自动同步)', 'Working Directory (CWD · editable offline, syncs when online)')}
                       </label>
                       <input
+                        id={`${idPrefix}-bot-cwd`}
                         type="text"
                         className="ca-input ca-mono"
                         disabled={cfgProfileBusy}
@@ -1147,13 +1424,38 @@ export function DevicesTab({
                         )}
                       </div>
 
-                      <CaDisclosure title={t('高级学习周期参数', 'Advanced Learning Schedule')}>
+                      {cfgLearning.activeJob && (
+                        <div className="ca-cred-box ca-inline-between ca-wrap">
+                          <div className="ca-inline-row">
+                            <span className="ca-pill ca-pill-info">{cfgLearning.activeJob.status}</span>
+                            <span className="ca-muted">
+                              {t(`进行中任务：${cfgLearning.activeJob.mode} (${cfgLearning.activeJob.jobId.slice(0, 8)})`, `Active job: ${cfgLearning.activeJob.mode} (${cfgLearning.activeJob.jobId.slice(0, 8)})`)}
+                            </span>
+                          </div>
+                          {(cfgLearning.activeJob.status === 'running' || cfgLearning.activeJob.status === 'queued') && (
+                            <button
+                              type="button"
+                              className="ca-btn ca-btn-danger ca-btn-sm"
+                              disabled={cfgLearningBusy}
+                              onClick={() => void handleCancelLearningJob(cfgLearning.activeJob!.jobId)}
+                            >
+                              {t('取消学习任务', 'Cancel job')}
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <CaDisclosure title={t('高级学习周期与整理参数', 'Advanced Learning & Curator Settings')}>
                         <div className="ca-form-stack">
                           <div className="ca-grid-2">
                             <div className="ca-field">
-                              <label className="ca-field-label">{t('记忆复盘间隔（轮次）', 'Memory review interval (turns)')}</label>
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-memory-every`}>
+                                {t('记忆复盘间隔（轮次）', 'Memory review interval (turns)')}
+                              </label>
                               <input
+                                id={`${idPrefix}-learn-memory-every`}
                                 type="number"
+                                min={1}
                                 className="ca-input ca-num"
                                 disabled={cfgLearningBusy}
                                 value={learnMemoryEvery}
@@ -1161,9 +1463,13 @@ export function DevicesTab({
                               />
                             </div>
                             <div className="ca-field">
-                              <label className="ca-field-label">{t('技能提炼间隔（迭代）', 'Skill extraction interval (iterations)')}</label>
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-skill-every`}>
+                                {t('技能提炼间隔（迭代）', 'Skill extraction interval (iterations)')}
+                              </label>
                               <input
+                                id={`${idPrefix}-learn-skill-every`}
                                 type="number"
+                                min={1}
                                 className="ca-input ca-num"
                                 disabled={cfgLearningBusy}
                                 value={learnSkillEvery}
@@ -1171,9 +1477,13 @@ export function DevicesTab({
                               />
                             </div>
                             <div className="ca-field">
-                              <label className="ca-field-label">{t('整理周期（小时）', 'Curation interval (hours)')}</label>
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-interval-hours`}>
+                                {t('整理周期（小时）', 'Curation interval (hours)')}
+                              </label>
                               <input
+                                id={`${idPrefix}-learn-interval-hours`}
                                 type="number"
+                                min={1}
                                 className="ca-input ca-num"
                                 disabled={cfgLearningBusy}
                                 value={learnIntervalHours}
@@ -1181,15 +1491,61 @@ export function DevicesTab({
                               />
                             </div>
                             <div className="ca-field">
-                              <label className="ca-field-label">{t('最小空闲时间（小时）', 'Minimum idle time (hours)')}</label>
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-min-idle-hours`}>
+                                {t('最小空闲时间（小时）', 'Minimum idle time (hours)')}
+                              </label>
                               <input
+                                id={`${idPrefix}-learn-min-idle-hours`}
                                 type="number"
+                                min={0}
                                 className="ca-input ca-num"
                                 disabled={cfgLearningBusy}
                                 value={learnMinIdleHours}
                                 onChange={e => setLearnMinIdleHours(Number(e.target.value))}
                               />
                             </div>
+                            <div className="ca-field">
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-stale-days`}>
+                                {t('陈旧判定阈值（天）', 'Stale threshold (days)')}
+                              </label>
+                              <input
+                                id={`${idPrefix}-learn-stale-days`}
+                                type="number"
+                                min={1}
+                                className="ca-input ca-num"
+                                disabled={cfgLearningBusy}
+                                value={learnStaleAfterDays}
+                                onChange={e => setLearnStaleAfterDays(Number(e.target.value))}
+                              />
+                            </div>
+                            <div className="ca-field">
+                              <label className="ca-field-label" htmlFor={`${idPrefix}-learn-archive-days`}>
+                                {t('自动归档阈值（天）', 'Archive threshold (days)')}
+                              </label>
+                              <input
+                                id={`${idPrefix}-learn-archive-days`}
+                                type="number"
+                                min={1}
+                                className="ca-input ca-num"
+                                disabled={cfgLearningBusy}
+                                value={learnArchiveAfterDays}
+                                onChange={e => setLearnArchiveAfterDays(Number(e.target.value))}
+                              />
+                            </div>
+                          </div>
+                          <div className="ca-inline-between">
+                            <div>
+                              <div className="ca-field-label">{t('合并相似技能与记忆', 'Consolidate overlapping entries')}</div>
+                              <div className="ca-muted">
+                                {t('整理时允许自动合并重复或高度重叠的条目', 'Allow curator runs to merge duplicate or overlapping skills and memories')}
+                              </div>
+                            </div>
+                            <CaSwitch
+                              checked={learnConsolidate}
+                              disabled={cfgLearningBusy}
+                              label={t('合并相似技能与记忆', 'Consolidate overlapping entries')}
+                              onChange={setLearnConsolidate}
+                            />
                           </div>
                           <div className="ca-form-actions">
                             <button
@@ -1302,10 +1658,15 @@ export function DevicesTab({
           const devBots = activeBotsByDevice.get(device.deviceId) ?? [];
           const isRenaming = renamingDeviceId === device.deviceId;
           const oauthEnabled = device.oauthAdminEnabled !== false;
+          const runtime = runtimeByDevice[device.deviceId];
+          const runtimeSummary = runtime ? formatRuntimeSummary(runtime, t) : null;
           const statusParts = [
             device.online ? t('在线', 'Online') : t('离线', 'Offline'),
             t(`${devBots.length} 个 Bot`, `${devBots.length} ${devBots.length === 1 ? 'Bot' : 'Bots'}`),
           ];
+          if (runtimeSummary) {
+            statusParts.push(runtimeSummary.text);
+          }
           if (!oauthEnabled) {
             statusParts.push(t('中心管理已关闭', 'Admin access off'));
           }
@@ -1368,8 +1729,18 @@ export function DevicesTab({
                     {device.platform && (
                       <span className="ca-pill ca-pill-muted">{platformLabel(device.platform, t)}</span>
                     )}
+                    {runtimeSummary?.showPill && (
+                      <span
+                        className={`ca-pill ca-pill-${runtimeSummary.pillTone}`}
+                        title={runtimeSummary.detailTitle}
+                      >
+                        {runtimeSummary.text}
+                      </span>
+                    )}
                   </div>
-                  <div className="ca-row-sub ca-num">{statusParts.join(' · ')}</div>
+                  <div className="ca-row-sub ca-num" title={runtimeSummary?.detailTitle}>
+                    {statusParts.join(' · ')}
+                  </div>
                 </div>
 
                 <div className="ca-row-actions">
@@ -1609,8 +1980,11 @@ export function DevicesTab({
           )}
 
           <div className="ca-field">
-            <label className="ca-field-label">{t('PEM 根证书内容', 'PEM Root Certificate')}</label>
+            <label className="ca-field-label" htmlFor={`${idPrefix}-private-ca-pem`}>
+              {t('PEM 根证书内容', 'PEM Root Certificate')}
+            </label>
             <textarea
+              id={`${idPrefix}-private-ca-pem`}
               rows={8}
               className="ca-textarea ca-mono"
               disabled={caBusy}
@@ -1674,10 +2048,11 @@ export function DevicesTab({
           {createBotFormError && <CaNotice tone="danger">{createBotFormError}</CaNotice>}
 
           <div className="ca-field">
-            <label className="ca-field-label">
+            <label className="ca-field-label" htmlFor={`${idPrefix}-new-bot-role`}>
               {t('Bot 名称', 'Bot Name')} <span className="ca-req">*</span>
             </label>
             <input
+              id={`${idPrefix}-new-bot-role`}
               type="text"
               className="ca-input"
               required
@@ -1689,8 +2064,9 @@ export function DevicesTab({
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">{t('模型选择', 'Model')}</label>
+            <label className="ca-field-label" htmlFor={`${idPrefix}-new-bot-model`}>{t('模型选择', 'Model')}</label>
             <select
+              id={`${idPrefix}-new-bot-model`}
               className="ca-select"
               disabled={createBotBusy}
               value={newBotModelRef}
@@ -1706,8 +2082,9 @@ export function DevicesTab({
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">{t('简介（可选）', 'Description (optional)')}</label>
+            <label className="ca-field-label" htmlFor={`${idPrefix}-new-bot-desc`}>{t('简介（可选）', 'Description (optional)')}</label>
             <input
+              id={`${idPrefix}-new-bot-desc`}
               type="text"
               className="ca-input"
               disabled={createBotBusy}
@@ -1718,8 +2095,9 @@ export function DevicesTab({
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">{t('工作目录 CWD（可选）', 'Working Directory CWD (optional)')}</label>
+            <label className="ca-field-label" htmlFor={`${idPrefix}-new-bot-cwd`}>{t('工作目录 CWD（可选）', 'Working Directory CWD (optional)')}</label>
             <input
+              id={`${idPrefix}-new-bot-cwd`}
               type="text"
               className="ca-input ca-mono"
               disabled={createBotBusy}

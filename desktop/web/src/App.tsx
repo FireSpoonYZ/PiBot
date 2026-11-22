@@ -1,6 +1,6 @@
 // Module 17 desktop 应用装配（core-owned）：连接管理、设备目录、
 // 导航与全画布工作区渲染。token/CA 仅输入态存在，连接尝试结束后立即清空。
-import { Component } from 'react';
+import { Component, createRef } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -18,7 +18,7 @@ import type {
   DesktopConnectionInput,
   DesktopUiProfile,
 } from '../../../host-core/desktop-client.js';
-import type { BotDirectoryEntry } from '../../../host-core/index.js';
+import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi, DesktopViewApi } from './types';
 import { PendingPanel } from './PendingPanel';
 import { SettingsPanel, type CenterAdminTab, type DevicesSectionState, type SettingsTab } from './SettingsPanel';
@@ -61,6 +61,7 @@ interface PendingBotNavigation {
   deviceId: string;
   botId: string;
   panel?: BotInspectorPanel;
+  fromCenterAdminTab?: CenterAdminTab;
 }
 
 interface AppState {
@@ -172,8 +173,14 @@ class App extends Component<AppProps, AppState> {
   private scopedKey = '';
   private scopedApi: DesktopViewApi | null = null;
   private devicesMounted = true;
+  private devicesRequestId = 0;
   private refreshingProfiles = false;
   private lastRuntimeError: string | null = null;
+  private pendingBotErrorShown = false;
+  private lastPendingBotError: string | null = null;
+  private centerAdminOpenerRef = createRef<HTMLButtonElement>();
+  private settingsOpenerRef = createRef<HTMLButtonElement>();
+  private workspaceReturnFocusEl: HTMLElement | null = null;
   private centerTransportCache: {
     api: DesktopPanelApi;
     identity: DesktopIdentity;
@@ -370,7 +377,15 @@ class App extends Component<AppProps, AppState> {
     });
   };
 
+  private captureWorkspaceOpener(fallback: HTMLElement | null): void {
+    if (!isPrimaryView(this.state.view)) return;
+    const active = document.activeElement;
+    this.workspaceReturnFocusEl =
+      active instanceof HTMLElement && active !== document.body ? active : fallback;
+  }
+
   private openSettingsView = (tab?: SettingsTab): void => {
+    this.captureWorkspaceOpener(this.settingsOpenerRef.current);
     this.setState((s) => ({
       view: 'settings',
       settingsTab: tab ?? s.settingsTab,
@@ -384,6 +399,8 @@ class App extends Component<AppProps, AppState> {
   };
 
   private openCenterAdminSettings = (tab?: CenterAdminTab): void => {
+    this.captureWorkspaceOpener(this.centerAdminOpenerRef.current);
+    this.props.notice.dismiss('desktop-bot-deeplink');
     this.setState((s) => ({
       view: 'center-admin',
       centerAdminTab: tab ?? 'providers',
@@ -394,11 +411,27 @@ class App extends Component<AppProps, AppState> {
   };
 
   private returnToWorkspace = (): void => {
-    this.setState((s) => ({
-      view: s.returnView,
-      pendingTarget: undefined,
-      globalError: null,
-    }));
+    const fromView = this.state.view;
+    const opener = this.workspaceReturnFocusEl;
+    this.workspaceReturnFocusEl = null;
+    this.setState(
+      (s) => ({
+        view: s.returnView,
+        pendingTarget: undefined,
+        globalError: null,
+      }),
+      () => {
+        if (!this.devicesMounted) return;
+        const fallback =
+          fromView === 'center-admin'
+            ? this.centerAdminOpenerRef.current
+            : fromView === 'settings'
+              ? this.settingsOpenerRef.current
+              : null;
+        const target = opener && opener.isConnected ? opener : fallback;
+        target?.focus();
+      },
+    );
   };
 
   private openBotConversationPanel(
@@ -409,12 +442,84 @@ class App extends Component<AppProps, AppState> {
     (bridge.openConversation as (target: SendRecordsTarget, panel?: BotInspectorPanel) => void)(target, panel);
   }
 
+  private retryPendingBotNavigation = (): void => {
+    const pendingTarget = this.state.pendingBotTarget;
+    if (!pendingTarget) {
+      this.props.notice.dismiss('desktop-bot-deeplink');
+      return;
+    }
+    const bridge = this.state.archiveBridge;
+    if (bridge?.conversationName(pendingTarget)) {
+      this.openBotConversationPanel(
+        bridge,
+        { deviceId: pendingTarget.deviceId, botId: pendingTarget.botId },
+        pendingTarget.panel,
+      );
+      this.pendingBotErrorShown = false;
+      this.lastPendingBotError = null;
+      this.props.notice.dismiss('desktop-bot-deeplink');
+      this.setState({ pendingBotTarget: undefined });
+      return;
+    }
+    this.pendingBotErrorShown = false;
+    this.lastPendingBotError = null;
+    this.props.notice.dismiss('desktop-bot-deeplink');
+    if (bridge?.online && this.state.transportConnected) {
+      bridge.refresh();
+    } else {
+      void this.checkConnection().then(() => {
+        if (this.devicesMounted && this.state.pendingBotTarget && this.state.archiveBridge?.online) {
+          this.state.archiveBridge.refresh();
+        }
+      });
+    }
+  };
+
+  private notifyPendingBotError(errorMessage: string | null): void {
+    const { t } = this.props;
+    const parsed = errorMessage ? humanizeError(errorMessage, t) : null;
+    const detail = parsed
+      ? [parsed.title, parsed.description, parsed.detail].filter(Boolean).join('\n')
+      : (errorMessage || undefined);
+    this.props.notice.notify({
+      id: 'desktop-bot-deeplink',
+      tone: 'warning',
+      title: t('暂无法同步智能体目录，请重试以打开目标智能体', 'Unable to sync agent directory — retry to open the target agent'),
+      detail,
+      sticky: true,
+      action: {
+        label: t('重试', 'Retry'),
+        onClick: this.retryPendingBotNavigation,
+      },
+    });
+  }
+
+  private notifyPendingBotMissing(fromCenterAdminTab?: CenterAdminTab): void {
+    const { t } = this.props;
+    this.props.notice.notify({
+      id: 'desktop-bot-deeplink',
+      tone: 'warning',
+      title: t('未找到目标智能体，可能已删除或尚未同步', 'Target agent not found — it may have been deleted or not yet synced'),
+      sticky: true,
+      action: {
+        label: t('返回中心管理', 'Back to Center Admin'),
+        onClick: () => {
+          this.props.notice.dismiss('desktop-bot-deeplink');
+          this.openCenterAdminSettings(fromCenterAdminTab ?? this.state.centerAdminTab);
+        },
+      },
+    });
+  }
+
   private handleOpenBotConversation = (
     deviceId: string,
     botId: string,
     panel?: BotInspectorPanel,
   ): void => {
     const target: SendRecordsTarget = { deviceId, botId };
+    this.pendingBotErrorShown = false;
+    this.lastPendingBotError = null;
+    this.props.notice.dismiss('desktop-bot-deeplink');
     if (this.state.archiveBridge?.conversationName(target)) {
       this.openBotConversationPanel(this.state.archiveBridge, target, panel);
       this.setState({
@@ -425,13 +530,28 @@ class App extends Component<AppProps, AppState> {
         globalError: null,
       });
     } else {
-      this.setState({
-        view: 'chat',
-        returnView: 'chat',
-        pendingTarget: undefined,
-        pendingBotTarget: { deviceId, botId, panel },
-        globalError: null,
-      });
+      const wasAlreadyChat = this.state.view === 'chat';
+      const fromCenterAdminTab = this.state.view === 'center-admin' ? this.state.centerAdminTab : undefined;
+      this.setState(
+        {
+          view: 'chat',
+          returnView: 'chat',
+          pendingTarget: undefined,
+          pendingBotTarget: { deviceId, botId, panel, fromCenterAdminTab },
+          globalError: null,
+        },
+        () => {
+          if (!this.devicesMounted || !this.state.pendingBotTarget) return;
+          const bridge = this.state.archiveBridge;
+          if (!this.state.transportConnected || (bridge && !bridge.online)) {
+            this.pendingBotErrorShown = true;
+            this.lastPendingBotError = bridge?.error ?? null;
+            this.notifyPendingBotError(bridge?.error ?? null);
+          } else if (wasAlreadyChat && bridge && !bridge.loading) {
+            bridge.refresh();
+          }
+        },
+      );
     }
   };
 
@@ -513,6 +633,7 @@ class App extends Component<AppProps, AppState> {
 
   componentWillUnmount(): void {
     this.devicesMounted = false;
+    this.workspaceReturnFocusEl = null;
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
     if (this.unsubPending) this.unsubPending();
@@ -520,12 +641,17 @@ class App extends Component<AppProps, AppState> {
     clearTimeout(this.pendingRefreshTimer);
     this.props.notice.dismiss('desktop-runtime-error');
     this.props.notice.dismiss('desktop-action-error');
+    this.props.notice.dismiss('desktop-bot-deeplink');
   }
 
   componentDidUpdate(prev: AppProps, prevState: AppState): void {
     const a = prevState.identity;
     const b = this.state.identity;
     if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
+      this.devicesRequestId += 1;
+      this.pendingBotErrorShown = false;
+      this.lastPendingBotError = null;
+      this.props.notice.dismiss('desktop-bot-deeplink');
       this.setState(
         { devices: emptyDevices, pendingTarget: undefined, pendingBotTarget: undefined },
         () => void this.loadDevices(),
@@ -545,16 +671,43 @@ class App extends Component<AppProps, AppState> {
         (!prevState.transportConnected && this.state.transportConnected)) {
       this.schedulePendingRefresh();
     }
-    // 从中心管理跳转到新建或尚未刷新的 Bot 会话：待 BotChats 目录刷新到目标后立即打开。
+    // 从中心管理跳转到新建或尚未刷新的 Bot 会话：待 BotChats 目录刷新到目标后立即打开；
+    // 区分目录错误（保留目标并提示重试）与确认缺失（提示未找到并提供返回中心管理入口）。
     if (this.state.pendingBotTarget) {
+      const pendingTarget = this.state.pendingBotTarget;
+      const bridge = this.state.archiveBridge;
       if (this.state.view !== 'chat') {
+        this.pendingBotErrorShown = false;
+        this.lastPendingBotError = null;
+        this.props.notice.dismiss('desktop-bot-deeplink');
         this.setState({ pendingBotTarget: undefined });
-      } else if (this.state.archiveBridge?.conversationName(this.state.pendingBotTarget)) {
-        const { deviceId, botId, panel } = this.state.pendingBotTarget;
-        this.openBotConversationPanel(this.state.archiveBridge, { deviceId, botId }, panel);
+      } else if (bridge?.conversationName(pendingTarget)) {
+        const { deviceId, botId, panel } = pendingTarget;
+        this.openBotConversationPanel(bridge, { deviceId, botId }, panel);
+        this.pendingBotErrorShown = false;
+        this.lastPendingBotError = null;
+        this.props.notice.dismiss('desktop-bot-deeplink');
         this.setState({ pendingBotTarget: undefined });
-      } else if (prevState.archiveBridge?.loading && !this.state.archiveBridge?.loading) {
-        this.setState({ pendingBotTarget: undefined });
+      } else if (prevState.archiveBridge?.loading && bridge && !bridge.loading) {
+        if (bridge.error) {
+          if (!this.pendingBotErrorShown || this.lastPendingBotError !== bridge.error) {
+            this.pendingBotErrorShown = true;
+            this.lastPendingBotError = bridge.error;
+            this.notifyPendingBotError(bridge.error);
+          }
+        } else {
+          this.pendingBotErrorShown = false;
+          this.lastPendingBotError = null;
+          this.setState({ pendingBotTarget: undefined });
+          this.notifyPendingBotMissing(pendingTarget.fromCenterAdminTab);
+        }
+      } else if (bridge && !bridge.loading && (!bridge.online || !this.state.transportConnected)) {
+        const err = bridge.error ?? null;
+        if (!this.pendingBotErrorShown || this.lastPendingBotError !== err) {
+          this.pendingBotErrorShown = true;
+          this.lastPendingBotError = err;
+          this.notifyPendingBotError(err);
+        }
       }
     }
     // 只采纳新快照，避免观察失败后被同一份过期 connected 快照反复激活。
@@ -654,10 +807,11 @@ class App extends Component<AppProps, AppState> {
     const identity = this.state.identity;
     if (!identity || !this.state.transportConnected || !this.devicesMounted) return;
     const { profileId, kind, generation } = identity;
+    const reqId = ++this.devicesRequestId;
     this.setState((s) => ({ devices: { ...s.devices, busy: true, error: null } }));
     try {
       const page = await this.props.api.broker(identity, 'devices', { limit: 20, cursor: null });
-      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      if (!this.devicesMounted || this.devicesRequestId !== reqId || !this.sameConnection(profileId, kind, generation)) return;
       this.setState({
         devices: {
           items: page.items,
@@ -670,7 +824,7 @@ class App extends Component<AppProps, AppState> {
         },
       });
     } catch (e) {
-      if (!this.devicesMounted || !this.sameConnection(profileId, kind, generation)) return;
+      if (!this.devicesMounted || this.devicesRequestId !== reqId || !this.sameConnection(profileId, kind, generation)) return;
       // 同一连接内换目标产生的迟到身份错误不作目录失败展示。
       const err = toError(e);
       this.setState((s) => ({
@@ -683,6 +837,47 @@ class App extends Component<AppProps, AppState> {
       }));
     }
   }
+
+  private onLoadMoreDevices = async (): Promise<void> => {
+    const identity = this.state.identity;
+    const cursor = this.state.devices.nextCursor;
+    if (!identity || !this.state.transportConnected || !this.devicesMounted || this.state.devices.busy || !cursor) {
+      return;
+    }
+    const { profileId, kind, generation } = identity;
+    const reqId = ++this.devicesRequestId;
+    this.setState((s) => ({ devices: { ...s.devices, busy: true, error: null } }));
+    try {
+      const page = await this.props.api.broker(identity, 'devices', { limit: 20, cursor });
+      if (!this.devicesMounted || this.devicesRequestId !== reqId || !this.sameConnection(profileId, kind, generation)) return;
+      this.setState((s) => {
+        const merged = new Map(s.devices.items.map((item) => [item.deviceId, item]));
+        for (const item of page.items) merged.set(item.deviceId, item);
+        return {
+          devices: {
+            items: Array.from(merged.values()),
+            nextCursor: page.nextCursor,
+            busy: false,
+            error: null,
+            loaded: true,
+            loadedAt: new Date().toISOString(),
+            stale: false,
+          },
+        };
+      });
+    } catch (e) {
+      if (!this.devicesMounted || this.devicesRequestId !== reqId || !this.sameConnection(profileId, kind, generation)) return;
+      const err = toError(e);
+      this.setState((s) => ({
+        devices: {
+          ...s.devices,
+          error: err.code === 'IDENTITY_CHANGED' ? null : err.message,
+          busy: false,
+          stale: s.devices.stale || (s.devices.loaded && err.code !== 'IDENTITY_CHANGED'),
+        },
+      }));
+    }
+  };
 
   /** 切换或断开中心连接：保留 Promise；gate reject 转可见错误而不是被吞。 */
   private async disconnectCenter(): Promise<void> {
@@ -911,7 +1106,10 @@ class App extends Component<AppProps, AppState> {
                 key={key}
                 type="button"
                 className={'rail-item' + (this.state.view === key ? ' active' : '')}
-                onClick={() => this.setState({ view: key, returnView: key, pendingTarget: undefined, globalError: null })}
+                onClick={() => {
+                  this.workspaceReturnFocusEl = null;
+                  this.setState({ view: key, returnView: key, pendingTarget: undefined, globalError: null });
+                }}
                 aria-pressed={this.state.view === key}
               >
                 <span className="rail-icon-wrap">
@@ -946,6 +1144,7 @@ class App extends Component<AppProps, AppState> {
               onOpen={() => this.openSettingsView('updates')}
             />
             <button
+              ref={this.centerAdminOpenerRef}
               type="button"
               className={'rail-item' + (this.state.view === 'center-admin' ? ' active' : '')}
               onClick={() => this.openCenterAdminSettings(this.state.centerAdminTab ?? 'providers')}
@@ -958,6 +1157,7 @@ class App extends Component<AppProps, AppState> {
               <span className="rail-label">{t('中心管理', 'Center')}</span>
             </button>
             <button
+              ref={this.settingsOpenerRef}
               type="button"
               className={'rail-item' + (this.state.view === 'settings' ? ' active' : '')}
               onClick={() => this.openSettingsView()}
@@ -987,7 +1187,16 @@ class App extends Component<AppProps, AppState> {
   private renderDeviceSelector(): ReactNode {
     const { t } = this.props;
     const { devices, pendingTarget, selectedDeviceId, archiveBridge, returnView } = this.state;
-    const choices = devices.items.length > 0 ? devices.items : archiveBridge?.devices ?? [];
+    const choiceMap = new Map<string, DevicesDirectoryItem>();
+    for (const device of devices.items) {
+      choiceMap.set(device.deviceId, device);
+    }
+    for (const device of archiveBridge?.devices ?? []) {
+      if (!choiceMap.has(device.deviceId)) {
+        choiceMap.set(device.deviceId, device);
+      }
+    }
+    const choices = Array.from(choiceMap.values());
     return (
       <div className="device-selector">
         <button
@@ -1013,6 +1222,16 @@ class App extends Component<AppProps, AppState> {
             ))}
           </select>
         </label>
+        {devices.nextCursor !== null && (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={devices.busy || !this.state.transportConnected}
+            onClick={() => void this.onLoadMoreDevices()}
+          >
+            {devices.busy ? t('正在加载设备…', 'Loading devices…') : t('加载更多设备', 'Load more devices')}
+          </button>
+        )}
         {devices.error && (
           <button type="button" className="secondary-button" onClick={() => void this.loadDevices()}>
             {t('刷新设备', 'Refresh devices')}
@@ -1079,9 +1298,43 @@ class App extends Component<AppProps, AppState> {
     const center = this.props.centerConnection.status;
     const centerTransport = this.getCenterTransport();
 
+    const headerBar = (
+      <header
+        className="desktop-center-header"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--space-3)',
+          padding: 'var(--space-3) var(--space-6)',
+          borderBottom: '1px solid var(--line)',
+          flexShrink: 0,
+        }}
+      >
+        <button type="button" className="quiet-button" onClick={this.returnToWorkspace}>
+          <ArrowLeft size={15} aria-hidden />
+          <span>{t('返回', 'Back')}</span>
+        </button>
+        <h2 className="desktop-settings-title">{t('中心管理', 'Center Admin')}</h2>
+        {center?.centerUrl ? (
+          <span
+            className="metadata"
+            style={{
+              marginLeft: 'auto',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {center.centerUrl}
+          </span>
+        ) : null}
+      </header>
+    );
+
     if (!centerTransport) {
       return (
         <div className="desktop-center-view">
+          {headerBar}
           <div className="desktop-center-inner">
             <div className="settings-empty-card">
               <h4>{t('尚未连接到 PiBot 中心', 'Not connected to PiBot Center')}</h4>
@@ -1106,6 +1359,7 @@ class App extends Component<AppProps, AppState> {
 
     return (
       <div className="desktop-center-view">
+        {headerBar}
         <CenterAdminPanel
           transport={centerTransport}
           activeTab={this.state.centerAdminTab}
@@ -1134,6 +1388,8 @@ class App extends Component<AppProps, AppState> {
     const snapshot = api.snapshot;
 
     const isBotChatsView = isPrimaryView(view);
+    const primaryView: AppView =
+      view === 'settings' || view === 'center-admin' ? this.state.returnView : view;
     const needsArchiveBridge = view === 'settings' && this.state.settingsTab === 'advanced';
 
     let overlayWorkspaceNode: ReactNode = null;
@@ -1191,8 +1447,8 @@ class App extends Component<AppProps, AppState> {
             currentDeviceId={this.state.status?.connection?.deviceId ?? ''}
             pageActive={pageActive && (isBotChatsView || needsArchiveBridge)}
             workspaceActive={pageActive && isBotChatsView}
-            boardActive={view === 'board'}
-            tasksActive={view === 'tasks'}
+            boardActive={primaryView === 'board'}
+            tasksActive={primaryView === 'tasks'}
             centerInterrupted={centerInterrupted}
             onOpenBoardChat={() => this.setState({ view: 'chat', returnView: 'chat' })}
             onSwitchView={(next) => this.setState({ view: next, returnView: next })}

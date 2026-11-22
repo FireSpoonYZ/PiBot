@@ -106,6 +106,50 @@ interface ActiveAuthFlow {
   error?: string;
 }
 
+export interface PendingGoogleFlow extends ActiveAuthFlow {
+  phase: 'pending';
+}
+
+const pendingGoogleFlows = new Map<string, PendingGoogleFlow>();
+
+function isPendingFlowExpired(
+  flow: Pick<PendingGoogleFlow, 'expiresAt'>,
+  now = Date.now(),
+): boolean {
+  const expMs = new Date(flow.expiresAt).getTime();
+  return !Number.isFinite(expMs) || expMs <= now;
+}
+
+function readPendingGoogleFlow(scopeKey: string): PendingGoogleFlow | null {
+  const stored = pendingGoogleFlows.get(scopeKey);
+  if (!stored) return null;
+  if (isPendingFlowExpired(stored)) {
+    pendingGoogleFlows.delete(scopeKey);
+    return null;
+  }
+  return stored;
+}
+
+function writePendingGoogleFlow(scopeKey: string, flow: PendingGoogleFlow): void {
+  if (isPendingFlowExpired(flow)) {
+    pendingGoogleFlows.delete(scopeKey);
+    return;
+  }
+  pendingGoogleFlows.set(scopeKey, flow);
+}
+
+export function clearPendingGoogleFlow(scopeKey?: string, expectedFlowId?: string): void {
+  if (scopeKey === undefined) {
+    pendingGoogleFlows.clear();
+    return;
+  }
+  if (expectedFlowId !== undefined) {
+    const existing = pendingGoogleFlows.get(scopeKey);
+    if (existing && existing.flowId !== expectedFlowId) return;
+  }
+  pendingGoogleFlows.delete(scopeKey);
+}
+
 interface NoticeBanner {
   tone: 'ok' | 'warn' | 'danger' | 'info';
   text: string;
@@ -178,10 +222,11 @@ export function GoogleTab({
     () => readTabCache<GoogleCacheData>(cacheKey, 'google')?.data ?? null,
     [cacheKey],
   );
+  const initialPendingFlow = useMemo(() => readPendingGoogleFlow(cacheKey), [cacheKey]);
 
-  // Progressive 3-section segmented navigation: default to 'accounts' if configured, else 'client'
+  // Progressive 3-section segmented navigation: default to 'accounts' if configured or OAuth flow is pending, else 'client'
   const [section, setSection] = useState<GoogleSection>(() =>
-    initialCache?.status?.client?.configured ? 'accounts' : 'client',
+    initialPendingFlow || initialCache?.status?.client?.configured ? 'accounts' : 'client',
   );
   const userPickedSectionRef = useRef(false);
 
@@ -303,12 +348,12 @@ export function GoogleTab({
   const [connectBusy, setConnectBusy] = useState(false);
   const [connectError, setConnectError] = useState('');
 
-  // Active OAuth system-browser flow
-  const [activeFlow, setActiveFlow] = useState<ActiveAuthFlow | null>(null);
+  // Active OAuth system-browser flow (hydrated from module-level store across tab switches)
+  const [activeFlow, setActiveFlow] = useState<ActiveAuthFlow | null>(() => initialPendingFlow);
   const [cancellingFlow, setCancellingFlow] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const flowGenRef = useRef(0);
-  const pollInFlightRef = useRef(false);
+  const prevFlowScopeRef = useRef(cacheKey);
 
   // Remove account modal state
   const [removeRevoke, setRemoveRevoke] = useState(true);
@@ -352,6 +397,29 @@ export function GoogleTab({
     },
     [clearSecretDrafts],
   );
+
+  // Clear stale flow when scope (cacheKey) changes while mounted
+  useEffect(() => {
+    const prevScope = prevFlowScopeRef.current;
+    if (prevScope === cacheKey) return;
+    prevFlowScopeRef.current = cacheKey;
+    clearPendingGoogleFlow(prevScope);
+    flowGenRef.current += 1;
+    setCancellingFlow(false);
+    setActiveFlow(readPendingGoogleFlow(cacheKey));
+  }, [cacheKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleUnauth = () => {
+      clearPendingGoogleFlow(cacheKey);
+      flowGenRef.current += 1;
+      setCancellingFlow(false);
+      setActiveFlow(null);
+    };
+    window.addEventListener('center-unauthenticated', handleUnauth);
+    return () => window.removeEventListener('center-unauthenticated', handleUnauth);
+  }, [cacheKey]);
 
   // Clear secrets and timers on unmount
   useEffect(() => {
@@ -498,7 +566,9 @@ export function GoogleTab({
           setUnavailableReason(null);
           setStatus(googleRes);
           if (!userPickedSectionRef.current) {
-            setSection(googleRes.client?.configured ? 'accounts' : 'client');
+            setSection(
+              readPendingGoogleFlow(cacheKey) || googleRes.client?.configured ? 'accounts' : 'client',
+            );
           }
         }
 
@@ -617,10 +687,28 @@ export function GoogleTab({
   // Countdown tick while waiting for system browser OAuth (paused when tab hidden)
   useEffect(() => {
     if (!active || !activeFlow || activeFlow.phase !== 'pending') return;
-    setNowMs(Date.now());
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    const currentFlow = activeFlow;
+    const checkTick = () => {
+      const now = Date.now();
+      setNowMs(now);
+      if (isPendingFlowExpired(currentFlow, now)) {
+        const t = tRef.current;
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+        setActiveFlow(prev =>
+          prev && prev.flowId === currentFlow.flowId && prev.phase === 'pending'
+            ? {
+                ...prev,
+                phase: 'failed',
+                error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+              }
+            : prev,
+        );
+      }
+    };
+    checkTick();
+    const timer = window.setInterval(checkTick, 1000);
     return () => window.clearInterval(timer);
-  }, [active, activeFlow]);
+  }, [active, activeFlow, cacheKey]);
 
   const handleFlowCompleted = useCallback(
     async (account: GoogleAccountStatus | undefined, flow: ActiveAuthFlow) => {
@@ -661,14 +749,37 @@ export function GoogleTab({
     const gen = flowGenRef.current;
     const currentFlow = activeFlow;
 
+    if (isPendingFlowExpired(currentFlow)) {
+      clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+      setActiveFlow({
+        ...currentFlow,
+        phase: 'failed',
+        error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+      });
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+
     const pollOnce = async () => {
-      if (pollInFlightRef.current || gen !== flowGenRef.current) return;
-      pollInFlightRef.current = true;
+      if (disposed || inFlight || gen !== flowGenRef.current) return;
+      if (isPendingFlowExpired(currentFlow)) {
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
+        setActiveFlow({
+          ...currentFlow,
+          phase: 'failed',
+          error: t('授权流程已过期，请重新开始。', 'Authorization flow expired. Please start again.'),
+        });
+        return;
+      }
+      inFlight = true;
       try {
         const res = await api.getGoogleFlow({ flowId: currentFlow.flowId });
-        if (gen !== flowGenRef.current) return;
+        if (disposed || gen !== flowGenRef.current) return;
         if (res.phase === 'pending') return;
 
+        clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
         if (res.phase === 'connected') {
           setActiveFlow(null);
           await handleFlowCompleted(res.account, currentFlow);
@@ -690,8 +801,9 @@ export function GoogleTab({
             t('此次授权未完成或已过期，原有有效连接未受影响。请重新开始。', 'Authorization did not complete or expired. Existing connections were not affected.'),
         });
       } catch (err) {
-        if (gen !== flowGenRef.current) return;
+        if (disposed || gen !== flowGenRef.current) return;
         if (err instanceof CenterApiError && (err.status === 404 || err.status === 410)) {
+          clearPendingGoogleFlow(cacheKey, currentFlow.flowId);
           setActiveFlow({
             ...currentFlow,
             phase: 'failed',
@@ -699,7 +811,7 @@ export function GoogleTab({
           });
         }
       } finally {
-        pollInFlightRef.current = false;
+        inFlight = false;
       }
     };
 
@@ -717,11 +829,12 @@ export function GoogleTab({
     document.addEventListener('visibilitychange', onReturn);
 
     return () => {
+      disposed = true;
       window.clearInterval(timer);
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
     };
-  }, [active, activeFlow, api, handleFlowCompleted, t]);
+  }, [active, activeFlow, api, cacheKey, handleFlowCompleted, t]);
 
   const handleJsonFilePick = useCallback(
     async (file: File | null | undefined) => {
@@ -800,6 +913,9 @@ export function GoogleTab({
 
       const updated = await api.configureGoogle(payload);
       clearSecretDrafts();
+      clearPendingGoogleFlow(cacheKey);
+      flowGenRef.current += 1;
+      setActiveFlow(null);
       setStatus(updated);
       await loadAll({ silent: true });
 
@@ -850,7 +966,7 @@ export function GoogleTab({
         });
         if (gen !== flowGenRef.current) return;
 
-        const flow: ActiveAuthFlow = {
+        const flow: PendingGoogleFlow = {
           flowId: res.flowId,
           authorizationUrl: res.authorizationUrl,
           expiresAt: toIsoExpiresAt(res.expiresAt),
@@ -858,6 +974,7 @@ export function GoogleTab({
           choices: normalized,
           targetAccount,
         };
+        writePendingGoogleFlow(cacheKey, flow);
         setActiveFlow(flow);
         setModal(null);
         userPickedSectionRef.current = true;
@@ -878,22 +995,25 @@ export function GoogleTab({
         setConnectBusy(false);
       }
     },
-    [api, onOpenExternalUrl, setBanner, t],
+    [api, cacheKey, onOpenExternalUrl, setBanner, t],
   );
 
   const handleCancelFlow = async () => {
     if (!activeFlow || cancellingFlow) return;
     const flowId = activeFlow.flowId;
+    const flowSnapshot = activeFlow;
     setCancellingFlow(true);
     flowGenRef.current += 1;
+    clearPendingGoogleFlow(cacheKey, flowId);
     try {
       await api.cancelGoogleFlow({ flowId });
     } catch {
       // Even if server already expired/finished, stop waiting locally and refresh status.
     } finally {
+      clearPendingGoogleFlow(cacheKey, flowId);
       setCancellingFlow(false);
       setActiveFlow({
-        ...activeFlow,
+        ...flowSnapshot,
         phase: 'cancelled',
         error: t('已取消本次授权，原有有效连接未受影响。', 'Authorization cancelled. Existing connections were not affected.'),
       });
@@ -1480,7 +1600,10 @@ export function GoogleTab({
                       <button
                         type="button"
                         className="ca-btn ca-btn-ghost ca-btn-sm"
-                        onClick={() => setActiveFlow(null)}
+                        onClick={() => {
+                          clearPendingGoogleFlow(cacheKey, activeFlow.flowId);
+                          setActiveFlow(null);
+                        }}
                       >
                         {t('关闭', 'Dismiss')}
                       </button>
@@ -2246,7 +2369,7 @@ export function GoogleTab({
                 ) : null}
               </ReservedSlot>
 
-              <div className="ca-form-actions ca-form-actions-between" style={{ flexWrap: 'nowrap' }}>
+              <div className="ca-form-actions ca-form-actions-between">
                 <button
                   type="button"
                   className="ca-btn ca-btn-ghost ca-btn-sm"
@@ -2434,7 +2557,7 @@ export function GoogleTab({
             </div>
           )}
 
-          <div className="ca-form-actions ca-form-actions-between" style={{ flexWrap: 'nowrap' }}>
+          <div className="ca-form-actions ca-form-actions-between">
             <button
               type="button"
               className="ca-btn"
@@ -2446,7 +2569,7 @@ export function GoogleTab({
               {t('切到手动录入', 'Manual entry')}
             </button>
 
-            <div className="ca-inline-row" style={{ flexWrap: 'nowrap' }}>
+            <div className="ca-inline-row">
               <button type="button" className="ca-btn ca-btn-ghost" onClick={() => setModal(null)}>
                 {t('关闭', 'Close')}
               </button>
@@ -2548,7 +2671,7 @@ export function GoogleTab({
             ) : null}
           </ReservedSlot>
 
-          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+          <div className="ca-form-actions">
             <button
               type="button"
               className="ca-btn"
@@ -2680,7 +2803,7 @@ export function GoogleTab({
               ) : null}
             </ReservedSlot>
 
-            <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+            <div className="ca-form-actions">
               <button
                 type="button"
                 className="ca-btn"
@@ -2915,7 +3038,7 @@ export function GoogleTab({
             ) : null}
           </ReservedSlot>
 
-          <div className="ca-form-actions" style={{ flexWrap: 'nowrap' }}>
+          <div className="ca-form-actions">
             <button
               type="button"
               className="ca-btn"

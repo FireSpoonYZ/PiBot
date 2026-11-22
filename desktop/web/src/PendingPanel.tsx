@@ -3,7 +3,7 @@ import { Component, createRef, type ContextType, type ReactNode } from 'react';
 import { CheckCircle2, Filter, History, Inbox, RefreshCw } from 'lucide-react';
 import type { PendingCursor, PendingListPage, PendingRecord, PendingState } from '../../../host-core/index.js';
 import type { DesktopUiIntent } from '../../../host-core/desktop-client.js';
-import { ActionBar, EmptyState, ErrorState, InlineNotice, Segmented } from '../../../web/src/components/ui';
+import { ActionBar, EmptyState, ErrorState, InlineNotice, Segmented, type InlineNoticeTone } from '../../../web/src/components/ui';
 import { LanguageOverride, useText } from '../../../web/src/ui';
 import type { SendRecordsTarget } from './BotChats';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
@@ -33,6 +33,7 @@ interface State {
   intents: DesktopUiIntent[];
   error: string | null;
   notice: string | null;
+  noticeTone: InlineNoticeTone;
   loading: boolean;
   busyId: string | null;
   busyOp: BusyOp | null;
@@ -186,6 +187,7 @@ export class PendingPanel extends Component<Props, State> {
     intents: [],
     error: null,
     notice: null,
+    noticeTone: 'info',
     loading: true,
     busyId: null,
     busyOp: null,
@@ -331,10 +333,13 @@ export class PendingPanel extends Component<Props, State> {
 
   private applyRecord(item: PendingRecord): void {
     if (this.props.target?.recordId === item.id) this.focusEpoch += 1;
+    const noticeTone: InlineNoticeTone =
+      isCancelled(item) || item.state === 'accepted' ? 'success' : 'info';
     this.setState((state) => ({
       items: state.items.map((old) => old.id === item.id ? item : old),
       focused: this.props.target?.recordId === item.id ? item : state.focused,
       notice: this.t(`当前记录状态：${recordStatus(item, this.t)}`, `Record status: ${recordStatus(item, this.t)}`),
+      noticeTone,
     }));
   }
 
@@ -344,13 +349,13 @@ export class PendingPanel extends Component<Props, State> {
     const epoch = this.identityEpoch;
     this.inFlight = true;
     let refresh = true;
-    this.setState({ busyId: item.id, busyOp: op, error: null, notice: null });
+    this.setState({ busyId: item.id, busyOp: op, error: null, notice: null, noticeTone: 'info' });
     try {
       if (op === 'pending_send') {
         const latest = await api.pending(identity, 'pending_get', { id: item.id });
         if (!this.isCurrent(identity, epoch) || !this.props.transportConnected) return;
         if (!latest) {
-          this.setState({ notice: this.t('该记录已不可用。', 'This record is no longer available.') });
+          this.setState({ notice: this.t('该记录已不可用。', 'This record is no longer available.'), noticeTone: 'info' });
           return;
         }
         if (!canSendRecord(latest)) {
@@ -390,6 +395,7 @@ export class PendingPanel extends Component<Props, State> {
           notice: bot
             ? this.t('已找到智能体创建结果。', 'Found agent creation result.')
             : this.t('暂时无法确认创建结果，请稍后再核对。', 'Could not confirm creation result yet; verify again later.'),
+          noticeTone: bot ? 'success' : 'info',
         });
       }
     } catch (error) {
@@ -405,11 +411,11 @@ export class PendingPanel extends Component<Props, State> {
     if (!identity || this.inFlight) return;
     const epoch = this.identityEpoch;
     this.inFlight = true;
-    this.setState({ busyId: intent.id, busyOp: 'delete_intent', error: null, notice: null });
+    this.setState({ busyId: intent.id, busyOp: 'delete_intent', error: null, notice: null, noticeTone: 'info' });
     try {
       await api.deleteIntent(intent.id);
       if (this.isCurrent(identity, epoch)) {
-        this.setState({ notice: this.t('已移除操作记录。', 'Action record removed.') });
+        this.setState({ notice: this.t('已移除操作记录。', 'Action record removed.'), noticeTone: 'success' });
       }
     } catch (error) {
       if (this.isCurrent(identity, epoch)) this.setState({ error: toError(error).message });
@@ -589,7 +595,7 @@ export class PendingPanel extends Component<Props, State> {
 
   render(): ReactNode {
     const { identity, transportConnected, target, conversationName, onClearTarget } = this.props;
-    const { view, loading, error, notice, focused, cursors, busyId } = this.state;
+    const { view, loading, error, notice, noticeTone, focused, cursors, busyId } = this.state;
     if (!identity) {
       return (
         <div className="pending-panel">
@@ -615,7 +621,7 @@ export class PendingPanel extends Component<Props, State> {
     const showingHistory = view === 'history';
     const noRecords = !items.length && !intents.length && !target?.recordId;
 
-    // 单一优先级状态栏：有列表项时的操作错误 > 离线只读提示 > 操作结果提示；空态错误交由 ErrorState 统一呈现，避免双重报错。
+    // 单一优先级状态栏：有列表项时的操作错误 > 新鲜操作结果反馈（离线时折叠提示连接状态） > 持久离线只读提示；空态错误交由 ErrorState 统一呈现，避免双重报错。
     let statusBanner: ReactNode = null;
     if (error && !noRecords) {
       statusBanner = (
@@ -644,6 +650,33 @@ export class PendingPanel extends Component<Props, State> {
           )}
         />
       );
+    } else if (notice) {
+      statusBanner = (
+        <InlineNotice
+          tone={noticeTone}
+          title={notice}
+          description={
+            !transportConnected
+              ? this.t('当前设备离线：仍可浏览本地账本或取消待发送消息；设备恢复在线后可继续发送与核对结果。', 'Device is currently offline: you can still inspect the local ledger or cancel queued messages; reconnect to send or verify.')
+              : undefined
+          }
+          onDismiss={() => this.setState({ notice: null })}
+          action={
+            !transportConnected ? (
+              <ActionBar align="start">
+                <button
+                  type="button"
+                  className="secondary-button pending-quiet-button"
+                  onClick={this.refreshRecords}
+                  disabled={loading || !!busyId}
+                >
+                  {this.t('刷新本地账本', 'Refresh local ledger')}
+                </button>
+              </ActionBar>
+            ) : undefined
+          }
+        />
+      );
     } else if (!transportConnected) {
       statusBanner = (
         <InlineNotice
@@ -662,14 +695,6 @@ export class PendingPanel extends Component<Props, State> {
               </button>
             </ActionBar>
           )}
-        />
-      );
-    } else if (notice) {
-      statusBanner = (
-        <InlineNotice
-          tone="info"
-          title={notice}
-          onDismiss={() => this.setState({ notice: null })}
         />
       );
     }

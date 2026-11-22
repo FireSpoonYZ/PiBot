@@ -2,6 +2,7 @@
    设计原则：单列、留白充足、卡片无描边无阴影、只用一种强调色；低频信息折叠。 */
 
 .bs-backdrop,
+.bs-sheet,
 .bs-inline-panel {
   --bs-accent: var(--color-primary, var(--brand));
   --bs-card: color-mix(in srgb, var(--color-surface-1, var(--surface)) 62%, var(--color-bg, var(--bg)));
@@ -10,10 +11,9 @@
 }
 
 .bs-backdrop {
-  position: fixed; inset: 0; z-index: var(--z-sheet, 200);
-  display: flex; align-items: flex-end; justify-content: center;
-  padding-bottom: var(--ime-bottom, 0px);
+  position: fixed; inset: 0; z-index: calc(var(--z-sheet, 200) - 1);
   background: var(--color-scrim, color-mix(in srgb, var(--color-text, var(--text)) 38%, transparent));
+  overscroll-behavior: contain;
   animation: bs-fade-in var(--dur-fast, 180ms) ease both;
 }
 
@@ -26,9 +26,11 @@
 .bs-inline-panel svg { width: 18px; height: 18px; stroke-width: 1.9; }
 
 :root[data-theme=dark] .bs-backdrop,
+:root[data-theme=dark] .bs-sheet,
 :root[data-theme=dark] .bs-inline-panel { --bs-card: var(--color-surface-1, var(--surface)); }
 @media (prefers-color-scheme: dark) {
   :root[data-theme=system] .bs-backdrop,
+  :root[data-theme=system] .bs-sheet,
   :root[data-theme=system] .bs-inline-panel { --bs-card: var(--color-surface-1, var(--surface)); }
 }
 
@@ -57,9 +59,13 @@
 }
 
 .bs-sheet {
-  --bs-safe-bottom: max(calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px);
+  --bs-safe-bottom: var(--bottom, max(0px, calc(var(--raw-safe-bottom, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))) - var(--ime-bottom, 0px))));
   --bs-sheet-max: min(90dvh, calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--ime-bottom, 0px) - var(--space-6, 24px)));
-  position: relative;
+  position: fixed;
+  left: 50%;
+  bottom: var(--ime-bottom, 0px);
+  z-index: var(--z-sheet, 200);
+  transform: translateX(-50%);
   width: 100%; max-width: 560px;
   height: auto;
   /* 内容少时不撑满，内容多时滚动；最小高度避免加载前后跳动过大。 */
@@ -304,7 +310,7 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
 .bs-sheet .inline-error { margin: 0; }
 
 @keyframes bs-fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes bs-sheet-in { from { transform: translateY(32px); opacity: .4; } to { transform: translateY(0); opacity: 1; } }
+@keyframes bs-sheet-in { from { transform: translate(-50%, 32px); opacity: .4; } to { transform: translate(-50%, 0); opacity: 1; } }
 @keyframes bs-dialog-top-pop-in { from { opacity: 0; transform: translateX(-50%) scale(.96); } to { opacity: 1; transform: translateX(-50%) scale(1); } }
 
 .bs-disclosure-right { display: inline-flex; align-items: center; gap: var(--space-2, 8px); min-width: 0; }
@@ -326,7 +332,7 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
   top: calc(var(--top, 0px) + min(14vh, 96px));
   transform: translateX(-50%);
   width: min(440px, calc(100% - var(--space-8, 32px)));
-  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--bottom, env(safe-area-inset-bottom, 0px)), var(--ime-bottom, 0px)) - var(--space-4, 16px));
+  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--raw-safe-bottom, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))), var(--ime-bottom, 0px)) - var(--space-4, 16px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -356,6 +362,8 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
   font-size: var(--text-lg, 1.15rem);
   font-weight: var(--weight-semibold, 650);
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .bs-confirm-dialog .dialog-body {
   padding: var(--space-1, 4px) var(--space-5, 20px) var(--space-5, 20px);
@@ -368,6 +376,8 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
   font-size: var(--text-md, .9rem);
   line-height: 1.5;
   color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .bs-confirm-dialog .dialog-actions {
   display: flex;
