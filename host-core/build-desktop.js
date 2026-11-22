@@ -822,6 +822,8 @@ async function collectBundledNpmPackages(metafile, outfile, absWorkingDir) {
       pkg &&
       pkg.name !== '@e-launcher/host-core' &&
       pkg.name !== 'pibot' &&
+      // The in-repo Center contract is covered by the root LICENSE.
+      pkg.root !== path.join(ROOT, 'center-contract') &&
       !roots.has(`${pkg.name}@${pkg.version}`)
     ) {
       roots.set(`${pkg.name}@${pkg.version}`, pkg);
