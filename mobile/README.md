@@ -157,6 +157,17 @@ displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）�
 
 麦克风权限由插件 `@TauriPlugin` 声明，Kotlin 侧在 `startVoice` 前检查真实前台与权限，权限回调按 generation 归属；语音沿用默认进程 Host 的既有“冻结 botId/requestId 只提交一次”语义与事件形状，重复/迟到回调不会串到新捕获。debug 构建开启 WebView 检查，release 保持关闭，未放松 CSP/Origin/TLS。
 
+## 剪贴板同步
+
+入口为「设置 → 本机与权限 → 剪贴板同步」。Rust JNI 库运行在客户端默认进程，不依赖 `:tauri_ui` 界面保持打开。
+
+- **交互与加密存储**：采用「一次入组（`pibot-clipboard-v1:...`）+ 每设备独立开关」。新安装默认关闭。手动开启后，客户端会保存开关，下次启动服务并连接同一 Center 后恢复同步。开关与组码以独立 AndroidKeyStore 别名 `clipboard_sync.state.v1` 做 AES-GCM 加密并保存在不参与备份的私有文件 `clipboard_sync_state_v1.json`（无明文回退），严格绑定当前 Center 的 origin、deviceId、令牌与 CA 指纹，切换 Center 不跨中心迁移。需先升级 Center 且仅在线实时投递（无离线补发、无历史、无文件、无自动粘贴，不接入 Bot/MCP）。
+- **后台接收与手动发送回退**：后台接收由默认进程依托客户端前台服务 `BotClientService` 维持，自动将远端纯文本（`≤ 64 KiB`）写入系统剪贴板并附带 `EXTRA_OWN_SYNC` 与 `ClipDescription.EXTRA_IS_SENSITIVE`（Android 13+ 抑制预览）。默认工作在 `manual` 模式：用户在真实前台且聚焦的 Activity 点击「立即发送（`sendNow`）」，由 Kotlin 原生校验并读取纯文本经同 UID 私有桥送至默认进程加密发出（只取现成纯文本，忽略附带的 HTML，不用 `coerceToText`，明文绝不回传 WebView；拒绝多条目、URI/Intent、敏感标记、自有标记、Shower `pibot` 剪贴板及含 `pibot1.` / `pibot-clipboard-v1:` 的文本）。
+- **系统分享与划词**：在其他应用选择「发送到 PiBot 同步组」，确认后发送所选纯文本，无需回到设置页或授予 Shizuku。仅在本机同步开启且在线时发送，不更改本机剪贴板。
+- **可选 Shizuku 与生命周期边界**：要在其他应用复制后自动发出，先授予 Shizuku 系统权限，再在剪贴板设置里单独同意后台自动发送。不支持或撤销时保留手动发送。不同厂商系统的后台行为需真机验证。**不承诺**设备重启/开机自动恢复剪贴板同步，也**不承诺**暂停/退出 `BotClientService` 后继续后台收发。
+
+完整安全边界、版本策略与三节点验收清单见 [docs/clipboard-sync.md](../docs/clipboard-sync.md)。
+
 ## 构建与先决条件
 
 与 Android CI 对齐，使用 Node.js **26.13.0**、JDK **21**、SDK Platform **36**、Build-Tools **36.0.0**、NDK **28.2.13676358**、CMake **3.22.1** 和 Rust **1.99.1**。Gradle **8.14.3** 由 wrapper 下载。通过 SDK Manager 安装对应包并接受许可，将 Node 加入 PATH，`JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 指向 SDK。 [Android CI](../.github/workflows/apk.yml)
@@ -187,7 +198,7 @@ Linux 使用相同 SDK 与 npm/Rust 准备步骤。运行 `pwsh -NoProfile -File
 
 - `mobile/build/tauri-sdk.gradle` 是生成的 SDK include 片段。片段缺失时，`settings.gradle` 在配置阶段先执行 `node host-core/build-mobile.js --sdk-path`，成功后再载入。本地 Gradle 与 CI 共用这一步。也可以先手动执行该命令排查 SDK 路径。
 - 如果 helper 跑完后片段仍不存在（例如 Cargo 不可用或 `mobile/src-tauri` 的 Cargo 图解析失败），Gradle 会抛带退出码与修复指引的 `GradleException`。注意：`node`/`cargo` 本身无法启动时，`providers.exec` 会直接以 Gradle 的 Exec 失败报错，不会进入这个自定义分支；两者都是真实构建错误，不会猜 cargo registry 目录，也不做 lock 刷新回退。
-- `:app:assembleDebug` 依赖 `buildMobileUi`，它执行 `node host-core/build-mobile.js --abis <launcherAbis> --ndk <sdk>/ndk/28.2.13676358`：构建 release 版 Rust cdylib、用 NDK clang 显式参数交叉编译并校验 16 KiB ELF 对齐、把 wry/tauri 生成的 Kotlin 写入 `app/build/generated/source/tauri`、把 `.so` 放到 `app/build/generated/jniLibs/tauri/<abi>`，并把按实际构建 ABI 的 cargo 图生成的完整 Rust 通知写到 Gradle assets 源根 `app/build/generated/assets/tauri/THIRD_PARTY_NOTICES.txt`（APK 内 asset 路径是 `THIRD_PARTY_NOTICES.txt`，不是 `tauri/` 子目录）。
+- `:app:assembleDebug` 依赖 `buildMobileUi`，它执行 `node host-core/build-mobile.js --abis <launcherAbis> --ndk <sdk>/ndk/28.2.13676358`：构建 release 版 Rust cdylib（`libe_launcher_mobile.so` 与剪贴板同步默认进程 JNI 库 `libpibot_clipboard_sync.so`，源码在 `clipboard-sync/android`）、用 NDK clang 显式参数交叉编译并校验 16 KiB ELF 对齐、把 wry/tauri 生成的 Kotlin 写入 `app/build/generated/source/tauri`、把 `.so` 放到 `app/build/generated/jniLibs/tauri/<abi>`，并把按实际构建 ABI 的 cargo 图（含 `clipboard-sync/android`）生成的完整 Rust 通知写到 Gradle assets 源根 `app/build/generated/assets/tauri/THIRD_PARTY_NOTICES.txt`（APK 内 asset 路径是 `THIRD_PARTY_NOTICES.txt`，不是 `tauri/` 子目录）。`app/build.gradle` 已将 `clipboard-sync/**`（排除 `**/target/**`、`**/build/**`）纳入 `buildMobileUi` 输入；独立 JNI crate 版本策略见 [docs/clipboard-sync.md](../docs/clipboard-sync.md#构建ci-触发与版本策略)。
 - `gradle.properties` 固定 `org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8`（完整 APK + androidTest 构建实测需要）；未设 Gradle/Cargo 并行上限；Kotlin 数据用 KGP 默认 `.kotlin/`（已忽略）。
 - 当 `:tauri-android` 工程（cargo registry）与工作树不在同一磁盘根时，仅该工程的 `KotlinCompile` 关闭增量编译；`:app` 保持增量。
 - 依赖自带的法务文本（`/META-INF/LICENSE`、`/META-INF/LICENSE.txt`、`/META-INF/NOTICE`、`/META-INF/NOTICE.txt`、`/LICENSE`、`/LICENSE.txt`、`/NOTICE`、`/NOTICE.txt`）也是这 8 个路径：`android.packaging.resources` 只把这 8 项从 AGP 默认排除集合里移除，并按标准 DSL 加入 `resources.merges`（同名文件合并完整上游文本）。签名/MANIFEST 等其它默认排除、默认 service merge 与 `jniLibs.useLegacyPackaging` 均不变；不使用 `pickFirst`、不手工拼接替代文本。

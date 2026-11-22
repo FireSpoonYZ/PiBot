@@ -90,6 +90,11 @@ jobs:
         working-directory: desktop/host-launcher
         run: cargo test --locked
 
+      - name: Clipboard sync Rust tests
+        run: |
+          cargo test --locked --manifest-path clipboard-sync/Cargo.toml
+          cargo test --locked --manifest-path clipboard-sync/relay-client/Cargo.toml
+
   build:
     name: Desktop ${{ matrix.bundle }}
     strategy:

@@ -1,0 +1,26 @@
+[package]
+name = "pibot-clipboard-sync"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+description = "Android JNI bridge for PiBot clipboard sync"
+
+# Standalone crate: never pulled into another workspace.
+[workspace]
+
+[lib]
+name = "pibot_clipboard_sync"
+crate-type = ["cdylib"]
+
+[dependencies]
+clipboard-sync = { path = ".." }
+clipboard-sync-relay-client = { path = "../relay-client" }
+jni = { version = "0.21", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

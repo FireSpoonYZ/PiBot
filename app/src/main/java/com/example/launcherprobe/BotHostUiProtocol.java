@@ -85,7 +85,10 @@ final class BotHostUiProtocol {
             "uiSettings", OP_PAUSE,
             "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility", "clientConnectionProbe",
             // 客户端自更新：固定方法名直达默认进程 ClientUpdater；只接收 protocol 固定参数。
-            "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel")));
+            "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel",
+            // 剪贴板同步：clipboardSync 处理状态/开关/组码操作；clipboardSyncSend 仅由原生聚焦 Activity
+            // 的 sendNow 经私有同 UID 桥送达默认进程，不加入 Rust ALLOWED_METHODS / Kotlin SERVICE_METHODS。
+            "clipboardSync", "clipboardSyncSend")));
 
     private BotHostUiProtocol() {
     }

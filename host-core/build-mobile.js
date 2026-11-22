@@ -6,9 +6,10 @@
 //
 // Modes:
 //   (default) : writes mobile/build/tauri-sdk.gradle from cargo metadata, builds
-//               mobile/build/web, builds the Rust cdylib per launcher ABI with
-//               explicit NDK argv, checks 16 KiB ELF alignment, and writes the
-//               Android Rust third-party notices into the APK assets.
+//               mobile/build/web, builds the mobile UI and default-process
+//               clipboard-sync Rust cdylibs per launcher ABI with explicit NDK
+//               argv, checks 16 KiB ELF alignment, and writes the Android Rust
+//               third-party notices into the APK assets.
 //   --web     : builds mobile/build/web only (vite.mobile.config.ts + tsc).
 //   --sdk-path: metadata only. Resolves the tauri SDK project from the mobile Cargo
 //               graph, writes mobile/build/tauri-sdk.gradle (applied by
@@ -17,7 +18,7 @@
 //   node host-core/build-mobile.js [--sdk-path | --web | [--abis arm64-v8a,x86_64] [--ndk <dir>]]
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
@@ -32,6 +33,10 @@ const MOBILE_SRC_TAURI = path.join(MOBILE_DIR, 'src-tauri');
 const CARGO_TOML = path.join(MOBILE_SRC_TAURI, 'Cargo.toml');
 const CARGO_TARGET_DIR = path.join(MOBILE_SRC_TAURI, 'target');
 const MOBILE_BUILD = path.join(MOBILE_DIR, 'build');
+const CLIPBOARD_SYNC_DIR = path.join(ROOT, 'clipboard-sync');
+const CLIPBOARD_ANDROID_DIR = path.join(CLIPBOARD_SYNC_DIR, 'android');
+const CLIPBOARD_CARGO_TOML = path.join(CLIPBOARD_ANDROID_DIR, 'Cargo.toml');
+const CLIPBOARD_CARGO_TARGET_DIR = path.join(MOBILE_BUILD, 'clipboard-sync-target');
 const WEB_OUT = path.join(MOBILE_BUILD, 'web');
 const GRADLE_INCLUDE = path.join(MOBILE_BUILD, 'tauri-sdk.gradle');
 const VITE_CONFIG = path.join(ROOT, 'vite.mobile.config.ts');
@@ -45,6 +50,59 @@ const TAURI_VERSION = '2.12.5';
 // Must match app/build.gradle namespace: wry/tauri codegen writes TauriActivity here.
 const ANDROID_PACKAGE = 'com.example.launcherprobe';
 const RUST_LIBRARY = 'e_launcher_mobile';
+const CLIPBOARD_RUST_LIBRARY = 'pibot_clipboard_sync';
+const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice', 'unlicense', 'copyright'];
+const ANDROID_CARGO_LICENSE_FALLBACKS = new Map([
+  ['jni-sys-macros@0.4.1', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: jni-sys-macros 0.4.1, jni-rs/jni-sys commit ' +
+      '64d77b7a5f119d7b55b4e2c169a4668067ff59e6 (LICENSE-MIT, LICENSE-APACHE; ' +
+      'declared "MIT OR Apache-2.0"); texts vendored verbatim in licenses/android/.',
+    files: [
+      'licenses/android/jni-sys-macros-0.4.1-MIT.txt',
+      'licenses/android/jni-sys-macros-0.4.1-Apache-2.0.txt',
+    ],
+  }],
+  ['ndk-context@0.1.1', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk-context 0.1.1, rust-windowing/android-ndk-rs commit ' +
+      '10f2ba388fca20f7349996ebae26ccda7a6fda5c, crate path "ndk-context"; version and ' +
+      '"MIT OR Apache-2.0" declaration taken from the crate archive Cargo.toml.orig and ' +
+      '.cargo_vcs_info (remote manifest retrieval failed), texts vendored verbatim in ' +
+      'licenses/android/.',
+    files: [
+      'licenses/android/ndk-context-0.1.1-MIT.txt',
+      'licenses/android/ndk-context-0.1.1-Apache-2.0.txt',
+    ],
+  }],
+  ['ndk@0.9.0', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk 0.9.0, rust-mobile/ndk commit ' +
+      '49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25, crate path "ndk"; repository root ' +
+      'LICENSE-MIT/LICENSE-APACHE at that commit, texts vendored verbatim in ' +
+      'licenses/android/.',
+    files: [
+      'licenses/android/ndk-49bbbba16c58-MIT.txt',
+      'licenses/android/ndk-49bbbba16c58-Apache-2.0.txt',
+    ],
+  }],
+  ['ndk-sys@0.6.0+11769913', {
+    license: 'MIT OR Apache-2.0',
+    provenance:
+      'Provenance: ndk-sys 0.6.0+11769913, rust-mobile/ndk commit ' +
+      '49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25, crate path "ndk-sys"; this workspace ' +
+      'inherits the repository root declaration, so the entry maps explicitly to the same ' +
+      'verified root LICENSE-MIT/LICENSE-APACHE texts as ndk 0.9.0 (no sibling or ' +
+      'version-range fallback), texts vendored verbatim in licenses/android/.',
+    files: [
+      'licenses/android/ndk-49bbbba16c58-MIT.txt',
+      'licenses/android/ndk-49bbbba16c58-Apache-2.0.txt',
+    ],
+  }],
+]);
 const NDK_VERSION = '28.2.13676358';
 const MIN_SDK_API = 33;
 const ELF_PAGE = 0x4000;
@@ -146,7 +204,7 @@ function quoteForCc(value) {
   return value.includes(' ') ? `"${value}"` : value;
 }
 
-function androidBuildEnv(abi, ndk) {
+function androidBuildEnv(abi, ndk, { includeWry = true } = {}) {
   const spec = ABI_TARGETS[abi];
   const prebuilt = path.join(ndk, 'toolchains', 'llvm', 'prebuilt', HOST_TAG);
   const clang = path.join(prebuilt, 'bin', CLANG_BINARY);
@@ -156,9 +214,6 @@ function androidBuildEnv(abi, ndk) {
   const ccTriple = spec.triple.replace(/-/g, '_');
   const env = {
     ...process.env,
-    WRY_ANDROID_PACKAGE: ANDROID_PACKAGE,
-    WRY_ANDROID_LIBRARY: RUST_LIBRARY,
-    WRY_ANDROID_KOTLIN_FILES_OUT_DIR: KOTLIN_OUT,
     [`CARGO_TARGET_${envTriple}_LINKER`]: clang,
     CARGO_ENCODED_RUSTFLAGS: [
       `-Clink-arg=--target=${ccTarget}`,
@@ -170,6 +225,15 @@ function androidBuildEnv(abi, ndk) {
     [`CFLAGS_${ccTriple}`]: `--target=${ccTarget} --sysroot=${quoteForCc(sysroot)}`,
     [`AR_${ccTriple}`]: path.join(prebuilt, 'bin', AR_BINARY),
   };
+  if (includeWry) {
+    env.WRY_ANDROID_PACKAGE = ANDROID_PACKAGE;
+    env.WRY_ANDROID_LIBRARY = RUST_LIBRARY;
+    env.WRY_ANDROID_KOTLIN_FILES_OUT_DIR = KOTLIN_OUT;
+  } else {
+    delete env.WRY_ANDROID_PACKAGE;
+    delete env.WRY_ANDROID_LIBRARY;
+    delete env.WRY_ANDROID_KOTLIN_FILES_OUT_DIR;
+  }
   // Packaging owns the SDK project path and the NDK target flags: a stale inherited
   // value would rewrite the repo Gradle files or re-add whitespace-split flags.
   delete env.TAURI_ANDROID_PROJECT_PATH;
@@ -281,9 +345,11 @@ async function buildRustLibraries(abis, ndk) {
   const built = [];
   for (const abi of abis) {
     const spec = ABI_TARGETS[abi];
+    const args = ['build', '--manifest-path', CARGO_TOML, '--target', spec.triple, '--target-dir', CARGO_TARGET_DIR, '--release'];
+    if (isRegularFile(path.join(MOBILE_SRC_TAURI, 'Cargo.lock'))) args.push('--locked');
     await runExec(
       'cargo',
-      ['build', '--manifest-path', CARGO_TOML, '--target', spec.triple, '--target-dir', CARGO_TARGET_DIR, '--release'],
+      args,
       { cwd: MOBILE_SRC_TAURI, env: androidBuildEnv(abi, ndk), stdio: 'inherit' }
     );
     const artifact = path.join(CARGO_TARGET_DIR, spec.triple, 'release', `lib${RUST_LIBRARY}.so`);
@@ -305,6 +371,185 @@ async function buildRustLibraries(abis, ndk) {
   return built;
 }
 
+async function buildClipboardSyncLibraries(abis, ndk) {
+  if (!isRegularFile(CLIPBOARD_CARGO_TOML)) {
+    throw fail(`${path.relative(ROOT, CLIPBOARD_CARGO_TOML)} is missing; clipboard-sync Android crate must be present before packaging`);
+  }
+  const built = [];
+  for (const abi of abis) {
+    const spec = ABI_TARGETS[abi];
+    const args = [
+      'build',
+      '--manifest-path',
+      CLIPBOARD_CARGO_TOML,
+      '--target',
+      spec.triple,
+      '--target-dir',
+      CLIPBOARD_CARGO_TARGET_DIR,
+      '--release',
+    ];
+    if (isRegularFile(path.join(CLIPBOARD_ANDROID_DIR, 'Cargo.lock'))) args.push('--locked');
+    await runExec('cargo', args, {
+      cwd: CLIPBOARD_ANDROID_DIR,
+      env: androidBuildEnv(abi, ndk, { includeWry: false }),
+      stdio: 'inherit',
+    });
+    const artifact = path.join(
+      CLIPBOARD_CARGO_TARGET_DIR,
+      spec.triple,
+      'release',
+      `lib${CLIPBOARD_RUST_LIBRARY}.so`
+    );
+    if (!isRegularFile(artifact)) throw fail(`Rust cdylib missing at ${artifact}`);
+    const buffer = await readFile(artifact);
+    assertElfSharedLibrary(buffer, spec.eMachine, `${abi} lib${CLIPBOARD_RUST_LIBRARY}.so`);
+    const target = path.join(JNI_OUT, abi, `lib${CLIPBOARD_RUST_LIBRARY}.so`);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, buffer);
+    built.push({ abi, triple: spec.triple, sha256: sha256Buffer(buffer) });
+  }
+  return built;
+}
+
+function isInsideRoot(filePath) {
+  const rel = path.relative(ROOT, path.resolve(filePath));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+async function findLicenseFiles(pkgRoot) {
+  const entries = (await readdir(pkgRoot)).sort();
+  const found = [];
+  for (const entry of entries) {
+    const lower = entry.toLowerCase();
+    if (LICENSE_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
+      const full = path.join(pkgRoot, entry);
+      const info = lstatSync(full, { throwIfNoEntry: false });
+      if (info && info.isFile() && !info.isSymbolicLink()) {
+        found.push(full);
+      }
+    }
+    if (lower === 'licenses' || lower === 'license') {
+      const subDir = path.join(pkgRoot, entry);
+      const subStat = lstatSync(subDir, { throwIfNoEntry: false });
+      if (subStat && subStat.isDirectory() && !subStat.isSymbolicLink()) {
+        for (const subEntry of (await readdir(subDir)).sort()) {
+          const full = path.join(subDir, subEntry);
+          const info = lstatSync(full, { throwIfNoEntry: false });
+          if (info && info.isFile() && !info.isSymbolicLink()) {
+            found.push(full);
+          }
+        }
+      }
+    }
+  }
+  return found;
+}
+
+async function collectClipboardCargoLicenseSections({ targetTriple, metadataFile }) {
+  if (!isRegularFile(CLIPBOARD_CARGO_TOML)) {
+    throw fail(`${path.relative(ROOT, CLIPBOARD_CARGO_TOML)} is missing; clipboard-sync Android crate must be present before packaging`);
+  }
+  const args = ['metadata', '--format-version', '1', '--manifest-path', CLIPBOARD_CARGO_TOML];
+  if (targetTriple) {
+    args.push('--filter-platform', targetTriple);
+  }
+  if (isRegularFile(path.join(CLIPBOARD_ANDROID_DIR, 'Cargo.lock'))) {
+    args.push('--locked');
+  }
+  const { stdout } = await runExec('cargo', args, { cwd: CLIPBOARD_ANDROID_DIR });
+  await mkdir(path.dirname(metadataFile), { recursive: true });
+  await writeFile(metadataFile, stdout, 'utf8');
+
+  let metadata;
+  try {
+    metadata = JSON.parse(stdout);
+  } catch (err) {
+    throw fail(`cargo metadata returned invalid JSON: ${err.message}`);
+  }
+  const workspaceMembers = new Set(metadata.workspace_members ?? []);
+  const resolvedNodes = metadata.resolve?.nodes ?? [];
+  if (resolvedNodes.length === 0) {
+    throw fail('clipboard-sync cargo metadata resolve graph is empty');
+  }
+  const byId = new Map((metadata.packages ?? []).map((pkg) => [pkg.id, pkg]));
+  const seen = new Map();
+  for (const node of resolvedNodes) {
+    if (workspaceMembers.has(node.id)) continue;
+    const pkg = byId.get(node.id);
+    if (!pkg) {
+      throw fail(`clipboard-sync cargo resolve node ${node.id} has no matching package entry`);
+    }
+    // Skip first-party in-repo path crates (clipboard-sync, clipboard-sync-relay-client),
+    // which are covered by the root LICENSE already included in projectNotices.
+    if (
+      (pkg.source === null || pkg.source === undefined) &&
+      typeof pkg.manifest_path === 'string' &&
+      isInsideRoot(pkg.manifest_path)
+    ) {
+      continue;
+    }
+    const key = `${pkg.name}@${pkg.version}`;
+    if (!seen.has(key)) seen.set(key, pkg);
+  }
+  if (seen.size === 0) {
+    throw fail('clipboard-sync cargo metadata resolved zero third-party Rust dependencies');
+  }
+
+  const sections = [];
+  const sorted = [...seen.values()].sort((a, b) =>
+    `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`)
+  );
+  for (const pkg of sorted) {
+    if (typeof pkg.manifest_path !== 'string' || pkg.manifest_path === '') {
+      throw fail(`cargo package ${pkg.name}@${pkg.version} has no manifest_path`);
+    }
+    const pkgDir = path.dirname(pkg.manifest_path);
+    const licenseFiles = [];
+    if (typeof pkg.license_file === 'string' && pkg.license_file !== '') {
+      const explicitFile = path.resolve(pkgDir, pkg.license_file);
+      if (isRegularFile(explicitFile)) {
+        licenseFiles.push(explicitFile);
+      }
+    }
+    for (const file of await findLicenseFiles(pkgDir)) {
+      if (!licenseFiles.includes(file)) licenseFiles.push(file);
+    }
+    let fallbackProvenance = null;
+    if (licenseFiles.length === 0) {
+      const fallback = ANDROID_CARGO_LICENSE_FALLBACKS.get(`${pkg.name}@${pkg.version}`);
+      if (fallback && fallback.license === (pkg.license ?? null)) {
+        for (const relFile of fallback.files) {
+          const file = path.resolve(ROOT, relFile);
+          if (!isRegularFile(file)) {
+            throw fail(`vendored license file missing for ${pkg.name}@${pkg.version}: ${relFile}`);
+          }
+          licenseFiles.push(file);
+        }
+        fallbackProvenance = fallback.provenance ?? null;
+      }
+    }
+    if (licenseFiles.length === 0) {
+      throw fail(`Rust dependency ${pkg.name}@${pkg.version} has no license file in crate archive`);
+    }
+
+    const headerLines = [`## cargo: ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`];
+    if (Array.isArray(pkg.authors) && pkg.authors.length > 0) {
+      headerLines.push(`Authors: ${pkg.authors.join(', ')}`);
+    }
+    if (typeof pkg.repository === 'string' && pkg.repository !== '') {
+      headerLines.push(`Repository: ${pkg.repository}`);
+    } else if (typeof pkg.homepage === 'string' && pkg.homepage !== '') {
+      headerLines.push(`Homepage: ${pkg.homepage}`);
+    }
+    if (fallbackProvenance) headerLines.push(fallbackProvenance);
+    sections.push(headerLines.join('\n'));
+    for (const file of licenseFiles) {
+      sections.push((await readFile(file, 'utf8')).trim());
+    }
+  }
+  return sections;
+}
+
 // One notices block per crate: the header line plus its license texts.
 function splitCargoLicenseBlocks(sections) {
   const blocks = [];
@@ -315,6 +560,10 @@ function splitCargoLicenseBlocks(sections) {
   return blocks;
 }
 
+function cargoBlockKey(block) {
+  return String(block[0] ?? '').split('\n')[0];
+}
+
 // Each chosen ABI is resolved on its own graph; identical crates are merged once
 // instead of claiming both ABIs always resolve the same dependency set.
 async function collectAndroidRustNotices(abis) {
@@ -323,21 +572,36 @@ async function collectAndroidRustNotices(abis) {
   for (const abi of abis) {
     const triple = ABI_TARGETS[abi].triple;
     graphs.push(`${abi} (${triple})`);
-    const sections = await collectCargoLicenseSections({
+    const mobileSections = await collectCargoLicenseSections({
       cargoToml: CARGO_TOML,
       targetTriple: triple,
       metadataFile: path.join(MOBILE_BUILD, `cargo-metadata-${abi}.json`),
     });
-    for (const block of splitCargoLicenseBlocks(sections)) {
-      if (!blocks.has(block[0])) blocks.set(block[0], block);
+    for (const block of splitCargoLicenseBlocks(mobileSections)) {
+      const key = cargoBlockKey(block);
+      if (!blocks.has(key)) blocks.set(key, block);
+    }
+    const clipboardSections = await collectClipboardCargoLicenseSections({
+      targetTriple: triple,
+      metadataFile: path.join(MOBILE_BUILD, `clipboard-sync-cargo-metadata-${abi}.json`),
+    });
+    for (const block of splitCargoLicenseBlocks(clipboardSections)) {
+      const key = cargoBlockKey(block);
+      if (!blocks.has(key)) blocks.set(key, block);
     }
   }
-  return { graphs, blocks: [...blocks.values()] };
+  const sortedBlocks = [...blocks.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, block]) => block);
+  return { graphs, blocks: sortedBlocks };
 }
 
 async function writeNotices(abis) {
   const { graphs, blocks } = await collectAndroidRustNotices(abis);
-  const header = ['# Third-Party Notices (e-Launcher Android Tauri UI)', `ABI graphs: ${graphs.join(', ')}`].join('\n');
+  const header = [
+    '# Third-Party Notices (e-Launcher Android Tauri UI & Clipboard Sync)',
+    `ABI graphs: ${graphs.join(', ')}`,
+  ].join('\n');
   // web/src/gbot-ui 是源码级 MIT 适配（lenML/gbot-ui）：不在 npm/Cargo 图上，
   // 沿用 desktop 读 licenses 文件的方式直接把同一份文本附进 Android 产物。
   const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
@@ -358,6 +622,7 @@ async function prepareMobile(abis, ndk) {
   const sdkDir = await writeGradleInclude();
   const webDir = await buildWeb();
   const libraries = await buildRustLibraries(abis, ndk);
+  const clipboardSync = await buildClipboardSyncLibraries(abis, ndk);
   const notices = await writeNotices(abis);
   return {
     done: true,
@@ -365,6 +630,7 @@ async function prepareMobile(abis, ndk) {
     gradleInclude: toForward(GRADLE_INCLUDE),
     webDir: toForward(webDir),
     abis: libraries,
+    clipboardSyncAbis: clipboardSync,
     kotlinDir: toForward(KOTLIN_OUT),
     notices: { outfile: toForward(notices.outfile), sha256: notices.sha256 },
   };

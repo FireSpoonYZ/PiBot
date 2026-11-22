@@ -2,6 +2,7 @@ package com.example.launcherprobe
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -273,6 +274,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "repairCenterBinding" -> repairCenterBinding(invoke)
             "onboardingStatus" -> onboardingStatus(invoke)
             "onboardingAction" -> onboardingAction(invoke, params)
+            "clipboardSync" -> clipboardSync(invoke, params)
             else -> dispatchService(invoke, method, params)
         }
     }
@@ -346,6 +348,55 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
                 replyOk(invoke, result)
             }
         }
+    }
+
+    /**
+     * 剪贴板同步本地入口：sendNow 仅在真实前台且聚焦的 Activity 中原生读取并过滤系统剪贴板，
+     * 经私有同 UID 桥 clipboardSyncSend 送达默认进程（绝不向 WebView 回传剪贴板明文）；
+     * 其余固定动作经 clipboardSync 转发给默认进程控制器。
+     */
+    private fun clipboardSync(invoke: Invoke, params: JSONObject) {
+        val failure = streamFailure
+        if (failure != null) {
+            replyStreamClosed(invoke, failure)
+            return
+        }
+        if (!uiReady()) {
+            replyInvalid(invoke, "NOT_READY", "界面未就绪")
+            return
+        }
+        val action = validateClipboardSyncParams(params)
+        if (action == null) {
+            replyInvalid(invoke, "INVALID_ARGUMENT", "剪贴板同步参数无效")
+            return
+        }
+        if (action == "sendNow") {
+            if (!focusedForegroundUi()) {
+                replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台聚焦窗口发送剪贴板")
+                return
+            }
+            val clipboard = hostActivity.getSystemService(ClipboardManager::class.java)
+            val read = ClipboardSyncController.readSendableClip(clipboard)
+            if (!read.ok) {
+                replyInvalid(
+                    invoke,
+                    read.errorCode ?: "CLIPBOARD_UNAVAILABLE",
+                    read.errorMessage ?: "无法读取系统剪贴板"
+                )
+                return
+            }
+            forward(invoke, "clipboardSyncSend", JSONObject().put("text", read.text))
+            return
+        }
+        if (action == "authorizeBackground" || action == "revokeBackground") {
+            if (!foregroundUi()) {
+                replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台修改后台剪贴板授权")
+                return
+            }
+            forward(invoke, "clipboardSync", params)
+            return
+        }
+        forward(invoke, "clipboardSync", params)
     }
 
     // ---------- UI 本地动作 ----------
@@ -1121,6 +1172,11 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             && !activity.isFinishing && !activity.isDestroyed
     }
 
+    private fun focusedForegroundUi(): Boolean {
+        val activity = hostActivity
+        return foregroundUi() && activity.hasWindowFocus()
+    }
+
     private fun objectOf(vararg pairs: Pair<String, Any?>): JSObject {
         val result = JSObject()
         for ((key, value) in pairs) result.put(key, value)
@@ -1211,6 +1267,27 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             // 客户端自更新：固定方法名直达默认进程 ClientUpdater。
             "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel"
         )
+
+        /**
+         * 校验 clipboardSync 本地动作参数：拒绝多余键与非白名单动作，且不接受 WebView 传入剪贴板明文。
+         */
+        @JvmStatic
+        fun validateClipboardSyncParams(params: JSONObject?): String? {
+            if (params == null) return null
+            val action = params.opt("action") as? String ?: return null
+            return when (action) {
+                "status", "newGroup", "showCode", "sendNow",
+                "authorizeBackground", "revokeBackground" ->
+                    if (params.length() == 1) action else null
+                "setEnabled" ->
+                    if (params.length() == 2 && params.opt("enabled") is Boolean) action else null
+                "joinGroup" -> {
+                    val code = params.opt("code") as? String
+                    if (params.length() == 2 && !code.isNullOrBlank()) action else null
+                }
+                else -> null
+            }
+        }
 
         /**
          * 将前端触感类型校验并映射到 Android HapticFeedbackConstants；非法或未知值返回 null。
