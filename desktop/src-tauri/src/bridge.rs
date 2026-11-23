@@ -25,7 +25,6 @@ use tauri::{AppHandle, Manager, ipc::Channel, utils::platform};
 use tokio::sync::oneshot;
 
 const MAX_LINE_BYTES: usize = 40 * 1024 * 1024;
-const MAX_PENDING_CALLS: usize = 8;
 const MAX_OBSERVERS: usize = 8;
 const WRITER_QUEUE_CAP: usize = 16;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -717,14 +716,6 @@ impl DesktopBridge {
             .clone()
             .unwrap_or_else(|| BridgeError::new("DISCONNECTED", "desktop client unavailable", "not-sent")),
         );
-      }
-      let request_limit = MAX_PENDING_CALLS + usize::from(op == "browser_window_close");
-      if guard.pending.len() >= request_limit {
-        return Err(BridgeError::new(
-          "RPC_BUSY",
-          "maximum in-flight broker requests reached",
-          "not-sent",
-        ));
       }
       let Some(writer_tx) = guard.writer_tx.clone() else {
         return Err(BridgeError::new(

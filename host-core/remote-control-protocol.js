@@ -55,9 +55,6 @@ const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 export const MAX_CONTROL_JSON_BYTES = 33554432; // 32 MiB, params/result JSON UTF-8 bytes
 export const CONTROL_TIMEOUT_MS = 20000;
 export const CONTROL_CLIENT_TIMEOUT_MS = 25000;
-export const CONTROL_MAX_CLIENT_CALLS = 8;
-export const CONTROL_MAX_HOST_CALLS = 8;
-export const CONTROL_MAX_PENDING = 128;
 
 // Hindsight memory calls are the only slow RPCs: the backend request cap is
 // 120s (HINDSIGHT_MAX_TIMEOUT_MS, reflect), so each hop gets a fixed budget that

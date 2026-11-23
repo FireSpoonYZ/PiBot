@@ -3,7 +3,7 @@
 // listener with a single /v1/link WebSocket upgrade path. Authenticated sockets
 // carry a role (host default, client explicit); hosts are the sole entry in
 // deviceMap and route legacy delivery frames, while clients of the same
-// registered device place bounded control calls that are correlated by routeId.
+// registered device place control calls that are correlated by routeId.
 // Module 12 routes managed-scope sync frames between hosts that negotiated
 // scopeProtocol:1; no scope/history state or pending mailbox is kept here.
 // The relay never persists messages and keeps no business state beyond peers.
@@ -28,12 +28,7 @@ import {
   encodeRelayFrame
 } from './relay-protocol.js';
 import { assertId, digest, messageError } from './message-protocol.js';
-import {
-  openControlRoutes,
-  CONTROL_MAX_CLIENT_CALLS,
-  CONTROL_MAX_HOST_CALLS,
-  CONTROL_MAX_PENDING
-} from './relay-control.js';
+import { openControlRoutes } from './relay-control.js';
 import {
   openLiveRoutes,
   LIVE_MAX_CLIENT_SUBSCRIPTIONS,
@@ -226,7 +221,7 @@ export async function openRelayServer(options = {}) {
   });
   const allConns = new Set();  // every accepted WS, authenticated or not
   const upgradeSockets = new Set();
-  const controlRoutes = openControlRoutes(); // bounded control-call correlation
+  const controlRoutes = openControlRoutes(); // control-call correlation
   const liveRoutes = openLiveRoutes(); // bounded live-observation correlation
   let closed = false;
 
@@ -520,9 +515,9 @@ export async function openRelayServer(options = {}) {
   }
 
   // Shared placement path for wire control-call frames and the
-  // in-process internal client: identical method-version gate, pending/host
-  // call limits, target identity check and per-method deadline. Failures are
-  // delivered back through the client conn's control-result channel.
+  // in-process internal client: identical method-version gate, target identity
+  // check and per-method deadline. Failures are delivered back through the
+  // client conn's control-result channel.
   function placeControlCall(client, callId, targetDeviceId, method, params) {
     let methodVersion;
     try {
@@ -538,21 +533,12 @@ export async function openRelayServer(options = {}) {
     if (clientCap < methodVersion) {
       return sendControlFailure(client, callId, targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
     }
-    if (
-      controlRoutes.size() >= CONTROL_MAX_PENDING ||
-      controlRoutes.countClient(client) >= CONTROL_MAX_CLIENT_CALLS
-    ) {
-      return sendControlFailure(client, callId, targetDeviceId, 'RPC_BUSY', 'not-sent');
-    }
     const peer = deviceMap.get(targetDeviceId);
     if (!peer || !peerUsable(peer)) {
       return sendControlFailure(client, callId, targetDeviceId, 'OFFLINE', 'not-sent');
     }
     if (peer.controlProtocol < methodVersion) {
       return sendControlFailure(client, callId, targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
-    }
-    if (controlRoutes.countHost(peer) >= CONTROL_MAX_HOST_CALLS) {
-      return sendControlFailure(client, callId, targetDeviceId, 'RPC_BUSY', 'not-sent');
     }
     const record = controlRoutes.add(client, callId, peer, targetDeviceId, controlMethodTimeoutMs(method));
     if (!writeFrame(peer.ws, {
@@ -628,8 +614,8 @@ export async function openRelayServer(options = {}) {
   // ---- In-process internal client (center -> host control calls) ----
   // The center calls host control methods through the same routeControlCall
   // placement path a remote client conn would use: identical method whitelist
-  // (normalizeControlCall), target identity/peerUsable check, pending/host
-  // call limits and per-method deadlines. The "client" is a conn-shaped object
+  // (normalizeControlCall), target identity/peerUsable check and per-method
+  // deadlines. The "client" is a conn-shaped object
   // whose ws is a synchronous in-memory sink: outbound control-result frames
   // settle the per-call promise instead of touching a socket. Internal conns
   // are never added to allConns, so heartbeat/registry scans and socket close
@@ -1426,7 +1412,7 @@ export async function openRelayServer(options = {}) {
       }
       return { onlineDeviceIds, pendingConnections };
     },
-    // In-process control call: same whitelist/identity/limits/timeouts as a
+    // In-process control call: same whitelist/identity/timeouts as a
     // remote client conn. Rejects with an Error carrying {code, outcome}.
     call: internalCall,
     close

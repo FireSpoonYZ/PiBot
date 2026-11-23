@@ -27,7 +27,7 @@ export function openHostBridge({ dataRoot, store, relay }) {
         return registry.list().filter(d => d.deviceId !== deviceId && d.revokedAt === null).map(d => ({ deviceId: d.deviceId, name: d.displayName || d.deviceId, online: online.has(d.deviceId) }));
       },
       // In-process relay client call: reuses the relay's control route table,
-      // method whitelist, target identity, call limits and timeouts — no
+      // method whitelist, target identity and timeouts — no
       // second WebSocket to the public link URL and no relaxed permissions.
       async call(target, method, params) {
         if (!relay.getStatus().onlineDeviceIds.includes(target)) throw Object.assign(new Error('Device offline'), { code: 'DEVICE_OFFLINE' });

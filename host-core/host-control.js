@@ -8,7 +8,6 @@
 // 发到新连接。
 import {
   CONTROL_ERROR_CODES,
-  CONTROL_MAX_HOST_CALLS,
   CONTROL_OUTCOMES,
   MAX_CONTROL_JSON_BYTES,
 } from './remote-control-protocol.js';
@@ -87,12 +86,8 @@ export function createHostControlReceiver({ deviceId, execute, send }) {
       sendFailure(frame.routeId, 'CONTROL_UNAVAILABLE', 'not-sent');
       return;
     }
-    // 活动期重复 routeId 绝不双启动；无队列，超出上限立即拒绝。
+    // 活动期重复 routeId 绝不双启动。
     if (active.has(frame.routeId)) return;
-    if (active.size >= CONTROL_MAX_HOST_CALLS) {
-      sendFailure(frame.routeId, 'RPC_BUSY', 'not-sent');
-      return;
-    }
     const rec = { routeId: frame.routeId, gen: generation, done: false, cancelled: false };
     rec.controller = new AbortController();
     active.set(rec.routeId, rec);

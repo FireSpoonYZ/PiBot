@@ -20,7 +20,6 @@ import {
   CONTROL_ERROR_CODES,
   CONTROL_OUTCOMES,
   CONTROL_CLIENT_TIMEOUT_MS,
-  CONTROL_MAX_CLIENT_CALLS,
   controlBrokerTimeoutMs,
   normalizeControlCall,
 } from './remote-control-protocol.js';
@@ -35,7 +34,6 @@ import {
   validateLocalControlUrl,
 } from './desktop-ui-store.js';
 
-export const DESKTOP_MAX_IN_FLIGHT_REQUESTS = CONTROL_MAX_CLIENT_CALLS; // 8
 export const DESKTOP_MAX_OBSERVATIONS = LIVE_MAX_CLIENT_SUBSCRIPTIONS; // 8
 export const DESKTOP_CALL_TIMEOUT_MS = CONTROL_CLIENT_TIMEOUT_MS; // 25000 for ordinary calls
 export const INTENT_METHODS = new Set([
@@ -1052,7 +1050,7 @@ export function openDesktopClient(options) {
   let pendingClient = null;
   let pendingSwitchChain = Promise.resolve();
 
-  // Bounded in-flight requests and observations
+  // In-flight requests and bounded observations
   const inflightRequests = new Map(); // internalId -> { controller, promise }
   let nextInternalRequestId = 1;
   const observations = new Map(); // observationId -> { id, controller, generation, promise, settled }
@@ -2267,18 +2265,15 @@ export function openDesktopClient(options) {
         !localBrowser && op !== 'browser_local_route' && op !== 'browser_egress_close') requireCenter();
     if (op === 'settings_set') throw brokerError('NOT_CONNECTED', 'not-sent', 'settings are managed by the center');
     // unobserve only aborts a local subscription synchronously (no network, no wait): it must
-    // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
-    // aborts every client observation before its first await), or a cancelled client
-    // observation would leak its broker slot. It cannot accumulate: opUnobserve returns at once.
+    // never be blocked by a connect/disconnect switch (a switch already aborts every client
+    // observation before its first await), or a cancelled client observation would leak its
+    // broker slot. It cannot accumulate: opUnobserve returns at once.
     const localCancel = op === 'unobserve';
     if (
       !localCancel && switching && !CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op) &&
       op !== 'connect'
     ) {
       throw brokerError('RPC_BUSY', 'not-sent', 'desktop client is switching connections');
-    }
-    if (!localCancel && inflightRequests.size >= DESKTOP_MAX_IN_FLIGHT_REQUESTS) {
-      throw brokerError('RPC_BUSY', 'not-sent', 'desktop client request capacity reached');
     }
 
     const handler = OP_HANDLERS.get(op);

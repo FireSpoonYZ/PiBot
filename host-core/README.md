@@ -125,10 +125,10 @@ node host-core/cli.js list --data-root '/path/to/data-root'
 - `relay-server.js` / `relay-server-cli.js`：认证中继服务（WebSocketServer noServer + TLS/loopback 规则）与其 CLI。
 - `message-delivery.js`：内部投递泵（不导出），在线扫描 outbox、退避与诊断。
 - `device-link.js` / `device-link-cli.js`：Host 链路（ws 客户端、Hello/ready、所有权锁、重连/blocked）与其 CLI；模块 9 起 `device-link-cli` 增加可选配对 `--control-url` 与 `--control-token-env`，配置控制适配器后 hello 带 `role:'host',controlProtocol:1`。模块 12 起 hello 恒带 `scopeProtocol:1`，ready 必须回显 `scopeProtocol:1` 否则以 `UNSUPPORTED_SCOPE_PROTOCOL` 永久阻塞；内部实例化 `scope-delivery.js`/`replica-sync.js` 两泵，`getStatus()` 新增 `scopeDelivery`/`replicaSync` 两节，公共 `wake()` 唤醒三泵。
-- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`CONTROL_MAX_CLIENT_CALLS`/`CONTROL_MAX_HOST_CALLS`/`CONTROL_MAX_PENDING`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）；模块 14 起 `CONTROL_METHODS` 为旧十方法 + v2 方法表（现共 40：M14 的固定 25 个不变，另加扩展/SOUL 5 个；`CONTROL_V1_METHODS`/`controlMethodVersion` 见同文件）。Hindsight 超时链常量与辅助（`HINDSIGHT_MAX_TIMEOUT_MS` 由 `hindsight-client.js` 导出；本文件为 `CONTROL_MEMORY_DEADLINE_MS`/`CONTROL_MEMORY_CLIENT_DEADLINE_MS`/`CONTROL_MEMORY_BROKER_DEADLINE_MS`/`MEMORY_HTTP_INACTIVITY_MS`、`isMemoryControlMethod`/`controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs`）只对八个 memory 方法放宽，其余 RPC 仍用原 `CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`。
-- `relay-server.js`：模块 8/9 认证中继服务（WebSocketServer noServer + TLS/loopback 规则、control-* 有界路由与清理）。模块 12 增加 scope 业务帧路由：仅已协商 `scopeProtocol:1` 的 host 连接可发送；来源注入 `fromDeviceId`；离线/吊销回 `scope-unavailable`/`replica-unavailable` OFFLINE，目标无能力回 UNSUPPORTED，高水位/编码失败回 BACKPRESSURE；ack/reject/result 为临时帧，目标不可用时静默丢弃；不保存任何 scope/成员/历史状态。
+- `remote-control-protocol.js`：模块 9 协议常量与方向性帧校验（`CONTROL_METHODS`/`CONTROL_ERROR_CODES`/`MAX_CONTROL_JSON_BYTES`/`CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`/`normalizeControlCall`/`readControlClientFrame`/`readControlServerFrame`）；模块 14 起 `CONTROL_METHODS` 为旧十方法 + v2 方法表（现共 40：M14 的固定 25 个不变，另加扩展/SOUL 5 个；`CONTROL_V1_METHODS`/`controlMethodVersion` 见同文件）。Hindsight 超时链常量与辅助（`HINDSIGHT_MAX_TIMEOUT_MS` 由 `hindsight-client.js` 导出；本文件为 `CONTROL_MEMORY_DEADLINE_MS`/`CONTROL_MEMORY_CLIENT_DEADLINE_MS`/`CONTROL_MEMORY_BROKER_DEADLINE_MS`/`MEMORY_HTTP_INACTIVITY_MS`、`isMemoryControlMethod`/`controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs`）只对八个 memory 方法放宽，其余 RPC 仍用原 `CONTROL_TIMEOUT_MS`/`CONTROL_CLIENT_TIMEOUT_MS`。
+- `relay-server.js`：模块 8/9 认证中继服务（WebSocketServer noServer + TLS/loopback 规则、control-* 路由追踪与清理）。模块 12 增加 scope 业务帧路由：仅已协商 `scopeProtocol:1` 的 host 连接可发送；来源注入 `fromDeviceId`；离线/吊销回 `scope-unavailable`/`replica-unavailable` OFFLINE，目标无能力回 UNSUPPORTED，高水位/编码失败回 BACKPRESSURE；ack/reject/result 为临时帧，目标不可用时静默丢弃；不保存任何 scope/成员/历史状态。
 - `local-control-adapter.js`：`createLocalControlAdapter({url,token})`，目标本机回环 Control API 适配（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径 `/`）。
-- `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（最多 8 个活动调用、无队列）。
+- `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（无队列，按 routeId 追踪活动调用）。
 - `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
 - `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起按 `CONTROL_METHODS` 动态列出现行方法表（现共 37 个），另有保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
 
@@ -726,7 +726,7 @@ try {
 - **令牌区分**：relay 凭证（`--token-env`）用于登录中继；`--control-url`/`--control-token-env` 是本机回环 Control API 的本地令牌（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径必须 `/`，不带 query/fragment）。
 - **信任模型**：传输仍依赖受信中继 + TLS 通道，不是端到端加密/签名；CA 可用但不能关闭校验。
 - **结果语义**：`not-sent` 未交给目标本地 Control API；`unconfirmed` 操作可能已被接受（超时/断线/取消后），不可认定无副作用；`responded` 目标本地 API 已返回（未必代表失败零副作用）。应用层请求幂等依赖显式 requestId 重试核对，不自动重试。
-- **上限**：请求参数与结果 JSON 各 ≤32MiB（UTF-8），整 relay 帧 ≤40MiB；客户端 8 个在途调用、25s 超时，Host 8 个活动调用、20s TTL，全局 128 条 pending。
+- **上限**：请求参数与结果 JSON 各 ≤32MiB（UTF-8），整 relay 帧 ≤40MiB；普通控制 RPC 不设客户端/Host/全局条数并发拒绝（仍受单帧大小、高水位背压、鉴权与超时约束），客户端 25s 超时，中继/Host 20s TTL（慢方法沿用更长超时链）。
 - **边界**：仅 Node 客户端；SSE 直播、设备目录/枚举 UI、任意 URL/路径/头/端口 RPC、离线信箱或自动变更重试不在本模块。
 
 ### 模块 9 验收
@@ -1469,7 +1469,7 @@ Node Mobile 24.18.0 内嵌 icu_small（ICU 78.3）缺分词数据，Intl.Segment
 
 - `android-runtime.js` 新增 `mode === 'client'`：只 `openDesktopClient({dataRoot})`（ui store + pending 账本 + 固定传输），ready id 用 broker 的 `clientId`；**从不**打开 Host/Runtime、不读模型凭据、不发 native 工具调用。与 Host 共用 `BotHostProcess`（Node Mobile）单例生命周期，但由 `BotHostClient` 以独立 `files/bot-client` 懒启动，与 `files/bot-host` 隔离。
 - 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 Host 方法表（M20-01 交付时 35 个，含后续 SOUL 增量现为 37 个）。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
-- broker 侧 `unobserve` 是纯本地取消：不排到 8 个普通 RPC 或 connect/disconnect 切换后面，否则取消的观察会泄漏槽位；它同步返回、不会堆积。普通请求/观察的 8/8/25 s 上限与行为不变。
+- broker 侧 `unobserve` 是纯本地取消：不受 connect/disconnect 切换阻塞，否则取消的观察会泄漏槽位；它同步返回、不会堆积。broker 普通请求不再设 8 个并发上限，观察 8 路与普通调用 25 s 超时保持不变。
 - 生命周期：默认进程内单例管理器（冷态只构造）；一个 `clientRoot` 同时只允许一个 UI 会话持有，其余按 BUSY 拒绝；UI 关闭/EOF 只释放本会话观察与该 client child，不 stop/abort 远端 Agent，不自动重连、不重放变更。批量取消用 owned 8 槽与串行幂等清理。
 - 凭据：连接 token 与 relay CA 只在会话内存，不进 `desktop-ui.sqlite`/pending/localStorage，也不写日志。
 
@@ -1538,7 +1538,7 @@ Node Mobile 24.18.0 内嵌 icu_small（ICU 78.3）缺分词数据，Intl.Segment
 
 ### 超时链（八个 memory 方法与手动 compact）
 
-Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 135s ≤ 远端/本机客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s，每层严格包含内层。手动压缩 `/compact` 复用同一组期限（摘要请求可能超过默认 20s/25s），其 HTTP 路由也使用 130s 空闲窗口。其他 RPC 与并发/准入/请求体/头/写超时不变（仍 20s/25s，在途 8/8、128 槽位）。调用方统一经 `controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs` 取值，不使用过期常量。
+Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 135s ≤ 远端/本机客户端 140s ≤ 桌面 broker 145s ≤ 原生外层 150s，每层严格包含内层。手动压缩 `/compact` 复用同一组期限（摘要请求可能超过默认 20s/25s），其 HTTP 路由也使用 130s 空闲窗口。其他 RPC 的默认超时与请求体/头/写超时不变（仍 20s/25s；Node/中继/Host 普通控制 RPC 不再设 8/8/128 并发条数拒绝，实时观察与 Android bridge 既有上限不变）。调用方统一经 `controlMethodTimeoutMs`/`controlClientTimeoutMs`/`controlBrokerTimeoutMs` 取值，不使用过期常量。
 
 ## 每轮集中插件同步（turn admission，契约说明）
 
