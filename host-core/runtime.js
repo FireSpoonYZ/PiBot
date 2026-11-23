@@ -10,6 +10,7 @@ import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai/models';
+import { uuidv7 } from '@earendil-works/pi-ai/utils/uuid';
 import { InlineCodemodeSandbox } from '@earendil-works/pi-codemode/portable';
 import { createCodingTools } from '@earendil-works/pi-durable/tools';
 import { createToolSearchExtension } from '@earendil-works/pi-durable/tool-search';
@@ -3020,8 +3021,13 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
             }
           }
+          const providerState = await tx.doc(durable.ProviderDoc, conversation.id);
           await waits.cancelConversationInTransaction(botId, conversation.id, tx);
           const resetEntry = await tx.appendEntry(durable.ResetEntry, conversation.id, { head: 'self' });
+          // A reset starts a new provider context even if the next input is identical.
+          // Rotate regardless of the selected provider: a previously used ACP binding
+          // must also stay retired when the Bot later switches back to Antigravity.
+          providerState.sessionId = uuidv7();
           if (liveDoc.runFailure !== undefined) {
             delete liveDoc.runFailure;
           }

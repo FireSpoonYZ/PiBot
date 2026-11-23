@@ -114,6 +114,33 @@ const GENERATION_STREAM_PATCHED = `    let emittedOutput = false;
         return { message, emittedOutput };
     }`;
 
+const COMPACTION_OPTIONS_ORIGINAL = `            const options = {
+                ...forwarded,
+                cacheRetention: "none",
+                maxTokens,
+                signal: runtime.signal,
+                telemetry: context.telemetry,
+                sessionId: await ensureProviderSessionId(runtime, context),
+                ...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
+            };
+            const message = await runtime.models.completeSimple(model, { messages }, options);`;
+
+const COMPACTION_OPTIONS_PATCHED = `            const providerSessionId = await ensureProviderSessionId(runtime, context);
+            const options = {
+                ...forwarded,
+                cacheRetention: "none",
+                maxTokens,
+                signal: runtime.signal,
+                telemetry: context.telemetry,
+                // Summarization has its own instructions and history. Keep it out of
+                // Antigravity's chat session, with a stable identity for task retries.
+                sessionId: ref.provider === "antigravity-acp"
+                    ? JSON.stringify(["antigravity-compaction", providerSessionId, runtime.taskId])
+                    : providerSessionId,
+                ...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
+            };
+            const message = await runtime.models.completeSimple(model, { messages }, options);`;
+
 const TYPES_ORIGINAL = `export interface GenerationHooks {
     /** Before every request attempt, including recovery; the result is used for that request only. */
     beforeRequest(request: {`;
@@ -243,7 +270,11 @@ export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules'))
     path.join(pkgDir, 'dist', 'storage', 'sqlite', 'storage.js'),
     [{ original: STORAGE_ORIGINAL, patched: STORAGE_PATCHED }]
   );
-  return { generationChanged, typesChanged, storageChanged };
+  const compactionChanged = applyExactPatches(
+    path.join(pkgDir, 'dist', 'harness', 'compaction.js'),
+    [{ original: COMPACTION_OPTIONS_ORIGINAL, patched: COMPACTION_OPTIONS_PATCHED }]
+  );
+  return { generationChanged, typesChanged, storageChanged, compactionChanged };
 }
 
 if (import.meta.main) {

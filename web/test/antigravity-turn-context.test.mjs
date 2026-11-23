@@ -172,6 +172,7 @@ function createControlledHandle(id) {
 /** Controlled AcpDriver + SharedMcpBridge harness via node:test prototype mocks (never launches agy). */
 function createControlledAcpDriverHarness(t) {
   const states = new WeakMap();
+  const driverByListTools = new WeakMap();
   const runs = [];
   let pendingDriverForMcp = null;
   let convSeq = 1;
@@ -194,10 +195,14 @@ function createControlledAcpDriverHarness(t) {
   });
   t.mock.method(SharedMcpBridge.prototype, 'registerSession', function (handler) {
     const reg = origRegister.call(this, handler);
-    if (pendingDriverForMcp) {
-      stateFor(pendingDriverForMcp).mcp = { bridge: this, token: reg.token, handler };
-      pendingDriverForMcp = null;
+    const owner = pendingDriverForMcp ?? driverByListTools.get(handler.listTools);
+    if (owner) {
+      driverByListTools.set(handler.listTools, owner);
+      // Replace the registration: prior run contexts retain their old token
+      // and handler, so stale-call tests exercise the real epoch checks.
+      stateFor(owner).mcp = { bridge: this, token: reg.token, handler };
     }
+    pendingDriverForMcp = null;
     return reg;
   });
   t.mock.getter(AcpDriver.prototype, 'state', function () { return stateFor(this).state; });
@@ -535,7 +540,9 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     }
 
     const run2 = driverHarness.runs[1];
-    assert.equal(run2.request.conversationId, 'conv-e2e');
+    assert.equal(run2.request.conversationId, null, 'SOUL and tool changes must rebuild the native context');
+    assert.ok(run2.request.contextBlock?.text.includes('第一轮请记住暗号 ALPHA-7'));
+    assert.ok(run2.request.contextBlock?.text.includes('第一轮已收到 ALPHA-7'));
     assert.ok(run2.request.prompt.indexOf('BC nudge: keep tool output concise.') < run2.request.prompt.indexOf('第二轮请看图并使用新工具'));
     const projectedRecall = captured[1].messages.find((m) => m.hindsightRecall === true);
     assert.ok(projectedRecall && messageText(projectedRecall).includes(recallText));
@@ -562,7 +569,11 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     assert.equal(messageText(captured[3].messages[tc3.inputIndex]), '');
     assert.equal(hasImage(captured[3].messages[tc3.inputIndex]), true);
     assert.ok(captured[3].messages.slice(tc3.inputIndex + 1).some((m) => m.role === 'system' && (m.toolsRemoved ?? []).some((x) => x.name === 'ping_probe_tool')));
-    assert.deepEqual(driverHarness.runs[2].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
+    assert.equal(driverHarness.runs[2].request.conversationId, null, 'removing a tool must rebuild the native context');
+    assert.deepEqual(driverHarness.runs[2].request.images, [
+      { data: PNG_1X1, mimeType: 'image/png' }, // Retained Turn 2 image.
+      { data: PNG_1X1, mimeType: 'image/png' }, // Current Turn 3 image.
+    ]);
     assert.equal(driverHarness.runs[2].request.turnRecall, undefined);
     assert.ok(!driverHarness.runs[2].mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
   } catch (err) {
@@ -882,7 +893,7 @@ test('New & Legacy Host matrix: timestamp:0 plain-text vs recall/BC, text+image 
       messages: [BASE_SYSTEM, { role: 'user', content: [{ type: 'image', data: PNG_1X1, mimeType: 'image/png' }], timestamp: 0 }, { role: 'system', content: '', toolsRemoved: [{ name: 'inspect_tool' }], timestamp: 20 }, { role: 'user', content: 'BC nudge.', timestamp: 0 }],
       turnContext: { inputIndex: 1, auxiliaryIndices: [3] },
     }));
-    assert.equal(driverHarness.runs[1].request.conversationId, run1.assignedConversationId);
+    assert.equal(driverHarness.runs[1].request.conversationId, null, 'removed history must not reuse the old native binding');
     assert.deepEqual(driverHarness.runs[1].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
     assert.ok(!driverHarness.runs[1].mcpTools.some((x) => x.name === 'inspect_tool'));
 
@@ -940,9 +951,12 @@ test('New & Legacy Host matrix: timestamp:0 plain-text vs recall/BC, text+image 
 
     const legBound = await drainEventStream(antigravity.stream({ deviceId: 'dev-leg', sessionId: 'sess-leg', modelId: MODEL_ID, messages: toolThenSys }));
     assert.equal(legBound.terminal?.type, 'done');
-    assert.equal(driverHarness.runs[5].request.conversationId, runLeg1.assignedConversationId);
+    assert.equal(driverHarness.runs[5].request.conversationId, null, 'rewritten legacy history requires a new native context');
     assert.ok(driverHarness.runs[5].request.prompt.includes(RESUME_PROMPT));
     assert.ok(!driverHarness.runs[5].request.prompt.includes('绝不回退重发的旧输入'));
+    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('绝不回退重发的旧输入'));
+    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('"toolCallId":"tc_leg"'));
+    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('"text":"ok"'));
   } catch (err) {
     hadError = true;
     throw err;
@@ -978,8 +992,12 @@ test('Preserves parked tool continuation without resending prompt, bound assista
       deviceId: 'dev-a',
       sessionId: 'shared',
       modelId: MODEL_ID,
-      messages: [BASE_SYSTEM, { role: 'user', content: 'TRIGGER_PARK: read README.md', timestamp: 10 }],
-      turnContext: { inputIndex: 1, auxiliaryIndices: [] },
+      messages: [
+        BASE_SYSTEM,
+        { role: 'user', content: 'TRIGGER_PARK: read README.md', timestamp: 10 },
+        { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 },
+      ],
+      turnContext: { inputIndex: 1, auxiliaryIndices: [2] },
     }));
     assert.equal(call1.terminal?.reason, 'toolUse');
 
@@ -992,7 +1010,7 @@ test('Preserves parked tool continuation without resending prompt, bound assista
         { role: 'user', content: 'TRIGGER_PARK: read README.md', timestamp: 10 },
         asstToolCall('tc_1', 'read_file', { path: 'README.md' }, 11),
         toolResult('tc_1', 'read_file', [{ type: 'text', text: 'readme-ok' }, { type: 'image', data: PNG_1X1, mimeType: 'image/png' }], 12),
-        { role: 'system', content: '', sections: { delta: 'post-tool' }, timestamp: 13 },
+        { role: 'system', content: '', timestamp: 13 },
         { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 },
       ],
       turnContext: { inputIndex: 3, auxiliaryIndices: [5] },
@@ -1011,8 +1029,9 @@ test('Preserves parked tool continuation without resending prompt, bound assista
       turnContext: { inputIndex: 2, auxiliaryIndices: [] },
     }));
     assert.equal(boundResume.terminal?.type, 'done');
-    assert.equal(driverHarness.runs[1].request.conversationId, driverHarness.runs[0].assignedConversationId);
+    assert.equal(driverHarness.runs[1].request.conversationId, null, 'rewritten resume history must rebuild the native context');
     assert.ok(driverHarness.runs[1].request.prompt.includes(RESUME_PROMPT) && !driverHarness.runs[1].request.prompt.includes('不应重发的旧输入'));
+    assert.ok(driverHarness.runs[1].request.contextBlock?.text.includes('不应重发的旧输入'));
 
     await drainEventStream(antigravity.stream({ deviceId: 'dev-b', sessionId: 'shared', modelId: MODEL_ID, messages: [BASE_SYSTEM, { role: 'user', content: 'from dev-b', timestamp: 20 }], turnContext: { inputIndex: 1, auxiliaryIndices: [] } }));
     await drainEventStream(antigravity.stream({ deviceId: 'dev-a', sessionId: 'other', modelId: MODEL_ID, messages: [BASE_SYSTEM, { role: 'user', content: 'from other', timestamp: 21 }], turnContext: { inputIndex: 1, auxiliaryIndices: [] } }));
@@ -1052,7 +1071,8 @@ test('Migrates a pre-hook native binding once, restoring ordinary history withou
     const firstRecall = renderHindsightRecall([{
       bankId: 'legacy-bank', target: { kind: 'primary' }, result: { results: [{ id: 'r1', text: 'Recall from an older Host' }] },
     }]);
-    const first = await send([...history, { role: 'user', content: 'First message after upgrading', timestamp: 12 }, firstRecall], 4, [2, 5]);
+    const firstInput = { role: 'user', content: 'First message after upgrading', timestamp: 12 };
+    const first = await send([...history, firstInput, firstRecall], 4, [2, 5]);
     assert.equal(first.terminal?.reason, 'stop');
     const migrated = driver.runs[0];
     assert.equal(migrated.request.conversationId, null);
@@ -1068,7 +1088,7 @@ test('Migrates a pre-hook native binding once, restoring ordinary history withou
     await antigravity.close();
     antigravity = openIsolatedAntigravity(rootDir);
     const genuineLookalike = { ...firstRecall, content: firstRecall.content.replace('Recall from an older Host', 'Real user text') };
-    const afterRestart = await send([...history, genuineLookalike], 4, [2]);
+    const afterRestart = await send([...history, firstInput, first.terminal.message, genuineLookalike], 6, [2]);
     assert.equal(afterRestart.terminal?.reason, 'stop');
     const resumed = driver.runs[1];
     assert.equal(resumed.request.conversationId, migrated.assignedConversationId);
