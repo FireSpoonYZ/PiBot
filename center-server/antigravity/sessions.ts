@@ -29,8 +29,8 @@ export interface AgySession {
 type StoreMap = Record<string, AgySession>;
 const HASH_RE = /^[a-f0-9]{64}$/;
 
-async function syncFile(filePath: string): Promise<void> {
-	const handle = await fs.promises.open(filePath, "r");
+async function syncDirectory(directory: string): Promise<void> {
+	const handle = await fs.promises.open(directory, "r");
 	try {
 		await handle.sync();
 	} finally {
@@ -39,11 +39,10 @@ async function syncFile(filePath: string): Promise<void> {
 }
 
 async function durableRename(tmp: string, destination: string): Promise<void> {
-	await syncFile(tmp);
 	await fs.promises.rename(tmp, destination);
-	// Linux needs the directory entry synced as well as the file data. Windows
-	// cannot open directories through this API; rename still remains atomic.
-	if (process.platform !== "win32") await syncFile(path.dirname(destination));
+	// Sync the directory entry after the flushed write and atomic rename.
+	// Windows does not support opening directories through this API.
+	if (process.platform !== "win32") await syncDirectory(path.dirname(destination));
 }
 
 function readCheckpoint(value: unknown): ContextSnapshot | undefined {
@@ -187,6 +186,7 @@ export class SessionStore {
 		try {
 			await fs.promises.writeFile(tmp, JSON.stringify(merged, null, 2) + "\n", {
 				mode: 0o600,
+				flush: true,
 			});
 			await durableRename(tmp, this.#path);
 			// Another session can finish while the write is in flight.
@@ -213,7 +213,7 @@ export class SessionStore {
 		this.#queueWrite(async () => {
 			await fs.promises.mkdir(path.dirname(this.#path), { recursive: true, mode: 0o700 });
 			const tmp = `${this.#path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-			await fs.promises.writeFile(tmp, "{}\n", { mode: 0o600 });
+			await fs.promises.writeFile(tmp, "{}\n", { mode: 0o600, flush: true });
 			await durableRename(tmp, this.#path);
 		});
 	}

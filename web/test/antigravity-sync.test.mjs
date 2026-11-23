@@ -319,7 +319,7 @@ test('ACP refuses to start another native turn when the recovery checkpoint cann
     const original = fs.promises.rename;
     let fail = true;
     t.mock.method(fs.promises, 'rename', async function (from, to) {
-      if (fail && String(to).endsWith('/sessions.json')) throw new Error('ENOSPC checkpoint');
+      if (fail && path.basename(String(to)) === 'sessions.json') throw new Error('ENOSPC checkpoint');
       return original.call(this, from, to);
     });
     const messages = [BASE_SYSTEM, user('first'), first.terminal.message, user('next', 20)];
