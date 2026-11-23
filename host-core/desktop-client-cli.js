@@ -2,7 +2,7 @@
 // Module 17: UTF-8 JSONL stdio sidecar CLI for the desktop Tauri client.
 // Inert on import; calls openDesktopClient({dataRoot,onEvent}) only after
 // receiving the initial init request. Strict UTF-8/JSON, 40 MiB line cap,
-// 8 in-flight requests and 8 observations, stdout protocol only, stderr fixed
+// 8 observations, stdout protocol only, stderr fixed
 // non-sensitive stage messages, serialized backpressure-aware stdout writer.
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,7 +10,6 @@ import { assertId, messageError } from './message-protocol.js';
 import {
   openDesktopClient,
   normalizeDesktopError,
-  DESKTOP_MAX_IN_FLIGHT_REQUESTS,
 } from './desktop-client.js';
 
 export const DESKTOP_WIRE_MAX_LINE_BYTES = 41943040; // 40 MiB
@@ -471,12 +470,6 @@ export function createDesktopClientCli(options = {}) {
           activeIds.delete(req.id);
         }
       })();
-      return;
-    }
-
-    const requestLimit = DESKTOP_MAX_IN_FLIGHT_REQUESTS + Number(req.op === 'browser_window_close');
-    if (activeIds.size >= requestLimit) {
-      void sendErrorResponse(req.id, messageError('RPC_BUSY', 'maximum in-flight requests reached'), 'not-sent');
       return;
     }
 

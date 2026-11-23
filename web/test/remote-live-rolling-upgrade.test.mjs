@@ -114,7 +114,7 @@ function buildLiveStates() {
 }
 
 /** Loopback mock local control server speaking real /v1/host + /v1/bots/:botId/live SSE. */
-async function startMockControlServer({ deviceId, token, defaultWorkspace, initialState }) {
+async function startMockControlServer({ deviceId, token, defaultWorkspace, initialState, onListBots }) {
   const subscribers = new Set();
   const server = createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) {
@@ -152,6 +152,10 @@ async function startMockControlServer({ deviceId, token, defaultWorkspace, initi
       };
       res.write(`event: bot-live\ndata: ${JSON.stringify(snapshot)}\n\n`);
       res.on('close', () => subscribers.delete(sub));
+      return;
+    }
+    if (onListBots && req.method === 'GET' && req.url === '/v1/bots') {
+      onListBots(req, res);
       return;
     }
     res.writeHead(404);
@@ -808,5 +812,76 @@ test('new Client rejects unnegotiated extension injection from an untrusted lega
       server.close(resolve);
       server.closeAllConnections?.();
     });
+  }
+});
+
+test('control RPC allows >8 concurrent in-flight requests on one connection through client, relay, and Host', { timeout: 15_000 }, async () => {
+  const CONCURRENCY = 12;
+  const root = mkdtempSync(join(tmpdir(), 'pibot-control-concurrency-'));
+  const relayDir = join(root, 'relay');
+  mkdirSync(relayDir, { recursive: true });
+  const { dir: hostDir, deviceId: hostDeviceId } = createHostIdentity(root, 'host');
+  const clientDeviceId = 'client-concurrency-1';
+  const hostToken = makeToken();
+  const clientToken = makeToken();
+  const controlToken = makeToken();
+
+  const reg = openRelayRegistry({ dataRoot: relayDir });
+  reg.register({ deviceId: hostDeviceId, token: hostToken });
+  reg.register({ deviceId: clientDeviceId, token: clientToken });
+  reg.close();
+
+  const held = [];
+  let releaseAllArrived;
+  const allArrived = new Promise((resolve) => { releaseAllArrived = resolve; });
+  const releaseHeld = () => {
+    for (const [index, res] of held.splice(0).entries()) {
+      if (res.writableEnded) continue;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([{ botId: `bot-${index + 1}` }]));
+    }
+  };
+
+  const control = await startMockControlServer({
+    deviceId: hostDeviceId,
+    token: controlToken,
+    defaultWorkspace: hostDir,
+    onListBots: (_req, res) => {
+      held.push(res);
+      if (held.length === CONCURRENCY) releaseAllArrived();
+    },
+  });
+  const relay = await openRelayServer({ dataRoot: relayDir, port: 0, listenHost: '127.0.0.1' });
+  let link = null;
+  let client = null;
+  try {
+    link = await openDeviceLink({
+      dataRoot: hostDir,
+      url: relay.url,
+      token: hostToken,
+      control: { url: control.url, token: controlToken },
+    });
+    await waitForOnline(link);
+
+    client = await openRemoteControl({ deviceId: clientDeviceId, url: relay.url, token: clientToken });
+    const signal = AbortSignal.timeout(10_000);
+    const calls = Array.from({ length: CONCURRENCY }, () =>
+      client.call(hostDeviceId, 'listBots', {}, { signal }),
+    );
+    const allCalls = Promise.all(calls);
+    await Promise.race([allArrived, allCalls]);
+    assert.equal(held.length, CONCURRENCY);
+    releaseHeld();
+
+    const results = await allCalls;
+    assert.equal(results.length, CONCURRENCY);
+    assert.equal(new Set(results.map((bots) => bots[0]?.botId)).size, CONCURRENCY);
+  } finally {
+    releaseHeld();
+    client?.close();
+    await link?.close();
+    await relay.close();
+    await control.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

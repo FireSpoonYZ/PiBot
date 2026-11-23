@@ -22,7 +22,6 @@ import {
 import { normalizeDeviceName } from './device-metadata.js';
 import { messageError, assertId } from './message-protocol.js';
 import {
-  CONTROL_MAX_CLIENT_CALLS,
   CONTROL_CLIENT_TIMEOUT_MS,
   controlClientTimeoutMs,
   normalizeControlCall,
@@ -258,9 +257,6 @@ export async function openRemoteControl(options) {
     if (callSignal && callSignal.aborted) {
       throw new RemoteControlError('CANCELLED', 'not-sent');
     }
-    if (client.pending.size >= CONTROL_MAX_CLIENT_CALLS) {
-      throw new RemoteControlError('RPC_BUSY', 'not-sent');
-    }
 
     const callId = randomUUID();
     const record = {
@@ -381,9 +377,6 @@ export async function openRemoteControl(options) {
     if (dirSignal && dirSignal.aborted) {
       throw new RemoteControlError('CANCELLED', 'not-sent');
     }
-    if (client.pending.size >= CONTROL_MAX_CLIENT_CALLS) {
-      throw new RemoteControlError('RPC_BUSY', 'not-sent');
-    }
 
     const callId = randomUUID();
     const record = {
@@ -437,7 +430,6 @@ export async function openRemoteControl(options) {
       throw new RemoteControlError('INVALID_ARGUMENT', 'not-sent');
     }
     if (renameSignal?.aborted) throw new RemoteControlError('CANCELLED', 'not-sent');
-    if (client.pending.size >= CONTROL_MAX_CLIENT_CALLS) throw new RemoteControlError('RPC_BUSY', 'not-sent');
     const callId = randomUUID();
     const record = { kind: 'rename', callId, targetDeviceId: input.deviceId, signal: renameSignal,
       timer: null, onAbort: null, sent: false, settled: false };

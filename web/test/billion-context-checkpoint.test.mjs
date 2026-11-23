@@ -270,6 +270,7 @@ test('patchPiDurable is version-guarded and idempotent on installed @earendil-wo
   for (const relPath of [
     'package.json',
     join('dist', 'harness', 'generation.js'),
+    join('dist', 'harness', 'compaction.js'),
     join('dist', 'harness', 'types.d.ts'),
     join('dist', 'storage', 'sqlite', 'storage.js'),
   ]) {
@@ -284,6 +285,7 @@ test('patchPiDurable is version-guarded and idempotent on installed @earendil-wo
     generationChanged: false,
     typesChanged: false,
     storageChanged: false,
+    compactionChanged: false,
   });
 
   const pkgPath = join(tempPkgDir, 'package.json');

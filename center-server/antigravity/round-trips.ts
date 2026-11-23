@@ -306,17 +306,19 @@ export class ToolRoundTrips {
 	#dead = new Map<string, { name: string; reason: string }>();
 	#escalations = new EscalationRegistry();
 	#escalateAfterMs: number | ((name: string) => number);
+	#onPendingEmpty?: () => void;
 	#getDriver: () => TurnDriver;
 	#log: (s: string, d?: unknown, level?: "debug" | "info" | "warn" | "error") => void;
 
 	constructor(
 		driver: TurnDriver | (() => TurnDriver),
 		log?: (s: string, d?: unknown, level?: "debug" | "info" | "warn" | "error") => void,
-		opts: { escalateAfterMs?: number | ((name: string) => number) } = {},
+		opts: { escalateAfterMs?: number | ((name: string) => number); onPendingEmpty?: () => void } = {},
 	) {
 		this.#getDriver = typeof driver === "function" ? driver : () => driver;
 		this.#log = log ?? (() => {});
 		this.#escalateAfterMs = opts.escalateAfterMs ?? defaultEscalateAfterMs;
+		this.#onPendingEmpty = opts.onPendingEmpty;
 	}
 
 	get pendingIds(): string[] {
@@ -385,8 +387,13 @@ export class ToolRoundTrips {
 		} else {
 			entry.reject(new Error(reason));
 		}
-		this.#getDriver().kickIdle();
+		this.#unparkDriver();
 		this.#log("round-trip-fail", { callId, name: entry.name, reason });
+	}
+
+	#unparkDriver(): void {
+		this.#getDriver().kickIdle();
+		if (this.#pending.size === 0) this.#onPendingEmpty?.();
 	}
 
 	onToolCall = (
@@ -471,7 +478,7 @@ export class ToolRoundTrips {
 				isError,
 			});
 		}
-		this.#getDriver().kickIdle();
+		this.#unparkDriver();
 		this.#log("round-trip-resolved", { callId: toolCallId, name: entry.name, isError });
 		return true;
 	}
@@ -497,7 +504,7 @@ export function collectToolResults(
 		if (!id || !targetSet.has(id)) continue;
 		out.push({
 			toolCallId: id,
-			text: blocksToText(m.content).trim(),
+			text: blocksToText(m.content),
 			isError: m.isError === true,
 			images: extractResultImages(m.content),
 		});
@@ -519,7 +526,7 @@ export function buildLateResultPrompt(late: LateToolResult[], userPrompt?: strin
 		[
 			`host tool "${r.name}": ${r.reason}.`,
 			r.isError ? "The tool reported an error:" : "Result:",
-			r.text.trim() || (r.images?.length ? "[image result attached]" : "(no output)"),
+			r.text || (r.images?.length ? "[image result attached]" : "(no output)"),
 		].join("\n"),
 	);
 	const header =
@@ -533,6 +540,8 @@ export interface SplitAntigravityTurnContext {
 	inputIndex: number | null;
 	routeNote: string | undefined;
 	contextNotes: string[];
+	auxiliaryMessages: Message[];
+	contextImages: Array<{ data: string; mimeType: string }>;
 	turnRecall?: string;
 	historicalAuxiliaryIndices?: number[];
 }
@@ -546,13 +555,11 @@ export function extractUserPrompt(
 	if (!target || target.role !== "user") return null;
 	const content = target.content;
 	if (typeof content === "string") return content.trim().length > 0 ? content : null;
-	return (
-		content
-			.filter((b): b is { type: "text"; text: string } => b.type === "text")
-			.map((b) => b.text)
-			.join("\n")
-			.trim() || null
-	);
+	const text = content
+		.filter((b): b is { type: "text"; text: string } => b.type === "text")
+		.map((b) => b.text)
+		.join("\n");
+	return text.trim().length > 0 ? text : null;
 }
 
 export function extractImages(
@@ -679,6 +686,8 @@ export function splitAntigravityTurnContext(
 	const cleanMessages: Message[] = [];
 	const routeParts: string[] = [];
 	const contextNotes: string[] = [];
+	const auxiliaryMessages: Message[] = [];
+	const contextImages: Array<{ data: string; mimeType: string }> = [];
 	const historicalAuxiliaryIndices: number[] | undefined = explicit ? [] : undefined;
 	const isUserInput = rawInputIndex !== null && messages[rawInputIndex]?.role === "user";
 	let mappedInputIndex: number | null = null;
@@ -703,7 +712,9 @@ export function splitAntigravityTurnContext(
 		}
 		if (isAuxiliary) {
 			if (isTrailing) {
-				const text = blocksToText(msg.content).trim();
+				auxiliaryMessages.push(msg);
+				contextImages.push(...extractResultImages(msg.content));
+				const text = blocksToText(msg.content);
 				if (text.length > 0) {
 					contextNotes.push(text);
 				}
@@ -724,6 +735,8 @@ export function splitAntigravityTurnContext(
 		inputIndex: mappedInputIndex,
 		routeNote: routeParts.length > 0 ? routeParts.join("\n\n") : undefined,
 		contextNotes,
+		auxiliaryMessages,
+		contextImages,
 		...(turnRecall === undefined ? {} : { turnRecall }),
 		...(historicalAuxiliaryIndices !== undefined ? { historicalAuxiliaryIndices } : {}),
 	};
@@ -733,7 +746,13 @@ export function buildFullPrompt(
 	systemPrompt: string | undefined,
 	digest: string,
 	prompt: string,
-	auxiliary?: { routeNote?: string; contextNotes?: readonly string[] },
+	auxiliary?: {
+		routeNote?: string;
+		contextNotes?: readonly string[];
+		auxiliaryMessages?: readonly Message[];
+		historyImageCount?: number;
+		currentImageCount?: number;
+	},
 ): string {
 	const parts: string[] = [];
 	if (systemPrompt) {
@@ -749,13 +768,26 @@ export function buildFullPrompt(
 		if (routeNote) {
 			parts.push(`${TURN_ROUTING_PREAMBLE}\n\n${routeNote}\n\n${TURN_ROUTING_END}`);
 		}
-		const notes = (auxiliary.contextNotes ?? [])
-			.map((note) => (typeof note === "string" ? note.trim() : ""))
+		let nextImage = auxiliary.historyImageCount ?? 0;
+		const rawNotes = auxiliary.auxiliaryMessages?.map((message, index) => {
+			const text = blocksToText(message.content);
+			const count = extractResultImages(message.content).length;
+			if (count === 0) return text;
+			const first = nextImage + 1;
+			nextImage += count;
+			return `[Auxiliary context item ${index + 1}: image attachments ${first} through ${nextImage}.]\n${text}`;
+		}) ?? auxiliary.contextNotes ?? [];
+		const notes = rawNotes
+			.map((note) => (typeof note === "string" ? note : ""))
 			.filter((note) => note.length > 0);
 		if (notes.length > 0) {
 			parts.push(
 				`${AUXILIARY_CONTEXT_PREAMBLE}\n\n${notes.join("\n\n")}\n\n${AUXILIARY_CONTEXT_END}`,
 			);
+		}
+		const currentImages = auxiliary.currentImageCount ?? 0;
+		if (currentImages > 0) {
+			parts.push(`[Current input image attachments: ${nextImage + 1} through ${nextImage + currentImages}. Earlier attachments belong to the numbered history or auxiliary context.]`);
 		}
 	}
 	if (prompt) {
@@ -1028,12 +1060,16 @@ export function consumeActivity(
 			return "continue";
 		case "tool_start":
 		case "tool_done":
-		case "tool_error":
 			// Only host MCP bridge calls are allowed; fail explicitly on native/foreign tools.
 			if (!isAllowedBridgeServer(activity.mcpServer)) {
 				throw new DisallowedNativeToolError(activity.name, activity.mcpServer);
 			}
 			return "continue";
+		case "tool_error":
+			if (!isAllowedBridgeServer(activity.mcpServer)) {
+				throw new DisallowedNativeToolError(activity.name, activity.mcpServer);
+			}
+			throw new Error(`Antigravity bridge tool "${activity.name}" failed: ${activity.message}`);
 		case "bridge_call":
 			emitToolUse(
 				stream,

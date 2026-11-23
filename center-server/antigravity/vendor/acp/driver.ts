@@ -19,7 +19,7 @@
 //     approvals.mode allow to the same synchronous auto path
 
 import { randomUUID } from "node:crypto";
-import { AcpConnection, type AcpMcpServer, type AcpPermissionRequest } from "./connection.ts";
+import { AcpAuthError, AcpConnection, type AcpMcpServer, type AcpPermissionRequest } from "./connection.ts";
 import type { AcpPermissionHandler } from "./connection.ts";
 import { mapStopReason, mapUpdate, TextAccumulator, type AcpEditDiff } from "./events.ts";
 import { estimateTokens, synthesizeUsage } from "./usage-estimate.ts";
@@ -285,8 +285,9 @@ export class AcpDriver implements TurnDriver {
 		const conn = await this.#ensureConnection(request);
 		if (turn.closed) return;
 
-		// Session: load (resume) or create. Load failures fall back to a fresh
-		// session — a missing conversation must not fail the turn (9.4).
+		// A resumed request only carries the context delta for its bound session.
+		// If loading fails, let the caller rebuild from authoritative history
+		// before creating a new session; never send that delta to an empty one.
 		try {
 			if (request.conversationId) {
 				this.#log("session-load", { sessionId: request.conversationId });
@@ -310,23 +311,21 @@ export class AcpDriver implements TurnDriver {
 				});
 				return;
 			}
-			if (request.conversationId) {
-				this.#log("session-load-failed-creating-fresh", {
-					sessionId: request.conversationId,
-					message: err instanceof Error ? err.message : String(err),
-				});
-				try {
-					const created = await conn.newSession(request.cwd);
-					turn.sessionId = created.sessionId;
-					this.#stats.sessionsCreated += 1;
-				} catch (err2) {
-					this.#failTurn(turn, `ACP session failed: ${describe(err2)}`);
-					return;
-				}
-			} else {
-				this.#failTurn(turn, `ACP session failed: ${describe(err)}`);
-				return;
-			}
+			const sessionLoadFailed = Boolean(request.conversationId) && !(err instanceof AcpAuthError);
+			this.#log(request.conversationId ? "session-load-failed" : "session-new-failed", {
+				sessionId: request.conversationId ?? null,
+				message: err instanceof Error ? err.message : String(err),
+			});
+			this.#settle(turn, {
+				conversationId: request.conversationId ?? turn.sessionId,
+				status: "ERROR",
+				response: turn.response.text,
+				error: `ACP session failed: ${describe(err)}`,
+				finished: true,
+				aborted: false,
+				...(sessionLoadFailed ? { sessionLoadFailed: true } : {}),
+			});
+			return;
 		}
 		if (turn.closed) return;
 

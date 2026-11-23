@@ -16,6 +16,7 @@
 //   - `abortAll()` rejects every pending request (Gate D teardown: no promise
 //     survives a killed connection).
 
+import { Buffer } from "node:buffer";
 import { isKnownNoiseLine, MAX_FRAME_BYTES, stripGluedNoise } from "../frame-guard.ts";
 
 export interface JsonRpcErrorShape {
@@ -70,6 +71,16 @@ export class JsonRpcSession {
 	constructor(opts: JsonRpcSessionOptions) {
 		this.#opts = opts;
 		this.#send = opts.send;
+	}
+
+	#serialize(frame: unknown): string {
+		const serialized = JSON.stringify(frame);
+		if (typeof serialized !== "string") throw new Error("ACP outbound frame is not JSON serializable");
+		// The transport writes this exact string followed by one newline. Count
+		// UTF-8 bytes after JSON escaping, not characters in the original params.
+		const bytes = Buffer.byteLength(serialized, "utf8") + 1;
+		if (bytes > MAX_FRAME_BYTES) throw new JsonRpcFrameSizeError(bytes);
+		return serialized;
 	}
 
 	/** Feed raw transport bytes. Stdio chunks are NOT newline-aligned: bytes
@@ -160,7 +171,7 @@ export class JsonRpcSession {
 				.then(() => handler(msg.method as string, msg.params))
 				.then((result) => {
 					if (this.#aborted) return;
-					this.#send(JSON.stringify({ jsonrpc: "2.0", id, result: result ?? {} }));
+					this.#send(this.#serialize({ jsonrpc: "2.0", id, result: result ?? {} }));
 				})
 				.catch((err: unknown) => {
 					if (this.#aborted) return;
@@ -175,7 +186,29 @@ export class JsonRpcSession {
 
 	#sendError(id: number | string, code: number, message: string): void {
 		if (this.#aborted) return;
-		this.#send(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }));
+		let frame: string;
+		try {
+			frame = this.#serialize({ jsonrpc: "2.0", id, error: { code, message } });
+		} catch {
+			// Error text can itself be oversized. Return a complete bounded error
+			// rather than truncating JSON or letting an async handler reject again.
+			try {
+				frame = this.#serialize({
+					jsonrpc: "2.0", id,
+					error: { code: -32603, message: "ACP client error response exceeds the frame size limit" },
+				});
+			} catch {
+				// Even the request ID cannot fit in a valid reply. There is no safe
+				// frame to send; release local callers and stop this RPC session.
+				this.abortAll("ACP client error response cannot fit within the frame size limit");
+				return;
+			}
+		}
+		try {
+			this.#send(frame);
+		} catch {
+			this.abortAll("ACP client error response could not be sent");
+		}
 	}
 
 	/** Send a request. Resolves with the result value; rejects on error
@@ -183,6 +216,14 @@ export class JsonRpcSession {
 	request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
 		if (this.#aborted) return Promise.reject(new Error("connection aborted"));
 		const id = this.#nextId++;
+		let frame: string;
+		try {
+			frame = this.#serialize({ jsonrpc: "2.0", id, method, params: params ?? {} });
+		} catch (err) {
+			// Nothing is pending yet, so serialization failures and oversize
+			// payloads cannot leave behind a request or a timeout timer.
+			return Promise.reject(err);
+		}
 		const effective = timeoutMs ?? this.#opts.defaultTimeoutMs ?? 0;
 		return new Promise<unknown>((resolve, reject) => {
 			const pending: Pending = { resolve, reject, method };
@@ -193,13 +234,19 @@ export class JsonRpcSession {
 				}, effective);
 			}
 			this.#pending.set(id, pending);
-			this.#send(JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }));
+			try {
+				this.#send(frame);
+			} catch (err) {
+				this.#pending.delete(id);
+				if (pending.timer) clearTimeout(pending.timer);
+				reject(err instanceof Error ? err : new Error(String(err)));
+			}
 		});
 	}
 
 	notify(method: string, params?: unknown): void {
 		if (this.#aborted) return;
-		this.#send(JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }));
+		this.#send(this.#serialize({ jsonrpc: "2.0", method, params: params ?? {} }));
 	}
 
 	/** Reject every pending request (Gate D teardown). The transport is going
@@ -215,6 +262,18 @@ export class JsonRpcSession {
 
 	get pendingCount(): number {
 		return this.#pending.size;
+	}
+}
+
+/** The complete serialized outbound frame, including its newline, is too large. */
+export class JsonRpcFrameSizeError extends Error {
+	readonly code = "ACP_FRAME_TOO_LARGE";
+	readonly frameBytes: number;
+	readonly limitBytes = MAX_FRAME_BYTES;
+	constructor(frameBytes: number) {
+		super(`ACP outbound frame is ${frameBytes} bytes, exceeding the ${MAX_FRAME_BYTES}-byte limit`);
+		this.name = "JsonRpcFrameSizeError";
+		this.frameBytes = frameBytes;
 	}
 }
 

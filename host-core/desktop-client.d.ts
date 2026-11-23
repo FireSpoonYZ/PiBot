@@ -26,7 +26,6 @@ import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, BotCwdConfig, Ins
 /** Re-exported contract shapes so UI files only need this module. */
 export type { BotCapabilityConfig, Installation, JsonObject, JsonSchema, JsonValue } from '../center-contract/index.js';
 
-export const DESKTOP_MAX_IN_FLIGHT_REQUESTS: 8;
 export const DESKTOP_MAX_OBSERVATIONS: 8;
 export const DESKTOP_CALL_TIMEOUT_MS: 25000;
 export const INTENT_METHODS: ReadonlySet<DesktopIntentMethod>;
