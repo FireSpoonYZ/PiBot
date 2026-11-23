@@ -92,6 +92,7 @@
   font: inherit;
   font-size: 13.5px;
   font-weight: var(--weight-medium, 500);
+  min-height: 0;
   padding: 6px var(--space-3, 12px);
   border-radius: var(--ca-radius-sm);
   cursor: pointer;
@@ -183,7 +184,7 @@
 .ca-provider-search {
   position: relative;
   flex: 0 1 200px;
-  width: min(200px, 100%);
+  width: 200px;
   min-width: 0;
   max-width: 100%;
 }
@@ -267,6 +268,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   flex: 1;
   padding: var(--space-3, 12px) var(--space-3, 12px) var(--space-3, 12px) var(--space-4, 16px);
   transition: background var(--ca-dur-fast) var(--ca-ease-out);
@@ -340,6 +342,7 @@
   font: inherit;
   font-size: var(--text-sm, 13px);
   font-weight: var(--weight-medium, 500);
+  min-height: 0;
   padding: 6px var(--space-3, 12px);
   border-radius: var(--ca-radius-sm);
   border: 1px solid var(--ca-border-strong);
@@ -446,7 +449,7 @@ a.ca-btn:focus {
 }
 
 .ca-btn-icon {
-  padding: 5px 7px;
+  padding: 6px;
 }
 
 /* Switch */
@@ -577,7 +580,7 @@ a.ca-btn:focus {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
+  padding: 2px;
   max-width: 100%;
   overflow-x: auto;
   scrollbar-width: none;
@@ -597,8 +600,10 @@ a.ca-btn:focus {
   color: var(--ca-text-muted);
   font: inherit;
   font-size: 12.5px;
+  line-height: 1.35;
   font-weight: var(--weight-medium, 500);
-  padding: var(--space-1, 4px) 11px;
+  min-height: 0;
+  padding: 3px 9px;
   border-radius: 6px;
   cursor: pointer;
   touch-action: manipulation;
@@ -645,6 +650,8 @@ a.ca-btn:focus {
   color: var(--ca-text-muted);
   font: inherit;
   font-size: var(--text-xs, 12px);
+  line-height: 1.35;
+  min-height: 0;
   padding: 3px 10px;
   border-radius: var(--radius-full, 999px);
   cursor: pointer;
@@ -695,6 +702,11 @@ a.ca-btn:focus {
   padding: 7px 10px;
   outline: none;
   transition: border-color var(--ca-dur-fast) var(--ca-ease-out);
+}
+
+.ca-input,
+.ca-select {
+  min-height: 0;
 }
 
 .ca-input:focus,
@@ -879,6 +891,7 @@ a.ca-btn:focus {
   color: var(--ca-text-muted);
   cursor: pointer;
   touch-action: manipulation;
+  min-height: 0;
   padding: 0 2px;
   font-size: 14px;
   line-height: 1;
@@ -915,6 +928,7 @@ a.ca-btn:focus {
   font: inherit;
   font-size: 12.5px;
   font-weight: var(--weight-medium, 500);
+  min-height: 0;
   padding: 2px 0;
   cursor: pointer;
   touch-action: manipulation;
@@ -1215,6 +1229,7 @@ a.ca-btn:focus {
   color: var(--ca-text);
   text-align: left;
   font: inherit;
+  min-height: 0;
   padding: 9px var(--space-3, 12px);
   display: flex;
   align-items: center;
@@ -1267,6 +1282,7 @@ a.ca-btn:focus {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   flex: 1;
   padding: 9px var(--space-3, 12px);
   transition: background var(--ca-dur-fast) var(--ca-ease-out);
@@ -1350,6 +1366,7 @@ a.ca-btn:focus {
   color: var(--ca-text-muted);
   font: inherit;
   font-size: var(--text-xs, 12px);
+  min-height: 0;
   padding: var(--space-1, 4px) 9px;
   border-radius: 6px;
   cursor: pointer;
@@ -1421,6 +1438,7 @@ a.ca-btn:focus {
   font: inherit;
   font-size: var(--text-sm, 13px);
   white-space: nowrap;
+  min-height: 0;
   padding: 6px 10px;
   border-radius: 5px;
   cursor: pointer;
@@ -1673,6 +1691,7 @@ a.ca-btn:focus {
 .ca-card-disclosure-head {
   appearance: none;
   width: 100%;
+  min-height: 0;
   border: none;
   background: transparent;
   color: var(--ca-text);
@@ -1901,7 +1920,7 @@ a.ca-btn:focus {
 
 .ca-toolbar-search {
   flex: 0 1 180px;
-  width: min(180px, 100%);
+  width: 180px;
   min-width: 0;
   max-width: 100%;
   padding-top: var(--space-1, 4px);
@@ -1914,7 +1933,7 @@ a.ca-btn:focus {
 
 .ca-picker-search {
   flex: 0 1 220px;
-  width: min(220px, 100%);
+  width: 220px;
   min-width: 0;
   max-width: 100%;
 }
@@ -1927,7 +1946,7 @@ a.ca-btn:focus {
 
 .ca-discover-device {
   flex: 0 1 160px;
-  width: min(160px, 100%);
+  width: 160px;
   min-width: 0;
   max-width: 100%;
 }
@@ -1949,7 +1968,7 @@ a.ca-btn:focus {
 
 .ca-probe-select {
   flex: 0 1 170px;
-  width: min(170px, 100%);
+  width: 170px;
   min-width: 0;
   max-width: 100%;
 }
@@ -1976,8 +1995,14 @@ a.ca-btn:focus {
 
 .ca-rename-row {
   flex: 1 1 180px;
+  flex-wrap: nowrap;
   min-width: 0;
   max-width: min(280px, 100%);
+}
+
+.ca-rename-row > .ca-input {
+  flex: 1 1 auto;
+  width: auto;
 }
 
 .ca-input-compact {
@@ -1987,7 +2012,7 @@ a.ca-btn:focus {
 
 .ca-select-compact {
   flex: 0 1 170px;
-  width: min(170px, 100%);
+  width: 170px;
   min-width: 0;
   max-width: 100%;
   padding-top: var(--space-1, 4px);
@@ -1996,7 +2021,7 @@ a.ca-btn:focus {
 
 .ca-search-compact {
   flex: 0 1 220px;
-  width: min(220px, 100%);
+  width: 220px;
   min-width: 0;
   max-width: 100%;
   padding-top: var(--space-1, 4px);
@@ -2666,6 +2691,7 @@ a.ca-btn:focus {
 .ca-google-choice {
   appearance: none;
   width: 100%;
+  min-height: 0;
   text-align: left;
   font: inherit;
   color: var(--ca-text);
@@ -2792,7 +2818,7 @@ a.ca-btn:focus {
 
 .ca-google-filter-select {
   flex: 0 1 180px;
-  width: min(180px, 100%);
+  width: 180px;
   min-width: 0;
   max-width: 100%;
   padding: 4px 8px;
