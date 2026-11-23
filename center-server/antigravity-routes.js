@@ -8,8 +8,8 @@ import {
 import { validateAntigravityTurnContext } from './antigravity/turn-context.js';
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const STREAM_BODY_KEYS = new Set(['sessionId', 'modelId', 'messages', 'reasoning', 'turnContext']);
-const CANCEL_BODY_KEYS = new Set(['sessionId']);
+const STREAM_BODY_KEYS = new Set(['sessionId', 'requestId', 'modelId', 'messages', 'reasoning', 'turnContext']);
+const CANCEL_BODY_KEYS = new Set(['sessionId', 'requestId']);
 const MAX_ID_LENGTH = 256;
 const MAX_MESSAGES = 4096;
 const MAX_MESSAGE_PARTS = 512;
@@ -145,6 +145,7 @@ function validateStreamBody(raw) {
   assertAllowedKeys(raw, STREAM_BODY_KEYS, 'request');
   const sessionId = assertBoundedId(raw.sessionId, 'sessionId');
   const modelId = assertBoundedId(raw.modelId, 'modelId');
+  const requestId = Object.hasOwn(raw, 'requestId') ? assertBoundedId(raw.requestId, 'requestId') : undefined;
   if (raw.reasoning !== undefined && (typeof raw.reasoning !== 'string' || !THINKING_LEVELS.has(raw.reasoning))) {
     fail('INVALID_ARGUMENT', 'Invalid reasoning level');
   }
@@ -156,6 +157,7 @@ function validateStreamBody(raw) {
     raw.turnContext !== undefined ? validateAntigravityTurnContext(raw.messages, raw.turnContext) : undefined;
   return {
     sessionId,
+    ...(requestId !== undefined ? { requestId } : {}),
     modelId,
     messages: raw.messages,
     ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}),
@@ -166,7 +168,10 @@ function validateStreamBody(raw) {
 function validateCancelBody(raw) {
   if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', 'Expected an object');
   assertAllowedKeys(raw, CANCEL_BODY_KEYS, 'request');
-  return { sessionId: assertBoundedId(raw.sessionId, 'sessionId') };
+  return {
+    sessionId: assertBoundedId(raw.sessionId, 'sessionId'),
+    ...(Object.hasOwn(raw, 'requestId') ? { requestId: assertBoundedId(raw.requestId, 'requestId') } : {}),
+  };
 }
 
 function normalizeCatalogModel(item) {
@@ -314,7 +319,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
   host('POST', ANTIGRAVITY_STREAM_PATH, async (req, reply) => {
     const { deviceId, token } = req.centerDevice;
-    const { sessionId, modelId, messages, reasoning, turnContext } = validateStreamBody(req.body);
+    const { sessionId, requestId, modelId, messages, reasoning, turnContext } = validateStreamBody(req.body);
     assertDeviceAuthorized(deviceId, modelId);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
     if (req.raw.aborted || req.raw.destroyed || reply.raw.destroyed) {
@@ -326,6 +331,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
       {
         deviceId,
         sessionId,
+        ...(requestId !== undefined ? { requestId } : {}),
         modelId,
         messages,
         ...(reasoning !== undefined ? { reasoning } : {}),
@@ -346,12 +352,13 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
     let terminal = false;
     let clientDisconnected = false;
+    const cancelTarget = { deviceId, sessionId, ...(requestId !== undefined ? { requestId } : {}) };
 
     const abortDisconnect = () => {
       if (terminal || clientDisconnected) return;
       clientDisconnected = true;
       controller.abort();
-      void Promise.resolve(antigravity.cancel({ deviceId, sessionId })).catch(() => {});
+      void Promise.resolve(antigravity.cancel(cancelTarget)).catch(() => {});
       if (!reply.raw.destroyed) reply.raw.destroy();
     };
     const onResponseClose = () => {
@@ -386,7 +393,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
       if (!clientDisconnected && !terminal) terminal = true;
     } catch (error) {
       if (!clientDisconnected && !terminal) {
-        void Promise.resolve(antigravity.cancel({ deviceId, sessionId })).catch(() => {});
+        void Promise.resolve(antigravity.cancel(cancelTarget)).catch(() => {});
         terminal = true;
         if (!reply.raw.destroyed && !reply.raw.writableEnded) {
           reply.raw.write(JSON.stringify(safeStreamErrorEvent(modelId, error)) + '\n');
@@ -406,9 +413,10 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
   }, ANTIGRAVITY_MAX_FRAME_BYTES);
 
   host('POST', ANTIGRAVITY_CANCEL_PATH, async req => {
-    const { sessionId } = validateCancelBody(req.body);
+    const { sessionId, requestId } = validateCancelBody(req.body);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
-    await antigravity.cancel({ deviceId: req.centerDevice.deviceId, sessionId });
+    await antigravity.cancel({ deviceId: req.centerDevice.deviceId, sessionId,
+      ...(requestId !== undefined ? { requestId } : {}) });
     return { ok: true };
   });
 

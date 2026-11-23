@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import { randomUUID } from 'node:crypto';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { assertDeviceToken } from './relay-protocol.js';
 import { assertId } from './message-protocol.js';
@@ -536,6 +537,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     streamAntigravity(payload, options = {}) {
       const eventStream = createAssistantMessageEventStream();
+      const requestId = randomUUID();
       const model = options.model ?? {
         id: typeof payload?.modelId === 'string' ? payload.modelId : '',
         api: ANTIGRAVITY_API,
@@ -545,7 +547,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         if (closed || typeof sessionId !== 'string' || !sessionId.trim()) return;
         let timer;
         try {
-          const cancelReq = start(ANTIGRAVITY_CANCEL_PATH, { method: 'POST', body: { sessionId } });
+          const cancelReq = start(ANTIGRAVITY_CANCEL_PATH, { method: 'POST', body: { sessionId, requestId } });
           cancelReq.on('error', () => {});
           timer = setTimeout(() => cancelReq.destroy(centerError('CENTER_OFFLINE', 'center cancel timed out')), 5000);
           timer.unref?.();
@@ -570,12 +572,13 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         let req = null;
         let response = null;
         const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+        let cancelSessionId = sessionId;
         const triggerCancel = () => {
           if (terminalSeen || cancelTriggered) return;
           cancelTriggered = true;
           req?.destroy();
           response?.destroy();
-          if (started) void cancelAntigravity(sessionId);
+          if (started) void cancelAntigravity(cancelSessionId);
         };
         const onAbort = () => triggerCancel();
 
@@ -597,6 +600,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
             const nextPayload = await options.onPayload(bodyPayload, model);
             if (nextPayload !== undefined) bodyPayload = nextPayload;
           }
+          // This attempt's cancellation identity is transport-owned. A payload
+          // hook may reshape model input but must not reuse an older stream ID.
+          bodyPayload = { ...bodyPayload, requestId };
+          cancelSessionId = typeof bodyPayload.sessionId === 'string' ? bodyPayload.sessionId : '';
           if (signal?.aborted) {
             eventStream.push(createAntigravityErrorEvent(model, new Error('Request was aborted'), true));
             return;

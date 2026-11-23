@@ -28,8 +28,8 @@ export interface DriverProfile {
 
 export interface DriverTurnRequest extends DriverProfile {
 	/** Existing conversation/session to resume. Stream-json: agy conversation id via
-	 *  `--conversation`. ACP: sessionId via `session/load` (falls back to
-	 *  `session/new` when the server no longer knows it). */
+	 *  `--conversation`. ACP: sessionId via `session/load`; failed loads return
+	 *  an outcome so the caller can rebuild context before creating a session. */
 	conversationId?: string | null;
 	prompt: string;
 	/** Image blocks riding with the prompt. ACP forwards them as typed
@@ -95,6 +95,10 @@ export interface TurnOutcome {
 	usage?: AgyUsage;
 	finished: boolean;
 	aborted: boolean;
+	/** ACP could not load the requested session before dispatching a prompt.
+	 *  No model work was started: the caller may rebuild the full context and
+	 *  retry with a new session. Authentication errors do not set this flag. */
+	sessionLoadFailed?: true;
 	/** The model demonstrably produced output this turn: an agent_response
 	 *  or tool step was observed, or the settled response/usage is non-empty.
 	 *  Stream-json sets it on every outcome; ACP leaves it undefined.

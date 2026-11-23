@@ -201,7 +201,9 @@ export function toolName(title: unknown, kind: unknown): string {
 
 /** Map a `session/prompt` result stopReason to a TurnOutcome shape.
  *  Verified live: `end_turn`. Schema enumerates cancelled / max_tokens /
- *  max_turn_requests / refusal. Native cancellation returns `cancelled`. */
+ *  max_turn_requests / refusal. Native cancellation returns `cancelled`.
+ *  Only a confirmed end_turn is complete: partial or unrecognized results
+ *  must not be accepted as authoritative replies or compaction summaries. */
 export function mapStopReason(stopReason: unknown): {
 	status: "OK" | "ERROR";
 	aborted: boolean;
@@ -213,66 +215,26 @@ export function mapStopReason(stopReason: unknown): {
 		case "cancelled":
 			return { status: "OK", aborted: true };
 		case "max_tokens":
-			return { status: "OK", aborted: false, error: "ACP: response hit the token cap" };
+			return { status: "ERROR", aborted: false, error: "ACP: response was truncated at the token limit" };
 		case "refusal":
 			return { status: "ERROR", aborted: false, error: "ACP: the model refused the request" };
 		case "max_turn_requests":
 			return { status: "ERROR", aborted: false, error: "ACP: turn exceeded the request limit" };
 		default:
-			return { status: "OK", aborted: false };
+			return { status: "ERROR", aborted: false, error: "ACP: prompt returned an unknown or missing stop reason" };
 	}
 }
 
-/** Defensive accumulation with the cumulative-resend port. Native agy streams
- *  deltas, so on
- *  a compliant server the resend branch stays inert; it exists because the
- *  same backend's private protocol exhibited exactly this failure mode.
- *
- *  Two guards keep a misflip from corrupting the rest of the turn:
- *  - the flip requires the accumulated text to be at least FLIP_MIN_CHARS,
- *    because short prefixes ("**", "\n", "#") are trivially extended by
- *    ordinary markdown deltas;
- *  - in cumulative mode, a frame that no longer extends the accumulator is
- *    evidence of a misflip: fall back to append mode instead of slicing. */
-const FLIP_MIN_CHARS = 32;
-
+/** ACP message chunks are deltas. Repeated text is valid content, so never
+ *  infer cumulative resends from a chunk's prefix. Sanitization remains
+ *  incremental to handle control markup split across chunks. */
 export class TextAccumulator {
-	#rawAcc = "";
 	#sanitizedAcc = "";
-	#cumulative: boolean | undefined;
 	#sanitizer = new StreamSanitizer();
 
 	/** Returns the delta to emit, or null when nothing new should be emitted. */
 	append(delta: string): string | null {
-		let rawEmit: string | null = null;
-		if (this.#cumulative === undefined) this.#cumulative = false;
-		else if (
-			!this.#cumulative &&
-			this.#rawAcc.length >= FLIP_MIN_CHARS &&
-			delta.length > this.#rawAcc.length &&
-			delta.startsWith(this.#rawAcc)
-		) {
-			this.#cumulative = true;
-		}
-		if (this.#cumulative) {
-			if (!delta.startsWith(this.#rawAcc)) {
-				// Misflip evidence: back to deltas.
-				this.#cumulative = false;
-				this.#rawAcc += delta;
-				rawEmit = delta;
-			} else if (delta.length <= this.#rawAcc.length) {
-				return null; // duplicate frame
-			} else {
-				rawEmit = delta.slice(this.#rawAcc.length);
-				this.#rawAcc = delta;
-			}
-		} else {
-			this.#rawAcc += delta;
-			rawEmit = delta;
-		}
-
-		if (rawEmit === null) return null;
-		const sanitized = this.#sanitizer.push(rawEmit);
+		const sanitized = this.#sanitizer.push(delta);
 		if (sanitized.length > 0) {
 			this.#sanitizedAcc += sanitized;
 			return sanitized;
