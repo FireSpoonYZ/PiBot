@@ -6,9 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   createControlledAcpDriverHarness, openIsolatedAntigravity, openTestHostRuntime,
-  closeAndRemove, drainEventStream, waitUntil, toolResult,
+  closeAndRemove, drainEventStream, waitUntil, toolResult, messageText,
   BASE_SYSTEM, BASE_MODEL_SEL, MODEL_ID, USER_ORIGIN,
 } from './helpers/antigravity-sync-harness.mjs';
+import { ANTIGRAVITY_MAX_FRAME_BYTES } from '../../center-contract/antigravity.js';
 import { AcpConnection } from '../../center-server/antigravity/vendor/acp/connection.ts';
 import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
 import { mapStopReason } from '../../center-server/antigravity/vendor/acp/events.ts';
@@ -44,6 +45,29 @@ async function centerCase(t, name, body) {
     await closeAndRemove({ antigravity: service, rootDir });
   }
 }
+
+test('ACP does not repeat pre-tool text when the continuation ends without new text', { timeout: 15_000 }, async t => {
+  await centerCase(t, 'tool-only-end', async ({ driver, service }) => {
+    const preToolText = 'I will check the file.';
+    driver.setOnRun(async ctx => {
+      ctx.emit({ type: 'text', delta: preToolText });
+      await ctx.mcp.handler.onToolCall('read-call', 'read_file', { path: 'fixture.txt' }, ctx.signal);
+      // The driver outcome contains the entire native turn, not just this HTTP stream.
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: preToolText, finished: true, aborted: false });
+    });
+    const initial = [BASE_SYSTEM, user('Read a file.')];
+    const first = await send(service, initial);
+    assert.equal(first.terminal.reason, 'toolUse');
+    assert.equal(messageText(first.terminal.message), preToolText);
+
+    const continued = await send(service, [
+      ...initial, first.terminal.message, toolResult('read-call', 'read_file', 'actual result', 12),
+    ]);
+    assert.equal(continued.terminal.reason, 'stop');
+    assert.equal(messageText(continued.terminal.message), '');
+    assert.equal(driver.runs.length, 1, 'the tool result reenters the original native turn');
+  });
+});
 
 test('ACP rejects a tool result whose MCP waiter disappears during persistence and rebuilds on retry', { timeout: 15_000 }, async t => {
   await centerCase(t, 'delivery-race', async ({ driver, rootDir, service }) => {
@@ -187,6 +211,25 @@ test('ACP removes expired auxiliary context by rebuilding the next ordinary user
     assert.equal(driver.runs[1].request.conversationId, null);
     assert.ok(driver.runs[1].request.contextBlock.text.includes('Keep this real question.'));
     assert.ok(!JSON.stringify(driver.runs[1].request).includes('AUX_REMOVED_BEFORE_NEXT_TURN'));
+  });
+});
+
+test('ACP preserves a ready binding when a replacement replay exceeds the frame budget', { timeout: 15_000 }, async t => {
+  await centerCase(t, 'oversized-replay', async ({ driver, service }) => {
+    // Quotation marks are escaped once in the replay record and again in the frame.
+    const initial = [BASE_SYSTEM, user('"'.repeat(ANTIGRAVITY_MAX_FRAME_BYTES / 4))];
+    const first = await send(service, initial);
+    assert.equal(first.terminal.reason, 'stop');
+    const history = [...initial, first.terminal.message, user('Continue.')];
+    const changed = [{ ...BASE_SYSTEM, content: 'Changed SOUL.' }, ...history.slice(1)];
+    assert.ok(Buffer.byteLength(JSON.stringify(changed)) < ANTIGRAVITY_MAX_FRAME_BYTES);
+    const rejected = await send(service, changed);
+    assert.match(rejected.terminal.error?.errorMessage, /ACP frame budget/);
+    assert.equal(driver.runs.length, 1, 'oversized replay was never dispatched');
+
+    const restored = await send(service, history);
+    assert.equal(restored.terminal.reason, 'stop');
+    assert.equal(driver.runs[1].request.conversationId, driver.runs[0].assignedConversationId);
   });
 });
 
@@ -532,7 +575,7 @@ test('ACP reclaims an expired parked driver once its escalated tool call no long
         escalationAck = await ctx.mcp.handler.onToolCall('expired-call', 'read_file', { path: 'x' }, ctx.signal);
         finishTurn(ctx, 'native ended after the escalation acknowledgement');
       } else {
-        finishTurn(ctx, 'ordinary request after expiry');
+        finishTurn(ctx, 'ordinary request while the tool is parked');
       }
     });
 
@@ -544,6 +587,14 @@ test('ACP reclaims an expired parked driver once its escalated tool call no long
       assert.equal(first.terminal.reason, 'toolUse');
       expired = driver.runs[0];
       assert.ok(expired.driverState.active);
+
+      for (let index = 0; index < 64; index += 1) {
+        const result = await send(service, [BASE_SYSTEM, user(`Ordinary request ${index} while parked.`)], {
+          sessionId: `expired-parked-pressure-${index}`,
+        });
+        assert.equal(result.terminal.reason, 'stop');
+      }
+      assert.equal(driver.runs.length, 65);
 
       t.mock.timers.tick(20_001);
       await new Promise(setImmediate);
@@ -558,16 +609,9 @@ test('ACP reclaims an expired parked driver once its escalated tool call no long
       t.mock.timers.reset();
     }
 
-    for (let index = 0; index < 70; index += 1) {
-      const result = await send(service, [BASE_SYSTEM, user(`Post-expiry ordinary request ${index}.`)], {
-        sessionId: `expired-parked-pressure-${index}`,
-      });
-      assert.equal(result.terminal.reason, 'stop');
-    }
-    assert.equal(driver.runs.length, 71);
     const liveDrivers = () => driver.runs.filter(record => record.driverState.state !== 'dead');
     await waitUntil(() => expired.driverState.state === 'dead' && liveDrivers().length <= 64, {
-      timeoutMs: 5_000, label: 'expired parked driver to become eligible for idle eviction',
+      timeoutMs: 5_000, label: 'expired parked driver to be evicted without follow-up traffic',
     });
     assert.equal(expired.driverState.state, 'dead');
     assert.ok(liveDrivers().length <= 64);

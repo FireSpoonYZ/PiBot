@@ -8,7 +8,7 @@ import { connectCenter } from '../../host-core/center-client.js';
 import { registerAntigravityRoutes } from '../../center-server/antigravity-routes.js';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
 import {
-  ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH,
+  ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_MAX_FRAME_BYTES, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH,
 } from '../../center-contract/antigravity.js';
 import {
   createControlledAcpDriverHarness, openIsolatedAntigravity, drainEventStream,
@@ -299,7 +299,7 @@ test('invalid explicit requestIds never degrade into session-wide cancellation',
   }
 });
 
-test('a semantically invalid request cannot steal a parked native turn cancellation identity', { timeout: 15_000 }, async t => {
+test('rejected or cancelled replacements cannot steal a parked native turn cancellation identity', { timeout: 15_000 }, async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-parked-cancel-'));
   const service = openIsolatedAntigravity(rootDir);
@@ -318,6 +318,23 @@ test('a semantically invalid request cannot steal a parked native turn cancellat
       messages: [BASE_SYSTEM], turnContext: { inputIndex: null, auxiliaryIndices: [] },
     }, { signal: t.signal }));
     assert.equal(invalid.terminal?.type, 'error');
+
+    const oversized = payload('A replacement that would require a replay.');
+    oversized.messages.splice(1, 0, { role: 'user', content: '"'.repeat(ANTIGRAVITY_MAX_FRAME_BYTES / 4), timestamp: 9 });
+    oversized.turnContext.inputIndex = 2;
+    assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < ANTIGRAVITY_MAX_FRAME_BYTES);
+    const rejected = await drainEventStream(service.stream({
+      ...oversized, deviceId: DEVICE_ID, requestId: 'oversized',
+    }, { signal: t.signal }));
+    assert.match(rejected.terminal?.error?.errorMessage, /ACP frame budget/);
+    assert.equal(parkedNative.signal.aborted, false, 'a rejected replay cannot supersede the parked turn');
+
+    const replacement = service.stream({
+      ...payload('A replacement cancelled before dispatch.'), deviceId: DEVICE_ID, requestId: 'cancelled-replacement',
+    }, { signal: t.signal });
+    await service.cancel({ deviceId: DEVICE_ID, sessionId: SESSION_ID, requestId: 'cancelled-replacement' });
+    assert.equal((await drainEventStream(replacement)).terminal?.reason, 'aborted');
+
     assert.equal(driver.runs.length, 1);
     assert.equal(parkedNative.signal.aborted, false);
     await service.cancel({ deviceId: DEVICE_ID, sessionId: SESSION_ID, requestId: 'first' });
@@ -384,6 +401,30 @@ for (const abortPoint of ['before serial admission', 'during bridge startup']) {
     }
   });
 }
+
+test('logout cancels a stream still in preflight', { timeout: 15_000 }, async t => {
+  const fixture = await openCancelFixture(t);
+  const startupEntered = Promise.withResolvers();
+  const startupReleased = Promise.withResolvers();
+  const ensureStarted = SharedMcpBridge.prototype.ensureStarted;
+  t.mock.method(SharedMcpBridge.prototype, 'ensureStarted', async function () {
+    startupEntered.resolve();
+    await startupReleased.promise;
+    return ensureStarted.call(this);
+  });
+  fixture.driver.setOnRun(ctx => finishTurn(ctx, 'Dispatch after logout must not happen'));
+  try {
+    const result = drainEventStream(fixture.client.streamAntigravity(payload('Preflight during logout'), { signal: t.signal }));
+    await startupEntered.promise;
+    await fixture.service.logout();
+    startupReleased.resolve();
+    assert.equal((await result).terminal?.reason, 'aborted');
+    assert.equal(fixture.driver.runs.length, 0);
+  } finally {
+    startupReleased.resolve();
+    await fixture.close();
+  }
+});
 
 test('SharedMcpBridge close waits for an in-flight listen and leaves no listener', { timeout: 10_000 }, async () => {
   const bridge = new SharedMcpBridge();

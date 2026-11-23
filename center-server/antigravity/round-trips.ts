@@ -306,17 +306,19 @@ export class ToolRoundTrips {
 	#dead = new Map<string, { name: string; reason: string }>();
 	#escalations = new EscalationRegistry();
 	#escalateAfterMs: number | ((name: string) => number);
+	#onPendingEmpty?: () => void;
 	#getDriver: () => TurnDriver;
 	#log: (s: string, d?: unknown, level?: "debug" | "info" | "warn" | "error") => void;
 
 	constructor(
 		driver: TurnDriver | (() => TurnDriver),
 		log?: (s: string, d?: unknown, level?: "debug" | "info" | "warn" | "error") => void,
-		opts: { escalateAfterMs?: number | ((name: string) => number) } = {},
+		opts: { escalateAfterMs?: number | ((name: string) => number); onPendingEmpty?: () => void } = {},
 	) {
 		this.#getDriver = typeof driver === "function" ? driver : () => driver;
 		this.#log = log ?? (() => {});
 		this.#escalateAfterMs = opts.escalateAfterMs ?? defaultEscalateAfterMs;
+		this.#onPendingEmpty = opts.onPendingEmpty;
 	}
 
 	get pendingIds(): string[] {
@@ -385,8 +387,13 @@ export class ToolRoundTrips {
 		} else {
 			entry.reject(new Error(reason));
 		}
-		this.#getDriver().kickIdle();
+		this.#unparkDriver();
 		this.#log("round-trip-fail", { callId, name: entry.name, reason });
+	}
+
+	#unparkDriver(): void {
+		this.#getDriver().kickIdle();
+		if (this.#pending.size === 0) this.#onPendingEmpty?.();
 	}
 
 	onToolCall = (
@@ -471,7 +478,7 @@ export class ToolRoundTrips {
 				isError,
 			});
 		}
-		this.#getDriver().kickIdle();
+		this.#unparkDriver();
 		this.#log("round-trip-resolved", { callId: toolCallId, name: entry.name, isError });
 		return true;
 	}

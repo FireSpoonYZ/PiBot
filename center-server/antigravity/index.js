@@ -32,7 +32,6 @@ import {
 	toMcpToolDefinitions,
 	ToolRoundTrips,
 	toolsFromMessages,
-	appendText,
 } from "./round-trips.ts";
 import { makeSessionKey, SessionStore } from "./sessions.ts";
 import { AcpDriver } from "./vendor/acp/driver.ts";
@@ -174,7 +173,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		let slot = sessions.get(key);
 		if (slot) return slot;
 
-		let roundTrips;
 		const driver = new AcpDriver({
 			bin: profile.bin,
 			binArgs: ["acp", "--agent", AGENT_NAME, "--process-per-session"],
@@ -184,7 +182,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			mcpServers: () => [mcpBridge.serverConfig(slot.mcpToken)],
 			permissionPolicy: (req) => (isBridgePermissionRequest(req) ? "auto" : "deny"),
 		});
-		roundTrips = new ToolRoundTrips(driver);
+		const roundTrips = new ToolRoundTrips(driver, undefined, {
+			onPendingEmpty: () => void trimIdleSessions(),
+		});
 		driver.onTurnEnd = (outcome) => {
 			if (outcome.conversationId) {
 				roundTrips.stampConversation(outcome.conversationId);
@@ -207,8 +207,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			listTools: () => slot.currentTools,
 			allowedToolNames: new Set(),
 			activeConsumer: false,
-			requestId: undefined,
-			cancelEpoch: 0,
+			preflightRequest: null,
+			nativeOwner: null,
 			turnAbort: null,
 			turnCleanup: null,
 			serialChain: Promise.resolve(),
@@ -386,12 +386,12 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			return;
 		}
 		slot.activeConsumer = true;
-		// Update only after admission. A rejected parallel stream must not steal
-		// the cancellation identity of the running or parked native turn.
-		slot.requestId = requestId;
+		// Preflight can be cancelled without changing who owns a parked native turn.
+		const request = { requestId, cancelled: false };
+		slot.preflightRequest = request;
 		slot.serialUsers += 1;
 		slot.lastUsedAt = Date.now();
-		const startEpoch = slot.cancelEpoch;
+		const isCancelled = () => closed || signal?.aborted || request.cancelled;
 		let parked = false;
 		let compactionReclaimed = false;
 
@@ -405,7 +405,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		const releaseConsumer = () => {
 			if (consumerReleased) return;
 			consumerReleased = true;
-			detachCallerSignal(slot);
+			if (slot.preflightRequest === request) slot.preflightRequest = null;
+			if (slot.nativeOwner === request) detachCallerSignal(slot);
 			slot.activeConsumer = false;
 			slot.lastUsedAt = Date.now();
 		};
@@ -421,24 +422,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				finishConsumer("error", "Antigravity service is closed");
 				return;
 			}
-			if (signal?.aborted || slot.cancelEpoch !== startEpoch) {
-				throw createAbortError("Operation aborted");
-			}
-
-			ensureIsolatedProfile(profile);
-			await mcpBridge.ensureStarted();
-			if (signal?.aborted || slot.cancelEpoch !== startEpoch) {
-				throw createAbortError("Operation aborted");
-			}
-
-			const existing = store.get(slot.key);
-			const pendingIds = new Set(slot.roundTrips.pendingIds);
-			// Retirement or cancellation can change binding state while queued.
-			const { cleanMessages, inputIndex, inputRole, pairedIds, userPrompt, images, resume, error: inputError } =
-				inspectInput(existing, pendingIds);
-			if (inputError) {
-				finishConsumer("error", inputError);
-				return;
+			if (!isCancelled()) {
+				ensureIsolatedProfile(profile);
+				await mcpBridge.ensureStarted();
 			}
 
 			let nativeEpochForRequest = null;
@@ -446,10 +432,22 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				if (nativeEpochForRequest !== null && slot.deliveryFailure?.epoch === nativeEpochForRequest) {
 					throw slot.deliveryFailure.error;
 				}
-				if (closed || signal?.aborted || slot.cancelEpoch !== startEpoch) {
-					throw createAbortError("Operation aborted");
-				}
+				if (isCancelled()) throw createAbortError("Operation aborted");
 			};
+
+			const existing = store.get(slot.key);
+			const pendingIds = new Set(slot.roundTrips.pendingIds);
+			// Retirement or cancellation can change binding state while queued.
+			const { cleanMessages, inputIndex, inputRole, pairedIds, userPrompt, images, resume, error: inputError } =
+				inspectInput(existing, pendingIds);
+			// Early cancellation must still abort a compatible tool continuation's
+			// inherited turn. Check that compatibility before claiming the turn.
+			if (inputRole !== "toolResult" || inputError || closed) throwIfCancelled();
+			if (inputError) {
+				finishConsumer("error", inputError);
+				return;
+			}
+
 			const messageCount = cleanMessages.length;
 			const requestEnd = inputIndex + 1;
 			// A user is the actual prompt. A tool/assistant continuation is history
@@ -474,14 +472,14 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				slot.turnAbort && !slot.turnAbort.signal.aborted && slot.mcpRegistration &&
 				slot.nativeConfig?.modelId === modelId && slot.nativeConfig.reasoning === normalizedReasoning
 				? slot.driver.reentry() : null;
-			if (active) nativeEpochForRequest = slot.nativeEpoch;
 			const superseded = !active && (Boolean(slot.driver.activeHandle) || pendingIds.size > 0);
-			if (superseded) await abortSessionTurn(slot, "Context changed before tool continuation");
-			throwIfCancelled();
-
 			const mcpTools = toMcpToolDefinitions(toolsFromMessages(cleanMessages));
-			slot.currentTools = mcpTools;
-			slot.allowedToolNames = new Set(mcpTools.map((tool) => tool.name));
+			const claimNativeTurn = () => {
+				slot.preflightRequest = null;
+				slot.nativeOwner = request;
+				slot.currentTools = mcpTools;
+				slot.allowedToolNames = new Set(mcpTools.map((tool) => tool.name));
+			};
 			const reusable = !superseded && existing?.phase === "ready" && existing.turnRecallHook === true &&
 				existing.modelId === modelId && existing.reasoning === normalizedReasoning &&
 				sameAuxiliary && contextPrefixMatches(existing.checkpoint, historySnapshot);
@@ -571,15 +569,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						skipMessages,
 						auxiliaryIndices: resolvedTurn.historicalAuxiliaryIndices,
 					});
-					await markUncertain(conversationId);
-					throwIfCancelled();
-					detachCallerSignal(slot);
-					const turnAbort = new AbortController();
-					slot.turnAbort = turnAbort;
-					nativeEpochForRequest = registerTurnMcp(slot);
-					slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
-					attachCallerSignal(slot, signal);
-					throwIfCancelled();
 					const currentImages = spec.imagesInReplay && !conversationId ? [] : spec.images;
 					const fullPrompt = buildFullPrompt(
 						conversationId ? undefined : systemPromptFromMessages(cleanMessages),
@@ -601,6 +590,21 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						text: replay.text,
 					} : undefined;
 					assertPromptFits(fullPrompt, runImages, contextBlock);
+					// A rejected replay must leave the prior native turn and checkpoint untouched.
+					if (slot.nativeOwner !== request) {
+						claimNativeTurn();
+						if (superseded) await abortSessionTurn(slot, "Context changed before tool continuation");
+						throwIfCancelled();
+					}
+					await markUncertain(conversationId);
+					throwIfCancelled();
+					detachCallerSignal(slot);
+					const turnAbort = new AbortController();
+					slot.turnAbort = turnAbort;
+					nativeEpochForRequest = registerTurnMcp(slot);
+					slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
+					attachCallerSignal(slot, signal);
+					throwIfCancelled();
 					const contentBefore = JSON.stringify(blocks.partial.content);
 					const handle = await slot.driver.run({
 						cwd: profile.workspaceDir,
@@ -641,6 +645,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 
 			let result;
 			if (active) {
+				claimNativeTurn();
+				nativeEpochForRequest = slot.nativeEpoch;
+				throwIfCancelled();
 				await markUncertain(existing.conversationId);
 				throwIfCancelled();
 				attachCallerSignal(slot, signal);
@@ -709,9 +716,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			}
 			if (!outcome.conversationId) throw new Error("Antigravity completed without a conversation identity");
 			await awaitToolDeliveries();
-			if (!blocks.partial.content.some((part) => part.type === "text" && part.text) && outcome.response) {
-				appendText(stream, blocks, outcome.response);
-			}
+			// The driver already emitted text deltas; its outcome spans all tool continuations.
 			if (blocks.partial.content.length === 0) ensureTextOpen(stream, blocks);
 			blocks.partial.stopReason = "stop";
 			await rememberConversation(outcome.conversationId, "ready", blocks.partial);
@@ -720,16 +725,20 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			finishConsumer("stop");
 		} catch (err) {
 			invalidateAuthCacheIfNeeded(err);
-			await abortSessionTurn(slot, "Antigravity stream interrupted").catch(() => {});
-			const aborted = closed || signal?.aborted || slot.cancelEpoch !== startEpoch || err?.name === "AbortError";
+			if (slot.nativeOwner === request) {
+				await abortSessionTurn(slot, "Antigravity stream interrupted").catch(() => {});
+			}
+			const aborted = isCancelled() || err?.name === "AbortError";
 			const msg = redactText(err instanceof Error ? err.message : String(err));
 			finishConsumer(aborted ? "aborted" : "error", msg);
 		} finally {
 			releaseConsumer();
 			try {
-				if (slot.compaction && !parked && !slot.driver.activeHandle && slot.roundTrips.pendingIds.length === 0) {
+				const ownsNative = slot.nativeOwner === request;
+				if (slot.compaction && (!slot.nativeOwner || ownsNative) && !parked &&
+					!slot.driver.activeHandle && slot.roundTrips.pendingIds.length === 0) {
 					try {
-						await retireSessionResources(slot, "compaction finished", true);
+						await retireSessionResources(slot, "compaction finished", ownsNative);
 						compactionReclaimed = true;
 					} catch (error) {
 						console.warn(`[antigravity] compaction cleanup failed: ${redactText(String(error))}`);
@@ -955,7 +964,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			sessions.clear();
 			await Promise.allSettled(
 				allSlots.map(async (slot) => {
-					slot.cancelEpoch += 1;
+					if (slot.preflightRequest) slot.preflightRequest.cancelled = true;
+					if (slot.nativeOwner) slot.nativeOwner.cancelled = true;
 					detachCallerSignal(slot);
 					slot.roundTrips.failAll("Antigravity logged out", { includeEscalated: true });
 					if (slot.turnAbort && !slot.turnAbort.signal.aborted) {
@@ -1028,8 +1038,14 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			}
 			const slot = sessions.get(makeSessionKey(deviceId, sessionId));
 			if (!slot) return;
-			if (scoped && slot.requestId !== requestId) return;
-			slot.cancelEpoch += 1;
+			const pending = slot.preflightRequest;
+			if (pending && (!scoped || pending.requestId === requestId)) {
+				pending.cancelled = true;
+				if (scoped) return;
+			}
+			const owner = slot.nativeOwner;
+			if (!owner || (scoped && owner.requestId !== requestId)) return;
+			owner.cancelled = true;
 			await abortSessionTurn(slot, "Antigravity session cancelled");
 		},
 
