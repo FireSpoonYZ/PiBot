@@ -39,6 +39,12 @@ import type {
   ExternalVaultControlInput,
   ExternalVaultListResult,
   ExternalVaultStatus,
+  GoogleAssistantEventsResponse,
+  GoogleAssistantRemoveResponse,
+  GoogleAssistantResponse,
+  GoogleAssistantSaveRequest,
+  GoogleAssistantSetupRequest,
+  GoogleAssistantSetupResponse,
   GoogleAuthorizeRequest,
   GoogleAuthorizeResponse,
   GoogleCancelRequest,
@@ -528,6 +534,20 @@ export function createCenterApi(transport: CenterTransport) {
       req<{ rule?: GoogleRule; rules?: GoogleRule[] } | GoogleRule>('POST', '/api/google/rules/save', body),
     removeGoogleRule: (body: GoogleRuleRemoveRequest) =>
       req<{ removed?: boolean; ok?: boolean } | void>('POST', '/api/google/rules/remove', body),
+    getGoogleAssistant: () => req<GoogleAssistantResponse>('GET', '/api/google/assistant'),
+    saveGoogleAssistant: (body: GoogleAssistantSaveRequest) =>
+      req<GoogleAssistantResponse>('POST', '/api/google/assistant/save', body),
+    setupGoogleAssistant: (body: GoogleAssistantSetupRequest) =>
+      req<GoogleAssistantSetupResponse>('POST', '/api/google/assistant/setup', body),
+    removeGoogleAssistant: () =>
+      req<GoogleAssistantRemoveResponse>('POST', '/api/google/assistant/remove', {}),
+    listGoogleAssistantEvents: (limit?: number) => {
+      const qs =
+        typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+          ? `?limit=${Math.round(limit)}`
+          : '';
+      return req<GoogleAssistantEventsResponse>('GET', `/api/google/assistant/events${qs}`);
+    },
 
     // Webhooks
     listWebhooks: () => req<{ items: WebhookRoute[] }>('GET', '/api/webhooks'),

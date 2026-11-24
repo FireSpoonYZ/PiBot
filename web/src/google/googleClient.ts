@@ -6,8 +6,16 @@ import { centerAdminRequest, errorCodeOf, isCenterAuthOrBindError } from '../bot
 import type {
   BotBrowserControlCall,
   GoogleAccountView,
+  GoogleAssistantEventItem,
+  GoogleAssistantEventsResponse,
+  GoogleAssistantRemoveResponse,
+  GoogleAssistantResponse,
+  GoogleAssistantSaveRequest,
+  GoogleAssistantSetupRequest,
+  GoogleAssistantSetupResponse,
   GoogleAuthFlowStart,
   GoogleAuthFlowStatus,
+  GoogleBotSyncSnapshot,
   GoogleRuleDto,
   GoogleServiceChoice,
   GoogleSetupControlCall,
@@ -302,6 +310,104 @@ export async function removeGoogleRule(
     body: { id: input.id },
   });
   unwrapEnvelope<unknown>(raw);
+}
+
+export async function getGoogleAssistant(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+): Promise<GoogleAssistantResponse> {
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'GET',
+    path: '/api/google/assistant',
+  });
+  const data = unwrapEnvelope<GoogleAssistantResponse>(raw);
+  return {
+    assistant: data?.assistant ?? null,
+    runtime: data?.runtime ?? null,
+  };
+}
+
+export const fetchGoogleAssistant = getGoogleAssistant;
+
+export async function saveGoogleAssistant(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+  body: GoogleAssistantSaveRequest,
+): Promise<GoogleAssistantResponse> {
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'POST',
+    path: '/api/google/assistant/save',
+    body,
+  });
+  const data = unwrapEnvelope<GoogleAssistantResponse>(raw);
+  return {
+    assistant: data?.assistant ?? null,
+    runtime: data?.runtime ?? null,
+  };
+}
+
+export async function setupGoogleAssistant(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+  body: GoogleAssistantSetupRequest,
+): Promise<GoogleAssistantSetupResponse> {
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'POST',
+    path: '/api/google/assistant/setup',
+    body,
+  });
+  const data = unwrapEnvelope<GoogleAssistantSetupResponse>(raw);
+  return {
+    assistant: data?.assistant ?? null,
+    runtime: data?.runtime ?? null,
+    ...(data?.createdBot !== undefined ? { createdBot: data.createdBot } : {}),
+  };
+}
+
+export async function removeGoogleAssistant(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+): Promise<GoogleAssistantRemoveResponse> {
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'POST',
+    path: '/api/google/assistant/remove',
+    body: {},
+  });
+  const data = unwrapEnvelope<GoogleAssistantRemoveResponse>(raw);
+  return { removed: Boolean(data?.removed) };
+}
+
+export async function listGoogleAssistantEvents(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+  limit?: number,
+): Promise<GoogleAssistantEventsResponse> {
+  const qs =
+    typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+      ? `?limit=${Math.round(limit)}`
+      : '';
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'GET',
+    path: `/api/google/assistant/events${qs}`,
+  });
+  const data = unwrapEnvelope<GoogleAssistantEventsResponse | GoogleAssistantEventItem[]>(raw);
+  if (Array.isArray(data)) return { items: data };
+  return { items: Array.isArray(data?.items) ? data.items : [] };
+}
+
+export async function fetchGoogleBotSync(
+  api: DesktopPanelApi,
+  identity: DesktopIdentity,
+): Promise<GoogleBotSyncSnapshot> {
+  const raw = await centerAdminRequest<unknown>(api, identity, {
+    method: 'GET',
+    path: '/api/bot-sync',
+  });
+  const data = unwrapEnvelope<Partial<GoogleBotSyncSnapshot>>(raw);
+  return {
+    devices: Array.isArray(data?.devices) ? data.devices : [],
+    bots: Array.isArray(data?.bots) ? data.bots : [],
+  };
 }
 
 /**
