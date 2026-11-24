@@ -87,72 +87,78 @@
   font-size: var(--text-sm, 0.8125rem);
 }
 
-/* Questionnaire */
-.tp-questions {
-  display: grid;
-  gap: var(--space-3, 12px);
+/* ==========================================================================
+ * Redesigned Questionnaire (QA) Card — Warm Mineral Stone / Obsidian Moss
+ * Shared across Desktop main chat, Mobile chat, and Desktop Pet bubbles.
+ * ========================================================================== */
+
+.qa-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
   min-width: 0;
-}
-
-.tp-question {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  display: grid;
-  gap: var(--space-2, 8px);
-  min-width: 0;
-}
-
-.tp-question.is-unanswered {
-  padding: var(--space-2, 8px) 10px;
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid var(--state-danger-border, var(--border-default));
-  background: var(--state-danger-soft, transparent);
-}
-
-.tp-question-text {
-  font-size: var(--text-base, 0.875rem);
-  font-weight: var(--weight-semibold, 600);
-  line-height: 1.45;
-  padding: 0;
+  max-width: 100%;
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  box-shadow: var(--shadow-control);
   color: var(--ink-primary, var(--color-text, var(--text)));
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
-.tp-question-header {
-  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
-  font-weight: var(--weight-semibold, 600);
+.qa-card.is-bubble {
+  border: 0;
+  border-radius: 17px;
+  box-shadow: none;
+  background: transparent;
 }
 
-.tp-question-hint {
-  font-weight: var(--weight-regular, 400);
-  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
-}
-
-.tp-options {
-  display: grid;
-  gap: var(--space-1, 4px);
-  min-width: 0;
-}
-
-.tp-option {
-  position: relative;
+.qa-stepper {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-2, 8px);
-  min-height: var(--tap-min, 44px);
-  padding: var(--space-2, 8px) var(--space-3, 12px);
-  border-radius: var(--radius-sm, 8px);
-  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
-  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+}
+
+.qa-card.is-bubble .qa-stepper {
+  padding: 10px 13px 8px;
+}
+
+.qa-steps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.qa-step-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  max-width: 100%;
+  padding: 0 9px;
+  border-radius: var(--radius-xs, 6px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
   cursor: pointer;
   touch-action: manipulation;
   transition:
     background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
-    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
 }
 
-.tp-option::before {
+.qa-step-pill::before {
   content: '';
   position: absolute;
   top: 50%;
@@ -163,60 +169,714 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .tp-option:hover {
-    border-color: var(--border-default, var(--color-line, var(--line)));
-    background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  .qa-step-pill:hover {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
   }
 }
 
-.tp-option:active {
-  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
-}
-
-.tp-option:has(input:focus-visible) {
+.qa-step-pill:focus-visible {
   outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
-.tp-option.is-selected {
-  border-color: var(--signal-primary-border, var(--signal-primary, var(--color-primary)));
+.qa-step-pill.is-current {
   background: var(--signal-primary-soft, var(--color-primary-soft));
+  border-color: var(--signal-primary-border, var(--signal-primary, var(--color-primary)));
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+  font-weight: var(--weight-semibold, 600);
 }
 
-.tp-option input {
-  margin: 3px 0 0;
-  padding: 0;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
-  min-height: 18px;
+.qa-step-pill.is-done:not(.is-current) {
+  color: var(--state-live-ink, var(--state-live, var(--ok)));
+}
+
+.qa-step-num {
   flex: none;
-  accent-color: var(--signal-primary, var(--color-primary, var(--accent)));
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full, 999px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: var(--weight-semibold, 600);
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
 }
 
-.tp-option input:focus-visible {
-  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
-  outline-offset: 2px;
+.qa-step-pill.is-current .qa-step-num {
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+  color: var(--signal-primary-ink, var(--color-on-primary, var(--bg)));
 }
 
-.tp-option-body {
-  display: grid;
-  gap: 2px;
+.qa-step-pill.is-done:not(.is-current) .qa-step-num {
+  background: var(--state-live-soft, var(--ok-soft));
+  color: var(--state-live, var(--ok));
+}
+
+.qa-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qa-stepper-right {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qa-step-counter {
+  font-size: var(--text-2xs, 0.6875rem);
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-muted, var(--color-text-subtle, var(--muted)));
+}
+
+.qa-dismiss-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs, 6px);
+  background: transparent;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .qa-dismiss-btn:hover {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+}
+
+.qa-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+  padding: 14px 16px 12px;
   min-width: 0;
 }
 
-.tp-option-label {
+.qa-card.is-bubble .qa-body {
+  padding: 11px 13px 10px;
+  gap: 10px;
+  max-height: 310px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.qa-section {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.qa-section.is-unanswered {
+  padding: var(--space-2, 8px) 10px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--state-danger-border, var(--border-default));
+  background: var(--state-danger-soft, transparent);
+}
+
+.qa-eyebrow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+
+.qa-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs, 6px);
+  background: var(--signal-primary-soft, var(--color-primary-soft));
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+  font-size: var(--text-2xs, 0.6875rem);
+  font-weight: var(--weight-semibold, 600);
+  letter-spacing: 0.01em;
+}
+
+.qa-eyebrow-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qa-multi-hint,
+.qa-readonly-tag {
+  font-size: var(--text-2xs, 0.6875rem);
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+.qa-prompt {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0 0 2px;
+  font-size: var(--text-md, 0.9375rem);
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.44;
+  letter-spacing: -0.01em;
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.qa-card.is-bubble .qa-prompt {
+  font-size: 14px;
+}
+
+.qa-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qa-sr-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.qa-opt {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-card.is-bubble .qa-opt {
+  padding: 8px 10px;
+  gap: 9px;
+}
+
+.qa-opt::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .qa-opt:hover {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    border-color: var(--border-default, var(--color-line, var(--line)));
+  }
+}
+
+.qa-opt:active {
+  transform: scale(0.988);
+}
+
+.qa-opt:has(input:focus-visible) {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
+.qa-opt.is-selected {
+  background: var(--signal-primary-soft, var(--color-primary-soft));
+  border-color: var(--signal-primary-border, var(--signal-primary, var(--color-primary)));
+}
+
+.qa-opt:has(input:disabled) {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.qa-indicator {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  margin-top: 2px;
+  border-radius: var(--radius-full, 999px);
+  border: 1.5px solid var(--border-strong, var(--color-line, var(--line)));
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--signal-primary-ink, var(--color-on-primary, var(--bg)));
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-indicator.is-check {
+  border-radius: 5px;
+}
+
+.qa-opt.is-selected .qa-indicator,
+.qa-custom-row.is-active .qa-indicator {
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+  border-color: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.qa-indicator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--signal-primary-ink, var(--color-on-primary, var(--bg)));
+  transform: scale(0);
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-opt.is-selected .qa-indicator-dot,
+.qa-custom-row.is-active .qa-indicator-dot {
+  transform: scale(1);
+}
+
+.qa-indicator svg {
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-opt.is-selected .qa-indicator svg,
+.qa-custom-row.is-active .qa-indicator svg {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.qa-opt-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qa-opt-label {
   font-size: var(--text-sm, 0.8125rem);
   font-weight: var(--weight-medium, 500);
+  line-height: 1.38;
   color: var(--ink-primary, var(--color-text, var(--text)));
   overflow-wrap: anywhere;
 }
 
-.tp-option-desc {
+.qa-opt.is-selected .qa-opt-label {
+  font-weight: var(--weight-semibold, 600);
+}
+
+.qa-opt-desc {
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.45;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  overflow-wrap: anywhere;
+}
+
+.qa-opt-key {
+  flex: none;
+  align-self: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  color: var(--ink-muted, var(--color-text-subtle, var(--muted)));
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qa-opt.is-selected .qa-opt-key {
+  border-color: var(--signal-primary-border, var(--signal-primary, var(--color-primary)));
+  background: transparent;
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+/* Integrated custom answer row */
+.qa-custom-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--border-default, var(--color-line, var(--line)));
+  background: transparent;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-card.is-bubble .qa-custom-row {
+  padding: 8px 10px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .qa-custom-row:hover {
+    border-color: var(--border-strong, var(--color-line, var(--line)));
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  }
+}
+
+.qa-custom-row.is-active {
+  border-style: solid;
+  border-color: var(--signal-primary-border, var(--signal-primary, var(--color-primary)));
+  background: var(--signal-primary-soft, var(--color-primary-soft));
+}
+
+.qa-custom-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: var(--text-sm, 0.8125rem);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.qa-custom-row.is-active .qa-custom-trigger {
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  font-weight: var(--weight-medium, 500);
+}
+
+.qa-custom-trigger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.qa-custom-trigger:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.qa-custom-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.qa-custom-input,
+.qa-note-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  font-size: var(--text-sm, 0.8125rem);
+  line-height: 1.4;
+  transition:
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-note-input {
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+}
+
+.qa-custom-input:focus,
+.qa-note-input:focus {
+  border-color: var(--signal-primary, var(--color-primary, var(--accent)));
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  outline: none;
+}
+
+.qa-custom-input:focus-visible,
+.qa-note-input:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 1px;
+}
+
+.qa-custom-input:disabled,
+.qa-note-input:disabled {
+  opacity: 0.55;
+}
+
+/* Clean airy footer */
+.qa-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+}
+
+.qa-card.is-bubble .qa-footer {
+  padding: 9px 13px 11px;
+}
+
+.qa-foot-left,
+.qa-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qa-foot-right {
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.qa-note-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-xs, 6px);
+  background: transparent;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-note-btn::before,
+.qa-btn-ghost::before,
+.qa-btn-secondary::before,
+.qa-btn-primary::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .qa-note-btn:hover:not(:disabled) {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+}
+
+.qa-note-btn.is-has {
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.qa-note-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.qa-btn-ghost,
+.qa-btn-secondary,
+.qa-btn-primary {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm, 8px);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    border-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.qa-btn-ghost {
+  border: 0;
+  background: transparent;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+}
+
+.qa-btn-secondary {
+  border: 1px solid var(--border-default, var(--color-line, var(--line)));
+  background: var(--surface-raised, var(--color-surface-2, var(--bg)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.qa-btn-primary {
+  border: 0;
+  padding: 0 14px;
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+  color: var(--signal-primary-ink, var(--color-on-primary, var(--bg)));
+  font-weight: var(--weight-semibold, 600);
+  box-shadow: var(--shadow-control);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .qa-btn-ghost:hover:not(:disabled) {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+  .qa-btn-secondary:hover:not(:disabled) {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    border-color: var(--border-strong, var(--color-line, var(--line)));
+  }
+  .qa-btn-primary:hover:not(:disabled) {
+    background: var(--signal-primary-hover, var(--signal-primary, var(--color-primary)));
+  }
+}
+
+.qa-btn-ghost:active:not(:disabled),
+.qa-btn-secondary:active:not(:disabled),
+.qa-btn-primary:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.qa-btn-ghost:focus-visible,
+.qa-btn-secondary:focus-visible,
+.qa-btn-primary:focus-visible,
+.qa-note-btn:focus-visible,
+.qa-dismiss-btn:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
+.qa-btn-ghost:disabled,
+.qa-btn-secondary:disabled,
+.qa-btn-primary:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* Settled / answered decision receipt */
+.qa-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 15px;
+}
+
+.qa-card.is-bubble .qa-receipt {
+  padding: 11px 13px;
+}
+
+.qa-receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+}
+
+.qa-receipt-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--state-live-ink, var(--state-live, var(--ok)));
+}
+
+.qa-receipt-status.is-cancelled {
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+.qa-receipt-empty {
   font-size: var(--text-xs, 0.75rem);
   color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
   line-height: 1.45;
+}
+
+.qa-receipt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.qa-receipt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.qa-receipt-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--text-xs, 0.75rem);
+  min-width: 0;
+}
+
+.qa-receipt-q {
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.qa-receipt-a {
+  flex: none;
+  max-width: 66%;
+  padding: 2px 9px;
+  border-radius: var(--radius-xs, 6px);
+  background: var(--surface-1, var(--color-surface-1, var(--surface)));
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+  font-weight: var(--weight-medium, 500);
+  overflow-wrap: anywhere;
+}
+
+.qa-receipt-subnote,
+.qa-receipt-note {
+  font-size: var(--text-2xs, 0.6875rem);
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  overflow-wrap: anywhere;
+}
+
+.qa-receipt-note {
+  padding-top: 7px;
+  border-top: 1px solid var(--border-subtle, var(--color-line, var(--line)));
 }
 
 /* OptionPreview: prose stays sans-serif with normal wrapping; ONLY code/pre uses monospace. */
@@ -475,27 +1135,34 @@
 }
 
 @media (pointer: coarse) {
-  .tp-option input {
-    width: 20px;
-    height: 20px;
-    min-width: 20px;
-    min-height: 20px;
+  .qa-opt {
+    min-height: var(--tap-min, 44px);
+    padding: 11px 12px;
   }
 
-  .tp-option-desc,
-  .tp-optional-fields > summary,
-  .tp-answer-notes,
+  .qa-opt-key {
+    display: none;
+  }
+
+  .qa-opt-desc,
+  .qa-receipt-note,
   .tp-preview {
     font-size: var(--text-sm, 0.8125rem);
   }
 
+  .qa-custom-input,
+  .qa-note-input,
   .tp-input {
+    min-height: var(--tap-min, 44px);
     font-size: var(--text-md, 0.9375rem);
   }
 
-  .tp-optional-fields > summary {
-    display: flex;
-    width: 100%;
+  .qa-btn-ghost,
+  .qa-btn-secondary,
+  .qa-btn-primary {
+    min-height: 38px;
+    padding: 0 14px;
+    font-size: var(--text-sm, 0.8125rem);
   }
 
   .tp-task-open-btn {
@@ -506,9 +1173,20 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tp-option,
+  .qa-step-pill,
+  .qa-opt,
+  .qa-indicator,
+  .qa-indicator-dot,
+  .qa-indicator svg,
+  .qa-custom-row,
+  .qa-custom-input,
+  .qa-note-input,
+  .qa-note-btn,
+  .qa-btn-ghost,
+  .qa-btn-secondary,
+  .qa-btn-primary,
+  .qa-dismiss-btn,
   .tp-input,
-  .tp-optional-fields > summary,
   .tp-btn {
     transition: none;
   }

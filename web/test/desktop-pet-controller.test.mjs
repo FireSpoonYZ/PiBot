@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDesktopPetController, projectPetMessages } from '../../desktop/web/src/pet/controller.ts';
+import {
+  createDesktopPetController,
+  projectPetCards,
+  projectPetMessages,
+} from '../../desktop/web/src/pet/controller.ts';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const history = (id, role, text, kind = 'pi.message') => ({ id, kind, messages: [{ role, text }] });
@@ -39,7 +43,11 @@ function harness(options = {}) {
       if (options.pending) return options.pending(identity, op, params);
       return { id: 'pending-one', state: op === 'pending_enqueue' ? 'queued' : 'accepted' };
     },
-    async call(identity, op, params) { calls.push({ identity, op, params }); return {}; },
+    async call(identity, op, params) {
+      calls.push({ identity, op, params });
+      if (options.call) return options.call(identity, op, params);
+      return {};
+    },
   };
   const snapshots = [];
   const controller = createDesktopPetController(api, snapshot => snapshots.push(snapshot), {
@@ -185,4 +193,170 @@ test('transcript respects reset boundary and excludes tool output', () => {
     { id: '3:0', role: 'user', text: 'New question' },
     { id: '5:0', role: 'assistant', text: 'New answer' },
   ]);
+});
+
+const sampleQuestionnaire = (overrides = {}) => ({
+  kind: 'questionnaire',
+  version: 1,
+  installationId: 'inst-qa',
+  conversationId: 7,
+  requestId: 'req-qa-1',
+  status: 'pending',
+  questions: [
+    {
+      header: '方式',
+      question: '希望怎么展示桌宠？',
+      options: [
+        { label: '多态气泡', description: '按类型以气泡呈现' },
+        { label: '传统弹窗', description: '固定小窗' },
+      ],
+    },
+  ],
+  ...overrides,
+});
+
+test('pet projects active running and durable questionnaires, settled receipt, handoff, and todo', () => {
+  const readyActivity = { phase: 'running', source: 'primary', scopeId: null, requestId: 't1', startedAt: null };
+  const runningCards = projectPetCards({
+    busy: true,
+    queuedCount: 0,
+    generation: null,
+    history: [],
+    tools: [
+      {
+        callId: 'call-qa',
+        name: 'ask_user_question',
+        status: 'running',
+        output: '',
+        truncated: false,
+        droppedBytes: 0,
+        droppedLines: 0,
+        presentation: sampleQuestionnaire(),
+      },
+      {
+        callId: 'call-vault',
+        name: 'vault_unlock',
+        status: 'running',
+        output: '',
+        truncated: false,
+        droppedBytes: 0,
+        droppedLines: 0,
+        presentation: {
+          kind: 'vault-unlock',
+          version: 1,
+          installationId: 'inst-v',
+          conversationId: 7,
+          requestId: 'vault-1',
+          mode: 'unlock',
+          status: 'pending',
+        },
+      },
+      {
+        callId: 'call-todo',
+        name: 'todo_write',
+        status: 'done',
+        output: '',
+        truncated: false,
+        droppedBytes: 0,
+        droppedLines: 0,
+        presentation: {
+          kind: 'todo',
+          version: 1,
+          installationId: 'inst-t',
+          tasks: [
+            { id: 1, subject: 'Step one', status: 'completed' },
+            { id: 2, subject: 'Step two', status: 'in_progress' },
+          ],
+        },
+      },
+    ],
+  }, readyActivity, true);
+
+  assert.equal(runningCards.questionnaire?.presentation.requestId, 'req-qa-1');
+  assert.equal(runningCards.questionnaire?.interactive, true);
+  assert.equal(runningCards.handoff?.kind, 'vault-unlock');
+  assert.equal(runningCards.todo?.tasks.length, 2);
+
+  // Durable wait in history stays active only when listed in durableWaits
+  const idleActivity = { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null };
+  const durableCards = projectPetCards({
+    busy: false,
+    queuedCount: 0,
+    generation: null,
+    tools: [],
+    durableWaits: [{ installationId: 'inst-qa', conversationId: 7, requestId: 'req-qa-1' }],
+    history: [
+      {
+        id: 10,
+        kind: 'pi.message',
+        messages: [{ role: 'toolResult', text: '', toolCallId: 'hist-qa', presentation: sampleQuestionnaire(), durableWait: true }],
+      },
+    ],
+  }, idleActivity, true);
+  assert.equal(durableCards.questionnaire?.presentation.requestId, 'req-qa-1');
+  assert.equal(durableCards.questionnaire?.interactive, true);
+
+  // When durableWaits is empty, stale pending questionnaire in history is NOT resurrected
+  const staleCards = projectPetCards({
+    busy: false,
+    queuedCount: 0,
+    generation: null,
+    tools: [],
+    durableWaits: [],
+    history: [
+      {
+        id: 10,
+        kind: 'pi.message',
+        messages: [{ role: 'toolResult', text: '', toolCallId: 'hist-qa', presentation: sampleQuestionnaire(), durableWait: true }],
+      },
+      {
+        id: 11,
+        kind: 'pi.message',
+        messages: [{
+          role: 'toolResult',
+          text: '',
+          toolCallId: 'hist-qa-done',
+          presentation: sampleQuestionnaire({
+            status: 'answered',
+            result: {
+              cancelled: false,
+              answers: [{ questionIndex: 0, question: '希望怎么展示桌宠？', kind: 'option', answer: '多态气泡' }],
+            },
+          }),
+        }],
+      },
+    ],
+  }, idleActivity, true);
+  assert.equal(staleCards.questionnaire, null);
+  assert.equal(staleCards.settledQuestionnaire?.status, 'answered');
+});
+
+test('pet answer-questionnaire reuses callCapabilityAction answerQuestionnaire and returns settled data', async () => {
+  const h = harness({
+    call: async (_identity, op, params) => {
+      assert.equal(op, 'callCapabilityAction');
+      assert.equal(params.action, 'answerQuestionnaire');
+      return { result: { status: 'settled' } };
+    },
+  });
+  h.controller.start();
+  await settle();
+  const payload = {
+    conversationId: 7,
+    requestId: 'req-qa-1',
+    cancelled: false,
+    answers: [{ questionIndex: 0, selectedOptions: [0] }],
+  };
+  const result = await h.controller.handleAction(h.action('answer-questionnaire', {
+    installationId: 'inst-qa',
+    input: payload,
+  }));
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data, { status: 'settled' });
+  const call = h.calls.find(c => c.op === 'callCapabilityAction');
+  assert.equal(call.identity.targetDeviceId, 'local-device');
+  assert.equal(call.params.installationId, 'inst-qa');
+  assert.equal(call.params.request.botId, 'local-main');
+  assert.deepEqual(call.params.request.input, payload);
+  h.controller.stop();
 });

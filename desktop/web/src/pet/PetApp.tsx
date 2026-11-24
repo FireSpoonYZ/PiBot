@@ -1,18 +1,45 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  ArrowUp, ChevronDown, ChevronUp, ExternalLink, Mic, RefreshCw, Settings2, Square, Volume2, VolumeX, X,
+  AlertTriangle,
+  ArrowUp,
+  CheckCircle2,
+  Circle,
+  CircleDot,
+  ClipboardList,
+  ExternalLink,
+  History,
+  ListTodo,
+  Mic,
+  RefreshCw,
+  Settings2,
+  ShieldAlert,
+  Square,
+  Volume2,
+  VolumeX,
+  X,
 } from 'lucide-react';
+import type { QuestionnairePresentation } from '../../../../host-core/index.js';
 import { GrokBotAnimatedMark, resolveBotAvatarPreset } from '../../../../web/src/GrokBotAvatar';
 import { botActivityText, isBotActivityBusy } from '../../../../web/src/botActivity';
 import { classifyMarkdownLink } from '../../../../web/src/markdownLink';
+import {
+  ToolPresentationCard,
+  type QuestionnaireSubmitPayload,
+} from '../../../../web/src/ToolPresentation';
 import { useText } from '../../../../web/src/ui';
 import {
-  INITIAL_PET_SNAPSHOT, PET_EVENTS,
-  type DesktopPetAction, type DesktopPetResult, type DesktopPetSnapshot,
-  type DesktopPetWindowState, type PetDockSide, type PetPanelSide,
+  INITIAL_PET_SNAPSHOT,
+  PET_EVENTS,
+  type DesktopPetAction,
+  type DesktopPetResult,
+  type DesktopPetSnapshot,
+  type DesktopPetWindowState,
+  type PetDockSide,
+  type PetPanelSide,
+  type PetWindowHitRect,
 } from './protocol';
 import { resolvePetTheme } from './theme';
 import { createPetVoice, voiceError, type PetVoiceStatus } from './voice';
@@ -20,9 +47,17 @@ import { VoiceSettings } from './VoiceSettings';
 import { petWindow } from './windowApi';
 
 const AUTO_READ_KEY = 'pibot-desktop-pet-auto-read:v1';
+const AUTO_FADE_KEY = 'pibot-desktop-pet-auto-fade:v1';
+const DND_KEY = 'pibot-desktop-pet-dnd:v1';
+const COLLAPSED_W = 152;
+const COLLAPSED_H = 116;
+const STAGE_PAD = 6;
+const AUTO_FADE_MS = 10_000;
+
 const targetKey = (state: DesktopPetSnapshot) =>
   state.deviceId && state.botId ? state.deviceId + ':' + state.botId : '';
 const draftKey = (key: string) => 'pibot-desktop-pet-draft:v1:' + key;
+
 function readLocal(key: string): string {
   try { return localStorage.getItem(key) ?? ''; } catch { return ''; }
 }
@@ -32,10 +67,38 @@ function writeLocal(key: string, text: string): void {
     else localStorage.removeItem(key);
   } catch { /* The current editor remains usable when local storage is unavailable. */ }
 }
+
 const postAction = (action: DesktopPetAction) => emitTo('main', PET_EVENTS.action, action);
+
 type SendFlight = { id: string; key: string; text: string; assistantIds: Set<string> };
 type Recording = { key: string; start: Promise<void>; released: boolean };
 type WindowLayout = { dockSide: PetDockSide; panelSide: PetPanelSide; composited: boolean };
+type PendingRpc = { resolve: (result: DesktopPetResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+
+type BubbleDescriptor =
+  | { kind: 'settings'; id: 'settings' }
+  | { kind: 'voice'; id: string; text: string }
+  | {
+      kind: 'question';
+      id: string;
+      presentation: QuestionnairePresentation;
+      interactive: boolean;
+      interrupted?: boolean;
+      settledReceipt?: boolean;
+    }
+  | {
+      kind: 'handoff';
+      id: string;
+      title: string;
+      detail: string;
+      tone: 'attention' | 'info' | 'danger';
+      badge: string;
+      actionLabel?: string;
+      showRefresh?: boolean;
+    }
+  | { kind: 'thought'; id: string; text: string; canStop: boolean }
+  | { kind: 'speech'; id: string; text: string; streaming: boolean; promptQuote?: string; messageId?: string }
+  | { kind: 'progress'; id: string };
 
 const PetMarkdown = memo(function PetMarkdown({
   text,
@@ -80,19 +143,24 @@ export function PetApp() {
   const t = useText();
   const [snapshot, setSnapshot] = useState(INITIAL_PET_SNAPSHOT);
   const snapshotRef = useRef(snapshot);
-  const [expanded, setExpanded] = useState(false);
   const [layout, setLayout] = useState<WindowLayout>({
     dockSide: 'right',
     panelSide: 'top',
     composited: true,
   });
+  const [composerOpen, setComposerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [ctxMenuOpen, setCtxMenuOpen] = useState(false);
+  const [hoveringDock, setHoveringDock] = useState(false);
+  const [hoveringBubble, setHoveringBubble] = useState(false);
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
   const [notice, setNotice] = useState('');
   const [sendFlight, setSendFlight] = useState<SendFlight | null>(null);
   const sendFlightRef = useRef<SendFlight | null>(null);
   const [autoRead, setAutoRead] = useState(() => readLocal(AUTO_READ_KEY) === 'true');
+  const [autoFade, setAutoFade] = useState(() => readLocal(AUTO_FADE_KEY) === 'true');
+  const [dndMode, setDndMode] = useState(() => readLocal(DND_KEY) === 'true');
   const [replyToRead, setReplyToRead] = useState<SendFlight | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const speakTokenRef = useRef(0);
@@ -100,17 +168,26 @@ export function PetApp() {
   const [voice] = useState(() => createPetVoice({ onState: setVoiceStatus }));
   const recordingRef = useRef<Recording | null>(null);
   const [pageVisible, setPageVisible] = useState(!document.hidden);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
-  const pinnedRef = useRef(true);
+
+  // Bubble visibility & settlement tracking
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [forcedReplyId, setForcedReplyId] = useState<string | null>(null);
+  const [recentQuestionId, setRecentQuestionId] = useState<string | null>(null);
+  const initialReplyCapturedRef = useRef<string | null>(null);
+  const pendingRpcRef = useRef<Map<string, PendingRpc>>(new Map());
+
+  const stageRef = useRef<HTMLElement | null>(null);
+  const envelopeRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const pointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
-  const headerPointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const avatarPressValidRef = useRef(false);
+  const lastLayoutKeyRef = useRef('');
+  const focusPendingRef = useRef(false);
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
+
   const applyWindowState = useCallback((state: DesktopPetWindowState) => {
-    setExpanded(state.expanded);
     setLayout((prev) => ({
       dockSide: state.dockSide ?? prev.dockSide,
       panelSide: state.panelSide ?? prev.panelSide,
@@ -165,6 +242,36 @@ export function PetApp() {
     }
   }, [t]);
 
+  const dismissBubble = useCallback((id: string) => {
+    setDismissedIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    if (forcedReplyId === id) setForcedReplyId(null);
+    if (id.startsWith('q:')) setRecentQuestionId(null);
+    if (id === 'notice') setNotice('');
+  }, [forcedReplyId]);
+
+  const sendActionAwait = useCallback((action: DesktopPetAction): Promise<DesktopPetResult> => {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingRpcRef.current.delete(action.id);
+        reject(new Error(t('操作超时，请检查主窗口状态。', 'Action timed out. Check the main window.')));
+      }, 30_000);
+      pendingRpcRef.current.set(action.id, { resolve, reject, timer });
+      void postAction(action).catch((error) => {
+        const entry = pendingRpcRef.current.get(action.id);
+        if (entry) {
+          clearTimeout(entry.timer);
+          pendingRpcRef.current.delete(action.id);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    });
+  }, [t]);
+
+  // Listen to host state/result/window events
   useEffect(() => {
     let disposed = false;
     const unsubscribe: Array<() => void> = [];
@@ -176,10 +283,25 @@ export function PetApp() {
         const sessionChanged = Boolean(previousSession && payload.hostSessionId && previousSession !== payload.hostSessionId);
         const nextKey = targetKey(payload);
         snapshotRef.current = payload;
+
+        // Capture existing latest assistant message ID on first ready snapshot so opening
+        // the pet stays calm & ambient instead of popping old history immediately.
+        if (initialReplyCapturedRef.current === null && payload.connection === 'ready') {
+          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
+          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
+        }
+
+        if (payload.questionnaire?.presentation.requestId) {
+          setRecentQuestionId(payload.questionnaire.presentation.requestId);
+        }
+
         if (previousKey !== nextKey) {
           cancelRecording();
           stopReading();
           setReplyToRead(null);
+          setRecentQuestionId(null);
+          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
+          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
           const text = nextKey ? readLocal(draftKey(nextKey)) : '';
           draftRef.current = text;
           setDraft(text);
@@ -198,8 +320,16 @@ export function PetApp() {
       });
       if (disposed) { stateListener(); return; }
       unsubscribe.push(stateListener);
+
       const resultListener = await listen<DesktopPetResult>(PET_EVENTS.result, ({ payload }) => {
         if (disposed) return;
+        const rpc = pendingRpcRef.current.get(payload.id);
+        if (rpc) {
+          clearTimeout(rpc.timer);
+          pendingRpcRef.current.delete(payload.id);
+          if (payload.ok) rpc.resolve(payload);
+          else rpc.reject(new Error(payload.message || t('操作未完成，请打开主窗口查看。', 'Action failed. Check the main window.')));
+        }
         const queued = payload.queuedDraft;
         if (queued) {
           const key = queued.deviceId + ':' + queued.botId;
@@ -214,7 +344,6 @@ export function PetApp() {
           sendFlightRef.current = null;
           setSendFlight(null);
           if (payload.ok || payload.pendingId) {
-            // Clear only the exact draft that was queued; preserve subsequent editing.
             if (readLocal(draftKey(flight.key)) === flight.text) writeLocal(draftKey(flight.key), '');
             if (targetKey(snapshotRef.current) === flight.key && draftRef.current === flight.text) {
               draftRef.current = '';
@@ -223,28 +352,48 @@ export function PetApp() {
             if (payload.ok) setReplyToRead(flight);
           }
         }
-        if (payload.message) setNotice(payload.message);
-        else if (!payload.ok) setNotice(t('操作未完成，请打开主窗口查看。', 'Open the main window to check this action.'));
+        if (!rpc) {
+          if (payload.message) setNotice(payload.message);
+          else if (!payload.ok) setNotice(t('操作未完成，请打开主窗口查看。', 'Open the main window to check this action.'));
+        }
       });
       if (disposed) { resultListener(); return; }
       unsubscribe.push(resultListener);
+
       const windowListener = await listen<DesktopPetWindowState>(PET_EVENTS.window, ({ payload }) => {
         if (disposed) return;
         applyWindowState(payload);
-        if (!payload.visible) { cancelRecording(); stopReading(); }
+        if (!payload.visible) {
+          cancelRecording();
+          stopReading();
+          setComposerOpen(false);
+          setSettingsOpen(false);
+          setCtxMenuOpen(false);
+        }
       });
       if (disposed) { windowListener(); return; }
       unsubscribe.push(windowListener);
+
       const windowState = await petWindow('status');
       if (disposed) return;
       applyWindowState(windowState);
       await postAction({ id: crypto.randomUUID(), kind: 'ready' });
     };
     void install().catch(report);
-    return () => { disposed = true; unsubscribe.forEach((stop) => stop()); };
+    return () => {
+      disposed = true;
+      unsubscribe.forEach((stop) => stop());
+      pendingRpcRef.current.forEach((entry) => {
+        clearTimeout(entry.timer);
+        entry.reject(new Error('Disposed'));
+      });
+      pendingRpcRef.current.clear();
+    };
   }, [applyWindowState, cancelRecording, report, stopReading, t]);
 
   useEffect(() => () => { voice.dispose(); }, [voice]);
+
+  // Theme & page visibility sync
   useEffect(() => {
     const visibility = () => setPageVisible(!document.hidden);
     const mql = typeof window.matchMedia === 'function'
@@ -269,32 +418,49 @@ export function PetApp() {
     };
   }, []);
 
-  const setWindowExpanded = useCallback(async (next: boolean) => {
-    if (!next) { cancelRecording(); setSettingsOpen(false); }
-    const state = await petWindow('set-expanded', next);
-    applyWindowState(state);
-    if (state.expanded) await postAction({ id: crypto.randomUUID(), kind: 'refresh' });
-  }, [applyWindowState, cancelRecording]);
-
+  // Esc dismisses active transient layer cleanly
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
       if (recordingRef.current || voiceStatus.phase === 'transcribing') cancelRecording();
       else if (voiceStatus.phase === 'speaking') stopReading();
+      else if (ctxMenuOpen) setCtxMenuOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
-      else if (expanded) void setWindowExpanded(false).catch(report);
+      else if (composerOpen) setComposerOpen(false);
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [cancelRecording, expanded, report, setWindowExpanded, settingsOpen, stopReading, voiceStatus.phase]);
+  }, [cancelRecording, composerOpen, ctxMenuOpen, settingsOpen, stopReading, voiceStatus.phase]);
+
+  // Auto-focus composer textarea when user opens the floating composer pill
   useEffect(() => {
-    if (expanded && !settingsOpen) composerRef.current?.focus();
-  }, [expanded, settingsOpen]);
+    if (composerOpen && !settingsOpen) {
+      focusPendingRef.current = true;
+      const timer = setTimeout(() => composerRef.current?.focus(), 40);
+      return () => clearTimeout(timer);
+    }
+  }, [composerOpen, settingsOpen]);
+
+  // Auto-grow composer textarea (1–3 lines)
   useEffect(() => {
-    const panel = transcriptRef.current;
-    if (panel && pinnedRef.current) panel.scrollTop = panel.scrollHeight;
-  }, [snapshot.messages, snapshot.streamingText, expanded]);
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 72) + 'px';
+  }, [draft, composerOpen]);
+
+  // Close context menu when clicking outside
+  useEffect(() => {
+    if (!ctxMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement | null)?.closest('.pet-ctx-menu')) {
+        setCtxMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [ctxMenuOpen]);
 
   const sendText = useCallback(async (text: string, expectedKey = targetKey(snapshotRef.current)) => {
     const state = snapshotRef.current;
@@ -310,6 +476,8 @@ export function PetApp() {
     sendFlightRef.current = flight;
     setSendFlight(flight);
     setNotice('');
+    setForcedReplyId(null);
+    setComposerOpen(false);
     stopReading();
     try {
       await postAction({ id: flight.id, kind: 'send', text, deviceId: state.deviceId, botId: state.botId });
@@ -319,6 +487,24 @@ export function PetApp() {
     }
   }, [report, stopReading, t]);
 
+  const submitQuestionnaire = useCallback(async (input: QuestionnaireSubmitPayload): Promise<unknown> => {
+    const state = snapshotRef.current;
+    const activeQ = state.questionnaire;
+    if (!state.deviceId || !state.botId || !activeQ) {
+      throw new Error(t('问卷已失效或主助手尚未连接。', 'Questionnaire is no longer active.'));
+    }
+    const result = await sendActionAwait({
+      id: crypto.randomUUID(),
+      kind: 'answer-questionnaire',
+      deviceId: state.deviceId,
+      botId: state.botId,
+      installationId: activeQ.presentation.installationId,
+      input,
+    });
+    return result.data;
+  }, [sendActionAwait, t]);
+
+  // Auto-read TTS for completed replies initiated from pet
   useEffect(() => {
     if (!replyToRead) return;
     if (!autoRead || targetKey(snapshot) !== replyToRead.key) { setReplyToRead(null); return; }
@@ -346,6 +532,7 @@ export function PetApp() {
       if (recordingRef.current === recording) { recordingRef.current = null; report(error); }
     });
   };
+
   const finishRecording = async () => {
     const recording = recordingRef.current;
     if (!recording || recording.released) return;
@@ -372,218 +559,971 @@ export function PetApp() {
   const recording = voiceStatus.phase === 'recording';
   const transcribing = voiceStatus.phase === 'transcribing';
   const speaking = voiceStatus.phase === 'speaking';
-  const connectionText = snapshot.connection === 'ready' ? botActivityText(snapshot.activity, t)
-    : snapshot.connection === 'connecting' ? t('连接中', 'Connecting')
-    : snapshot.connection === 'unconfigured' ? t('请先连接本机主助手', 'Connect the local main bot')
-    : t('已离线', 'Offline');
-  const statusText = recording ? t('正在听，松开发送', 'Listening · release to send')
-    : transcribing ? t('正在转写', 'Transcribing')
-    : speaking ? t('正在朗读', 'Speaking') : connectionText;
+  const canSend = snapshot.connection === 'ready' && !sendFlight && !snapshot.sending && !recording && !transcribing;
+
+  const latestReply = useMemo(() => {
+    for (let i = snapshot.messages.length - 1; i >= 0; i -= 1) {
+      const item = snapshot.messages[i];
+      if (item.role === 'assistant' && item.text.trim()) {
+        const prev = i > 0 && snapshot.messages[i - 1]?.role === 'user' ? snapshot.messages[i - 1].text : undefined;
+        return { message: item, promptQuote: prev };
+      }
+    }
+    return null;
+  }, [snapshot.messages]);
+
+  const latestUserText = useMemo(() => {
+    for (let i = snapshot.messages.length - 1; i >= 0; i -= 1) {
+      if (snapshot.messages[i].role === 'user' && snapshot.messages[i].text.trim()) {
+        return snapshot.messages[i].text;
+      }
+    }
+    return undefined;
+  }, [snapshot.messages]);
+
+  // Clear temporary settled questionnaire receipt automatically once Bot moves on or after 2.6s
+  const matchingSettledQuestion = useMemo(() => {
+    if (!recentQuestionId || snapshot.questionnaire) return null;
+    if (snapshot.settledQuestionnaire?.requestId === recentQuestionId) {
+      return snapshot.settledQuestionnaire;
+    }
+    return null;
+  }, [recentQuestionId, snapshot.questionnaire, snapshot.settledQuestionnaire]);
+
+  useEffect(() => {
+    if (!matchingSettledQuestion) return;
+    if (snapshot.streamingText) {
+      setRecentQuestionId(null);
+      return;
+    }
+    const timer = setTimeout(() => setRecentQuestionId(null), 2600);
+    return () => clearTimeout(timer);
+  }, [matchingSettledQuestion, snapshot.streamingText]);
+
+  // Polymorphic bubble priority arbitration (single clean bubble at a time)
+  const activeBubble = useMemo<BubbleDescriptor | null>(() => {
+    if (settingsOpen) {
+      return { kind: 'settings', id: 'settings' };
+    }
+    if (recording) {
+      return { kind: 'voice', id: 'voice:rec', text: t('正在听你说话…松开发送', 'Listening… release to send') };
+    }
+    if (transcribing) {
+      return { kind: 'voice', id: 'voice:stt', text: t('正在转写语音…', 'Transcribing…') };
+    }
+
+    // Priority 1: Active pending questionnaire (always pops up, even in DND)
+    if (snapshot.questionnaire) {
+      const qId = `q:${snapshot.questionnaire.presentation.requestId}`;
+      if (!dismissedIds.has(qId)) {
+        return {
+          kind: 'question',
+          id: qId,
+          presentation: snapshot.questionnaire.presentation,
+          interactive: snapshot.questionnaire.interactive,
+          interrupted: snapshot.questionnaire.interrupted,
+        };
+      }
+    }
+
+    // Priority 1b: Brief settled receipt right after answering (in pet or main window)
+    if (matchingSettledQuestion) {
+      const qId = `q-done:${matchingSettledQuestion.requestId}`;
+      if (!dismissedIds.has(qId)) {
+        return {
+          kind: 'question',
+          id: qId,
+          presentation: matchingSettledQuestion,
+          interactive: false,
+          settledReceipt: true,
+        };
+      }
+    }
+
+    // Priority 2: Security / browser / account handoff card (always pops up)
+    if (snapshot.handoff && !dismissedIds.has(`handoff:${snapshot.handoff.id}`)) {
+      const h = snapshot.handoff;
+      return {
+        kind: 'handoff',
+        id: `handoff:${h.id}`,
+        title: h.title,
+        detail: h.detail,
+        tone: h.tone,
+        badge: h.kind === 'vault-unlock' ? t('安全接力', 'Security') : t('主窗口接力', 'Handoff'),
+        actionLabel: h.actionLabel,
+      };
+    }
+
+    // Priority 2b: Local error notice or offline state when user opened composer / triggered error
+    const errText = notice || voiceStatus.error || snapshot.error;
+    if (errText && !dismissedIds.has(`err:${errText}`)) {
+      return {
+        kind: 'handoff',
+        id: `err:${errText}`,
+        title: snapshot.connection === 'offline'
+          ? t('本机主助手离线', 'Local main bot offline')
+          : snapshot.connection === 'unconfigured'
+            ? t('请先连接本机主助手', 'Connect local main bot')
+            : t('提示', 'Notice'),
+        detail: errText,
+        tone: snapshot.connection === 'ready' ? 'attention' : 'danger',
+        badge: snapshot.connection === 'ready' ? t('提示', 'Notice') : t('连接状态', 'Connection'),
+        actionLabel: t('打开主窗口', 'Open main window'),
+        showRefresh: snapshot.connection !== 'ready',
+      };
+    }
+
+    // Priority 3: Live streaming reply
+    if (snapshot.streamingText && !dndMode) {
+      const sid = `stream:${snapshot.generationId ?? 'live'}`;
+      if (!dismissedIds.has(sid)) {
+        return {
+          kind: 'speech',
+          id: sid,
+          text: snapshot.streamingText,
+          streaming: true,
+          promptQuote: latestUserText,
+        };
+      }
+    }
+
+    // Priority 4: Busy thinking / working thought bubble (or todo progress if available while busy)
+    if (busy && !dndMode) {
+      if (snapshot.todo && snapshot.todo.tasks.some((item) => item.status !== 'completed')) {
+        const tid = `todo:${snapshot.todo.tasks.map((item) => `${item.id}:${item.status}`).join(',')}`;
+        if (!dismissedIds.has(tid)) {
+          return { kind: 'progress', id: tid };
+        }
+      }
+      const thoughtLabel = snapshot.activeToolName
+        ? t(`正在调用 ${snapshot.activeToolName}…`, `Running ${snapshot.activeToolName}…`)
+        : botActivityText(snapshot.activity, t);
+      return {
+        kind: 'thought',
+        id: 'thought:live',
+        text: thoughtLabel,
+        canStop: snapshot.canStop,
+      };
+    }
+
+    // Priority 5: Latest assistant reply (only for newly arrived replies or user-recalled reply)
+    if (latestReply) {
+      const rid = `speech:${latestReply.message.id}`;
+      const isFresh = initialReplyCapturedRef.current !== null && initialReplyCapturedRef.current !== rid;
+      const isForced = forcedReplyId === rid;
+      if ((isForced || (isFresh && !dndMode)) && !dismissedIds.has(rid)) {
+        return {
+          kind: 'speech',
+          id: rid,
+          text: latestReply.message.text,
+          streaming: false,
+          promptQuote: latestReply.promptQuote,
+          messageId: latestReply.message.id,
+        };
+      }
+    }
+
+    // Priority 6: Active Task / incomplete Todo card when idle
+    if (!dndMode && (snapshot.task || (snapshot.todo && snapshot.todo.tasks.some((item) => item.status !== 'completed')))) {
+      const pid = snapshot.task
+        ? `task:${snapshot.task.taskId}:${snapshot.task.status}:${snapshot.task.stepCount.done}`
+        : `todo-idle:${snapshot.todo?.tasks.length ?? 0}`;
+      if (!dismissedIds.has(pid)) {
+        return { kind: 'progress', id: pid };
+      }
+    }
+
+    return null;
+  }, [
+    busy,
+    dismissedIds,
+    dndMode,
+    forcedReplyId,
+    latestReply,
+    latestUserText,
+    matchingSettledQuestion,
+    notice,
+    recording,
+    settingsOpen,
+    snapshot,
+    t,
+    transcribing,
+    voiceStatus.error,
+  ]);
+
+  // Auto-fade completed speech bubbles when user enabled auto-fade
+  useEffect(() => {
+    if (!autoFade || !activeBubble || activeBubble.kind !== 'speech' || activeBubble.streaming) return;
+    if (hoveringBubble || speaking) return;
+    const bubbleId = activeBubble.id;
+    const timer = setTimeout(() => dismissBubble(bubbleId), AUTO_FADE_MS);
+    return () => clearTimeout(timer);
+  }, [activeBubble, autoFade, dismissBubble, hoveringBubble, speaking]);
+
+  // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
+  const syncNativeLayout = useCallback(() => {
+    const env = envelopeRef.current;
+    const stage = stageRef.current;
+    if (!env || !stage) return;
+
+    const envW = Math.ceil(env.scrollWidth + STAGE_PAD * 2);
+    const envH = Math.ceil(env.scrollHeight + STAGE_PAD * 2);
+    const hasOverlay = Boolean(activeBubble || composerOpen || ctxMenuOpen);
+    const width = hasOverlay ? Math.max(COLLAPSED_W, envW) : COLLAPSED_W;
+    const height = hasOverlay ? Math.max(COLLAPSED_H, envH) : COLLAPSED_H;
+
+    // Only include hit-rects once the viewport has caught up to the target size,
+    // preventing stale clipped regions while the window is still growing.
+    const stageRect = stage.getBoundingClientRect();
+    const sizeMatches =
+      Math.abs(stageRect.width - width) <= 4 && Math.abs(stageRect.height - height) <= 4;
+
+    const hitRects: PetWindowHitRect[] = [];
+    if (sizeMatches) {
+      const nodes = stage.querySelectorAll<HTMLElement>('[data-pet-hit="true"]');
+      nodes.forEach((node) => {
+        const r = node.getBoundingClientRect();
+        if (r.width <= 1 || r.height <= 1) return;
+        const pad = Number(node.dataset.petHitPad ?? '4');
+        const radius = Number(node.dataset.petHitRadius ?? '16');
+        hitRects.push({
+          x: Math.max(0, Math.floor(r.left - pad)),
+          y: Math.max(0, Math.floor(r.top - pad)),
+          width: Math.ceil(r.width + pad * 2),
+          height: Math.ceil(r.height + pad * 2),
+          radius,
+        });
+      });
+    }
+
+    const shouldFocus = focusPendingRef.current;
+    focusPendingRef.current = false;
+
+    const key = JSON.stringify([
+      width,
+      height,
+      shouldFocus,
+      hitRects.map((r) => [r.x, r.y, r.width, r.height]),
+    ]);
+    if (key === lastLayoutKeyRef.current) return;
+    lastLayoutKeyRef.current = key;
+
+    void petWindow('set-layout', undefined, { width, height, focus: shouldFocus, hitRects })
+      .then(applyWindowState)
+      .catch(() => { /* Window may be closing */ });
+  }, [activeBubble, applyWindowState, composerOpen, ctxMenuOpen]);
+
+  useLayoutEffect(() => {
+    const raf = requestAnimationFrame(syncNativeLayout);
+    return () => cancelAnimationFrame(raf);
+  }, [syncNativeLayout, hoveringDock, activeBubble, composerOpen, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
+
+  useEffect(() => {
+    const env = envelopeRef.current;
+    if (!env || typeof ResizeObserver !== 'function') return;
+    let raf = 0;
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(syncNativeLayout);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(env);
+    window.addEventListener('resize', schedule);
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      window.removeEventListener('resize', schedule);
+    };
+  }, [syncNativeLayout]);
+
   const avatar = snapshot.avatar ?? resolveBotAvatarPreset(targetKey(snapshot), snapshot.botName, true);
   const mascotState = recording ? 'listening' : transcribing ? 'thinking' : speaking ? 'dictating' : snapshot.mascotState;
-  const message = notice || voiceStatus.error || snapshot.error;
-  const canSend = snapshot.connection === 'ready' && !sendFlight && !snapshot.sending && !recording && !transcribing;
+  const petMood = recording
+    ? 'listening'
+    : activeBubble?.kind === 'question' && activeBubble.interactive
+      ? 'question'
+      : activeBubble?.kind === 'handoff'
+        ? 'handoff'
+        : busy || transcribing
+          ? 'thinking'
+          : 'idle';
+  const showDotBadge =
+    snapshot.connection !== 'ready' ||
+    recording ||
+    Boolean(snapshot.questionnaire?.interactive) ||
+    Boolean(snapshot.handoff);
+  const dotTone = recording || snapshot.connection === 'offline'
+    ? 'danger'
+    : snapshot.questionnaire?.interactive
+      ? 'primary'
+      : 'attention';
+
+  const canRecallReply = Boolean(latestReply && (!activeBubble || activeBubble.kind !== 'speech'));
 
   return (
     <main
+      ref={stageRef}
       className="pet-stage"
-      data-expanded={expanded ? 'true' : 'false'}
       data-dock-side={layout.dockSide}
       data-panel-side={layout.panelSide}
       data-composited={layout.composited ? 'true' : 'false'}
       aria-label={t('PiBot 桌宠', 'PiBot desktop pet')}
     >
-      {expanded && (
-        <section className="pet-chat" aria-label={t('与本机主助手对话', "Chat with this computer's main bot")}>
-          {settingsOpen ? <VoiceSettings onClose={() => setSettingsOpen(false)} /> : <>
-            <header
-              className="pet-header"
+      <div className="pet-envelope" ref={envelopeRef}>
+        {/* 1. POLYMORPHIC BUBBLE SLOT */}
+        {activeBubble ? (
+          <div
+            className="pet-bubble-wrap"
+            onPointerEnter={() => setHoveringBubble(true)}
+            onPointerLeave={() => setHoveringBubble(false)}
+          >
+            <section
+              className="pet-bubble"
+              data-variant={activeBubble.kind}
+              data-tone={activeBubble.kind === 'handoff' ? activeBubble.tone : undefined}
+              data-pet-hit="true"
+              data-pet-hit-pad="8"
+              data-pet-hit-radius={activeBubble.kind === 'thought' || activeBubble.kind === 'voice' ? '24' : '18'}
+              aria-label={t('桌宠气泡', 'Pet bubble')}
+            >
+              {activeBubble.kind === 'settings' ? (
+                <div className="pet-bubble-settings">
+                  <VoiceSettings onClose={() => setSettingsOpen(false)} />
+                </div>
+              ) : activeBubble.kind === 'voice' ? (
+                <div className="pet-thought-row">
+                  <span className="pet-thought-dots" aria-hidden="true">
+                    <span /><span /><span />
+                  </span>
+                  <span className="pet-thought-text">{activeBubble.text}</span>
+                </div>
+              ) : activeBubble.kind === 'thought' ? (
+                <div className="pet-thought-row">
+                  <span className="pet-thought-dots" aria-hidden="true">
+                    <span /><span /><span />
+                  </span>
+                  <span className="pet-thought-text">{activeBubble.text}</span>
+                  {activeBubble.canStop ? (
+                    <button
+                      type="button"
+                      className="pet-thought-stop"
+                      title={t('停止 Bot 当前任务', 'Stop bot task')}
+                      onClick={() => {
+                        const state = snapshotRef.current;
+                        if (state.deviceId && state.botId) {
+                          void postAction({
+                            id: crypto.randomUUID(),
+                            kind: 'stop',
+                            deviceId: state.deviceId,
+                            botId: state.botId,
+                          }).catch(report);
+                        }
+                      }}
+                    >
+                      <Square size={9} fill="currentColor" aria-hidden="true" />
+                      <span>{t('停止', 'Stop')}</span>
+                    </button>
+                  ) : null}
+                </div>
+              ) : activeBubble.kind === 'question' ? (
+                <ToolPresentationCard
+                  key={`${activeBubble.presentation.requestId}:${activeBubble.presentation.status}`}
+                  presentation={activeBubble.presentation}
+                  active={activeBubble.interactive}
+                  disabled={snapshot.connection !== 'ready'}
+                  questionnaireInterrupted={activeBubble.interrupted}
+                  variant="pet-bubble"
+                  onSubmit={activeBubble.interactive ? submitQuestionnaire : undefined}
+                  onDismissBubble={() => dismissBubble(activeBubble.id)}
+                />
+              ) : activeBubble.kind === 'handoff' ? (
+                <div className="pet-handoff-wrap">
+                  <div className="pet-handoff-head">
+                    <span className={`pet-handoff-badge is-${activeBubble.tone}`}>
+                      {activeBubble.tone === 'danger'
+                        ? <AlertTriangle size={12} aria-hidden="true" />
+                        : <ShieldAlert size={12} aria-hidden="true" />}
+                      <span>{activeBubble.badge}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="pet-mini-icon"
+                      title={t('收起', 'Dismiss')}
+                      aria-label={t('收起', 'Dismiss')}
+                      onClick={() => dismissBubble(activeBubble.id)}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                  <div className="pet-handoff-title">{activeBubble.title}</div>
+                  <p className="pet-handoff-desc">{activeBubble.detail}</p>
+                  <div className="pet-handoff-actions">
+                    {activeBubble.showRefresh ? (
+                      <button
+                        type="button"
+                        className="pet-handoff-ghost"
+                        onClick={() => void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(report)}
+                      >
+                        <RefreshCw size={12} aria-hidden="true" />
+                        <span>{t('刷新', 'Refresh')}</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="pet-handoff-ghost"
+                        onClick={() => dismissBubble(activeBubble.id)}
+                      >
+                        {t('稍后', 'Later')}
+                      </button>
+                    )}
+                    {activeBubble.actionLabel ? (
+                      <button
+                        type="button"
+                        className="pet-handoff-primary"
+                        onClick={() => {
+                          void petWindow('show-main').catch(report);
+                          dismissBubble(activeBubble.id);
+                        }}
+                      >
+                        <span>{activeBubble.actionLabel}</span>
+                        <ExternalLink size={12} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : activeBubble.kind === 'progress' ? (
+                <div className="pet-progress-wrap">
+                  {snapshot.todo && snapshot.todo.tasks.length > 0 ? (
+                    <>
+                      <div className="pet-progress-head">
+                        <span className="pet-progress-title">
+                          <ListTodo size={14} aria-hidden="true" />
+                          <span>{t('任务清单', 'Tasks')}</span>
+                        </span>
+                        <span className="pet-progress-count tabular-nums">
+                          {snapshot.todo.tasks.filter((item) => item.status === 'completed').length}/{snapshot.todo.tasks.length}
+                        </span>
+                      </div>
+                      <ul className="pet-todo-ul">
+                        {snapshot.todo.tasks.slice(0, 6).map((item) => (
+                          <li key={item.id} className={`pet-todo-li is-${item.status}`}>
+                            <span className="pet-todo-bullet" aria-hidden="true">
+                              {item.status === 'completed'
+                                ? <CheckCircle2 size={14} />
+                                : item.status === 'in_progress'
+                                  ? <CircleDot size={14} />
+                                  : <Circle size={14} />}
+                            </span>
+                            <span className="pet-todo-subject">{item.subject}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : snapshot.task ? (
+                    <>
+                      <div className="pet-progress-head">
+                        <span className="pet-progress-title">
+                          <ClipboardList size={14} aria-hidden="true" />
+                          <span>{snapshot.task.title}</span>
+                        </span>
+                        <span className="pet-progress-count tabular-nums">
+                          {snapshot.task.stepCount.total > 0
+                            ? `${snapshot.task.stepCount.done}/${snapshot.task.stepCount.total}`
+                            : snapshot.task.cardLabel}
+                        </span>
+                      </div>
+                      {snapshot.task.summary ? (
+                        <p className="pet-handoff-desc">{snapshot.task.summary}</p>
+                      ) : null}
+                    </>
+                  ) : null}
+                  <div className="pet-bubble-foot">
+                    <span className="pet-bubble-meta">{snapshot.botName}</span>
+                    <div className="pet-bubble-actions">
+                      <button
+                        type="button"
+                        className="pet-mini-btn"
+                        onClick={() => void petWindow('show-main').catch(report)}
+                      >
+                        <ExternalLink size={12} aria-hidden="true" />
+                        <span>{t('主窗口', 'Main')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="pet-mini-icon"
+                        title={t('收起', 'Dismiss')}
+                        aria-label={t('收起', 'Dismiss')}
+                        onClick={() => dismissBubble(activeBubble.id)}
+                      >
+                        <X size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* Speech reply bubble */
+                <div className="pet-speech-wrap">
+                  {activeBubble.promptQuote ? (
+                    <div className="pet-speech-quote" title={activeBubble.promptQuote}>
+                      <span>{t('你：', 'You: ')}{activeBubble.promptQuote}</span>
+                    </div>
+                  ) : null}
+                  <div className={`pet-speech-body${activeBubble.streaming ? ' pet-streaming' : ''}`}>
+                    <PetMarkdown text={activeBubble.text} onCopyLink={copyMarkdownLink} />
+                  </div>
+                  <div className="pet-bubble-foot">
+                    <span className="pet-bubble-meta">
+                      {activeBubble.streaming ? t('正在回复…', 'Replying…') : snapshot.botName}
+                    </span>
+                    <div className="pet-bubble-actions">
+                      {!activeBubble.streaming && activeBubble.messageId ? (
+                        <button
+                          type="button"
+                          className={`pet-mini-btn${speaking && speakingMessageId === activeBubble.messageId ? ' is-active' : ''}`}
+                          title={speaking && speakingMessageId === activeBubble.messageId ? t('停止朗读', 'Stop reading') : t('朗读', 'Read aloud')}
+                          onClick={() => {
+                            if (speaking && speakingMessageId === activeBubble.messageId) stopReading();
+                            else speakMessage(activeBubble.messageId!, activeBubble.text);
+                          }}
+                        >
+                          {speaking && speakingMessageId === activeBubble.messageId
+                            ? <VolumeX size={12} aria-hidden="true" />
+                            : <Volume2 size={12} aria-hidden="true" />}
+                          <span>{speaking && speakingMessageId === activeBubble.messageId ? t('停读', 'Mute') : t('朗读', 'Read')}</span>
+                        </button>
+                      ) : null}
+                      {activeBubble.streaming && snapshot.canStop ? (
+                        <button
+                          type="button"
+                          className="pet-thought-stop"
+                          onClick={() => {
+                            const state = snapshotRef.current;
+                            if (state.deviceId && state.botId) {
+                              void postAction({
+                                id: crypto.randomUUID(),
+                                kind: 'stop',
+                                deviceId: state.deviceId,
+                                botId: state.botId,
+                              }).catch(report);
+                            }
+                          }}
+                        >
+                          <Square size={9} fill="currentColor" aria-hidden="true" />
+                          <span>{t('停止', 'Stop')}</span>
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="pet-mini-btn"
+                        title={t('在主窗口继续', 'Continue in main window')}
+                        onClick={() => void petWindow('show-main').catch(report)}
+                      >
+                        <ExternalLink size={12} aria-hidden="true" />
+                        <span>{t('主窗口', 'Main')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="pet-mini-icon"
+                        title={t('收起气泡', 'Dismiss bubble')}
+                        aria-label={t('收起气泡', 'Dismiss bubble')}
+                        onClick={() => dismissBubble(activeBubble.id)}
+                      >
+                        <X size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                  {autoFade && !activeBubble.streaming && !hoveringBubble && !speaking ? (
+                    <div className="pet-autofade-bar" aria-hidden="true">
+                      <div className="pet-autofade-fill" />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <span className="pet-bubble-tail" aria-hidden="true" />
+            </section>
+          </div>
+        ) : null}
+
+        {/* 2. DOCK ROW: FLOATING QUICK COMPOSER PILL + MASCOT ACTOR */}
+        <div className="pet-dock-row">
+          {composerOpen && !settingsOpen ? (
+            <div className="pet-composer-area">
+              <form
+                className="pet-composer-pill"
+                data-pet-hit="true"
+                data-pet-hit-pad="6"
+                data-pet-hit-radius="24"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (canSend) void sendText(draft);
+                }}
+              >
+                <textarea
+                  ref={composerRef}
+                  rows={1}
+                  className="pet-composer-input"
+                  value={draft}
+                  aria-label={t('发送给本机主助手的消息', 'Message to the local main bot')}
+                  placeholder={snapshot.connection === 'ready'
+                    ? t(`和 ${snapshot.botName} 说点什么…`, `Ask ${snapshot.botName}…`)
+                    : t('本机主助手未连接…', 'Local main bot offline…')}
+                  disabled={!snapshot.botId}
+                  onChange={(event) => changeDraft(event.target.value)}
+                  onCompositionStart={() => { composingRef.current = true; }}
+                  onCompositionEnd={() => { composingRef.current = false; }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === 'Enter' &&
+                      !event.shiftKey &&
+                      !composingRef.current &&
+                      !event.nativeEvent.isComposing &&
+                      event.nativeEvent.keyCode !== 229
+                    ) {
+                      event.preventDefault();
+                      if (canSend) void sendText(draft);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className={`pet-pill-mic${recording ? ' is-listening' : ''}`}
+                  disabled={!canSend && !recording}
+                  title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
+                  aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    beginRecording();
+                  }}
+                  onPointerUp={(event) => {
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                    void finishRecording();
+                  }}
+                  onPointerCancel={cancelRecording}
+                  onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
+                >
+                  <Mic size={15} aria-hidden="true" />
+                </button>
+                {snapshot.canStop && !draft.trim() ? (
+                  <button
+                    type="button"
+                    className="pet-pill-stop"
+                    title={t('停止当前任务', 'Stop task')}
+                    aria-label={t('停止当前任务', 'Stop task')}
+                    onClick={() => {
+                      const state = snapshotRef.current;
+                      if (state.deviceId && state.botId) {
+                        void postAction({
+                          id: crypto.randomUUID(),
+                          kind: 'stop',
+                          deviceId: state.deviceId,
+                          botId: state.botId,
+                        }).catch(report);
+                      }
+                    }}
+                  >
+                    <Square size={11} fill="currentColor" aria-hidden="true" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    className="pet-pill-send"
+                    disabled={!canSend || !draft.trim()}
+                    title={t('发送', 'Send')}
+                    aria-label={t('发送', 'Send')}
+                  >
+                    <ArrowUp size={16} aria-hidden="true" />
+                  </button>
+                )}
+              </form>
+              {canRecallReply ? (
+                <div className="pet-composer-sub" data-pet-hit="true" data-pet-hit-pad="4" data-pet-hit-radius="12">
+                  <button
+                    type="button"
+                    className="pet-recall-chip"
+                    onClick={() => {
+                      if (!latestReply) return;
+                      const rid = `speech:${latestReply.message.id}`;
+                      setDismissedIds((prev) => {
+                        const next = new Set(prev);
+                        next.delete(rid);
+                        return next;
+                      });
+                      setForcedReplyId(rid);
+                    }}
+                  >
+                    <History size={11} aria-hidden="true" />
+                    <span>{t('查看上一条回复', 'Last reply')}</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div
+            className={`pet-dock${composerOpen ? ' is-composer-open' : ''}`}
+            data-mood={petMood}
+            onPointerEnter={() => setHoveringDock(true)}
+            onPointerLeave={() => setHoveringDock(false)}
+          >
+            {/* Hover micro action rail (hidden when idle; zero permanent clutter) */}
+            {!composerOpen ? (
+              <div
+                className={`pet-hover-rail${hoveringDock ? ' is-shown' : ''}`}
+                data-pet-hit={hoveringDock ? 'true' : undefined}
+                data-pet-hit-pad="6"
+                data-pet-hit-radius="16"
+                aria-label={t('桌宠快捷操作', 'Quick pet actions')}
+              >
+                <button
+                  type="button"
+                  className={`pet-rail-btn${recording ? ' is-recording' : ''}`}
+                  disabled={!canSend && !recording}
+                  title={t('按住直接说话', 'Hold to talk')}
+                  aria-label={t('按住直接说话', 'Hold to talk')}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    beginRecording();
+                  }}
+                  onPointerUp={(event) => {
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                    void finishRecording();
+                  }}
+                  onPointerCancel={cancelRecording}
+                >
+                  <Mic size={13} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="pet-rail-btn"
+                  title={t('打开主窗口', 'Open main window')}
+                  aria-label={t('打开主窗口', 'Open main window')}
+                  onClick={() => void petWindow('show-main').catch(report)}
+                >
+                  <ExternalLink size={12.5} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="pet-rail-btn"
+                  title={t('语音设置', 'Voice settings')}
+                  aria-label={t('语音设置', 'Voice settings')}
+                  onClick={() => {
+                    cancelRecording();
+                    stopReading();
+                    focusPendingRef.current = true;
+                    setSettingsOpen((v) => !v);
+                  }}
+                >
+                  <Settings2 size={12.5} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  className="pet-rail-btn"
+                  title={t('隐藏桌宠', 'Hide pet')}
+                  aria-label={t('隐藏桌宠', 'Hide pet')}
+                  onClick={() => {
+                    cancelRecording();
+                    stopReading();
+                    void petWindow('hide').catch(report);
+                  }}
+                >
+                  <X size={12.5} aria-hidden="true" />
+                </button>
+              </div>
+            ) : null}
+
+            {/* Mascot Avatar Button */}
+            <button
+              type="button"
+              className="pet-avatar"
+              data-pet-hit="true"
+              data-pet-hit-pad="4"
+              data-pet-hit-radius="26"
+              aria-expanded={composerOpen}
+              aria-label={t('单击对话，拖动移动，右键菜单', 'Click to chat, drag to move, right-click for menu') + ' · ' + snapshot.botName}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                focusPendingRef.current = true;
+                setCtxMenuOpen((open) => !open);
+              }}
               onPointerDown={(event) => {
-                if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
-                headerPointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+                if (event.button !== 0) return;
+                setCtxMenuOpen(false);
+                avatarPressValidRef.current = true;
+                pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
                 event.currentTarget.setPointerCapture(event.pointerId);
               }}
               onPointerMove={(event) => {
-                const pointer = headerPointerRef.current;
+                const pointer = pointerRef.current;
                 if (!pointer || pointer.id !== event.pointerId) return;
                 if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
-                headerPointerRef.current = null;
+                pointerRef.current = null;
+                avatarPressValidRef.current = false;
                 if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }
                 void petWindow('drag').catch(report);
               }}
-              onPointerUp={() => { headerPointerRef.current = null; }}
-              onPointerCancel={() => { headerPointerRef.current = null; }}
-              onLostPointerCapture={() => { headerPointerRef.current = null; }}
-            >
-              <div className="pet-heading">
-                <strong>{snapshot.botName}</strong>
-                <span>{t('本机主助手', 'Local main bot')}</span>
-              </div>
-              <button type="button" className="pet-icon" title={t('打开主窗口', 'Open main window')} aria-label={t('打开主窗口', 'Open main window')}
-                onClick={() => void petWindow('show-main').catch(report)}><ExternalLink size={16} /></button>
-              <button type="button" className="pet-icon" title={t('语音设置', 'Voice settings')} aria-label={t('语音设置', 'Voice settings')}
-                onClick={() => { cancelRecording(); stopReading(); setSettingsOpen(true); }}><Settings2 size={16} /></button>
-              <button type="button" className="pet-icon" title={t('收起对话', 'Collapse chat')} aria-label={t('收起对话', 'Collapse chat')}
-                onClick={() => void setWindowExpanded(false).catch(report)}>
-                {layout.panelSide === 'bottom' ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-              </button>
-            </header>
-            <div className="pet-transcript" ref={transcriptRef} role="log" aria-live="off"
-              onScroll={(event) => { const el = event.currentTarget; pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
-              {!snapshot.messages.length && !snapshot.streamingText && (
-                <div className="pet-empty">
-                  <strong>{t('随时说两句', 'A small place to talk')}</strong>
-                  <p>{snapshot.connection === 'ready'
-                    ? t('输入消息，或按住麦克风说话。', 'Type a message, or hold the microphone to speak.')
-                    : t('连接本机主助手后即可对话。', "Connect this computer's main bot to start chatting.")}</p>
-                </div>
-              )}
-              {snapshot.messages.map((item) => {
-                const isReadingThis = speaking && speakingMessageId === item.id;
-                return (
-                  <article className={'pet-message pet-message-' + item.role} key={item.id}>
-                    {item.role === 'assistant'
-                      ? <PetMarkdown text={item.text} onCopyLink={copyMarkdownLink} />
-                      : <div className="pet-message-text">{item.text}</div>}
-                    {item.role === 'assistant' && (
-                      <button
-                        type="button"
-                        className={'pet-read' + (isReadingThis ? ' active' : '')}
-                        title={isReadingThis ? t('停止朗读', 'Stop reading') : t('朗读这条回复', 'Read this reply')}
-                        aria-label={isReadingThis ? t('停止朗读', 'Stop reading') : t('朗读这条回复', 'Read this reply')}
-                        aria-pressed={isReadingThis}
-                        onClick={() => {
-                          if (isReadingThis) stopReading();
-                          else speakMessage(item.id, item.text);
-                        }}
-                      >
-                        {isReadingThis ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                      </button>
-                    )}
-                  </article>
-                );
-              })}
-              {snapshot.streamingText && (
-                <article className="pet-message pet-message-assistant pet-streaming">
-                  <PetMarkdown text={snapshot.streamingText} onCopyLink={copyMarkdownLink} />
-                </article>
-              )}
-            </div>
-            {message && <div className="pet-notice" role="status">{message}</div>}
-            {snapshot.connection !== 'ready' && <div className="pet-reconnect">
-              <button type="button" onClick={() => void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(report)}><RefreshCw size={13} />{t('刷新', 'Refresh')}</button>
-              <button type="button" onClick={() => void petWindow('show-main').catch(report)}>{t('打开主窗口', 'Open main window')}</button>
-            </div>}
-            <form className="pet-composer" onSubmit={(event) => { event.preventDefault(); if (canSend) void sendText(draft); }}>
-              <textarea ref={composerRef} rows={2} value={draft}
-                aria-label={t('发送给本机主助手的消息', 'Message to the local main bot')}
-                placeholder={t('聊点什么…', 'Say something…')} disabled={!snapshot.botId}
-                onChange={(event) => changeDraft(event.target.value)}
-                onCompositionStart={() => { composingRef.current = true; }}
-                onCompositionEnd={() => { composingRef.current = false; }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey && !composingRef.current && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                    event.preventDefault(); if (canSend) void sendText(draft);
+              onPointerUp={() => { pointerRef.current = null; }}
+              onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
+              onLostPointerCapture={() => { pointerRef.current = null; }}
+              onClick={(event) => {
+                if (event.detail > 0 && !avatarPressValidRef.current) return;
+                avatarPressValidRef.current = false;
+                if (settingsOpen) {
+                  setSettingsOpen(false);
+                  return;
+                }
+                const next = !composerOpen;
+                if (next) {
+                  focusPendingRef.current = true;
+                  if (snapshotRef.current.connection !== 'ready') {
+                    setDismissedIds((prev) => {
+                      const cleaned = new Set<string>();
+                      prev.forEach((item) => { if (!item.startsWith('err:')) cleaned.add(item); });
+                      return cleaned;
+                    });
                   }
-                }} />
-              <div className="pet-composer-actions">
-                <button type="button" className={'pet-mic' + (recording ? ' active' : '')}
-                  disabled={!canSend && !recording} aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
-                  title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return;
-                    event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); beginRecording();
-                  }}
-                  onPointerUp={(event) => {
-                    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-                    void finishRecording();
-                  }}
-                  onPointerCancel={cancelRecording}
-                  onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
-                  onKeyDown={(event) => {
-                    if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); beginRecording(); }
-                  }}
-                  onKeyUp={(event) => {
-                    if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); void finishRecording(); }
-                  }}><Mic size={16} /><span>{recording ? t('松开发送', 'Release') : t('按住说话', 'Hold to talk')}</span></button>
-                <button type="button" className={'pet-icon' + (autoRead ? ' selected' : '')}
-                  aria-pressed={autoRead} aria-label={t('自动朗读桌宠回复', 'Read pet replies aloud')}
-                  title={t('自动朗读桌宠回复', 'Read pet replies aloud')}
-                  onClick={() => { const next = !autoRead; setAutoRead(next); writeLocal(AUTO_READ_KEY, String(next)); if (!next) stopReading(); }}>
-                  {autoRead ? <Volume2 size={16} /> : <VolumeX size={16} />}
-                </button>
-                {speaking && (
-                  <button type="button" className="pet-stop-audio" title={t('停止朗读', 'Stop reading')}
-                    aria-label={t('停止朗读', 'Stop reading')} onClick={stopReading}>
-                    <VolumeX size={13} /><span>{t('停读', 'Mute')}</span>
-                  </button>
-                )}
-                <span className="pet-action-spacer" />
-                {snapshot.canStop && (
-                  <button type="button" className="pet-stop"
-                    title={t('停止 Bot 当前任务', 'Stop bot task')} aria-label={t('停止 Bot 当前任务', 'Stop bot task')}
-                    onClick={() => {
-                      const state = snapshotRef.current;
-                      if (state.deviceId && state.botId) void postAction({
-                        id: crypto.randomUUID(), kind: 'stop', deviceId: state.deviceId, botId: state.botId,
-                      }).catch(report);
-                    }}>
-                    <Square size={10} fill="currentColor" /><span>{t('停止', 'Stop')}</span>
-                  </button>
-                )}
-                <button type="submit" className="pet-send" disabled={!canSend || !draft.trim()}
-                  title={t('发送', 'Send')} aria-label={t('发送', 'Send')}><ArrowUp size={18} /></button>
-              </div>
-            </form>
-          </>}
-        </section>
-      )}
-      <div className="pet-dock">
-        {!expanded && (
-          <button type="button" className="pet-close" title={t('隐藏桌宠', 'Hide pet')} aria-label={t('隐藏桌宠', 'Hide pet')}
-            onClick={() => { cancelRecording(); stopReading(); void petWindow('hide').catch(report); }}>
-            <X size={13} />
-          </button>
-        )}
-        <button type="button" className="pet-avatar" aria-expanded={expanded}
-          aria-label={t('点击对话，拖动移动桌宠', 'Click to chat, drag to move pet') + ' · ' + snapshot.botName + ' · ' + statusText}
-          onPointerDown={(event) => {
-            if (event.button !== 0) return;
-            avatarPressValidRef.current = true;
-            pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
-            event.currentTarget.setPointerCapture(event.pointerId);
-          }}
-          onPointerMove={(event) => {
-            const pointer = pointerRef.current;
-            if (!pointer || pointer.id !== event.pointerId) return;
-            if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
-            pointerRef.current = null;
-            avatarPressValidRef.current = false;
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }
-            void petWindow('drag').catch(report);
-          }}
-          onPointerUp={() => { pointerRef.current = null; }}
-          onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
-          onLostPointerCapture={() => { pointerRef.current = null; }}
-          onClick={(event) => {
-            // Require a non-dragged press for pointer clicks; keyboard/AT-SPI clicks have detail === 0.
-            if (event.detail > 0 && !avatarPressValidRef.current) return;
-            avatarPressValidRef.current = false;
-            void setWindowExpanded(!expanded).catch(report);
-          }}>
-          <GrokBotAnimatedMark seedId={targetKey(snapshot) || 'desktop-pet'} shape={avatar.shape} color={avatar.color}
-            state={mascotState} size={94} maxFrameRate={30}
-            isPlaying={pageVisible && (busy || recording || transcribing || speaking)}
-            isStatic={!busy && !recording && !transcribing && !speaking} />
-        </button>
-        <div className={'pet-status' + (busy ? ' busy' : '')} title={statusText} role="status">
-          <span className={'pet-status-dot ' + snapshot.connection} />
-          <span className="pet-status-text">{statusText}</span>
+                  void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(() => {});
+                } else {
+                  cancelRecording();
+                }
+                setComposerOpen(next);
+              }}
+            >
+              <GrokBotAnimatedMark
+                seedId={targetKey(snapshot) || 'desktop-pet'}
+                shape={avatar.shape}
+                color={avatar.color}
+                state={mascotState}
+                size={88}
+                maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
+                isPlaying={pageVisible}
+                isStatic={false}
+              />
+              {showDotBadge ? <span className={`pet-badge-dot is-${dotTone}`} aria-hidden="true" /> : null}
+            </button>
+          </div>
         </div>
+
+        {/* 3. RIGHT-CLICK CONTEXT MENU */}
+        {ctxMenuOpen ? (
+          <div
+            className="pet-ctx-menu"
+            role="menu"
+            data-pet-hit="true"
+            data-pet-hit-pad="4"
+            data-pet-hit-radius="12"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className="pet-ctx-item"
+              onClick={() => {
+                setCtxMenuOpen(false);
+                focusPendingRef.current = true;
+                setComposerOpen((v) => !v);
+              }}
+            >
+              <span>{composerOpen ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="pet-ctx-item"
+              onClick={() => {
+                setCtxMenuOpen(false);
+                void petWindow('show-main').catch(report);
+              }}
+            >
+              <span>{t('打开主窗口', 'Open main window')}</span>
+              <ExternalLink size={12} aria-hidden="true" />
+            </button>
+            <div className="pet-ctx-sep" />
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={autoRead}
+              className="pet-ctx-item"
+              onClick={() => {
+                const next = !autoRead;
+                setAutoRead(next);
+                writeLocal(AUTO_READ_KEY, String(next));
+                if (!next) stopReading();
+                setCtxMenuOpen(false);
+              }}
+            >
+              <span>{t('自动朗读回复', 'Auto-read replies')}</span>
+              <span className="pet-ctx-val">{autoRead ? t('开', 'On') : t('关', 'Off')}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={autoFade}
+              className="pet-ctx-item"
+              onClick={() => {
+                const next = !autoFade;
+                setAutoFade(next);
+                writeLocal(AUTO_FADE_KEY, String(next));
+                setCtxMenuOpen(false);
+              }}
+            >
+              <span>{t('回复 10 秒自动淡出', 'Auto-fade replies (10s)')}</span>
+              <span className="pet-ctx-val">{autoFade ? t('开', 'On') : t('关', 'Off')}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={dndMode}
+              className="pet-ctx-item"
+              onClick={() => {
+                const next = !dndMode;
+                setDndMode(next);
+                writeLocal(DND_KEY, String(next));
+                setCtxMenuOpen(false);
+              }}
+            >
+              <span>{t('勿扰（暂停主动冒泡）', 'Quiet mode')}</span>
+              <span className="pet-ctx-val">{dndMode ? t('开', 'On') : t('关', 'Off')}</span>
+            </button>
+            <div className="pet-ctx-sep" />
+            <button
+              type="button"
+              role="menuitem"
+              className="pet-ctx-item"
+              onClick={() => {
+                setCtxMenuOpen(false);
+                cancelRecording();
+                stopReading();
+                focusPendingRef.current = true;
+                setSettingsOpen(true);
+              }}
+            >
+              <span>{t('语音设置…', 'Voice settings…')}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="pet-ctx-item is-danger"
+              onClick={() => {
+                setCtxMenuOpen(false);
+                cancelRecording();
+                stopReading();
+                void petWindow('hide').catch(report);
+              }}
+            >
+              <span>{t('隐藏桌宠', 'Hide pet')}</span>
+            </button>
+          </div>
+        ) : null}
       </div>
     </main>
   );

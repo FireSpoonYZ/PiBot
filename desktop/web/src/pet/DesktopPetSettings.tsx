@@ -38,7 +38,7 @@ export function DesktopPetSettings() {
           <span className="settings-row-label">
             <span>{title}</span>
             <span className="metadata" style={{ display: 'block' }}>
-              {t('点击头像对话，拖动头像或标题栏移动；桌宠语音可在桌宠内独立设置。', 'Click to chat, drag to move. Configure pet voice inside the pet window.')}
+              {t('单击唤出输入胶囊，拖动移动，右键打开快捷菜单；回复与问卷以气泡呈现。', 'Click for quick prompt, drag to move, right-click for menu. Replies and questionnaires appear as bubbles.')}
             </span>
           </span>
           <Switch

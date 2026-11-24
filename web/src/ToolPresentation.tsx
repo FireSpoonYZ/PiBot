@@ -1,12 +1,15 @@
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ArrowRight,
+  Check,
   CheckCircle2,
   Circle,
   CircleDot,
   ClipboardList,
-  HelpCircle,
   ListTodo,
+  MessageSquarePlus,
+  X,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type {
@@ -111,7 +114,6 @@ export type QuestionnaireSubmitAnswer = {
 };
 
 const CUSTOM_TEXT_LIMIT = 2000;
-const NOTES_LIMIT = 2000;
 const GLOBAL_NOTE_LIMIT = 2000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -270,7 +272,7 @@ export interface ToolPresentationCardProps {
   active: boolean;
   disabled?: boolean;
   questionnaireInterrupted?: boolean;
-  variant?: 'desktop';
+  variant?: 'desktop' | 'pet-bubble';
   requesterName?: string;
   googleContext?: GoogleChatCardContext;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
@@ -278,6 +280,7 @@ export interface ToolPresentationCardProps {
   onOpenTask?: (taskId: string, openEdit?: boolean) => void;
   onConfirmTaskPlan?: (taskId: string) => Promise<void> | void;
   onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
+  onDismissBubble?: () => void;
 }
 
 export function ToolPresentationCard({
@@ -293,6 +296,7 @@ export function ToolPresentationCard({
   onOpenTask,
   onConfirmTaskPlan: _onConfirmTaskPlan,
   onAnswerTaskPrompt: _onAnswerTaskPrompt,
+  onDismissBubble,
 }: ToolPresentationCardProps) {
   const t = useText();
   if (presentation.kind === 'todo') {
@@ -318,12 +322,14 @@ export function ToolPresentationCard({
   }
   return (
     <QuestionnaireCard
+      key={presentation.requestId}
       presentation={presentation}
       active={active && presentation.status === 'pending' && Boolean(onSubmit)}
       disabled={disabled}
       interrupted={questionnaireInterrupted && presentation.status === 'pending'}
-      collapseOptionalFields={variant === 'desktop'}
+      embeddedBubble={variant === 'pet-bubble'}
       onSubmit={onSubmit}
+      onDismissBubble={onDismissBubble}
       t={t}
     />
   );
@@ -441,24 +447,28 @@ function QuestionnaireCard({
   active,
   disabled,
   interrupted,
-  collapseOptionalFields,
+  embeddedBubble,
   onSubmit,
+  onDismissBubble,
   t,
 }: {
   presentation: QuestionnairePresentation;
   active: boolean;
   disabled: boolean;
   interrupted: boolean;
-  collapseOptionalFields: boolean;
+  embeddedBubble: boolean;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  onDismissBubble?: () => void;
   t: (zh: string, en: string) => string;
 }) {
   const errorId = useId();
   const editable = active && !disabled && !interrupted;
   const [localStatus, setLocalStatus] = useState<'settled' | null>(null);
+  const [step, setStep] = useState(0);
   const [selectedMap, setSelectedMap] = useState<Record<number, number[]>>({});
+  const [customOpenMap, setCustomOpenMap] = useState<Record<number, boolean>>({});
   const [customTextMap, setCustomTextMap] = useState<Record<number, string>>({});
-  const [notesMap, setNotesMap] = useState<Record<number, string>>({});
+  const [noteOpen, setNoteOpen] = useState(false);
   const [globalNote, setGlobalNote] = useState('');
   const [error, setError] = useState('');
   const [showValidation, setShowValidation] = useState(false);
@@ -467,14 +477,39 @@ function QuestionnaireCard({
   const [submitted, setSubmitted] = useState(false);
   /** 同一 tick 内防重入：state 更新晚于同步 onChange 链。 */
   const submittingRef = useRef(false);
+  const autoAdvanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const customInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const noteInputRef = useRef<HTMLInputElement | null>(null);
   const busy = submitting || submitted;
 
+  const totalQuestions = presentation.questions.length;
+  const clampedStep = Math.min(Math.max(0, step), Math.max(0, totalQuestions - 1));
+  const useStepper = totalQuestions > 1;
+
+  const cancelAutoAdvance = () => {
+    if (autoAdvanceTimerRef.current !== null) {
+      clearTimeout(autoAdvanceTimerRef.current);
+      autoAdvanceTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => cancelAutoAdvance, []);
+
   const selectedFor = (index: number): number[] => selectedMap[index] ?? [];
+  const isQuestionAnswered = (index: number): boolean =>
+    selectedFor(index).length > 0 || Boolean((customTextMap[index] ?? '').trim());
+
   const clearError = () => {
     if (error) setError('');
   };
 
+  const goToStep = (nextIndex: number) => {
+    cancelAutoAdvance();
+    setStep(Math.min(Math.max(0, nextIndex), Math.max(0, totalQuestions - 1)));
+  };
+
   const toggleOption = (questionIndex: number, optionIndex: number, multi: boolean) => {
+    cancelAutoAdvance();
     setSelectedMap(prev => {
       const current = prev[questionIndex] ?? [];
       const next = multi
@@ -484,14 +519,49 @@ function QuestionnaireCard({
         : [optionIndex];
       return { ...prev, [questionIndex]: next };
     });
-    // 单选下 custom 与选项互斥：点选项即清掉已输入的自定义文本。
+    // 单选下 custom 与选项互斥：点选项即清掉已输入的自定义文本并收起输入行。
     if (!multi) {
+      setCustomTextMap(prev => (prev[questionIndex] ? { ...prev, [questionIndex]: '' } : prev));
+      setCustomOpenMap(prev => (prev[questionIndex] ? { ...prev, [questionIndex]: false } : prev));
+    }
+    clearError();
+
+    // 步进模式下：单选且无 preview 且下一题尚未作答时，轻柔前进到下一题；
+    // 用户点击「上一题」修改旧选项时不会被打断抢跳。
+    const chosenOption = presentation.questions[questionIndex]?.options[optionIndex];
+    if (
+      useStepper &&
+      !multi &&
+      !chosenOption?.preview &&
+      questionIndex < totalQuestions - 1 &&
+      !isQuestionAnswered(questionIndex + 1)
+    ) {
+      autoAdvanceTimerRef.current = setTimeout(() => {
+        autoAdvanceTimerRef.current = null;
+        setStep(current => (current === questionIndex ? questionIndex + 1 : current));
+      }, 220);
+    }
+  };
+
+  const toggleCustomRow = (questionIndex: number, multi: boolean) => {
+    cancelAutoAdvance();
+    const currentlyOpen = Boolean(customOpenMap[questionIndex] || (customTextMap[questionIndex] ?? '').trim());
+    const nextOpen = !currentlyOpen;
+    setCustomOpenMap(prev => ({ ...prev, [questionIndex]: nextOpen }));
+    if (nextOpen && !multi) {
+      setSelectedMap(prev => ((prev[questionIndex] ?? []).length > 0 ? { ...prev, [questionIndex]: [] } : prev));
+    }
+    if (!nextOpen) {
       setCustomTextMap(prev => (prev[questionIndex] ? { ...prev, [questionIndex]: '' } : prev));
     }
     clearError();
+    if (nextOpen) {
+      requestAnimationFrame(() => customInputRefs.current[questionIndex]?.focus());
+    }
   };
 
   const changeCustomText = (questionIndex: number, multi: boolean, text: string) => {
+    cancelAutoAdvance();
     setCustomTextMap(prev => ({ ...prev, [questionIndex]: text }));
     // 单选下输入 custom 即清空已选选项；multi 允许 selected + custom 并存。
     if (!multi && text !== '') {
@@ -502,30 +572,27 @@ function QuestionnaireCard({
 
   const buildAnswers = () =>
     presentation.questions
-      .map((question, index) => {
+      .map((_question, index) => {
         const selected = selectedFor(index);
         const customText = (customTextMap[index] ?? '').trim();
-        const notes = (notesMap[index] ?? '').trim();
-        if (selected.length === 0 && !customText && !notes) return null;
+        if (selected.length === 0 && !customText) return null;
         const next: QuestionnaireSubmitPayload['answers'][number] = { questionIndex: index };
         if (selected.length > 0) next.selectedOptions = selected;
         if (customText) next.customText = customText;
-        if (notes) next.notes = notes;
         return next;
       })
       .filter((a): a is QuestionnaireSubmitPayload['answers'][number] => a !== null);
 
   const handleSubmit = async (cancelled: boolean) => {
+    cancelAutoAdvance();
     if (!editable || !onSubmit || submittingRef.current || submitted) return;
     if (!cancelled) {
-      const unansweredCount = presentation.questions.filter(
-        (_question, idx) => selectedFor(idx).length === 0 && !(customTextMap[idx] ?? '').trim(),
-      ).length;
+      const firstUnanswered = presentation.questions.findIndex((_q, idx) => !isQuestionAnswered(idx));
+      const unansweredCount = presentation.questions.filter((_q, idx) => !isQuestionAnswered(idx)).length;
       if (unansweredCount > 0) {
         setShowValidation(true);
-        setError(
-          t(`还有 ${unansweredCount} 道题未回答，请选择选项或填写自定义回答后再提交。`, `${unansweredCount} question(s) unanswered. Select an option or enter a custom answer before submitting.`),
-        );
+        if (useStepper && firstUnanswered >= 0) setStep(firstUnanswered);
+        setError(t(`还有 ${unansweredCount} 道题未回答，请选择选项或填写自定义回答后再提交。`, `${unansweredCount} question(s) unanswered. Select an option or enter a custom answer before submitting.`));
         return;
       }
     }
@@ -559,213 +626,373 @@ function QuestionnaireCard({
   };
 
   const settledLocally = localStatus === 'settled' && presentation.status === 'pending';
-
   const displayStatus = interrupted ? 'cancelled' : presentation.status;
-  const statusLabel = interrupted ? t('已中断', 'Interrupted')
-    : presentation.status === 'answered' ? t('已回答', 'Answered')
-    : presentation.status === 'cancelled' ? t('已取消', 'Cancelled')
-    : settledLocally ? t('已结算（以先到回答为准）', 'Settled (first answer won)')
-    : editable ? t('待回答', 'Pending') : t('待回答（只读）', 'Pending (read-only)');
-  const slipTone: ActionSlipTone =
-    interrupted || presentation.status === 'cancelled'
-      ? 'neutral'
-      : presentation.status === 'answered' || settledLocally
-        ? 'live'
-        : editable
-          ? 'info'
-          : 'neutral';
+  const isPendingView = presentation.status === 'pending' && !interrupted && !settledLocally;
+  const answeredCount = presentation.questions.filter((_q, idx) => isQuestionAnswered(idx)).length;
+  const isLastStep = !useStepper || clampedStep === totalQuestions - 1;
+  const inputDisabled = !editable || busy || settledLocally;
 
-  const globalNoteInput = (
-    <input
-      type="text"
-      className="tp-input tp-global-note"
-      aria-label={t('整体备注（可选）', 'Overall note (optional)')}
-      placeholder={t('整体备注（可选）', 'Overall note (optional)')}
-      value={globalNote}
-      maxLength={GLOBAL_NOTE_LIMIT}
-      disabled={!editable || busy || settledLocally}
-      onChange={event => { setGlobalNote(event.target.value); clearError(); }}
-    />
-  );
+  const renderQuestion = (index: number) => {
+    const question = presentation.questions[index];
+    if (!question) return null;
+    const selected = selectedFor(index);
+    const groupName = `tp-q-${presentation.requestId}-${index}`;
+    const multi = question.multiSelect === true;
+    const customText = customTextMap[index] ?? '';
+    const customActive = Boolean(customOpenMap[index] || customText.trim());
+    const unanswered = !isQuestionAnswered(index);
+    const invalid = showValidation && unanswered;
+    const questionScope = question.header || question.question || `#${index + 1}`;
 
-  const showPendingActions = presentation.status === 'pending' && !interrupted && !settledLocally;
+    return (
+      <fieldset
+        key={index}
+        className={`qa-section${invalid ? ' is-unanswered' : ''}`}
+        disabled={inputDisabled}
+        data-unanswered={unanswered ? '' : undefined}
+        aria-invalid={invalid || undefined}
+        aria-describedby={invalid && error ? errorId : undefined}
+      >
+        {(!useStepper || multi || !editable) ? (
+          <div className="qa-eyebrow-row">
+            {!useStepper ? (
+              <span className="qa-eyebrow">{question.header}</span>
+            ) : (
+              <span />
+            )}
+            <div className="qa-eyebrow-meta">
+              {multi ? <span className="qa-multi-hint">{t('可多选', 'Multi-select')}</span> : null}
+              {!editable ? (
+                <span className="qa-readonly-tag">{t('只读', 'Read-only')}</span>
+              ) : null}
+              {!useStepper && embeddedBubble && onDismissBubble ? (
+                <button
+                  type="button"
+                  className="qa-dismiss-btn"
+                  title={t('收起气泡', 'Dismiss')}
+                  aria-label={t('收起气泡', 'Dismiss')}
+                  onClick={onDismissBubble}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        <legend className="qa-prompt">{question.question}</legend>
+        <div className="tp-options qa-options" role="group" aria-label={questionScope}>
+          {question.options.map((option, optionIndex) => {
+            const checked = selected.includes(optionIndex);
+            return (
+              <label key={optionIndex} className={`qa-opt${checked ? ' is-selected' : ''}`}>
+                <input
+                  className="qa-sr-input"
+                  type={multi ? 'checkbox' : 'radio'}
+                  name={groupName}
+                  checked={checked}
+                  disabled={inputDisabled}
+                  onChange={() => toggleOption(index, optionIndex, multi)}
+                />
+                <span className={`qa-indicator${multi ? ' is-check' : ''}`} aria-hidden="true">
+                  {multi ? (
+                    <Check size={11} strokeWidth={3.1} aria-hidden="true" />
+                  ) : (
+                    <span className="qa-indicator-dot" />
+                  )}
+                </span>
+                <span className="qa-opt-text">
+                  <span className="qa-opt-label">{option.label}</span>
+                  <span className="qa-opt-desc">{option.description}</span>
+                </span>
+                <span className="qa-opt-key tabular-nums" aria-hidden="true">{optionIndex + 1}</span>
+              </label>
+            );
+          })}
+
+          <div className={`qa-custom-row${customActive ? ' is-active' : ''}`}>
+            <button
+              type="button"
+              className="qa-custom-trigger"
+              disabled={inputDisabled}
+              aria-expanded={customActive}
+              onClick={() => toggleCustomRow(index, multi)}
+            >
+              <span className={`qa-indicator${multi ? ' is-check' : ''}`} aria-hidden="true">
+                {customActive ? (
+                  multi ? <Check size={11} strokeWidth={3.1} aria-hidden="true" /> : <span className="qa-indicator-dot" />
+                ) : null}
+              </span>
+              <span className="qa-custom-label">{t('其他，自己输入…', 'Other, write your own…')}</span>
+            </button>
+            {customActive ? (
+              <input
+                ref={el => { customInputRefs.current[index] = el; }}
+                type="text"
+                className="qa-custom-input"
+                aria-label={t(`${questionScope}：自定义回答（可选）`, `${questionScope}: Custom answer (optional)`)}
+                placeholder={t('输入你的想法…', 'Type your answer…')}
+                value={customText}
+                maxLength={CUSTOM_TEXT_LIMIT}
+                disabled={inputDisabled}
+                aria-invalid={invalid || undefined}
+                aria-describedby={invalid && error ? errorId : undefined}
+                onChange={event => changeCustomText(index, multi, event.target.value)}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        {/* preview 只限单选选项（上游契约）；multi 的 preview 字段不渲染。 */}
+        {!multi && question.options.map((option, optionIndex) =>
+          option.preview && selected.includes(optionIndex) ? (
+            <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
+          ) : null,
+        )}
+      </fieldset>
+    );
+  };
+
+  if (!isPendingView) {
+    const cancelled = interrupted || presentation.result?.cancelled || presentation.status === 'cancelled';
+    const receiptTitle = interrupted
+      ? t('已中断', 'Interrupted')
+      : settledLocally
+        ? t('已结算（以先到回答为准）', 'Settled (first answer won)')
+        : cancelled
+          ? t('已取消', 'Cancelled')
+          : t('已确认', 'Confirmed');
+    const answers = presentation.result?.answers ?? [];
+
+    return (
+      <div className="tp-questionnaire-wrap">
+        <section
+          role="group"
+          aria-label={t('问卷结果', 'Questionnaire result')}
+          className={`qa-card is-${displayStatus}${embeddedBubble ? ' is-bubble' : ''}`}
+        >
+          <div className="qa-receipt">
+            <div className="qa-receipt-head">
+              <span
+                role="status"
+                className={`qa-receipt-status${cancelled ? ' is-cancelled' : ''}`}
+              >
+                {cancelled ? (
+                  <X size={13} aria-hidden="true" />
+                ) : (
+                  <Check size={14} strokeWidth={2.6} aria-hidden="true" />
+                )}
+                <span>{receiptTitle}</span>
+              </span>
+              {embeddedBubble && onDismissBubble ? (
+                <button
+                  type="button"
+                  className="qa-dismiss-btn"
+                  title={t('收起气泡', 'Dismiss')}
+                  aria-label={t('收起气泡', 'Dismiss')}
+                  onClick={onDismissBubble}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+
+            {interrupted ? (
+              <div className="qa-receipt-empty">{t('该问卷已中断，无法继续提交。', 'This questionnaire was interrupted.')}</div>
+            ) : settledLocally ? (
+              <div className="qa-receipt-empty">
+                {t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}
+              </div>
+            ) : cancelled && answers.length === 0 ? (
+              <div className="qa-receipt-empty">{t('用户已取消该问卷。', 'The questionnaire was cancelled.')}</div>
+            ) : null}
+
+            {answers.length > 0 ? (
+              <div className="qa-receipt-rows">
+                {answers.map((answer: QuestionnaireAnswerPresentation, index) => {
+                  const matchedHeader = presentation.questions[answer.questionIndex]?.header;
+                  const valueText =
+                    answer.kind === 'multi' && answer.selected?.length
+                      ? answer.answer
+                        ? `${answer.selected.join(t('、', ', '))}${t('、', ', ')}${answer.answer}`
+                        : answer.selected.join(t('、', ', '))
+                      : answer.answer ?? t('（未回答）', '(unanswered)');
+                  return (
+                    <div key={index} className="qa-receipt-item">
+                      <div className="qa-receipt-row">
+                        <span className="qa-receipt-q" title={answer.question}>
+                          {matchedHeader || answer.question || `#${answer.questionIndex + 1}`}
+                        </span>
+                        <span className="qa-receipt-a">{valueText}</span>
+                      </div>
+                      {answer.notes ? (
+                        <div className="qa-receipt-subnote">{t('备注：', 'Notes: ')}{answer.notes}</div>
+                      ) : null}
+                      {answer.preview ? <OptionPreview preview={answer.preview} /> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            {presentation.result?.unanswered?.length ? (
+              <div className="qa-receipt-empty tabular-nums">
+                {presentation.result.unanswered.length}{t(' 题未回答', ' unanswered')}
+              </div>
+            ) : null}
+            {presentation.result?.globalNote ? (
+              <div className="qa-receipt-note">{t('补充：', 'Note: ')}{presentation.result.globalNote}</div>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div
       className="tp-questionnaire-wrap"
       data-active-questionnaire={editable && !busy && !settledLocally ? presentation.requestId : undefined}
     >
-      <ActionSlip
-        className={`tp-slip tp-questionnaire is-${displayStatus}`}
-        tone={slipTone}
+      <section
         role="group"
-        ariaLabel={t('问卷', 'Questionnaire')}
-        icon={<HelpCircle size={16} aria-hidden="true" />}
-        title={t('问卷', 'Questions')}
-        status={<span role="status">{statusLabel}</span>}
-        footer={
-          showPendingActions ? (
-            <div className="tp-actions">
+        aria-label={t('问卷', 'Questionnaire')}
+        className={`qa-card is-${displayStatus}${embeddedBubble ? ' is-bubble' : ''}`}
+      >
+        {useStepper ? (
+          <div className="qa-stepper">
+            <div className="qa-steps" role="tablist" aria-label={t('问题步骤', 'Question steps')}>
+              {presentation.questions.map((question, idx) => {
+                const done = isQuestionAnswered(idx);
+                const current = idx === clampedStep;
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    role="tab"
+                    aria-selected={current}
+                    className={`qa-step-pill${current ? ' is-current' : ''}${done ? ' is-done' : ''}`}
+                    onClick={() => goToStep(idx)}
+                  >
+                    <span className="qa-step-num tabular-nums" aria-hidden="true">
+                      {done && !current ? <Check size={10} strokeWidth={3} /> : idx + 1}
+                    </span>
+                    <span className="qa-step-label">{question.header}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="qa-stepper-right">
+              <span className="qa-step-counter tabular-nums">
+                {clampedStep + 1}/{totalQuestions}
+              </span>
+              {embeddedBubble && onDismissBubble ? (
+                <button
+                  type="button"
+                  className="qa-dismiss-btn"
+                  title={t('收起气泡', 'Dismiss')}
+                  aria-label={t('收起气泡', 'Dismiss')}
+                  onClick={onDismissBubble}
+                >
+                  <X size={13} aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="qa-body">
+          {renderQuestion(clampedStep)}
+
+          {noteOpen ? (
+            <div className="qa-note-box">
+              <input
+                ref={noteInputRef}
+                type="text"
+                className="qa-note-input"
+                aria-label={t('整体备注（可选）', 'Overall note (optional)')}
+                placeholder={t('添加补充说明（可选）…', 'Add an overall note (optional)…')}
+                value={globalNote}
+                maxLength={GLOBAL_NOTE_LIMIT}
+                disabled={inputDisabled}
+                onChange={event => { setGlobalNote(event.target.value); clearError(); }}
+              />
+            </div>
+          ) : null}
+
+          {error ? (
+            <div id={errorId} className="tp-error-wrap">
+              <InlineBanner tone="danger" role="alert" compact title={error} />
+            </div>
+          ) : null}
+        </div>
+
+        <footer className="qa-footer">
+          <div className="qa-foot-left">
+            <button
+              type="button"
+              className={`qa-note-btn${globalNote.trim() ? ' is-has' : ''}`}
+              disabled={inputDisabled}
+              aria-expanded={noteOpen}
+              onClick={() => {
+                const next = !noteOpen;
+                setNoteOpen(next);
+                if (next) requestAnimationFrame(() => noteInputRef.current?.focus());
+              }}
+            >
+              <MessageSquarePlus size={13} aria-hidden="true" />
+              <span>{globalNote.trim() ? t('已添说明', 'Note added') : t('补充说明', 'Add note')}</span>
+            </button>
+          </div>
+          <div className="qa-foot-right">
+            <button
+              type="button"
+              className="qa-btn-ghost"
+              disabled={!editable || busy}
+              onClick={() => void handleSubmit(true)}
+            >
+              {t('取消', 'Cancel')}
+            </button>
+            {useStepper ? (
               <button
                 type="button"
-                className="tp-btn"
-                disabled={!editable || busy}
-                onClick={() => void handleSubmit(true)}
+                className="qa-btn-secondary"
+                disabled={clampedStep <= 0 || busy}
+                onClick={() => goToStep(clampedStep - 1)}
               >
-                {t('取消问卷', 'Cancel')}
+                <ArrowLeft size={13} aria-hidden="true" />
+                <span>{t('上一题', 'Back')}</span>
               </button>
+            ) : null}
+            {useStepper && !isLastStep ? (
               <button
                 type="button"
-                className="tp-btn tp-btn-primary"
+                className="qa-btn-primary tp-btn-primary"
+                disabled={busy}
+                onClick={() => goToStep(clampedStep + 1)}
+              >
+                <span>{t('下一题', 'Next')}</span>
+                <ArrowRight size={13} aria-hidden="true" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="qa-btn-primary tp-btn-primary"
                 disabled={!editable || busy}
                 aria-describedby={error ? errorId : undefined}
                 onClick={() => void handleSubmit(false)}
               >
-                {submitting ? t('提交中…', 'Submitting…') : submitted ? t('已提交，等待确认', 'Submitted, awaiting confirmation') : t('提交回答', 'Submit')}
+                {submitting
+                  ? t('提交中…', 'Submitting…')
+                  : submitted
+                    ? t('已提交', 'Submitted')
+                    : useStepper
+                      ? `${t('确认提交', 'Submit')} (${answeredCount}/${totalQuestions})`
+                      : t('确认提交', 'Submit')}
               </button>
-            </div>
-          ) : undefined
-        }
-      >
-        {presentation.status === 'pending' ? (
-          <div className="tp-questions">
-            {presentation.questions.map((question, index) => {
-              const selected = selectedFor(index);
-              const groupName = `tp-q-${presentation.requestId}-${index}`;
-              const inputDisabled = !editable || busy || settledLocally;
-              const multi = question.multiSelect === true;
-              const unanswered = selected.length === 0 && !(customTextMap[index] ?? '').trim();
-              const invalid = showValidation && unanswered;
-              const questionScope = question.header || question.question || `#${index + 1}`;
-              const optionalFields = (
-                <>
-                  <input
-                    type="text"
-                    className="tp-input"
-                    aria-label={t(`${questionScope}：自定义回答（可选）`, `${questionScope}: Custom answer (optional)`)}
-                    placeholder={t('自定义回答（可选）', 'Custom answer (optional)')}
-                    value={customTextMap[index] ?? ''}
-                    maxLength={CUSTOM_TEXT_LIMIT}
-                    disabled={inputDisabled}
-                    aria-invalid={invalid || undefined}
-                    aria-describedby={invalid && error ? errorId : undefined}
-                    onChange={event => changeCustomText(index, multi, event.target.value)}
-                  />
-                  <input
-                    type="text"
-                    className="tp-input tp-notes"
-                    aria-label={t(`${questionScope}：备注（可选）`, `${questionScope}: Notes (optional)`)}
-                    placeholder={t('备注（可选）', 'Notes (optional)')}
-                    value={notesMap[index] ?? ''}
-                    maxLength={NOTES_LIMIT}
-                    disabled={inputDisabled}
-                    onChange={event => { setNotesMap(prev => ({ ...prev, [index]: event.target.value })); clearError(); }}
-                  />
-                </>
-              );
-              return (
-                <fieldset
-                  key={index}
-                  className={`tp-question${invalid ? ' is-unanswered' : ''}`}
-                  disabled={inputDisabled}
-                  data-unanswered={unanswered ? '' : undefined}
-                  aria-invalid={invalid || undefined}
-                  aria-describedby={invalid && error ? errorId : undefined}
-                >
-                  <legend className="tp-question-text">
-                    <span className="tp-question-header">{question.header} · </span>
-                    {question.question}
-                    {multi ? <span className="tp-question-hint">{t('（可多选）', ' (multi)')}</span> : null}
-                  </legend>
-                  <div className="tp-options" role="group">
-                    {question.options.map((option, optionIndex) => {
-                      const checked = selected.includes(optionIndex);
-                      return (
-                        <label key={optionIndex} className={`tp-option${checked ? ' is-selected' : ''}`}>
-                          <input
-                            type={multi ? 'checkbox' : 'radio'}
-                            name={groupName}
-                            checked={checked}
-                            disabled={inputDisabled}
-                            onChange={() => toggleOption(index, optionIndex, multi)}
-                          />
-                          <span className="tp-option-body">
-                            <span className="tp-option-label">{option.label}</span>
-                            <span className="tp-option-desc">{option.description}</span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                  {/* preview 只限单选选项（上游契约）；multi 的 preview 字段不渲染。 */}
-                  {!multi && question.options.map((option, optionIndex) =>
-                    option.preview && selected.includes(optionIndex) ? (
-                      <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
-                    ) : null,
-                  )}
-                  {!interrupted && (collapseOptionalFields ? (
-                    <details className="tp-optional-fields">
-                      <summary>
-                        {t('自定义回答和备注', 'Custom answer and notes')}
-                        {customTextMap[index]?.trim() || notesMap[index]?.trim() ? t(' · 已填写', ' · Added') : ''}
-                      </summary>
-                      {optionalFields}
-                    </details>
-                  ) : optionalFields)}
-                </fieldset>
-              );
-            })}
-            {!interrupted && (collapseOptionalFields ? (
-              <details className="tp-optional-fields">
-                <summary>{globalNote.trim() ? t('整体备注 · 已填写', 'Overall note · Added') : t('添加整体备注', 'Add overall note')}</summary>
-                {globalNoteInput}
-              </details>
-            ) : globalNoteInput)}
-            {!interrupted && error ? (
-              <div id={errorId} className="tp-error-wrap">
-                <InlineBanner tone="danger" role="alert" compact title={error} />
-              </div>
-            ) : null}
-            {!interrupted && settledLocally ? (
-              <InlineBanner
-                tone="live"
-                role="status"
-                compact
-                title={t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}
-              />
-            ) : null}
+            )}
           </div>
-        ) : (
-          <div className="tp-result">
-            {presentation.result?.cancelled || presentation.status === 'cancelled' ? (
-              <div className="tp-result-line">{t('用户已取消该问卷。', 'The questionnaire was cancelled.')}</div>
-            ) : null}
-            {presentation.result?.answers.map((answer: QuestionnaireAnswerPresentation, index) => (
-              <div key={index} className="tp-answer">
-                <div className="tp-answer-question">{answer.question || `#${answer.questionIndex + 1}`}</div>
-                <div className="tp-answer-value">
-                  {/* multi 同时显示 selected 与自定义文本；option/custom 显示标量答案。 */}
-                  {answer.kind === 'multi' && answer.selected?.length
-                    ? answer.answer
-                      ? `${answer.selected.join(t('、', ', '))}${t('、', ', ')}${answer.answer}`
-                      : answer.selected.join(t('、', ', '))
-                    : answer.answer ?? t('（未回答）', '(unanswered)')}
-                </div>
-                {answer.notes ? <div className="tp-answer-notes">{t('备注：', 'Notes: ')}{answer.notes}</div> : null}
-                {answer.preview ? <OptionPreview preview={answer.preview} /> : null}
-              </div>
-            ))}
-            {presentation.result?.unanswered?.length ? (
-              <div className="tp-result-line tabular-nums">
-                {presentation.result.unanswered.length}{t(' 题未回答', ' unanswered')}
-              </div>
-            ) : null}
-            {presentation.result?.globalNote ? (
-              <div className="tp-answer-notes">{t('整体备注：', 'Note: ')}{presentation.result.globalNote}</div>
-            ) : null}
-          </div>
-        )}
-      </ActionSlip>
+        </footer>
+      </section>
     </div>
   );
 }

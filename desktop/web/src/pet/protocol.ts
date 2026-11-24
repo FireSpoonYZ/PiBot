@@ -1,4 +1,5 @@
 import type { BotAvatar } from '../../../../center-contract/index.js';
+import type { QuestionnairePresentation, TodoPresentation } from '../../../../host-core/index.js';
 import type { BotActivity } from '../../../../web/src/botActivity';
 import type { GrokMascotState } from '../../../../web/src/grokMascotEngine';
 
@@ -15,6 +16,47 @@ export interface PetMessage {
   text: string;
 }
 
+/** Object type alias (not interface) to remain assignable to ActionRequest.input (JsonValue). */
+export type PetQuestionnaireSubmitAnswer = {
+  questionIndex: number;
+  selectedOptions?: number[];
+  customText?: string;
+  notes?: string;
+};
+
+export type PetQuestionnaireSubmitPayload = {
+  conversationId: number;
+  requestId: string;
+  cancelled: boolean;
+  answers: PetQuestionnaireSubmitAnswer[];
+  globalNote?: string;
+};
+
+export interface PetActiveQuestionnaire {
+  toolCallId: string;
+  presentation: QuestionnairePresentation;
+  interactive: boolean;
+  interrupted?: boolean;
+}
+
+export interface PetTaskCard {
+  taskId: string;
+  title: string;
+  status: 'triaging' | 'working' | 'waiting' | 'done' | 'cancelled';
+  cardLabel: string;
+  summary?: string;
+  stepCount: { done: number; total: number };
+}
+
+export interface PetHandoffCard {
+  id: string;
+  kind: 'vault-unlock' | 'google-setup' | 'google-account-select' | 'google-browser-takeover' | 'google-readiness';
+  title: string;
+  detail: string;
+  tone: 'attention' | 'info' | 'danger';
+  actionLabel: string;
+}
+
 export interface DesktopPetSnapshot {
   hostSessionId: string;
   revision: number;
@@ -28,6 +70,12 @@ export interface DesktopPetSnapshot {
   messages: PetMessage[];
   streamingText: string;
   generationId: string | null;
+  activeToolName: string | null;
+  questionnaire: PetActiveQuestionnaire | null;
+  settledQuestionnaire: QuestionnairePresentation | null;
+  todo: TodoPresentation | null;
+  task: PetTaskCard | null;
+  handoff: PetHandoffCard | null;
   error: string | null;
   sending: boolean;
   canStop: boolean;
@@ -37,18 +85,42 @@ export type DesktopPetAction =
   | { id: string; kind: 'ready' }
   | { id: string; kind: 'refresh' }
   | { id: string; kind: 'stop'; deviceId: string; botId: string }
-  | { id: string; kind: 'send'; text: string; deviceId: string; botId: string };
+  | { id: string; kind: 'send'; text: string; deviceId: string; botId: string }
+  | {
+      id: string;
+      kind: 'answer-questionnaire';
+      deviceId: string;
+      botId: string;
+      installationId: string;
+      input: PetQuestionnaireSubmitPayload;
+    };
 
 export interface DesktopPetResult {
   id: string;
   ok: boolean;
   message?: string;
   pendingId?: string;
+  data?: unknown;
   queuedDraft?: { deviceId: string; botId: string; text: string };
 }
 
 export type PetDockSide = 'left' | 'right';
 export type PetPanelSide = 'top' | 'bottom';
+
+export interface PetWindowHitRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  radius?: number;
+}
+
+export interface PetWindowLayoutRequest {
+  width: number;
+  height: number;
+  focus?: boolean;
+  hitRects?: PetWindowHitRect[];
+}
 
 export interface DesktopPetWindowState {
   visible: boolean;
@@ -59,7 +131,7 @@ export interface DesktopPetWindowState {
 }
 
 export type DesktopPetWindowAction =
-  | 'show' | 'hide' | 'toggle' | 'set-expanded' | 'show-main' | 'drag' | 'status';
+  | 'show' | 'hide' | 'toggle' | 'set-expanded' | 'set-layout' | 'show-main' | 'drag' | 'status';
 
 export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   hostSessionId: '',
@@ -74,6 +146,12 @@ export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   messages: [],
   streamingText: '',
   generationId: null,
+  activeToolName: null,
+  questionnaire: null,
+  settledQuestionnaire: null,
+  todo: null,
+  task: null,
+  handoff: null,
   error: null,
   sending: false,
   canStop: false,
