@@ -15,6 +15,7 @@ import android.net.Network;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.util.HashMap;
@@ -37,6 +38,13 @@ public final class BotClientService extends Service {
     private static final String CHANNEL = "bot-client-connection";
     private static final int NOTIFICATION_ID = 3160;
     private static final long UPDATE_POLL_MS = 60_000;
+    static final String PROACTIVE_RESULT_KIND = "proactive-google";
+    static final String PROACTIVE_DEFAULT_TITLE = "邮件与日程管家";
+    static final String PROACTIVE_DEFAULT_SUMMARY = "有新的邮件或日程待查看";
+    static final String PROACTIVE_CHANNEL = "bot-client-tasks";
+    static final int PROACTIVE_NOTIFICATION_ID = 3162;
+    private static final long PROACTIVE_CONFIG_POLL_MS = 60_000L;
+    private static final long PROACTIVE_BOARD_POLL_MS = 15_000L;
     private static volatile BotClientService activeService;
     private static final Map<String, String> visibleChats = new HashMap<>();
     private static final AtomicBoolean localPolling = new AtomicBoolean();
@@ -64,6 +72,12 @@ public final class BotClientService extends Service {
     private boolean scanHasPending;
     private boolean previousPending;
     private boolean rescanRequested;
+    private boolean proactivePolling;
+    private long lastProactiveConfigAt;
+    private long lastProactiveBoardAt;
+    private String proactiveDeviceId;
+    private String proactiveBotId;
+    private String proactiveBotName;
     private final ConnectivityManager.NetworkCallback network = new ConnectivityManager.NetworkCallback() {
         @Override public void onAvailable(Network network) {
             if (!alive) return;
@@ -182,7 +196,10 @@ public final class BotClientService extends Service {
         int epoch = service.lifecycle.get();
         Consumer<Long> listener = service.hostExitListener;
         service.main.post(() -> {
-            if (service.lifecycle.get() == epoch) service.retryHostOnConnection(listener);
+            if (service.lifecycle.get() == epoch) {
+                service.lastProactiveConfigAt = 0L;
+                service.retryHostOnConnection(listener);
+            }
         });
     }
 
@@ -300,6 +317,12 @@ public final class BotClientService extends Service {
             polling = false;
             scanHasPending = false;
             rescanRequested = false;
+            proactivePolling = false;
+            lastProactiveConfigAt = 0L;
+            lastProactiveBoardAt = 0L;
+            proactiveDeviceId = null;
+            proactiveBotId = null;
+            proactiveBotName = null;
             alive = true;
             lifecycle.incrementAndGet();
             Log.i("BotClientService", "Client lifecycle started");
@@ -315,6 +338,7 @@ public final class BotClientService extends Service {
 
     private void beginExit() {
         alive = false;
+        proactivePolling = false;
         int epoch = lifecycle.incrementAndGet();
         Log.i("BotClientService", "Client exit requested");
         detachHostListener();
@@ -364,6 +388,7 @@ public final class BotClientService extends Service {
 
     @Override public void onDestroy() {
         alive = false;
+        proactivePolling = false;
         lifecycle.incrementAndGet();
         ClipboardSyncController.get(this).shutdown();
         detachHostListener();
@@ -387,16 +412,17 @@ public final class BotClientService extends Service {
             JSONObject page = envelope == null ? null : envelope.optJSONObject("value");
             if (error != null || page == null) {
                 scanHasPending = scanHasPending || previousPending;
-                finishScan();
+                finishScan(epoch);
                 return;
             }
             scanItem(page.optJSONArray("items"), 0, page.optJSONObject("nextCursor"), epoch);
         }));
     }
 
-    private void finishScan() {
-        if (!alive) return;
+    private void finishScan(int epoch) {
+        if (!alive || lifecycle.get() != epoch) return;
         polling = false;
+        pollProactiveBoardIfDue(epoch);
         long delay = rescanRequested ? 0 : scanHasPending ? 2000 : 15000;
         rescanRequested = false;
         main.postDelayed(check, delay);
@@ -406,7 +432,7 @@ public final class BotClientService extends Service {
         if (!alive || lifecycle.get() != epoch) return;
         if (items == null || index >= items.length()) {
             if (cursor != null) scanPage(cursor, epoch);
-            else finishScan();
+            else finishScan(epoch);
             return;
         }
         JSONObject item = items.optJSONObject(index);
@@ -459,6 +485,238 @@ public final class BotClientService extends Service {
             try {
                 context.getSystemService(NotificationManager.class).notify("bot:" + digest(deviceId + String.valueOf((char) 0) + botId), 3161, notification);
             } catch (SecurityException denied) { return false; }
+        }
+        context.getSharedPreferences("bot_client_notifications", MODE_PRIVATE).edit().putBoolean(key, true).commit();
+        return true;
+    }
+
+    private void pollProactiveBoardIfDue(int epoch) {
+        if (!alive || lifecycle.get() != epoch || proactivePolling) return;
+        BotHostClient.ClipboardCredentials creds = BotHostClient.get(this).clipboardSyncCredentials();
+        if (creds == null || !creds.linkAllowed) return;
+        long now = SystemClock.elapsedRealtime();
+        if (lastProactiveConfigAt == 0L || now - lastProactiveConfigAt >= PROACTIVE_CONFIG_POLL_MS) {
+            proactivePolling = true;
+            lastProactiveConfigAt = now;
+            JSONObject params = BotHostUiProtocol.object("method", "GET", "path", "/api/google/assistant");
+            BotHostClient.get(this).request("background", () -> alive && lifecycle.get() == epoch,
+                    "center_admin_request", params).whenComplete((envelope, error) -> main.post(() -> {
+                if (!alive || lifecycle.get() != epoch) {
+                    proactivePolling = false;
+                    return;
+                }
+                if (error != null || envelope == null) {
+                    proactivePolling = false;
+                    return;
+                }
+                JSONObject payload = unwrapCenterAdminPayload(envelope.optJSONObject("value"));
+                JSONObject assistant = payload == null ? null : payload.optJSONObject("assistant");
+                if (assistant == null || !assistant.optBoolean("enabled", false)) {
+                    proactiveDeviceId = null;
+                    proactiveBotId = null;
+                    proactiveBotName = null;
+                    proactivePolling = false;
+                    return;
+                }
+                String deviceId = optNonNullString(assistant, "deviceId");
+                String botId = optNonNullString(assistant, "botId");
+                if (deviceId.isEmpty() || botId.isEmpty()) {
+                    proactiveDeviceId = null;
+                    proactiveBotId = null;
+                    proactiveBotName = null;
+                    proactivePolling = false;
+                    return;
+                }
+                boolean targetChanged = !deviceId.equals(proactiveDeviceId) || !botId.equals(proactiveBotId);
+                proactiveDeviceId = deviceId;
+                proactiveBotId = botId;
+                String name = optNonNullString(assistant, "botName");
+                if (name.isEmpty()) name = optNonNullString(assistant, "role");
+                if (!name.isEmpty()) {
+                    proactiveBotName = name;
+                } else if (targetChanged) {
+                    proactiveBotName = null;
+                }
+                if (proactiveBotName == null || proactiveBotName.isEmpty()) {
+                    resolveProactiveBotNameAndPoll(deviceId, botId, epoch);
+                } else {
+                    pollProactiveBoardNow(epoch, SystemClock.elapsedRealtime());
+                }
+            }));
+            return;
+        }
+        if (proactiveDeviceId != null && proactiveBotId != null
+                && (lastProactiveBoardAt == 0L || now - lastProactiveBoardAt >= PROACTIVE_BOARD_POLL_MS)) {
+            proactivePolling = true;
+            pollProactiveBoardNow(epoch, now);
+        }
+    }
+
+    private void resolveProactiveBotNameAndPoll(String deviceId, String botId, int epoch) {
+        if (!alive || lifecycle.get() != epoch) {
+            proactivePolling = false;
+            return;
+        }
+        BotHostClient.get(this).request("background", () -> alive && lifecycle.get() == epoch,
+                "bot_directory", new JSONObject()).whenComplete((envelope, error) -> main.post(() -> {
+            if (!alive || lifecycle.get() != epoch) {
+                proactivePolling = false;
+                return;
+            }
+            if (error == null && envelope != null) {
+                JSONObject dir = envelope.optJSONObject("value");
+                JSONArray bots = dir == null ? null : dir.optJSONArray("bots");
+                if (bots != null) {
+                    for (int i = 0; i < bots.length(); i++) {
+                        JSONObject item = bots.optJSONObject(i);
+                        if (item == null) continue;
+                        if (deviceId.equals(optNonNullString(item, "deviceId"))
+                                && botId.equals(optNonNullString(item, "botId"))) {
+                            String role = optNonNullString(item, "role");
+                            if (!role.isEmpty()) {
+                                proactiveBotName = role;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            pollProactiveBoardNow(epoch, SystemClock.elapsedRealtime());
+        }));
+    }
+
+    private void pollProactiveBoardNow(int epoch, long now) {
+        String deviceId = proactiveDeviceId;
+        String botId = proactiveBotId;
+        String botName = proactiveBotName;
+        if (!alive || lifecycle.get() != epoch || deviceId == null || botId == null) {
+            proactivePolling = false;
+            return;
+        }
+        lastProactiveBoardAt = now;
+        JSONObject params = BotHostUiProtocol.object("botIds", new JSONArray().put(botId));
+        BotHostManager hostManager = BotHostManager.get(this);
+        JSONObject hostSnapshot = hostManager.snapshot();
+        boolean useLocalHost = "running".equals(hostSnapshot.optString("phase"))
+                && deviceId.equals(optNonNullString(hostSnapshot, "deviceId"));
+        CompletableFuture<JSONObject> future = useLocalHost
+                ? hostManager.call("getBotBoard", params)
+                : BotHostClient.get(this).request("background", () -> alive && lifecycle.get() == epoch,
+                        "call", BotHostUiProtocol.object("targetDeviceId", deviceId, "method", "getBotBoard", "params", params));
+        future.whenComplete((envelope, error) -> main.post(() -> {
+            proactivePolling = false;
+            if (!alive || lifecycle.get() != epoch || error != null || envelope == null) return;
+            JSONObject board = useLocalHost ? envelope.optJSONObject("result") : envelope.optJSONObject("value");
+            evaluateProactiveBoardResult(this, deviceId, botId, botName, board);
+        }));
+    }
+
+    static JSONObject unwrapCenterAdminPayload(JSONObject value) {
+        if (value == null) return null;
+        if (value.has("ok") && !value.optBoolean("ok", true)) return null;
+        JSONObject data = value.optJSONObject("data");
+        return data != null ? data : value;
+    }
+
+    private static String optNonNullString(JSONObject obj, String key) {
+        if (obj == null || obj.isNull(key)) return "";
+        Object value = obj.opt(key);
+        return value instanceof String ? ((String) value).trim() : "";
+    }
+
+    static String proactiveBoardDedupeKey(String deviceId, String botId, String resultId) {
+        return digest("board" + String.valueOf((char) 0) + deviceId
+                + String.valueOf((char) 0) + botId
+                + String.valueOf((char) 0) + resultId);
+    }
+
+    /**
+     * Evaluates a {@code getBotBoard} snapshot for the bound proactive Google assistant Bot.
+     * Returns {@code true} only when a new {@code proactive-google} notification was posted.
+     */
+    static boolean evaluateProactiveBoardResult(
+            Context context,
+            String deviceId,
+            String botId,
+            String botName,
+            JSONObject boardSnapshot) {
+        if (context == null || deviceId == null || deviceId.isEmpty()
+                || botId == null || botId.isEmpty() || boardSnapshot == null) {
+            return false;
+        }
+        JSONArray items = boardSnapshot.optJSONArray("items");
+        if (items == null) return false;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null || !botId.equals(optNonNullString(item, "botId"))) continue;
+            JSONObject lastResult = item.optJSONObject("lastResult");
+            if (lastResult == null) return false;
+            String kind = optNonNullString(lastResult, "kind");
+            String resultId = optNonNullString(lastResult, "id");
+            if (!PROACTIVE_RESULT_KIND.equals(kind) || resultId.isEmpty()) return false;
+            String summary = optNonNullString(lastResult, "summary");
+            return showProactiveBoardNotification(context, deviceId, botId, botName, resultId, summary);
+        }
+        return false;
+    }
+
+    /**
+     * Posts a lock-screen-private notification for a proactive Google assistant Board result,
+     * suppressing duplicates (in {@code bot_client_notifications}) and currently visible chats.
+     * Returns {@code true} only when a notification is actually posted.
+     */
+    static synchronized boolean showProactiveBoardNotification(
+            Context context,
+            String deviceId,
+            String botId,
+            String botName,
+            String resultId,
+            String summary) {
+        if (context == null || deviceId == null || deviceId.isEmpty()
+                || botId == null || botId.isEmpty() || resultId == null || resultId.isEmpty()) {
+            return false;
+        }
+        String key = proactiveBoardDedupeKey(deviceId, botId, resultId);
+        if (context.getSharedPreferences("bot_client_notifications", MODE_PRIVATE).getBoolean(key, false)) {
+            return false;
+        }
+        if (isVisible(deviceId, botId)) {
+            context.getSharedPreferences("bot_client_notifications", MODE_PRIVATE).edit().putBoolean(key, true).commit();
+            return false;
+        }
+        if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        String title = botName != null && !botName.trim().isEmpty() ? botName.trim() : PROACTIVE_DEFAULT_TITLE;
+        String body = summary != null && !summary.trim().isEmpty() ? summary.trim() : PROACTIVE_DEFAULT_SUMMARY;
+        if (body.length() > 200) {
+            body = body.substring(0, 200);
+        }
+        Intent intent = new Intent(context, TauriMainActivity.class)
+                .setData(Uri.parse("assistant://bot/" + Uri.encode(deviceId) + "/" + Uri.encode(botId)))
+                .putExtra("assistant_device_id", deviceId)
+                .putExtra("assistant_bot_id", botId)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent open = PendingIntent.getActivity(
+                context,
+                PROACTIVE_NOTIFICATION_ID,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        manager.createNotificationChannel(
+                new NotificationChannel(PROACTIVE_CHANNEL, "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
+        Notification notification = new Notification.Builder(context, PROACTIVE_CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_notify_more)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build();
+        try {
+            manager.notify("bot-board:" + digest(deviceId + String.valueOf((char) 0) + botId), PROACTIVE_NOTIFICATION_ID, notification);
+        } catch (SecurityException denied) {
+            return false;
         }
         context.getSharedPreferences("bot_client_notifications", MODE_PRIVATE).edit().putBoolean(key, true).commit();
         return true;

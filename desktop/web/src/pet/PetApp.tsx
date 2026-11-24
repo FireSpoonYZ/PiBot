@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle,
   ArrowUp,
+  Bell,
   CheckCircle2,
   Circle,
   CircleDot,
@@ -39,6 +40,7 @@ import {
   type DesktopPetWindowState,
   type PetDockSide,
   type PetPanelSide,
+  type PetProactiveAlert,
   type PetWindowHitRect,
 } from './protocol';
 import { resolvePetTheme } from './theme';
@@ -55,6 +57,7 @@ const MAX_STAGE_W = 520;
 const MAX_STAGE_H = 640;
 const STAGE_PAD = 12;
 const AUTO_FADE_MS = 10_000;
+const PROACTIVE_AUTO_TUCK_MS = 15_000;
 
 function layoutRectRelativeTo(node: HTMLElement, ancestor: HTMLElement) {
   let left = 0;
@@ -113,6 +116,7 @@ type BubbleDescriptor =
     }
   | { kind: 'thought'; id: string; text: string; canStop: boolean }
   | { kind: 'speech'; id: string; text: string; streaming: boolean; promptQuote?: string; messageId?: string }
+  | { kind: 'proactive-alert'; id: string; alert: PetProactiveAlert }
   | { kind: 'progress'; id: string };
 
 const PetMarkdown = memo(function PetMarkdown({
@@ -168,6 +172,7 @@ export function PetApp() {
   const [ctxMenuOpen, setCtxMenuOpen] = useState(false);
   const [hoveringDock, setHoveringDock] = useState(false);
   const [hoveringBubble, setHoveringBubble] = useState(false);
+  const [bubbleFocused, setBubbleFocused] = useState(false);
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
   const [notice, setNotice] = useState('');
@@ -186,6 +191,8 @@ export function PetApp() {
 
   // Bubble visibility & settlement tracking
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [tuckedProactiveIds, setTuckedProactiveIds] = useState<Set<string>>(() => new Set());
+  const [revealedProactiveId, setRevealedProactiveId] = useState<string | null>(null);
   const [forcedReplyId, setForcedReplyId] = useState<string | null>(null);
   const [recentQuestionId, setRecentQuestionId] = useState<string | null>(null);
   const initialReplyCapturedRef = useRef<string | null>(null);
@@ -442,10 +449,20 @@ export function PetApp() {
       else if (ctxMenuOpen) setCtxMenuOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
       else if (composerOpen) setComposerOpen(false);
+      else if (revealedProactiveId) {
+        const tuckedId = revealedProactiveId;
+        setRevealedProactiveId(null);
+        setTuckedProactiveIds((prev) => {
+          if (prev.has(tuckedId)) return prev;
+          const next = new Set(prev);
+          next.add(tuckedId);
+          return next;
+        });
+      }
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [cancelRecording, composerOpen, ctxMenuOpen, settingsOpen, stopReading, voiceStatus.phase]);
+  }, [cancelRecording, composerOpen, ctxMenuOpen, revealedProactiveId, settingsOpen, stopReading, voiceStatus.phase]);
 
   // Auto-focus composer textarea when user opens the floating composer pill
   useEffect(() => {
@@ -741,6 +758,20 @@ export function PetApp() {
       }
     }
 
+    // Priority 5b: Proactive Google assistant Board alert (below all active chat/handoff/speech bubbles)
+    if (snapshot.proactiveAlert) {
+      const alert = snapshot.proactiveAlert;
+      const isRevealed = revealedProactiveId === alert.resultId;
+      const isTucked = tuckedProactiveIds.has(alert.resultId);
+      if (isRevealed || (!dndMode && !isTucked)) {
+        return {
+          kind: 'proactive-alert',
+          id: `proactive:${alert.resultId}`,
+          alert,
+        };
+      }
+    }
+
     // Priority 6: Active Task / incomplete Todo card when idle
     if (!dndMode && (snapshot.task || (snapshot.todo && snapshot.todo.tasks.some((item) => item.status !== 'completed')))) {
       const pid = snapshot.task
@@ -764,12 +795,25 @@ export function PetApp() {
     matchingSettledQuestion,
     notice,
     recording,
+    revealedProactiveId,
     settingsOpen,
     snapshot,
     t,
     transcribing,
+    tuckedProactiveIds,
     voiceStatus.error,
   ]);
+
+  // Clear revealed proactive alert state when alert clears or rotates to a newer resultId
+  useEffect(() => {
+    if (revealedProactiveId && snapshot.proactiveAlert?.resultId !== revealedProactiveId) {
+      setRevealedProactiveId(null);
+    }
+  }, [revealedProactiveId, snapshot.proactiveAlert]);
+
+  useEffect(() => {
+    if (!activeBubble) setBubbleFocused(false);
+  }, [activeBubble]);
 
   // Auto-fade completed speech bubbles when user enabled auto-fade
   useEffect(() => {
@@ -779,6 +823,24 @@ export function PetApp() {
     const timer = setTimeout(() => dismissBubble(bubbleId), AUTO_FADE_MS);
     return () => clearTimeout(timer);
   }, [activeBubble, autoFade, dismissBubble, hoveringBubble, speaking]);
+
+  // Auto-tuck auto-opened proactive alert back into the mascot badge after 15s without hover/focus.
+  // Auto-tuck is NOT dismissal: never dispatch dismiss-proactive-alert here.
+  const activeProactiveAlertId =
+    activeBubble?.kind === 'proactive-alert' ? activeBubble.alert.resultId : null;
+  useEffect(() => {
+    if (!activeProactiveAlertId) return;
+    if (revealedProactiveId === activeProactiveAlertId || hoveringBubble || bubbleFocused) return;
+    const timer = setTimeout(() => {
+      setTuckedProactiveIds((prev) => {
+        if (prev.has(activeProactiveAlertId)) return prev;
+        const next = new Set(prev);
+        next.add(activeProactiveAlertId);
+        return next;
+      });
+    }, PROACTIVE_AUTO_TUCK_MS);
+    return () => clearTimeout(timer);
+  }, [activeProactiveAlertId, bubbleFocused, hoveringBubble, revealedProactiveId]);
 
   // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
   const syncNativeLayoutRef = useRef<() => void>(() => {});
@@ -888,7 +950,8 @@ export function PetApp() {
     snapshot.connection !== 'ready' ||
     recording ||
     Boolean(snapshot.questionnaire?.interactive) ||
-    Boolean(snapshot.handoff);
+    Boolean(snapshot.handoff) ||
+    Boolean(snapshot.proactiveAlert);
   const dotTone = recording || snapshot.connection === 'offline'
     ? 'danger'
     : snapshot.questionnaire?.interactive
@@ -913,6 +976,12 @@ export function PetApp() {
             className="pet-bubble-wrap"
             onPointerEnter={() => setHoveringBubble(true)}
             onPointerLeave={() => setHoveringBubble(false)}
+            onFocus={() => setBubbleFocused(true)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setBubbleFocused(false);
+              }
+            }}
           >
             <section
               className="pet-bubble"
@@ -1198,6 +1267,60 @@ export function PetApp() {
                       </button>
                     </div>
                   </div>
+                </div>
+              ) : activeBubble.kind === 'proactive-alert' ? (
+                <div className="pet-proactive-wrap">
+                  <div
+                    className="pet-proactive-line"
+                    title={`${activeBubble.alert.botName} · ${activeBubble.alert.summary}`}
+                  >
+                    <span className="pet-proactive-icon" aria-hidden="true">
+                      <Bell size={13} />
+                    </span>
+                    <span className="pet-proactive-bot">{activeBubble.alert.botName}</span>
+                    <span className="pet-proactive-sep" aria-hidden="true">·</span>
+                    <span className="pet-proactive-summary">{activeBubble.alert.summary}</span>
+                  </div>
+                  <div className="pet-proactive-actions">
+                    <button
+                      type="button"
+                      className="pet-handoff-ghost"
+                      onClick={() => {
+                        const alert = activeBubble.alert;
+                        setRevealedProactiveId(null);
+                        void postAction({
+                          id: crypto.randomUUID(),
+                          kind: 'dismiss-proactive-alert',
+                          resultId: alert.resultId,
+                        }).catch(report);
+                      }}
+                    >
+                      {t('忽略', 'Dismiss')}
+                    </button>
+                    <button
+                      type="button"
+                      className="pet-handoff-primary"
+                      onClick={() => {
+                        const alert = activeBubble.alert;
+                        setRevealedProactiveId(null);
+                        void postAction({
+                          id: crypto.randomUUID(),
+                          kind: 'open-bot',
+                          deviceId: alert.deviceId,
+                          botId: alert.botId,
+                        }).catch(report);
+                        void petWindow('show-main').catch(report);
+                      }}
+                    >
+                      <span>{t('查看', 'View')}</span>
+                      <ExternalLink size={12} aria-hidden="true" />
+                    </button>
+                  </div>
+                  {revealedProactiveId !== activeBubble.alert.resultId && !hoveringBubble && !bubbleFocused ? (
+                    <div className="pet-autofade-bar" aria-hidden="true">
+                      <div className="pet-autofade-fill is-proactive" />
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 /* Speech reply bubble */
@@ -1519,6 +1642,23 @@ export function PetApp() {
                 avatarPressValidRef.current = false;
                 if (settingsOpen) {
                   setSettingsOpen(false);
+                  return;
+                }
+                const pendingAlert = snapshotRef.current.proactiveAlert;
+                const alertHidden = Boolean(
+                  pendingAlert &&
+                  (dndMode || tuckedProactiveIds.has(pendingAlert.resultId)) &&
+                  revealedProactiveId !== pendingAlert.resultId,
+                );
+                if (alertHidden && pendingAlert && (!activeBubble || activeBubble.kind === 'progress')) {
+                  setTuckedProactiveIds((prev) => {
+                    if (!prev.has(pendingAlert.resultId)) return prev;
+                    const next = new Set(prev);
+                    next.delete(pendingAlert.resultId);
+                    return next;
+                  });
+                  setRevealedProactiveId(pendingAlert.resultId);
+                  focusPendingRef.current = true;
                   return;
                 }
                 const next = !composerOpen;

@@ -5,11 +5,27 @@ import { PET_EVENTS, type DesktopPetAction, type DesktopPetWindowState } from '.
 import { petWindow } from './windowApi';
 import { completePetAction } from './drafts';
 
+export interface StartDesktopPetHostOptions {
+  onOpenBot?: (deviceId: string, botId: string) => void;
+}
+
 /** The main document owns the existing client; the pet never opens a second broker connection. */
-export async function startDesktopPetHost(api: DesktopPanelApi): Promise<() => void> {
-  const controller = createDesktopPetController(api, (snapshot) => {
-    void emitTo('pet', PET_EVENTS.state, snapshot).catch(() => {});
-  });
+export async function startDesktopPetHost(
+  api: DesktopPanelApi,
+  options: StartDesktopPetHostOptions = {},
+): Promise<() => void> {
+  const controller = createDesktopPetController(
+    api,
+    (snapshot) => {
+      void emitTo('pet', PET_EVENTS.state, snapshot).catch(() => {});
+    },
+    {
+      onOpenBot: (deviceId, botId) => {
+        options.onOpenBot?.(deviceId, botId);
+        void petWindow('show-main').catch(() => {});
+      },
+    },
+  );
   let started = false;
   const start = () => {
     if (started) return;

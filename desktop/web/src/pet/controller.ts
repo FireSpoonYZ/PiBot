@@ -23,12 +23,20 @@ import {
   type PetActiveQuestionnaire,
   type PetHandoffCard,
   type PetMessage,
+  type PetProactiveAlert,
   type PetTaskCard,
 } from './protocol.ts';
 
 export interface DesktopPetControllerDependencies {
   hostStatus?: () => Promise<Pick<HostStatus, 'configured' | 'deviceId'>>;
+  onOpenBot?: (deviceId: string, botId: string) => void;
+  proactivePollIntervalMs?: number;
 }
+
+const PROACTIVE_POLL_INTERVAL_MS = 15_000;
+const PROACTIVE_BOARD_RESULT_KIND = 'proactive-google';
+const PROACTIVE_FALLBACK_SUMMARY = '有新的邮件或日程待查看';
+const PROACTIVE_FALLBACK_BOT_NAME = '邮件与日程管家';
 
 export interface PetProjectedCards {
   activeToolName: string | null;
@@ -331,12 +339,53 @@ function connectionKey(api: DesktopPanelApi): string {
     : '';
 }
 
+function unwrapCenterAdminData(raw: unknown): Record<string, unknown> | null {
+  if (!isRecord(raw)) return null;
+  if ('ok' in raw && raw.ok === false) return null;
+  if ('data' in raw && isRecord(raw.data)) return raw.data;
+  return raw;
+}
+
+function readProactiveLastResult(
+  value: unknown,
+): { id: string; summary: string; completedAt: string | null } | null {
+  if (!isRecord(value) || !isNonEmpty(value.id)) return null;
+  if (value.kind !== PROACTIVE_BOARD_RESULT_KIND) return null;
+  const summary =
+    typeof value.summary === 'string' && value.summary.trim()
+      ? value.summary.trim()
+      : PROACTIVE_FALLBACK_SUMMARY;
+  const completedAt =
+    typeof value.completedAt === 'string' && value.completedAt.trim()
+      ? value.completedAt.trim()
+      : null;
+  return { id: value.id, summary, completedAt };
+}
+
+function sameProactiveAlert(a: PetProactiveAlert | null, b: PetProactiveAlert | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.deviceId === b.deviceId &&
+    a.botId === b.botId &&
+    a.botName === b.botName &&
+    a.resultId === b.resultId &&
+    a.summary === b.summary &&
+    a.completedAt === b.completedAt
+  );
+}
+
+function proactiveBindingKey(deviceId: string, botId: string): string {
+  return `${deviceId}\0${botId}`;
+}
+
 export function createDesktopPetController(
   api: DesktopPanelApi,
   onSnapshot: (snapshot: DesktopPetSnapshot) => void,
   dependencies: DesktopPetControllerDependencies = {},
 ) {
   const readHost = dependencies.hostStatus ?? hostStatus;
+  const proactiveIntervalMs = dependencies.proactivePollIntervalMs ?? PROACTIVE_POLL_INTERVAL_MS;
   let value: DesktopPetSnapshot = { ...INITIAL_PET_SNAPSHOT, hostSessionId: crypto.randomUUID() };
   let active = false;
   let unsubscribe: (() => void) | null = null;
@@ -349,6 +398,14 @@ export function createDesktopPetController(
   let live: BotLiveState | null = null;
   let generationSerial = 0;
   let sending = false;
+  let proactiveTimer: ReturnType<typeof setInterval> | null = null;
+  let proactiveEpoch = 0;
+  let proactiveRequestId = 0;
+  let proactiveInFlight = false;
+  let proactiveProfileKey = '';
+  const botNameByKey = new Map<string, string>();
+  const proactiveBaselineIds = new Map<string, string | null>();
+  const dismissedProactiveResultIds = new Set<string>();
 
   function publish(patch: Partial<DesktopPetSnapshot> = {}): void {
     value = { ...value, ...patch, sending, revision: value.revision + 1 };
@@ -458,6 +515,177 @@ export function createDesktopPetController(
     }
   }
 
+  function resolveProactiveTargetIdentity(targetDeviceId: string): DesktopIdentity | null {
+    const currentId = api.identity;
+    if (!currentId || !api.transportConnected) return null;
+    if (currentId.kind === 'local') {
+      return currentId.targetDeviceId === targetDeviceId ? currentId : null;
+    }
+    if (typeof api.identityForTarget === 'function') {
+      return api.identityForTarget(targetDeviceId);
+    }
+    return currentId.targetDeviceId === targetDeviceId ? currentId : null;
+  }
+
+  function setProactiveAlert(next: PetProactiveAlert | null): void {
+    if (sameProactiveAlert(value.proactiveAlert, next)) return;
+    publish({ proactiveAlert: next });
+  }
+
+  function stopProactivePolling(): void {
+    proactiveEpoch += 1;
+    proactiveInFlight = false;
+    if (proactiveTimer !== null) {
+      clearInterval(proactiveTimer);
+      proactiveTimer = null;
+    }
+  }
+
+  function startProactivePolling(): void {
+    if (proactiveTimer !== null) return;
+    const intervalMs = Math.max(50, proactiveIntervalMs);
+    const timer = setInterval(() => {
+      if (active && api.identity && api.transportConnected) {
+        void checkProactiveAlert(true);
+      }
+    }, intervalMs);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    proactiveTimer = timer;
+  }
+
+  /**
+   * Poll bound proactive Google assistant Board metadata (never raw conversation history).
+   * Fail-soft on 404/offline/errors so older Centers or transient outages never disrupt the pet.
+   */
+  async function checkProactiveAlert(fromTimer = false): Promise<void> {
+    if (!active || !api.identity || !api.transportConnected) return;
+    if (fromTimer && proactiveInFlight) return;
+    const epoch = proactiveEpoch;
+    const reqId = ++proactiveRequestId;
+    const connKey = connectionKey(api);
+    const currentId = api.identity;
+    const stillCurrent = () =>
+      active &&
+      epoch === proactiveEpoch &&
+      reqId === proactiveRequestId &&
+      connKey === connectionKey(api);
+
+    proactiveInFlight = true;
+    try {
+      let raw: unknown;
+      try {
+        raw = await api.broker(currentId, 'center_admin_request', {
+          method: 'GET',
+          path: '/api/google/assistant',
+        });
+      } catch {
+        return;
+      }
+      if (!stillCurrent()) return;
+
+      const payload = unwrapCenterAdminData(raw);
+      const assistant = payload && isRecord(payload.assistant) ? payload.assistant : null;
+      if (
+        !assistant ||
+        assistant.enabled !== true ||
+        !isNonEmpty(assistant.deviceId) ||
+        !isNonEmpty(assistant.botId)
+      ) {
+        if (value.proactiveAlert !== null) {
+          setProactiveAlert(null);
+        }
+        return;
+      }
+
+      const targetDeviceId = assistant.deviceId;
+      const targetBotId = assistant.botId;
+      const targetIdentity = resolveProactiveTargetIdentity(targetDeviceId);
+      if (!targetIdentity) return;
+
+      let board: unknown;
+      try {
+        board = await api.call(targetIdentity, 'getBotBoard', { botIds: [targetBotId] });
+      } catch {
+        return;
+      }
+      if (!stillCurrent()) return;
+
+      const items = isRecord(board) && Array.isArray(board.items) ? board.items : [];
+      const item = items.find((entry) => isRecord(entry) && entry.botId === targetBotId);
+      if (!isRecord(item)) return;
+
+      const bindingKey = proactiveBindingKey(targetDeviceId, targetBotId);
+      const proactiveResult = readProactiveLastResult(item.lastResult);
+
+      // Cold-start baseline: record existing result on first successful poll for this binding
+      // so launching the desktop app never re-pops stale alerts.
+      if (!proactiveBaselineIds.has(bindingKey)) {
+        proactiveBaselineIds.set(bindingKey, proactiveResult ? proactiveResult.id : null);
+        if (
+          value.proactiveAlert &&
+          (value.proactiveAlert.deviceId !== targetDeviceId || value.proactiveAlert.botId !== targetBotId)
+        ) {
+          setProactiveAlert(null);
+        }
+        return;
+      }
+
+      if (!proactiveResult) {
+        if (
+          value.proactiveAlert &&
+          value.proactiveAlert.deviceId === targetDeviceId &&
+          value.proactiveAlert.botId === targetBotId
+        ) {
+          const itemActivity = isRecord(item.activity) ? item.activity : null;
+          if (!itemActivity || itemActivity.phase === 'idle') {
+            setProactiveAlert(null);
+          }
+        }
+        return;
+      }
+
+      const baselineId = proactiveBaselineIds.get(bindingKey);
+      if (proactiveResult.id === baselineId || dismissedProactiveResultIds.has(proactiveResult.id)) {
+        if (
+          value.proactiveAlert &&
+          value.proactiveAlert.deviceId === targetDeviceId &&
+          value.proactiveAlert.botId === targetBotId &&
+          value.proactiveAlert.resultId === proactiveResult.id
+        ) {
+          setProactiveAlert(null);
+        }
+        return;
+      }
+
+      const assistantBotName =
+        (isNonEmpty(assistant.botName) && assistant.botName.trim()) ||
+        (isNonEmpty(assistant.role) && assistant.role.trim()) ||
+        '';
+      const resolvedBotName =
+        botNameByKey.get(bindingKey) ||
+        assistantBotName ||
+        (value.deviceId === targetDeviceId && value.botId === targetBotId && value.botName
+          ? value.botName
+          : '') ||
+        PROACTIVE_FALLBACK_BOT_NAME;
+
+      setProactiveAlert({
+        deviceId: targetDeviceId,
+        botId: targetBotId,
+        botName: resolvedBotName,
+        resultId: proactiveResult.id,
+        summary: proactiveResult.summary,
+        completedAt: proactiveResult.completedAt,
+      });
+    } finally {
+      if (reqId === proactiveRequestId) {
+        proactiveInFlight = false;
+      }
+    }
+  }
+
   async function refresh(): Promise<void> {
     if (!active) return;
     const epoch = ++refreshEpoch;
@@ -470,6 +698,9 @@ export function createDesktopPetController(
       if (!host.configured || !host.deviceId) {
         clearTarget();
         publish({ connection: 'unconfigured', deviceId: null, error: '请先在主界面配置本机 Host。' });
+        if (api.identity && api.transportConnected) {
+          await checkProactiveAlert();
+        }
         return;
       }
       if (value.deviceId && value.deviceId !== host.deviceId) clearTarget();
@@ -481,6 +712,11 @@ export function createDesktopPetController(
       const target = api.identityForTarget(host.deviceId);
       const directory = await api.broker(target, 'bot_directory', {});
       if (!current()) return;
+      for (const entry of directory.bots) {
+        if (entry && isNonEmpty(entry.deviceId) && isNonEmpty(entry.botId) && isNonEmpty(entry.role)) {
+          botNameByKey.set(proactiveBindingKey(entry.deviceId, entry.botId), entry.role);
+        }
+      }
       const primary = directory.bots.find((item) =>
         item.deviceId === host.deviceId && item.isPrimary && !item.archivedAt);
       if (!primary) {
@@ -491,6 +727,7 @@ export function createDesktopPetController(
           connection: failure || offline ? 'offline' : 'unconfigured',
           error: failure?.message ?? (failure || offline ? '本机 Host 暂不可用。' : '本机还没有 main bot，请在主界面创建或指定。'),
         });
+        await checkProactiveAlert();
         return;
       }
       const changed = !bot || bot.botId !== primary.botId || bot.deviceId !== primary.deviceId;
@@ -506,6 +743,7 @@ export function createDesktopPetController(
       } else if (!observation) {
         watch(target, primary);
       }
+      await checkProactiveAlert();
     } catch (error) {
       if (current()) markOffline(toError(error).message);
     }
@@ -516,6 +754,22 @@ export function createDesktopPetController(
     if (key === observedConnection) return;
     observedConnection = key;
     refreshEpoch += 1;
+    proactiveEpoch += 1;
+    proactiveInFlight = false;
+    const nextProfileKey = api.identity ? `${api.identity.profileId}:${api.identity.kind}` : '';
+    if (nextProfileKey !== proactiveProfileKey) {
+      proactiveProfileKey = nextProfileKey;
+      proactiveBaselineIds.clear();
+      dismissedProactiveResultIds.clear();
+      botNameByKey.clear();
+      if (value.proactiveAlert !== null) {
+        value = { ...value, proactiveAlert: null };
+      }
+    } else if (!api.identity || !api.transportConnected) {
+      if (value.proactiveAlert !== null) {
+        value = { ...value, proactiveAlert: null };
+      }
+    }
     clearTarget();
     void refresh();
   }
@@ -527,13 +781,16 @@ export function createDesktopPetController(
     }
     active = true;
     observedConnection = connectionKey(api);
+    proactiveProfileKey = api.identity ? `${api.identity.profileId}:${api.identity.kind}` : '';
     unsubscribe = api.subscribe(onConnectionChange);
+    startProactivePolling();
     void refresh();
   }
 
   function stop(): void {
     active = false;
     refreshEpoch += 1;
+    stopProactivePolling();
     unsubscribe?.();
     unsubscribe = null;
     closeObservation();
@@ -615,6 +872,27 @@ export function createDesktopPetController(
     }
     if (action.kind === 'refresh') {
       await refresh();
+      return { id: action.id, ok: true };
+    }
+    if (action.kind === 'open-bot') {
+      if (
+        value.proactiveAlert &&
+        value.proactiveAlert.deviceId === action.deviceId &&
+        value.proactiveAlert.botId === action.botId
+      ) {
+        dismissedProactiveResultIds.add(value.proactiveAlert.resultId);
+        publish({ proactiveAlert: null });
+      }
+      dependencies.onOpenBot?.(action.deviceId, action.botId);
+      return { id: action.id, ok: true };
+    }
+    if (action.kind === 'dismiss-proactive-alert') {
+      if (isNonEmpty(action.resultId)) {
+        dismissedProactiveResultIds.add(action.resultId);
+      }
+      if (value.proactiveAlert && value.proactiveAlert.resultId === action.resultId) {
+        publish({ proactiveAlert: null });
+      }
       return { id: action.id, ok: true };
     }
     if (action.deviceId !== value.deviceId || action.botId !== value.botId) {

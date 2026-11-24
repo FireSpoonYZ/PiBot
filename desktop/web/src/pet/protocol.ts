@@ -57,6 +57,15 @@ export interface PetHandoffCard {
   actionLabel: string;
 }
 
+export interface PetProactiveAlert {
+  deviceId: string;
+  botId: string;
+  botName: string;
+  resultId: string;
+  summary: string;
+  completedAt: string | null;
+}
+
 export interface DesktopPetSnapshot {
   hostSessionId: string;
   revision: number;
@@ -76,6 +85,7 @@ export interface DesktopPetSnapshot {
   todo: TodoPresentation | null;
   task: PetTaskCard | null;
   handoff: PetHandoffCard | null;
+  proactiveAlert: PetProactiveAlert | null;
   error: string | null;
   sending: boolean;
   canStop: boolean;
@@ -93,7 +103,9 @@ export type DesktopPetAction =
       botId: string;
       installationId: string;
       input: PetQuestionnaireSubmitPayload;
-    };
+    }
+  | { id: string; kind: 'open-bot'; deviceId: string; botId: string }
+  | { id: string; kind: 'dismiss-proactive-alert'; resultId: string };
 
 export interface DesktopPetResult {
   id: string;
@@ -152,6 +164,7 @@ export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   todo: null,
   task: null,
   handoff: null,
+  proactiveAlert: null,
   error: null,
   sending: false,
   canStop: false,

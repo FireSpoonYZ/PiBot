@@ -238,6 +238,20 @@ button svg { flex: none; }
   width: 308px;
 }
 
+/* Variant: Proactive Assistant Board Alert */
+.pet-bubble[data-variant="proactive-alert"] {
+  width: 312px;
+  border-color: var(--signal-primary-border);
+}
+.pet-bubble[data-variant="proactive-alert"] .pet-bubble-tail {
+  border-right-color: var(--signal-primary-border);
+  border-bottom-color: var(--signal-primary-border);
+}
+.pet-stage[data-panel-side="bottom"] .pet-bubble[data-variant="proactive-alert"] .pet-bubble-tail {
+  border-left-color: var(--signal-primary-border);
+  border-top-color: var(--signal-primary-border);
+}
+
 /* Variant: Voice Settings inside bubble */
 .pet-bubble[data-variant="settings"] {
   width: 356px;
@@ -448,9 +462,65 @@ button svg { flex: none; }
   transform-origin: left;
   animation: pet-autofade-shrink 10s linear forwards;
 }
+.pet-autofade-fill.is-proactive {
+  animation-duration: 15s;
+}
 @keyframes pet-autofade-shrink {
   from { transform: scaleX(1); }
   to { transform: scaleX(0); }
+}
+
+/* Proactive Assistant Alert Bubble */
+.pet-proactive-wrap {
+  position: relative;
+  padding: 11px 13px 10px;
+}
+.pet-proactive-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 9px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.pet-proactive-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: var(--signal-primary-soft);
+  color: var(--signal-primary);
+}
+.pet-proactive-bot {
+  flex: none;
+  max-width: 108px;
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pet-proactive-sep {
+  flex: none;
+  color: var(--ink-muted);
+}
+.pet-proactive-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pet-proactive-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 /* Handoff & Progress Bubbles */
