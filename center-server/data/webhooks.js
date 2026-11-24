@@ -199,7 +199,12 @@ export function webhookStore(db, transaction, options = {}) {
         resolvedOptions = nowMs;
         resolvedNowMs = resolvedOptions.nowMs ?? Date.now();
       }
-      const pollOptions = resolvedOptions && typeof resolvedOptions === 'object' ? resolvedOptions : {};
+      const rawPollOptions = resolvedOptions && typeof resolvedOptions === 'object' ? resolvedOptions : {};
+      const pollOptions = {
+        ...rawPollOptions,
+        googleAssistantBatch: rawPollOptions.googleAssistantBatch === true
+          || rawPollOptions.googleAssistant === 'batch-v1',
+      };
       const after = parseCursor(cursor, extraDeliveries.length);
       return transaction(() => {
         const now = new Date(resolvedNowMs).toISOString();

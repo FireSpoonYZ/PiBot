@@ -192,6 +192,9 @@ test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAu
     'automation_google_rule_set_enabled',
     'automation_google_rule_update',
     'automation_google_rule_remove',
+    'automation_google_assistant_get',
+    'automation_google_assistant_configure',
+    'automation_google_assistant_remove',
   ];
 
   const actualNames = googleRuleOperations.map((op) => op.name);
@@ -219,6 +222,12 @@ test('Google rule contract descriptors and handlers match 1-to-1 and exclude OAu
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_update')?.destructive, false);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_remove')?.readOnly, false);
   assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_rule_remove')?.destructive, true);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_get')?.readOnly, true);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_get')?.destructive, false);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_configure')?.readOnly, false);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_configure')?.destructive, false);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_remove')?.readOnly, false);
+  assert.equal(googleRuleOperations.find((op) => op.name === 'automation_google_assistant_remove')?.destructive, true);
 
   const googleHandlers = createGoogleRuleHandlers({});
   assert.deepEqual(Object.keys(googleHandlers).sort(), [...expectedNames].sort());

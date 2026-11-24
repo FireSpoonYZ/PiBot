@@ -129,6 +129,27 @@ const UPDATE_MUTABLE_KEYS = [
 const UPDATE_FIELDS = new Set(['id', ...UPDATE_MUTABLE_KEYS]);
 const REMOVE_FIELDS = new Set(['id']);
 
+const ASSISTANT_EMPTY_FIELDS = new Set();
+const ASSISTANT_CONFIGURE_MUTABLE_KEYS = [
+  'enabled',
+  'deviceId',
+  'botId',
+  'mode',
+  'accounts',
+  'batchWindowMinutes',
+  'digestTimes',
+  'calendarEnabled',
+  'calendarLeadMinutes',
+];
+const ASSISTANT_CONFIGURE_FIELDS = new Set(ASSISTANT_CONFIGURE_MUTABLE_KEYS);
+const FORBIDDEN_ASSISTANT_CONSENT_FIELDS = new Set([
+  'hindsightprivatememory',
+  'hindsight_private_memory',
+]);
+const ASSISTANT_DIGEST_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const MAX_ASSISTANT_ACCOUNTS = 20;
+const MAX_ASSISTANT_DIGEST_TIMES = 6;
+
 function fail(code, message) {
   throw Object.assign(new Error(message), { code });
 }
@@ -451,6 +472,71 @@ async function invokeGoogleRules(deps, action, payload = {}) {
     return service.manage(action, payload);
   }
   fail('INTERNAL_ERROR', 'Google rules service is unavailable');
+}
+
+async function invokeGoogleAssistant(deps, action, payload = {}) {
+  if (typeof deps?.owner === 'function') {
+    if (action === 'get') {
+      return deps.owner('GET', '/api/google/assistant', { params: {}, query: {} });
+    }
+    if (action === 'save') {
+      return deps.owner('POST', '/api/google/assistant/save', { params: {}, body: payload, query: {} });
+    }
+    if (action === 'remove') {
+      return deps.owner('POST', '/api/google/assistant/remove', { params: {}, body: {}, query: {} });
+    }
+    if (action === 'events') {
+      const query = payload.limit !== undefined ? { limit: payload.limit } : {};
+      return deps.owner('GET', '/api/google/assistant/events', { params: {}, query });
+    }
+    fail('INTERNAL_ERROR', `Unsupported Google assistant action: ${String(action)}`);
+  }
+  const service = resolveRulesService(deps);
+  if (service && typeof service.assistantManage === 'function') {
+    return service.assistantManage(action, payload);
+  }
+  fail('INTERNAL_ERROR', 'Proactive Google assistant service is unavailable');
+}
+
+function sanitizeGoogleAssistant(assistant) {
+  if (!isPlainObject(assistant)) return null;
+  const mode = assistant.mode === 'existing' ? 'existing' : 'dedicated';
+  return {
+    enabled: Boolean(assistant.enabled),
+    deviceId: typeof assistant.deviceId === 'string' ? assistant.deviceId : '',
+    botId: typeof assistant.botId === 'string' ? assistant.botId : '',
+    mode,
+    accounts: Array.isArray(assistant.accounts)
+      ? assistant.accounts.filter((item) => typeof item === 'string' && item.trim())
+      : [],
+    batchWindowMinutes: Number.isInteger(assistant.batchWindowMinutes) ? assistant.batchWindowMinutes : 10,
+    digestTimes: Array.isArray(assistant.digestTimes)
+      ? assistant.digestTimes.filter((item) => typeof item === 'string' && ASSISTANT_DIGEST_TIME_RE.test(item))
+      : [],
+    calendarEnabled: Boolean(assistant.calendarEnabled),
+    calendarLeadMinutes: Number.isInteger(assistant.calendarLeadMinutes) ? assistant.calendarLeadMinutes : 15,
+    hindsightPrivateMemory: Boolean(assistant.hindsightPrivateMemory),
+    revision: Number.isInteger(assistant.revision) ? assistant.revision : 1,
+    listeningSince: typeof assistant.listeningSince === 'string' ? assistant.listeningSince : null,
+    createdAt: typeof assistant.createdAt === 'string' ? assistant.createdAt : null,
+    updatedAt: typeof assistant.updatedAt === 'string' ? assistant.updatedAt : null,
+  };
+}
+
+function sanitizeGoogleAssistantRuntime(runtime) {
+  if (!isPlainObject(runtime)) return null;
+  return {
+    status: typeof runtime.status === 'string' ? runtime.status : null,
+    reason: typeof runtime.reason === 'string' ? runtime.reason : null,
+    detail: typeof runtime.detail === 'string' ? scrubGoogleSecrets(runtime.detail).slice(0, 400) : null,
+    lastCheckedAt: typeof runtime.lastCheckedAt === 'string' ? runtime.lastCheckedAt : null,
+    lastEventAt: typeof runtime.lastEventAt === 'string' ? runtime.lastEventAt : null,
+    pendingBucketCount: Number.isInteger(runtime.pendingBucketCount) ? runtime.pendingBucketCount : 0,
+    pendingDeliveryCount: Number.isInteger(runtime.pendingDeliveryCount) ? runtime.pendingDeliveryCount : 0,
+    missedCount: Number.isInteger(runtime.missedCount) ? runtime.missedCount : 0,
+    targetOnline: typeof runtime.targetOnline === 'boolean' ? runtime.targetOnline : null,
+    lastDelivery: sanitizeLastDelivery(runtime.lastDelivery),
+  };
 }
 
 async function getExistingGoogleRule(deps, id) {
@@ -853,6 +939,164 @@ export function createGoogleRuleHandlers(deps = {}) {
         id,
         ...(res?.rule ? { rule: sanitizeGoogleRule(res.rule) } : {}),
       };
+    },
+
+    async automation_google_assistant_get(args, rawActor) {
+      const actor = validateActor(rawActor);
+      const inputArgs = optionalPlainObject(args);
+      assertCleanFields(inputArgs, ASSISTANT_EMPTY_FIELDS);
+
+      const res = await invokeGoogleAssistant(deps, 'get');
+      const assistant = sanitizeGoogleAssistant(res?.assistant);
+      if (!assistant) {
+        return { assistant: null, runtime: null };
+      }
+      if (!isTargetAllowedByActor(actor, assistant.deviceId, assistant.botId)) {
+        return { assistant: null, runtime: null };
+      }
+      return {
+        assistant,
+        runtime: sanitizeGoogleAssistantRuntime(res?.runtime),
+      };
+    },
+
+    async automation_google_assistant_configure(args, rawActor) {
+      const actor = validateActor(rawActor);
+      const inputArgs = requirePlainObject(args);
+
+      for (const key of Object.keys(inputArgs)) {
+        if (PROTOTYPE_KEYS.has(key)) {
+          fail('INVALID_ARGUMENT', `Disallowed field: ${key}`);
+        }
+        const lower = key.toLowerCase();
+        if (FORBIDDEN_AUTH_FIELD_SET.has(lower)) {
+          fail('FORBIDDEN', `OAuth, credential, token, and permission field '${key}' is forbidden`);
+        }
+        if (FORBIDDEN_ASSISTANT_CONSENT_FIELDS.has(lower)) {
+          fail('FORBIDDEN', 'hindsightPrivateMemory consent can only be configured by the Center owner');
+        }
+        if (!ASSISTANT_CONFIGURE_FIELDS.has(key)) {
+          fail('INVALID_ARGUMENT', `Unknown field: ${key}`);
+        }
+      }
+
+      if (!ASSISTANT_CONFIGURE_MUTABLE_KEYS.some((key) => inputArgs[key] !== undefined)) {
+        fail('INVALID_ARGUMENT', 'At least one mutable assistant field must be provided');
+      }
+
+      const currentRes = await invokeGoogleAssistant(deps, 'get');
+      const existing = isPlainObject(currentRes?.assistant) ? currentRes.assistant : null;
+      if (existing) {
+        assertActorRuleTargetAllowed(actor, existing);
+      }
+
+      let deviceId;
+      let botId;
+      if (existing) {
+        deviceId = inputArgs.deviceId !== undefined
+          ? assertTrimmedId(inputArgs.deviceId, 'deviceId', 128)
+          : existing.deviceId;
+        botId = inputArgs.botId !== undefined
+          ? assertTrimmedId(inputArgs.botId, 'botId', 128)
+          : existing.botId;
+        assertActorRuleTargetAllowed(actor, { deviceId, botId });
+      } else {
+        ({ deviceId, botId } = resolveCreateTarget(inputArgs, actor));
+      }
+
+      const sameTarget = Boolean(existing && deviceId === existing.deviceId && botId === existing.botId);
+      const body = {
+        deviceId,
+        botId,
+        // Preserve owner-granted private memory ONLY when target Bot is unchanged;
+        // creating or redirecting to a different Bot always resets hindsightPrivateMemory to false.
+        hindsightPrivateMemory: sameTarget ? Boolean(existing.hindsightPrivateMemory) : false,
+      };
+
+      if (inputArgs.enabled !== undefined) {
+        if (typeof inputArgs.enabled !== 'boolean') {
+          fail('INVALID_ARGUMENT', 'enabled must be a boolean');
+        }
+        body.enabled = inputArgs.enabled;
+      }
+
+      if (inputArgs.mode !== undefined) {
+        if (inputArgs.mode !== 'dedicated' && inputArgs.mode !== 'existing') {
+          fail('INVALID_ARGUMENT', 'mode must be dedicated or existing');
+        }
+        body.mode = inputArgs.mode;
+      }
+
+      if (inputArgs.accounts !== undefined) {
+        if (!Array.isArray(inputArgs.accounts) || inputArgs.accounts.length === 0 || inputArgs.accounts.length > MAX_ASSISTANT_ACCOUNTS) {
+          fail('INVALID_ARGUMENT', `accounts must contain 1 to ${MAX_ASSISTANT_ACCOUNTS} entries`);
+        }
+        const cleaned = [];
+        for (let i = 0; i < inputArgs.accounts.length; i += 1) {
+          const entry = assertNonEmptyText(inputArgs.accounts[i], `accounts[${i}]`, MAX_FILTER_LENGTH).trim().toLowerCase();
+          cleaned.push(entry);
+        }
+        body.accounts = [...new Set(cleaned)].sort();
+      }
+
+      if (inputArgs.batchWindowMinutes !== undefined) {
+        if (!Number.isSafeInteger(inputArgs.batchWindowMinutes) || inputArgs.batchWindowMinutes < 1 || inputArgs.batchWindowMinutes > MAX_MINUTES_BEFORE) {
+          fail('INVALID_ARGUMENT', `batchWindowMinutes must be an integer between 1 and ${MAX_MINUTES_BEFORE}`);
+        }
+        body.batchWindowMinutes = inputArgs.batchWindowMinutes;
+      }
+
+      if (inputArgs.digestTimes !== undefined) {
+        if (!Array.isArray(inputArgs.digestTimes) || inputArgs.digestTimes.length > MAX_ASSISTANT_DIGEST_TIMES) {
+          fail('INVALID_ARGUMENT', `digestTimes must be an array of at most ${MAX_ASSISTANT_DIGEST_TIMES} HH:mm strings`);
+        }
+        const times = [];
+        for (let i = 0; i < inputArgs.digestTimes.length; i += 1) {
+          const entry = inputArgs.digestTimes[i];
+          if (typeof entry !== 'string' || !entry.isWellFormed() || !ASSISTANT_DIGEST_TIME_RE.test(entry.trim())) {
+            fail('INVALID_ARGUMENT', `Invalid digestTimes[${i}]`);
+          }
+          times.push(entry.trim());
+        }
+        body.digestTimes = [...new Set(times)].sort();
+      }
+
+      if (inputArgs.calendarEnabled !== undefined) {
+        if (typeof inputArgs.calendarEnabled !== 'boolean') {
+          fail('INVALID_ARGUMENT', 'calendarEnabled must be a boolean');
+        }
+        body.calendarEnabled = inputArgs.calendarEnabled;
+      }
+
+      if (inputArgs.calendarLeadMinutes !== undefined) {
+        if (!Number.isSafeInteger(inputArgs.calendarLeadMinutes) || inputArgs.calendarLeadMinutes < 0 || inputArgs.calendarLeadMinutes > MAX_MINUTES_BEFORE) {
+          fail('INVALID_ARGUMENT', `calendarLeadMinutes must be an integer between 0 and ${MAX_MINUTES_BEFORE}`);
+        }
+        body.calendarLeadMinutes = inputArgs.calendarLeadMinutes;
+      }
+
+      const res = await invokeGoogleAssistant(deps, 'save', body);
+      return {
+        assistant: sanitizeGoogleAssistant(res?.assistant),
+        runtime: sanitizeGoogleAssistantRuntime(res?.runtime),
+      };
+    },
+
+    async automation_google_assistant_remove(args, rawActor) {
+      const actor = validateActor(rawActor);
+      const inputArgs = optionalPlainObject(args);
+      assertCleanFields(inputArgs, ASSISTANT_EMPTY_FIELDS);
+
+      if (actor.botTargets) {
+        const currentRes = await invokeGoogleAssistant(deps, 'get');
+        const existing = isPlainObject(currentRes?.assistant) ? currentRes.assistant : null;
+        if (existing) {
+          assertActorRuleTargetAllowed(actor, existing);
+        }
+      }
+
+      const res = await invokeGoogleAssistant(deps, 'remove', {});
+      return { removed: Boolean(res?.removed) };
     },
   };
 }

@@ -157,3 +157,74 @@ export function createGoogleRuleDispatcher({
     };
   };
 }
+
+/**
+ * Creates the internal Center->Host dispatcher for proactive Google assistant batches
+ * and timely pre-meeting calendar alerts (`google_assistant_events`).
+ */
+export function createGoogleAssistantDispatcher({
+  store,
+  notify,
+  bridge,
+  now = () => Date.now(),
+  gmailEventTtlMs = DEFAULT_GMAIL_EVENT_TTL_MS,
+} = {}) {
+  if (!store || typeof store.enqueueGoogleAssistantEvent !== 'function') {
+    fail('INVALID_ARGUMENT', 'store.enqueueGoogleAssistantEvent is required');
+  }
+
+  return async function dispatchAssistant(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      fail('INVALID_ARGUMENT', 'Expected assistant dispatch input object');
+    }
+    const deviceId = requireText(input.deviceId, 'deviceId', 128);
+    const botId = requireText(input.botId, 'botId', 128);
+    const account = requireText(input.account, 'account', 320).trim().toLowerCase();
+    const source = input.source === 'gmail' || input.source === 'calendar'
+      ? input.source
+      : fail('INVALID_ARGUMENT', 'source must be gmail or calendar');
+    const eventKey = requireText(input.eventKey, 'eventKey', 512);
+    const instruction = requireText(input.instruction, 'instruction', 8000);
+    const payloadJson = stablePayloadJson(input.payload);
+    const nowMs = now();
+    const occurredAt = typeof input.occurredAt === 'string'
+      ? input.occurredAt
+      : new Date(
+        typeof input.occurredAt === 'number' && Number.isFinite(input.occurredAt)
+          ? input.occurredAt
+          : (typeof input.payload?.occurredAt === 'number' && Number.isFinite(input.payload.occurredAt)
+            ? input.payload.occurredAt
+            : nowMs),
+      ).toISOString();
+    const expiresAt = resolveExpiresAtIso(input, nowMs, gmailEventTtlMs);
+
+    const { event, created } = store.enqueueGoogleAssistantEvent({
+      deviceId,
+      botId,
+      account,
+      source,
+      routeName: typeof input.routeName === 'string' && input.routeName.trim()
+        ? input.routeName.trim().slice(0, 80)
+        : undefined,
+      eventKey,
+      instruction,
+      payloadJson,
+      occurredAt,
+      expiresAt,
+      nowMs,
+    });
+
+    const targetOnline = isDeviceOnline(bridge, deviceId);
+    if (created && event.status === 'pending') {
+      notify?.(deviceId);
+    }
+
+    return {
+      eventId: event.id,
+      requestId: event.requestId,
+      status: event.status,
+      created,
+      targetOnline,
+    };
+  };
+}

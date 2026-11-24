@@ -8,7 +8,8 @@
 //   accounts.callback(URLSearchParams), and never echoes code, state, or tokens.
 // - No request body or query secrets are logged; Cache-Control: no-store on every route.
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { DEFAULT_GOOGLE_ASSISTANT_SOUL } from '../../center-contract/google-workspace.js';
 import {
   GOOGLE_ACTION_BODY_LIMIT,
   GOOGLE_CALLBACK_PATH,
@@ -283,9 +284,119 @@ function renderCallbackHtml({ ok, phase, email, errorMessage }) {
 </html>`;
 }
 
-export function registerGoogleWorkspaceRoutes(app, { route, publicUrl, google }) {
+const ASSISTANT_SETUP_FIELDS = new Set([
+  'mode',
+  'deviceId',
+  'botId',
+  'createBot',
+  'accounts',
+  'batchWindowMinutes',
+  'digestTimes',
+  'calendarEnabled',
+  'calendarLeadMinutes',
+  'hindsightPrivateMemory',
+]);
+const ASSISTANT_CREATE_BOT_FIELDS = new Set([
+  'role',
+  'description',
+  'modelRef',
+  'thinkingLevel',
+  'cwd',
+]);
+const ASSISTANT_THINKING_LEVELS = new Set([
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+const ASSISTANT_MODEL_REF_RE = /^[^/\s]+\/.+$/u;
+const ASSISTANT_DIGEST_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function isAbsoluteBotPath(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 1024
+    && value.isWellFormed()
+    && value.trim() === value
+    && !/[\x00-\x1f\x7f]/.test(value)
+    && (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\/]+[\\/]+[^\\/]+/.test(value));
+}
+
+function assertAllowedRouteFields(obj, allowed) {
+  requireObject(obj);
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) fail('INVALID_ARGUMENT', `Unknown field: ${key}`);
+  }
+  return obj;
+}
+
+function validateCreateBotInput(raw) {
+  if (raw === undefined) {
+    return {
+      role: '邮件与日程管家',
+      description: '专职负责 Gmail 邮件与 Google Calendar 日程的主动感知、摘要与回复草稿准备',
+      modelRef: undefined,
+      thinkingLevel: undefined,
+      cwd: undefined,
+    };
+  }
+  const obj = assertAllowedRouteFields(raw, ASSISTANT_CREATE_BOT_FIELDS);
+  const role = obj.role !== undefined
+    ? optionalBoundedText(obj.role, 'createBot.role', 80) ?? fail('INVALID_ARGUMENT', 'Invalid createBot.role')
+    : '邮件与日程管家';
+  let description = '专职负责 Gmail 邮件与 Google Calendar 日程的主动感知、摘要与回复草稿准备';
+  if (obj.description !== undefined) {
+    if (typeof obj.description !== 'string' || !obj.description.isWellFormed() || obj.description.length > 2000) {
+      fail('INVALID_ARGUMENT', 'Invalid createBot.description');
+    }
+    description = obj.description.trim();
+  }
+  let modelRef;
+  if (obj.modelRef !== undefined) {
+    if (obj.modelRef === null) {
+      modelRef = null;
+    } else if (
+      typeof obj.modelRef === 'string'
+      && obj.modelRef.isWellFormed()
+      && obj.modelRef.trim() === obj.modelRef
+      && obj.modelRef.length <= 512
+      && !/[\x00-\x1f\x7f]/.test(obj.modelRef)
+      && ASSISTANT_MODEL_REF_RE.test(obj.modelRef)
+    ) {
+      modelRef = obj.modelRef;
+    } else {
+      fail('INVALID_ARGUMENT', 'Invalid createBot.modelRef');
+    }
+  }
+  let thinkingLevel;
+  if (obj.thinkingLevel !== undefined) {
+    if (obj.thinkingLevel === null) {
+      thinkingLevel = null;
+    } else if (typeof obj.thinkingLevel === 'string' && ASSISTANT_THINKING_LEVELS.has(obj.thinkingLevel)) {
+      thinkingLevel = obj.thinkingLevel;
+    } else {
+      fail('INVALID_ARGUMENT', 'Invalid createBot.thinkingLevel');
+    }
+  }
+  let cwd;
+  if (obj.cwd !== undefined) {
+    if (!isAbsoluteBotPath(obj.cwd)) {
+      fail('INVALID_ARGUMENT', 'createBot.cwd must be a non-empty absolute path');
+    }
+    cwd = obj.cwd;
+  }
+  return { role, description, modelRef, thinkingLevel, cwd };
+}
+
+export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publicUrl, google, notifyDevice, notify, learning, packages } = {}) {
   const { accounts, rules } = google || {};
   if (!accounts) throw new Error('google.accounts is required');
+  const notifyConfig = typeof notifyDevice === 'function'
+    ? notifyDevice
+    : (typeof notify === 'function' ? notify : null);
 
   const runOwner = (fn) => async (req, reply) => {
     setNoCacheHeaders(reply);
@@ -394,5 +505,248 @@ export function registerGoogleWorkspaceRoutes(app, { route, publicUrl, google })
         ...(limit !== undefined ? { limit } : {}),
       });
     }));
+
+    if (typeof rules.assistantManage === 'function') {
+      route('GET', '/api/google/assistant', runOwner(async () => rules.assistantManage('get')));
+
+      route('POST', '/api/google/assistant/save', runOwner(async (req) => {
+        const body = requireObject(req.body);
+        const previous = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+        const result = await rules.assistantManage('save', body);
+        const nextDeviceId = result?.assistant?.deviceId;
+        if (nextDeviceId) notifyConfig?.(nextDeviceId, 'config-changed');
+        if (previous?.deviceId && previous.deviceId !== nextDeviceId) {
+          notifyConfig?.(previous.deviceId, 'config-changed');
+        }
+        try { rules?.onAccountChanged?.(); } catch { /* non-fatal runtime sync */ }
+        return result;
+      }), true, GOOGLE_RULE_BODY_LIMIT);
+
+      route('POST', '/api/google/assistant/setup', runOwner(async (req) => {
+        const body = assertAllowedRouteFields(req.body, ASSISTANT_SETUP_FIELDS);
+        const mode = body.mode === 'dedicated' || body.mode === 'existing'
+          ? body.mode
+          : fail('INVALID_ARGUMENT', 'mode must be dedicated or existing');
+        const deviceId = optionalBoundedText(body.deviceId, 'deviceId', 128);
+        if (!deviceId) fail('INVALID_ARGUMENT', 'deviceId is required');
+        if (bridge?.registry) {
+          const device = bridge.registry.get(deviceId);
+          if (!device || device.revokedAt !== null || deviceId === bridge.deviceId) {
+            fail('NOT_FOUND', 'Device not found');
+          }
+        }
+
+        // Pre-validate common schedule/account inputs before any Host RPC side effects.
+        if (body.batchWindowMinutes !== undefined && (!Number.isInteger(body.batchWindowMinutes) || body.batchWindowMinutes < 1 || body.batchWindowMinutes > 1440)) {
+          fail('INVALID_ARGUMENT', 'batchWindowMinutes must be an integer between 1 and 1440');
+        }
+        if (body.digestTimes !== undefined) {
+          if (!Array.isArray(body.digestTimes) || body.digestTimes.length > 6 || body.digestTimes.some(item => typeof item !== 'string' || !ASSISTANT_DIGEST_TIME_RE.test(item.trim()))) {
+            fail('INVALID_ARGUMENT', 'Invalid digestTimes');
+          }
+        }
+        if (body.calendarEnabled !== undefined && typeof body.calendarEnabled !== 'boolean') {
+          fail('INVALID_ARGUMENT', 'calendarEnabled must be a boolean');
+        }
+        if (body.calendarLeadMinutes !== undefined && (!Number.isInteger(body.calendarLeadMinutes) || body.calendarLeadMinutes < 0 || body.calendarLeadMinutes > 1440)) {
+          fail('INVALID_ARGUMENT', 'calendarLeadMinutes must be an integer between 0 and 1440');
+        }
+        if (body.hindsightPrivateMemory !== undefined && typeof body.hindsightPrivateMemory !== 'boolean') {
+          fail('INVALID_ARGUMENT', 'hindsightPrivateMemory must be a boolean');
+        }
+
+        const googleStatus = await accounts.status();
+        let resolvedAccounts;
+        if (body.accounts !== undefined) {
+          if (!Array.isArray(body.accounts) || body.accounts.length === 0 || body.accounts.length > 20) {
+            fail('INVALID_ARGUMENT', 'accounts must be a non-empty array');
+          }
+          const matchedList = [];
+          for (const rawAcct of body.accounts) {
+            const textAcct = optionalBoundedText(rawAcct, 'accounts entry', 200);
+            if (!textAcct) fail('INVALID_ARGUMENT', 'Invalid accounts entry');
+            const lowered = textAcct.toLowerCase();
+            const found = (googleStatus?.accounts ?? []).find(
+              entry => entry && (
+                (typeof entry.email === 'string' && entry.email.toLowerCase() === lowered)
+                || (typeof entry.id === 'string' && entry.id.toLowerCase() === lowered)
+              ),
+            );
+            if (!found || typeof found.email !== 'string') {
+              fail('NOT_FOUND', `Google account not found: ${textAcct}`);
+            }
+            matchedList.push(found.email.toLowerCase());
+          }
+          resolvedAccounts = [...new Set(matchedList)].sort();
+        } else {
+          const connected = (googleStatus?.accounts ?? [])
+            .filter(entry => entry && entry.status === 'connected' && typeof entry.email === 'string')
+            .map(entry => entry.email.toLowerCase());
+          if (connected.length === 0) {
+            fail('INVALID_STATE', 'No connected Google account is available');
+          }
+          resolvedAccounts = [...new Set(connected)].sort();
+        }
+
+        const previous = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+        let targetBotId = optionalBoundedText(body.botId, 'botId', 128);
+        let createdBot;
+
+        if (mode === 'existing') {
+          if (body.createBot !== undefined) {
+            fail('INVALID_ARGUMENT', 'createBot is only allowed when mode is dedicated');
+          }
+          if (!targetBotId) {
+            fail('INVALID_ARGUMENT', 'botId is required when mode is existing');
+          }
+        } else if (body.createBot !== undefined || !targetBotId) {
+          if (typeof bridge?.call !== 'function') {
+            fail('INVALID_STATE', 'Host bridge is unavailable to create a dedicated Bot');
+          }
+          const createSpec = validateCreateBotInput(body.createBot);
+          const created = await bridge.call(deviceId, 'createBot', {
+            requestId: randomUUID(),
+            role: createSpec.role,
+            ...(createSpec.description ? { description: createSpec.description } : {}),
+            ...(createSpec.cwd ? { cwd: createSpec.cwd } : {}),
+          });
+          const createdBotId = optionalBoundedText(created?.botId, 'created botId', 128);
+          if (!createdBotId) {
+            fail('INVALID_STATE', 'Host createBot did not return a valid botId');
+          }
+          if (typeof store?.upsertDeviceBot === 'function') {
+            let botRecord = store.upsertDeviceBot(deviceId, {
+              ...created,
+              deviceId,
+              botId: createdBotId,
+              name: typeof created?.name === 'string' ? created.name : (created?.role ?? createSpec.role),
+            });
+            if (botRecord.cwd === undefined && typeof created?.cwd === 'string' && isAbsoluteBotPath(created.cwd)) {
+              try {
+                botRecord = store.upsertDeviceBot(
+                  deviceId,
+                  { botId: botRecord.botId, name: botRecord.name },
+                  { kind: 'cwd', expectedRevision: 0, value: created.cwd },
+                );
+              } catch (err) {
+                if (err?.code !== 'REVISION_CONFLICT') throw err;
+              }
+            }
+          }
+          try { await packages?.reconcileDevice?.(deviceId); } catch { /* best-effort */ }
+
+          let soulApplied = false;
+          try {
+            const currentSoul = await bridge.call(deviceId, 'getBotSoul', { botId: createdBotId });
+            if (typeof currentSoul?.revision === 'string' && currentSoul.revision) {
+              await bridge.call(deviceId, 'setBotSoul', {
+                botId: createdBotId,
+                input: {
+                  expectedRevision: currentSoul.revision,
+                  text: DEFAULT_GOOGLE_ASSISTANT_SOUL,
+                },
+              });
+              soulApplied = true;
+            }
+          } catch { /* best-effort */ }
+
+          let modelApplied = false;
+          if (
+            (createSpec.modelRef !== undefined || createSpec.thinkingLevel !== undefined)
+            && typeof store?.getBotModelConfig === 'function'
+            && typeof store?.putBotModelConfig === 'function'
+          ) {
+            try {
+              const currentModel = store.getBotModelConfig(deviceId, createdBotId);
+              const nextOverrides = { ...(currentModel?.overrides || {}) };
+              if (createSpec.modelRef !== undefined) {
+                if (createSpec.modelRef === null) delete nextOverrides.modelRef;
+                else nextOverrides.modelRef = createSpec.modelRef;
+              }
+              if (createSpec.thinkingLevel !== undefined) {
+                if (createSpec.thinkingLevel === null) delete nextOverrides.thinkingLevel;
+                else nextOverrides.thinkingLevel = createSpec.thinkingLevel;
+              }
+              store.putBotModelConfig(deviceId, createdBotId, currentModel?.revision ?? 0, nextOverrides);
+              modelApplied = true;
+            } catch { /* best-effort */ }
+          }
+
+          if (learning) {
+            try {
+              if (typeof learning.configure === 'function') {
+                await learning.configure(
+                  { deviceId, botId: createdBotId },
+                  { expectedRevision: 0, config: { review: { enabled: false } } },
+                );
+              } else if (typeof learning.execute === 'function') {
+                const statusRes = await learning.execute({ deviceId, botId: createdBotId }, { action: 'status' });
+                await learning.execute(
+                  { deviceId, botId: createdBotId },
+                  {
+                    action: 'configure',
+                    expectedRevision: statusRes?.settings?.revision ?? 0,
+                    config: { review: { enabled: false } },
+                  },
+                );
+              }
+            } catch { /* best-effort */ }
+          }
+
+          targetBotId = createdBotId;
+          createdBot = {
+            deviceId,
+            botId: createdBotId,
+            role: createSpec.role,
+            soulApplied,
+            modelApplied,
+          };
+        }
+
+        const savePayload = {
+          enabled: true,
+          deviceId,
+          botId: targetBotId,
+          mode,
+          accounts: resolvedAccounts,
+          batchWindowMinutes: body.batchWindowMinutes ?? 10,
+          digestTimes: body.digestTimes !== undefined
+            ? body.digestTimes
+            : (mode === 'existing' ? ['09:00', '18:00'] : []),
+          calendarEnabled: body.calendarEnabled ?? true,
+          calendarLeadMinutes: body.calendarLeadMinutes ?? 15,
+          hindsightPrivateMemory: body.hindsightPrivateMemory !== undefined
+            ? body.hindsightPrivateMemory
+            : mode === 'dedicated',
+        };
+        const result = await rules.assistantManage('save', savePayload);
+        notifyConfig?.(deviceId, 'config-changed');
+        if (previous?.deviceId && previous.deviceId !== deviceId) {
+          notifyConfig?.(previous.deviceId, 'config-changed');
+        }
+        try { rules?.onAccountChanged?.(); } catch { /* non-fatal runtime sync */ }
+        return {
+          ...result,
+          ...(createdBot ? { createdBot } : {}),
+        };
+      }), true, GOOGLE_RULE_BODY_LIMIT);
+
+      route('POST', '/api/google/assistant/remove', runOwner(async (req) => {
+        const body = requireObject(req.body ?? {});
+        const previous = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+        const result = await rules.assistantManage('remove', body);
+        if (previous?.deviceId) {
+          notifyConfig?.(previous.deviceId, 'config-changed');
+        }
+        return { removed: Boolean(result?.removed) };
+      }), true, GOOGLE_ACTION_BODY_LIMIT);
+
+      route('GET', '/api/google/assistant/events', runOwner(async (req) => {
+        const limit = optionalQueryInt(req.query?.limit, 'limit', 1, 200);
+        return await rules.assistantManage('events', {
+          ...(limit !== undefined ? { limit } : {}),
+        });
+      }));
+    }
   }
 }

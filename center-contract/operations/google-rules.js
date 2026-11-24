@@ -288,4 +288,82 @@ export const googleRuleOperations = Object.freeze([
     readOnly: false,
     destructive: true,
   }),
+
+  defineOperation({
+    name: 'automation_google_assistant_get',
+    description: 'Get the current proactive Google Workspace assistant binding configuration and safe runtime status for already-authorized accounts. Never exposes OAuth tokens or email/calendar bodies.',
+    properties: {},
+    required: [],
+    readOnly: true,
+    destructive: false,
+  }),
+
+  defineOperation({
+    name: 'automation_google_assistant_configure',
+    description: 'Configure or update the proactive Google Workspace assistant binding (enabled state, target Bot, mode, watched authorized accounts, Gmail batch window, daily digest times, and Calendar lead time). Never initiates Google OAuth sign-in, accepts credentials/tokens, or enables private Hindsight memory consent (owner-only in Center UI).',
+    properties: {
+      enabled: {
+        type: 'boolean',
+        description: 'Enable or pause the proactive Google assistant (pausing cancels pending undelivered events).',
+      },
+      deviceId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Target Host device ID. Optional for Bot callers (defaults to caller device when creating); required for OAuth callers when creating.',
+      },
+      botId: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 128,
+        description: 'Target Bot ID. Optional for Bot callers targeting their own device when creating; required for OAuth callers or cross-device calls when creating.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['dedicated', 'existing'],
+        description: 'Proactive assistant mode: "dedicated" (read+draft-only Bot) or "existing" (background proactive turns only).',
+      },
+      accounts: {
+        type: 'array',
+        items: { type: 'string', minLength: 1, maxLength: MAX_FILTER_LENGTH },
+        minItems: 1,
+        maxItems: 20,
+        description: 'Already-authorized Google account emails or IDs to watch.',
+      },
+      batchWindowMinutes: {
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_MINUTES_BEFORE,
+        description: 'Gmail batching window in minutes before flushing buffered high-priority/batched threads (1..1440, default 10).',
+      },
+      digestTimes: {
+        type: 'array',
+        items: { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' },
+        maxItems: 6,
+        description: 'Optional daily routine digest times in 24-hour HH:mm format (e.g. ["09:00","18:00"]). Pass [] to flush all threads by batchWindowMinutes.',
+      },
+      calendarEnabled: {
+        type: 'boolean',
+        description: 'Whether timely pre-meeting Google Calendar alerts are enabled (default true).',
+      },
+      calendarLeadMinutes: {
+        type: 'integer',
+        minimum: 0,
+        maximum: MAX_MINUTES_BEFORE,
+        description: 'Minutes before meeting start to deliver timely pre-meeting alerts (0..1440, default 15).',
+      },
+    },
+    required: [],
+    readOnly: false,
+    destructive: false,
+  }),
+
+  defineOperation({
+    name: 'automation_google_assistant_remove',
+    description: 'Remove the proactive Google Workspace assistant binding and cancel its pending undelivered events. Does not disconnect Google accounts or delete any Bot.',
+    properties: {},
+    required: [],
+    readOnly: false,
+    destructive: true,
+  }),
 ]);
