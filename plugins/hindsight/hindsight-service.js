@@ -30,6 +30,12 @@ const TOOL_OPERATIONS = new Set([
   'retryMemory',
 ]);
 
+const WRITE_TOOL_OPERATIONS = new Set([
+  'retainMemory',
+  'correctMemory',
+  'retryMemory',
+]);
+
 const CONTROL_ACTOR = Object.freeze({ kind: 'control' });
 
 // 纠错错误码白名单：只暴露稳定码，不透传任意 err.code/原始错误。
@@ -141,6 +147,7 @@ export function createHindsightService({
   context,
   sources,
   documents,
+  dataPrivacy = null,
 }) {
   /** 每 Bot 策略（manager 提供）；未提供策略时不限制。 */
   function policyFor(botId) {
@@ -319,6 +326,7 @@ export function createHindsightService({
             callId: actor.callId,
             nativeId: actor.nativeId,
             originTarget: actor.originTarget,
+            ...(actor.privacyException ? { privacyException: actor.privacyException } : {}),
           }
         : { requestId: normalized.requestId }),
     };
@@ -552,12 +560,30 @@ export function createHindsightService({
       args = {};
     }
 
+    let privacyException = null;
+    if (
+      WRITE_TOOL_OPERATIONS.has(operation) &&
+      typeof dataPrivacy?.assertExportAllowed === 'function'
+    ) {
+      const decision = await dataPrivacy.assertExportAllowed(api.conversationId, {
+        operation: 'hindsight:' + operation,
+        callContext,
+        botId: identity.botId,
+        targetKind: target.kind,
+        sharedMemory: Boolean(config?.sharedMemory),
+      });
+      if (decision?.exception === 'proactive-private-hindsight') {
+        privacyException = decision.exception;
+      }
+    }
+
     const actor = {
       kind: 'tool',
       taskId: api.taskId,
       callId: api.callId,
       nativeId: api.conversationId,
       originTarget: baseTarget,
+      ...(privacyException ? { privacyException } : {}),
     };
 
     // 工作会话（scope 身份）写/纠错/重试/reflect 需活动检查，且以实际来源 scope 为准，与所选 target 无关。
