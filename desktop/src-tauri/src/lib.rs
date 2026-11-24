@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod browser_guest;
+mod desktop_pet;
 #[cfg(target_os = "linux")]
 mod clipboard_linux;
 pub mod clipboard_runtime;
@@ -10,6 +11,7 @@ mod desktop_tray;
 pub mod host_service;
 pub mod image_picker;
 pub mod pairing_code;
+pub mod pet_voice;
 pub mod updates;
 
 use serde::{Deserialize, Serialize};
@@ -192,7 +194,13 @@ pub fn run() {
     .manage(updates::UpdateState::default())
     .manage(clipboard_runtime::ClipboardRuntime::new())
     .manage(host_service::HostStartup::default())
+    .manage(desktop_pet::DesktopPet::default())
+    .manage(pet_voice::PetVoiceState::default())
     .on_window_event(|window, event| {
+      if window.label() == desktop_pet::PET_LABEL {
+        desktop_pet::on_window_event(window, event);
+        return;
+      }
       if window.label() != "main" {
         return;
       }
@@ -214,6 +222,7 @@ pub fn run() {
         let window = window.clone();
         tauri::async_runtime::spawn(async move {
           close_browser_window(&app, guest_ids).await;
+          let _ = desktop_pet::control(&app, "hide", None).await;
           let _ = window.destroy();
         });
       }
@@ -228,7 +237,11 @@ pub fn run() {
     })
     .plugin(
       tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
-        .on_navigation(|webview, url| (webview.label() == "main" && is_allowed_navigation(url)) || browser_guest::permits(webview.app_handle(), webview.label(), url))
+        .on_navigation(|webview, url| {
+          (webview.label() == "main" && is_allowed_navigation(url))
+            || (webview.label() == desktop_pet::PET_LABEL && desktop_pet::permits(url))
+            || browser_guest::permits(webview.app_handle(), webview.label(), url)
+        })
         .build(),
     )
     .plugin(tauri_plugin_dialog::init())
@@ -262,6 +275,8 @@ pub fn run() {
   let app = builder
     .invoke_handler(tauri::generate_handler![
       desktop_request,
+      desktop_pet::desktop_pet,
+      pet_voice::desktop_pet_voice,
       browser_guest::desktop_browser_guest,
       desktop_open_center,
       desktop_observe,
@@ -287,6 +302,8 @@ pub fn run() {
 
   app.run(|app_handle, event| {
     if matches!(event, RunEvent::Exit) {
+      pet_voice::cancel_window_jobs(app_handle, "pet");
+      pet_voice::cancel_window_jobs(app_handle, "main");
       app_handle
         .state::<clipboard_runtime::ClipboardRuntime>()
         .shutdown(app_handle);

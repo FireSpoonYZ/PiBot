@@ -7,7 +7,7 @@ use std::{
 
 use tauri::{
   AppHandle, Manager,
-  menu::{Menu, MenuBuilder, MenuItem, Submenu},
+  menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem, Submenu},
   tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
@@ -15,6 +15,7 @@ use crate::clipboard_runtime::{ClipboardRuntime, ConnectionState};
 
 const TRAY_ID: &str = "pibot-tray";
 const OPEN_ID: &str = "pibot_tray_open";
+const PET_ID: &str = "pibot_tray_pet";
 const QUIT_ID: &str = "pibot_tray_quit";
 const CLIPBOARD_ID: &str = "pibot_tray_clipboard";
 const PAUSE_ID: &str = "clipboard_tray_pause";
@@ -23,6 +24,7 @@ const RESUME_ID: &str = "clipboard_tray_resume";
 struct DesktopTray {
   quitting: AtomicBool,
   menu: Menu<tauri::Wry>,
+  pet_toggle: CheckMenuItem<tauri::Wry>,
   clipboard: Submenu<tauri::Wry>,
   status: MenuItem<tauri::Wry>,
   pause: MenuItem<tauri::Wry>,
@@ -73,8 +75,17 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     return Ok(());
   }
 
+  let pet_toggle = CheckMenuItem::with_id(
+    app,
+    PET_ID,
+    "Desktop pet",
+    true,
+    crate::desktop_pet::is_visible(app),
+    None::<&str>,
+  )?;
   let menu = MenuBuilder::new(app)
     .text(OPEN_ID, "Open PiBot")
+    .item(&pet_toggle)
     .text(QUIT_ID, "Quit Client")
     .build()?;
   let status = MenuItem::new(app, "Clipboard sync: connecting", false, None::<&str>)?;
@@ -96,6 +107,15 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
       }
       match event.id().as_ref() {
         OPEN_ID => crate::show_main_window(app),
+        PET_ID => {
+          let app = app.clone();
+          tauri::async_runtime::spawn(async move {
+            if crate::desktop_pet::control(&app, "toggle", None).await.is_err() {
+              sync_pet_visible(&app, crate::desktop_pet::is_visible(&app));
+              crate::show_main_window(&app);
+            }
+          });
+        }
         QUIT_ID => {
           if !tray.quitting.swap(true, Ordering::AcqRel) {
             crate::quit_from_tray(app);
@@ -133,6 +153,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
   app.manage(DesktopTray {
     quitting: AtomicBool::new(false),
     menu,
+    pet_toggle,
     clipboard,
     status,
     pause,
@@ -155,6 +176,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     }
   });
   Ok(())
+}
+
+pub fn sync_pet_visible(app: &AppHandle, visible: bool) {
+  let Some(tray) = app.try_state::<DesktopTray>() else { return };
+  if tray.quitting.load(Ordering::Acquire) {
+    return;
+  }
+  let _ = tray.pet_toggle.set_checked(visible);
 }
 
 pub fn can_close_to_tray(app: &AppHandle) -> bool {
