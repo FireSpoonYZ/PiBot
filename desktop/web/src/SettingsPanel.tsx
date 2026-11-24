@@ -1,3 +1,4 @@
+import { DesktopPetSettings } from './pet/DesktopPetSettings';
 // 桌面客户端全画布设置工作区（.desktop-settings-view）：左侧导航栏 + 右侧 720px 单列内容。
 import {
   Archive,
@@ -910,6 +911,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
                   ]}
                 />
               </section>
+
+              <DesktopPetSettings />
 
               <section className="settings-section">
                 <h4>{t('对话与语音', 'Chat & Speech')}</h4>

@@ -24,6 +24,11 @@
     "allow-desktop-update-download",
     "allow-desktop-update-install",
     "allow-desktop-update-cancel",
-    "allow-desktop-clipboard-sync"
+    "allow-desktop-clipboard-sync",
+    "allow-desktop-pet",
+    "allow-desktop-pet-voice",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to"
   ]
 }

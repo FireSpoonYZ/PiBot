@@ -31,9 +31,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; media-src 'self' blob: data:",
       "capabilities": [
-        "main"
+        "main",
+        "pet"
       ],
       "assetProtocol": {
         "enable": false,

@@ -1,0 +1,20 @@
+{
+  "identifier": "pet",
+  "description": "Local desktop pet: window controls, voice, and events shared with the main view.",
+  "local": true,
+  "webviews": [
+    "pet"
+  ],
+  "platforms": [
+    "windows",
+    "linux",
+    "macOS"
+  ],
+  "permissions": [
+    "allow-desktop-pet",
+    "allow-desktop-pet-voice",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to"
+  ]
+}

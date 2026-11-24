@@ -15,6 +15,7 @@ use crate::clipboard_runtime::{ClipboardRuntime, ConnectionState};
 
 const TRAY_ID: &str = "pibot-tray";
 const OPEN_ID: &str = "pibot_tray_open";
+const PET_ID: &str = "pibot_tray_pet";
 const QUIT_ID: &str = "pibot_tray_quit";
 const CLIPBOARD_ID: &str = "pibot_tray_clipboard";
 const PAUSE_ID: &str = "clipboard_tray_pause";
@@ -75,6 +76,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
   let menu = MenuBuilder::new(app)
     .text(OPEN_ID, "Open PiBot")
+    .text(PET_ID, "Show / Hide desktop pet")
     .text(QUIT_ID, "Quit Client")
     .build()?;
   let status = MenuItem::new(app, "Clipboard sync: connecting", false, None::<&str>)?;
@@ -96,6 +98,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
       }
       match event.id().as_ref() {
         OPEN_ID => crate::show_main_window(app),
+        PET_ID => {
+          let app = app.clone();
+          tauri::async_runtime::spawn(async move {
+            if crate::desktop_pet::control(&app, "toggle", None).await.is_err() {
+              crate::show_main_window(&app);
+            }
+          });
+        }
         QUIT_ID => {
           if !tray.quitting.swap(true, Ordering::AcqRel) {
             crate::quit_from_tray(app);
