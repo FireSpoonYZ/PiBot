@@ -45,7 +45,13 @@ import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
-import { botBoardResultHooks, clearBotBoardResult, applyGlobalTasksToBotBoardItem } from './runtime-bot-board.js';
+import {
+  botBoardResultHooks,
+  clearBotBoardResult,
+  applyGlobalTasksToBotBoardItem,
+  GOOGLE_ASSISTANT_DESENSITIZED_PREVIEW,
+  isSilentAssistantReply,
+} from './runtime-bot-board.js';
 import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { WorkIndex, WorkContextState, workInstructions } from './work-context-docs.js';
@@ -55,10 +61,18 @@ import { createTurnAdmission } from './runtime-turns.js';
 import { canDetachPrimaryWait, createRuntimeWaits } from './runtime-waits.js';
 import { TurnQueue } from './runtime-turns-docs.js';
 import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
-import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution, isAllowedHostSourceType } from './bot-session-context.js';
+import {
+  BotSessionState,
+  GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
+  USER_MESSAGE_KIND,
+  WORK_TRIGGER_KIND,
+  deriveEntryAttribution,
+  isAllowedHostSourceType,
+} from './bot-session-context.js';
 import {
   createGoogleWorkspacePrivacy,
   GOOGLE_WORKSPACE_DATA_BOUNDARY,
+  GOOGLE_WORKSPACE_MCP_INSTALLATION_ID,
   GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
   GoogleWorkspacePrivacyState,
   isTrustedDataBoundary,
@@ -166,6 +180,145 @@ function assertNonBlank(value, name) {
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const DEDICATED_SAFE_CORE_EXTENSION_NAMES = new Set([
+  'host.base-behavior',
+  'host.bot-board',
+  'host.request-context',
+  'tool_search',
+  'pi.tool-search',
+  'pi.tool_search',
+]);
+
+function capExtensionName(installationId, version, botId) {
+  return 'cap-' + createHash('sha256').update(JSON.stringify([installationId, version, botId])).digest('hex');
+}
+
+/** Validate Center-synced `proactiveAssistant` effectiveConfig block on `builtin.google-workspace`. */
+export function normalizeProactiveAssistantConfig(raw) {
+  if (!isPlainObject(raw)) return null;
+  const role = raw.role === 'dedicated' || raw.role === 'existing' ? raw.role : null;
+  if (!role) return null;
+  const accounts = Array.isArray(raw.accounts)
+    ? raw.accounts.filter((item) => typeof item === 'string' && item.trim() !== '').map((item) => item.trim())
+    : [];
+  return {
+    role,
+    accounts,
+    hindsightPrivateMemory: raw.hindsightPrivateMemory === true,
+  };
+}
+
+/** Extract trusted `proactiveAssistant` policy from a Bot's Center capability snapshot. */
+export function extractProactiveAssistantConfigFromCapabilities(capabilities) {
+  if (!Array.isArray(capabilities)) return null;
+  const googleCap = capabilities.find(
+    (cap) =>
+      isPlainObject(cap) &&
+      cap.installationId === GOOGLE_WORKSPACE_MCP_INSTALLATION_ID &&
+      cap.target === 'center' &&
+      cap.enabled === true &&
+      cap.authorized !== false,
+  );
+  if (!googleCap) return null;
+  return normalizeProactiveAssistantConfig(googleCap.effectiveConfig?.proactiveAssistant);
+}
+
+/**
+ * Tighten-only privacy revocation helper: immediately disables `hindsightPrivateMemory` when a
+ * newer Center snapshot turns it off or unbinds/disables the assistant (even while the Bot is
+ * busy / `waiting-idle`). Never grants `hindsightPrivateMemory: true` early and never weakens a
+ * `dedicated` Bot's toolset lock before idle reconfiguration.
+ */
+export function tightenProactiveAssistantPrivacy(existing, capabilities) {
+  if (!existing || existing.hindsightPrivateMemory !== true) return existing ?? null;
+  const desired = extractProactiveAssistantConfigFromCapabilities(capabilities);
+  if (desired?.hindsightPrivateMemory === true) return existing;
+  return { ...existing, hindsightPrivateMemory: false };
+}
+
+/**
+ * Select the extension set for a Bot. Dedicated Google proactive assistant Bots are locked
+ * strictly to safe infrastructure extensions + `builtin.google-workspace` + `@e-launcher/hindsight`
+ * (+ optional `codemode`), omitting local shell/file/admin/comms/UI/browser extensions.
+ * Existing Bots and normal Bots retain all extensions untouched.
+ */
+export function selectBotExtensions({
+  coreExtensions = [],
+  botHostExtensions = [],
+  pluginExtensions = [],
+  codemodeEnabled = false,
+  codemodeExtension = null,
+  finalBudgetExtension = null,
+  toolSearchExtension = null,
+  proactiveAssistant = null,
+  allowedDedicatedPluginExtensionNames = null,
+} = {}) {
+  const isDedicated = proactiveAssistant?.role === 'dedicated';
+  if (!isDedicated) {
+    return {
+      isDedicated: false,
+      selectedExtensions: [
+        ...coreExtensions,
+        ...botHostExtensions,
+        ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
+        ...pluginExtensions,
+        ...(finalBudgetExtension ? [finalBudgetExtension] : []),
+      ],
+      selectedPluginExtensions: pluginExtensions,
+    };
+  }
+  const safeCore = coreExtensions.filter(
+    (extension) =>
+      extension &&
+      (extension === toolSearchExtension || DEDICATED_SAFE_CORE_EXTENSION_NAMES.has(extension.name)),
+  );
+  const safePlugins = pluginExtensions.filter((extension) => {
+    if (!extension) return false;
+    if (allowedDedicatedPluginExtensionNames instanceof Set) {
+      return allowedDedicatedPluginExtensionNames.has(extension.name);
+    }
+    return (
+      extension.name === GOOGLE_WORKSPACE_MCP_INSTALLATION_ID ||
+      extension.name === 'e-launcher.hindsight' ||
+      extension.name === '@e-launcher/hindsight'
+    );
+  });
+  return {
+    isDedicated: true,
+    selectedExtensions: [
+      ...safeCore,
+      ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
+      ...safePlugins,
+      ...(finalBudgetExtension ? [finalBudgetExtension] : []),
+    ],
+    selectedPluginExtensions: safePlugins,
+  };
+}
+
+/**
+ * Compute whether/what to write to `BotRecord.lastPreview` when a primary submission finishes:
+ * - Silent `google-workspace-assistant` turn -> skip (preserve prior `lastPreview`).
+ * - Positive `google-workspace-assistant` turn OR any turn on a dedicated proactive assistant Bot
+ *   -> write desensitized fixed preview (`邮件与日程更新`) so raw email text never leaks to directory.
+ * - Ordinary turn on normal / `existing` Bot -> write raw `answerText || ''`.
+ */
+export function computeCompletedLastPreview({
+  isProactiveAssistantTurn = false,
+  isDedicatedAssistantBot = false,
+  answerText = '',
+} = {}) {
+  if (isProactiveAssistantTurn) {
+    if (isSilentAssistantReply(answerText)) {
+      return { skip: true, lastPreview: null };
+    }
+    return { skip: false, lastPreview: GOOGLE_ASSISTANT_DESENSITIZED_PREVIEW };
+  }
+  if (isDedicatedAssistantBot) {
+    return { skip: false, lastPreview: GOOGLE_ASSISTANT_DESENSITIZED_PREVIEW };
+  }
+  return { skip: false, lastPreview: answerText || '' };
 }
 
 const TaskDispatchContexts = durable.defineDoc({
@@ -414,7 +567,65 @@ export async function openRuntime(options) {
   let workContexts = null;
   let browserSetup = null;
   let coreExtensions = [];
+  let toolSearchExtension = null;
   const botHostExtensionsFor = (botId) => browserSetup?.extensionsForBot(botId) ?? [];
+  const proactiveAssistantByBot = new Map(); // botId -> { role, accounts, hindsightPrivateMemory }
+  const dedicatedAllowedPluginExtNamesByBot = new Map(); // botId -> Set<string>
+  const getProactiveAssistantConfig = (botId) => proactiveAssistantByBot.get(botId) ?? null;
+  function tightenBotProactivePrivacy(botId, capabilities) {
+    const existing = proactiveAssistantByBot.get(botId);
+    if (!existing || existing.hindsightPrivateMemory !== true) return false;
+    const tightened = tightenProactiveAssistantPrivacy(existing, capabilities);
+    if (tightened === existing) return false;
+    proactiveAssistantByBot.set(botId, tightened);
+    return true;
+  }
+  const isHindsightManifestId = (id) => id === 'e-launcher.hindsight' || id === '@e-launcher/hindsight';
+  async function syncBotProactivePolicy(botId, capabilities) {
+    if (typeof botId !== 'string' || !botId) return;
+    const config = extractProactiveAssistantConfigFromCapabilities(capabilities);
+    if (!config) {
+      proactiveAssistantByBot.delete(botId);
+      dedicatedAllowedPluginExtNamesByBot.delete(botId);
+      return;
+    }
+    proactiveAssistantByBot.set(botId, config);
+    if (config.role !== 'dedicated') {
+      dedicatedAllowedPluginExtNamesByBot.delete(botId);
+      return;
+    }
+    const allowed = new Set();
+    for (const cap of Array.isArray(capabilities) ? capabilities : []) {
+      if (!isPlainObject(cap) || cap.enabled !== true || cap.authorized === false) continue;
+      const installationId = cap.installationId;
+      if (typeof installationId !== 'string' || !installationId) continue;
+      if (installationId === GOOGLE_WORKSPACE_MCP_INSTALLATION_ID && cap.target === 'center') {
+        allowed.add(capExtensionName(installationId, cap.targetVersion, botId));
+        continue;
+      }
+      if (isHindsightManifestId(installationId)) {
+        allowed.add(capExtensionName(installationId, cap.targetVersion, botId));
+        continue;
+      }
+      if (cap.target === 'host' && typeof centerRuntime.installer?.getInstalled === 'function') {
+        try {
+          const installed = await centerRuntime.installer.getInstalled(installationId, { version: cap.targetVersion });
+          const manifestId = installed?.manifest?.id ?? installed?.id ?? null;
+          if (isHindsightManifestId(manifestId)) {
+            allowed.add(capExtensionName(installationId, cap.targetVersion, botId));
+          }
+        } catch {
+          /* ignore uninstalled lookup; fail-closed by omitting */
+        }
+      }
+    }
+    dedicatedAllowedPluginExtNamesByBot.set(botId, allowed);
+  }
+  const proactiveProfileOptions = {
+    getToolSearchExtension: () => toolSearchExtension,
+    getProactiveAssistantConfig,
+    dedicatedAllowedPluginExtNamesByBot,
+  };
   let online = false;
   let closing = false;
   let maintenance = false;
@@ -530,7 +741,7 @@ export async function openRuntime(options) {
     // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
     // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
     getPrimary: async (bot) => {
-      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor);
+      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor, proactiveProfileOptions);
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
         const modelRef = botModels[bot.botId]?.modelRef;
@@ -540,6 +751,7 @@ export async function openRuntime(options) {
           defaultModel: modelRef,
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
+          selectedExtensions: profile.selectedExtensions,
           removeTools: profile.removeTools,
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
@@ -559,7 +771,7 @@ export async function openRuntime(options) {
     collaboration,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, proactiveProfileOptions),
   });
 
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
@@ -588,9 +800,45 @@ export async function openRuntime(options) {
   }));
   registry.install(defineExtension({
     name: 'host.bot-board',
-    hooks: [hook(GenerationTask, botBoardResultHooks(() => harness))],
+    hooks: [hook(GenerationTask, botBoardResultHooks(() => harness, {
+      isProactiveAssistantTurn: async (conversationId, taskId, context) => {
+        if (!harness || conversationId === undefined || conversationId === null) return false;
+        const taskKey = taskId !== undefined && taskId !== null ? String(taskId) : null;
+        if (taskKey !== null) {
+          const sessionState = await harness.snapshot(BotSessionState, conversationId, context);
+          const reqId = sessionState?.turnByTask?.[taskKey];
+          const turn = typeof reqId === 'string' && reqId !== ''
+            ? (sessionState?.completedTurns?.[reqId] ??
+               (sessionState?.activeTurn?.requestId === reqId ? sessionState.activeTurn : null))
+            : (sessionState?.activeTurn?.taskId !== undefined && String(sessionState.activeTurn.taskId) === taskKey
+              ? sessionState.activeTurn
+              : null);
+          if (turn) {
+            return turn.sender?.kind === 'host' && turn.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+          }
+        }
+        const runContext = await sessions.getRunContext({ conversationId, taskId }, context);
+        return Boolean(
+          runContext?.events?.some(
+            (ev) =>
+              ev?.source === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE ||
+              ev?.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
+          ),
+        );
+      },
+      isDedicatedAssistantBot: async (conversationId, context) => {
+        if (!harness || conversationId === undefined || conversationId === null) return false;
+        try {
+          const identity = await resolveBotIdentity(host, harness, conversationId, context);
+          return getProactiveAssistantConfig(identity.botId)?.role === 'dedicated';
+        } catch {
+          return false;
+        }
+      },
+    }))],
   }));
-  registry.install(createToolSearchExtension());
+  toolSearchExtension = createToolSearchExtension();
+  registry.install(toolSearchExtension);
   registry.install(defineExtension({
     name: 'host.tools',
     tools: [
@@ -612,6 +860,7 @@ export async function openRuntime(options) {
     getHarness: () => harness,
     context: CTX,
     documents: { BotSessionState },
+    canUsePrivateHindsightBank: (botId) => getProactiveAssistantConfig(botId)?.hindsightPrivateMemory === true,
   });
   registry.install(defineExtension({
     name: 'host.communication',
@@ -677,6 +926,8 @@ export async function openRuntime(options) {
       const dispatch = await harness.snapshot(TaskDispatchContexts, api.conversationId, context);
       return sessions.getRunContext(api, context, { dispatchContexts: dispatch?.byRequest });
     },
+    getTurn: (api, context = CTX) => sessions.getTurn(api, context),
+    getProactiveAssistantConfig,
     resolveConversationBot: async (id) => {
       const identity = await resolveBotIdentity(host, harness, id, CTX);
       const primary = await harness.snapshot(PrimaryIndex, CTX);
@@ -742,7 +993,55 @@ export async function openRuntime(options) {
     listDirectoryBots: () => (tasksBridge ? tasksBridge.listDirectoryBots() : []),
   };
 
-  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade, waitsFacade });
+  const rawPlugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade, waitsFacade });
+  plugins = {
+    ...rawPlugins,
+    async applyBot(bot, capabilities, opts) {
+      const result = await rawPlugins.applyBot(bot, capabilities, opts);
+      const atomicFailed = Boolean(opts?.atomic && Array.isArray(result?.capabilityErrors) && result.capabilityErrors.length > 0);
+      if (!atomicFailed && bot?.botId) {
+        await syncBotProactivePolicy(bot.botId, capabilities);
+      }
+      return result;
+    },
+    dropGrants(botId, stale) {
+      const dropped = rawPlugins.dropGrants(botId, stale);
+      if (Array.isArray(dropped) && dropped.includes(GOOGLE_WORKSPACE_MCP_INSTALLATION_ID)) {
+        const existing = proactiveAssistantByBot.get(botId);
+        if (existing) {
+          proactiveAssistantByBot.set(botId, { ...existing, hindsightPrivateMemory: false });
+        }
+      }
+      return dropped;
+    },
+    async revoke(botId, stale, capabilities) {
+      const result = await rawPlugins.revoke(botId, stale, capabilities);
+      if (Array.isArray(capabilities)) {
+        const next = extractProactiveAssistantConfigFromCapabilities(capabilities);
+        if (!next) {
+          proactiveAssistantByBot.delete(botId);
+          dedicatedAllowedPluginExtNamesByBot.delete(botId);
+        } else {
+          const existing = proactiveAssistantByBot.get(botId);
+          proactiveAssistantByBot.set(botId, {
+            ...next,
+            hindsightPrivateMemory: Array.isArray(stale) && stale.includes(GOOGLE_WORKSPACE_MCP_INSTALLATION_ID)
+              ? false
+              : next.hindsightPrivateMemory,
+          });
+          if (existing?.role === 'dedicated' && next.role !== 'dedicated') {
+            dedicatedAllowedPluginExtNamesByBot.delete(botId);
+          }
+        }
+      }
+      return result;
+    },
+    async close() {
+      proactiveAssistantByBot.clear();
+      dedicatedAllowedPluginExtNamesByBot.clear();
+      return rawPlugins.close();
+    },
+  };
   // 短生命周期每任务 Antigravity 回合归属态（仅内存，绝不写进持久历史或 RequestContext）。
   const antigravityTurnProvenance = createTurnProvenanceStore();
   // 短生命周期每任务非 AGY 同轮预压/溢出恢复态（仅内存，随任务结束或 abort 自动清理）。
@@ -1144,7 +1443,7 @@ export async function openRuntime(options) {
     harness,
     context: CTX,
     sessions,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, proactiveProfileOptions),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -1185,6 +1484,11 @@ export async function openRuntime(options) {
     shower,
     browserSetup,
     botHostExtensionsFor,
+    proactiveProfileOptions,
+    proactiveAssistantByBot,
+    dedicatedAllowedPluginExtNamesByBot,
+    getProactiveAssistantConfig,
+    tightenBotProactivePrivacy,
     vault,
     schedules,
     setTasksBridge: (bridge) => { tasksBridge = bridge; },
@@ -1205,7 +1509,7 @@ export async function openRuntime(options) {
 }
 
 /** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
-function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor) {
+function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, proactiveOptions = null) {
   const selection = botModels[botId] ?? {};
   const modelRef = selection.modelRef ?? null;
   let model;
@@ -1218,20 +1522,28 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
   const botHostExtensions = typeof botHostExtensionsFor === 'function' ? botHostExtensionsFor(botId) : [];
   const codemodeOnly = Boolean(selection.codemodeOnly);
   const codemodeEnabled = Boolean(selection.codemode) || codemodeOnly;
-  const selectedExtensions = [
-    ...coreExtensions,
-    ...botHostExtensions,
-    ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
-    ...pluginExtensions,
+  const proactiveAssistant = proactiveOptions?.getProactiveAssistantConfig?.(botId) ?? null;
+  const allowedDedicatedPluginExtensionNames = proactiveOptions?.dedicatedAllowedPluginExtNamesByBot?.get(botId) ?? null;
+  const toolSearchExtension = proactiveOptions?.getToolSearchExtension?.() ?? proactiveOptions?.toolSearchExtension ?? null;
+  const { isDedicated, selectedExtensions, selectedPluginExtensions } = selectBotExtensions({
+    coreExtensions,
+    botHostExtensions,
+    pluginExtensions,
+    codemodeEnabled,
+    codemodeExtension,
     finalBudgetExtension,
-  ];
+    toolSearchExtension,
+    proactiveAssistant,
+    allowedDedicatedPluginExtensionNames,
+  });
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
   return {
     // 中心权威 cwd：空闲边界/绑定重入时经 agentProfileChange 写回已映射会话。
     cwd: host.getBot(botId)?.cwd,
     instructions,
     selectedExtensions,
-    pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []),
+    pluginTools: selectedPluginExtensions.flatMap((extension) => extension.tools ?? []),
+    strictTools: isDedicated,
     thinkingLevel: selection.thinkingLevel ?? null,
     codemode: codemodeEnabled,
     codemodeOnly,
@@ -1248,7 +1560,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, mcpDispatchExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot, dataPrivacy }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, mcpDispatchExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, proactiveProfileOptions, proactiveAssistantByBot, dedicatedAllowedPluginExtNamesByBot, getProactiveAssistantConfig, tightenBotProactivePrivacy, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1451,9 +1763,89 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   });
   const stopInFlight = new Map();     // botId -> 在飞「停止此 Bot」Promise：重复 abort 共用同一协调，绝不并发争用。
   const completedSubmissions = new Set(); // submissionId
+  const proactiveAssistantRequestIds = new Set(); // `${botId}\0${requestId}`
   let submissionCheckPromise = null;
   let checkSubmissionsAgain = false;
   let webhooks = null;
+
+  function noteProactiveAssistantRequest(botId, requestId) {
+    if (typeof botId !== 'string' || !botId || typeof requestId !== 'string' || !requestId) return;
+    const key = botId + '\u0000' + requestId;
+    if (proactiveAssistantRequestIds.size >= 4096) {
+      const oldest = proactiveAssistantRequestIds.values().next().value;
+      if (oldest !== undefined) proactiveAssistantRequestIds.delete(oldest);
+    }
+    proactiveAssistantRequestIds.add(key);
+  }
+
+  function clearBotProactiveState(botId) {
+    proactiveAssistantByBot?.delete(botId);
+    dedicatedAllowedPluginExtNamesByBot?.delete(botId);
+    const prefix = botId + '\u0000';
+    for (const key of [...proactiveAssistantRequestIds]) {
+      if (key.startsWith(prefix)) proactiveAssistantRequestIds.delete(key);
+    }
+  }
+
+  async function resolveCompletedSubmissionProactive(botId, formatted) {
+    const reqId = typeof formatted?.requestId === 'string' && formatted.requestId !== '' ? formatted.requestId : null;
+    if (!reqId) return false;
+    const key = botId + '\u0000' + reqId;
+    if (proactiveAssistantRequestIds.has(key)) {
+      proactiveAssistantRequestIds.delete(key);
+      return true;
+    }
+    const bot = host.getBot(botId);
+    if (!bot) return false;
+    const conversation = await getPrimaryConversation(harness, bot, {}, CTX).catch(() => null);
+    if (!conversation) return false;
+    try {
+      const sessionState = await harness.snapshot(BotSessionState, conversation.id, CTX);
+      const turn = sessionState?.completedTurns?.[reqId] ??
+        (sessionState?.activeTurn?.requestId === reqId ? sessionState.activeTurn : null);
+      if (turn) {
+        return turn.sender?.kind === 'host' && turn.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+      }
+      const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, reqId), CTX);
+      if (record?.entry !== undefined) {
+        const entry = await harness.commit((tx) => tx.entry(record.entry), CTX);
+        return (
+          (entry?.data?.turn?.sender?.kind === 'host' &&
+            entry?.data?.turn?.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) ||
+          (entry?.data?.attribution?.kind === 'host' &&
+            entry?.data?.attribution?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE)
+        );
+      }
+    } catch {
+      /* ignore lookup failure */
+    }
+    return false;
+  }
+
+  function applyCompletedSubmissionActivity(botId, formatted, isProactiveAssistantTurn) {
+    const isDedicatedAssistantBot = getProactiveAssistantConfig?.(botId)?.role === 'dedicated';
+    const previewDecision = computeCompletedLastPreview({
+      isProactiveAssistantTurn,
+      isDedicatedAssistantBot,
+      answerText: formatted.answerText || '',
+    });
+    if (!previewDecision.skip && !closing) {
+      try {
+        host.recordBotActivity(botId, {
+          lastActivityAt: new Date().toISOString(),
+          lastPreview: previewDecision.lastPreview,
+        });
+        scheduleBotsSync();
+      } catch {
+        /* ignore activity update error if bot was deleted or store closed */
+      }
+    }
+    webhooks?.notifySubmissionSettled?.(formatted.requestId);
+    // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
+    // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
+    drainSelfSoul(botId);
+    learning.noteCompletedSubmission(botId, formatted);
+  }
 
   function recordCompletedSubmission(botId, formatted) {
     if (!formatted || formatted.status !== 'done') return;
@@ -1463,20 +1855,25 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (completedSubmissions.has(submissionId)) return;
       completedSubmissions.add(submissionId);
     }
-    try {
-      host.recordBotActivity(botId, {
-        lastActivityAt: new Date().toISOString(),
-        lastPreview: formatted.answerText || '',
-      });
-      scheduleBotsSync();
-    } catch {
-      /* ignore activity update error if bot was deleted or store closed */
+    const reqId = typeof formatted.requestId === 'string' && formatted.requestId !== '' ? formatted.requestId : null;
+    const key = reqId ? botId + '\u0000' + reqId : null;
+    if (key && proactiveAssistantRequestIds.has(key)) {
+      proactiveAssistantRequestIds.delete(key);
+      applyCompletedSubmissionActivity(botId, formatted, true);
+      return;
     }
-    webhooks?.notifySubmissionSettled?.(formatted.requestId);
-    // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
-    // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
-    drainSelfSoul(botId);
-    learning.noteCompletedSubmission(botId, formatted);
+    if (!reqId) {
+      applyCompletedSubmissionActivity(botId, formatted, false);
+      return;
+    }
+    // Always check durable BotSessionState / submission entry when in-memory tracking did not
+    // observe submitPrimary (e.g. crash recovery before Center snapshot or assistant paused/unbound
+    // while an in-flight proactive turn finished), so raw email text or "(pass)" never leaks.
+    return resolveCompletedSubmissionProactive(botId, formatted)
+      .then(
+        (isProactive) => applyCompletedSubmissionActivity(botId, formatted, isProactive),
+        () => applyCompletedSubmissionActivity(botId, formatted, false),
+      );
   }
 
   function checkTrackedSubmissions() {
@@ -1503,7 +1900,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 const bot = host.getBot(info.botId);
                 if (bot) {
                   const formatted = await formatPrimarySubmission(harness, bot, statusRecord, CTX);
-                  recordCompletedSubmission(info.botId, formatted);
+                  await recordCompletedSubmission(info.botId, formatted);
                   // 原生工作完结是安全切换边界：泵下一条 Host 排队输入。
                   turns.pump(info.botId);
                 } else {
@@ -1511,7 +1908,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
-                webhooks?.notifySubmissionSettled?.(statusRecord.requestId ?? info.requestId);
+                const settledReqId = statusRecord.requestId ?? info.requestId;
+                if (typeof settledReqId === 'string' && settledReqId) {
+                  proactiveAssistantRequestIds.delete(info.botId + '\u0000' + settledReqId);
+                }
+                webhooks?.notifySubmissionSettled?.(settledReqId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
                 learning.scheduleIdleCheck(info.botId);
@@ -1619,7 +2020,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor);
+  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, proactiveProfileOptions);
 
   // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
   // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
@@ -1693,8 +2094,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         throw errWithCode('wait is not eligible for detached continuation', 'WAIT_CANCELLED');
       }
       const preserveGoogleRuleSource = turn.sender?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE;
+      const preserveGoogleAssistantSource = turn.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+      const preservedTrustedSourceType = preserveGoogleAssistantSource
+        ? GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE
+        : (preserveGoogleRuleSource ? GOOGLE_WORKSPACE_RULE_SOURCE_TYPE : null);
       const preserveGoogleBoundary =
-        isTrustedDataBoundary(turn.dataBoundary) || preserveGoogleRuleSource;
+        isTrustedDataBoundary(turn.dataBoundary) || preservedTrustedSourceType !== null;
       const routed = {
         kind: turn.kind, scopeId: turn.scopeId ?? null,
         replyTarget: structuredClone(turn.replyTarget),
@@ -1713,7 +2118,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         continuationTurn: routed,
         continuationWaitId: input.waitId,
         ...(preserveGoogleBoundary ? { trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY } : {}),
-        ...(preserveGoogleRuleSource ? { trustedSourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE } : {}),
+        ...(preservedTrustedSourceType !== null ? { trustedSourceType: preservedTrustedSourceType } : {}),
       });
     },
     cancelContinuation: async (botId, requestId) => turns.cancelRequest(await requireBot(botId), requestId),
@@ -1768,6 +2173,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         },
       }, capturedStopEpoch, {
         trustedSourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+        trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+      });
+    },
+    submitGoogleAssistant: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: {
+            kind: 'host',
+            name: input?.origin?.sender?.name,
+          },
+          replyTo: null,
+        },
+      }, capturedStopEpoch, {
+        trustedSourceType: GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
         trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
       });
     },
@@ -1876,6 +2298,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       defaultModel: modelRef,
       thinkingLevel: profile.thinkingLevel,
       instructions: profile.instructions,
+      selectedExtensions: profile.selectedExtensions,
       removeTools: profile.removeTools,
       codemodeOnly: profile.codemodeOnly,
     }, CTX);
@@ -1995,6 +2418,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     const dataBoundary = kind === 'host' && trustedDataBoundary !== null
       ? trustedDataBoundary
       : null;
+    if (sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE && typeof safeInput.requestId === 'string' && safeInput.requestId) {
+      noteProactiveAssistantRequest(botId, safeInput.requestId);
+    }
     const trustedInput = {
       ...safeInput,
       stopEpoch,
@@ -2223,6 +2649,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     await schedules.deleteBot(bot);
     await browserSetup.releaseBot(botId);
     host.deleteBot({ botId });
+    clearBotProactiveState(botId);
     live.clearGoogleSetupRevision(botId);
     await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
@@ -2361,6 +2788,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           const desired = new Map((snapshot.bots ?? []).map((bot) => [bot.botId, bot]));
           for (const record of host.listBots()) {
             const capabilities = desired.get(record.botId)?.capabilities ?? [];
+            // Synchronous tighten-only revocation for Hindsight private memory even when
+            // builtin.google-workspace stays enabled/authorized (only effectiveConfig changed).
+            tightenBotProactivePrivacy?.(record.botId, capabilities);
             const stale = plugins.staleGrants(record.botId, capabilities, credentials);
             if (!stale.length) continue;
             // 先把任务类型名取下来，再做删除；之后的实例释放不会让这里丢信息。
@@ -2389,6 +2819,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
    */
   async function applyBotConfiguration(record, selection, capabilities, deployment, credentials, desiredCwd) {
     const botId = record.botId;
+    // Immediately tighten Hindsight private memory if revoked, even if this Bot later returns waiting-idle.
+    tightenBotProactivePrivacy?.(botId, capabilities);
     try {
       // 1. 授权先收紧（幂等；新快照到达时 HostService 已先做过一次）。
       const stale = plugins.staleGrants(botId, capabilities, credentials);
@@ -2700,6 +3132,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await schedules.deleteBot(bot);
       await browserSetup.releaseBot(botId);
       const res = host.deleteBot({ botId });
+      clearBotProactiveState(botId);
       live.clearGoogleSetupRevision(botId);
       await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
@@ -2877,7 +3310,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 已完结回执直接返回，不调用 Submission.wait（其上开头无条件 resume，会意外调度其他待处理任务）。
       if (record.status === 'done' || record.status === 'unanswered') {
         const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
-        if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+        if (formatted.status === 'done') await recordCompletedSubmission(botId, formatted);
         return formatted;
       }
       // 离线或恢复未完成：Submission.wait 会隐式 resume 调度器、唤醒未知旧任务——
@@ -2890,7 +3323,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       trackedSubmissions.set(record.id, { botId, nativeId: conversation.id });
       const finalRecord = await submission.wait(CTX);
       const formatted = await formatPrimarySubmission(harness, bot, finalRecord, CTX);
-      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+      if (formatted.status === 'done') await recordCompletedSubmission(botId, formatted);
       return formatted;
     },
 
@@ -2907,7 +3340,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const record = await harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), CTX);
       if (!record) return null;
       const formatted = await formatPrimarySubmission(harness, bot, record, CTX);
-      if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
+      if (formatted.status === 'done') await recordCompletedSubmission(botId, formatted);
       return formatted;
     },
 

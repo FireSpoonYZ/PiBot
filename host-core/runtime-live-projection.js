@@ -18,7 +18,12 @@
 import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
 import { projectCodemodeCalls, projectNestedToolFields } from './tool-call-summary.js';
 import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
-import { deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
+import {
+  deriveEntryAttribution,
+  GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
+  questionnaireWaitKey,
+} from './bot-session-context.js';
+import { isSilentAssistantReply } from './runtime-bot-board.js';
 
 const MAX_HISTORY_ENTRIES = 50; // 最新可显示条目数
 const MAX_MESSAGES_PER_ENTRY = 8; // 每条目最多消息数（保留最新）
@@ -427,7 +432,14 @@ function projectAttribution(raw) {
   const channel = raw.channel;
   if (channel !== 'primary' && channel !== 'dm' && channel !== 'room') return null;
   const out = { kind, channel };
-  if (kind === 'host' && (raw.sourceType === 'webhook' || raw.sourceType === 'google-workspace-rule' || raw.sourceType === 'schedule' || raw.sourceType === 'task_dispatch')) {
+  if (
+    kind === 'host' &&
+    (raw.sourceType === 'webhook' ||
+      raw.sourceType === 'google-workspace-rule' ||
+      raw.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE ||
+      raw.sourceType === 'schedule' ||
+      raw.sourceType === 'task_dispatch')
+  ) {
     out.sourceType = raw.sourceType;
   }
   for (const key of ['botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt']) {
@@ -665,6 +677,170 @@ function compactionStartedAt(compactions, starts) {
 
 const ISO_MS_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
+function isGoogleAssistantTriggerEntry(entry) {
+  if (!entry || (entry.kind !== 'host.user-message' && entry.kind !== 'host.work-trigger')) return false;
+  const data = entry.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  if (data.attribution?.kind === 'host' && data.attribution?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) {
+    return true;
+  }
+  if (data.turn?.sender?.kind === 'host' && data.turn?.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) {
+    return true;
+  }
+  return false;
+}
+
+function triggerRequestIdOf(entry) {
+  const data = entry?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const candidate = data.requestId ?? data.turn?.requestId ?? data.attribution?.messageId;
+  return typeof candidate === 'string' && candidate !== '' ? candidate : null;
+}
+
+function extractRawAssistantText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const block of content) {
+    if (block && block.type === 'text' && typeof block.text === 'string') {
+      parts.push(block.text);
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * 识别已完结且最终答复为静默（空串或 `(pass)`）的 `google-workspace-assistant` 后台巡检轮，
+ * 将其触发条目与过程/答复条目一并从实时可见历史中隐藏（不改动底层 Durable 审计记录）。
+ * 正在运行中的轮、含错误或挂起交互卡的轮一律保留可见。
+ */
+function collectSilentProactiveAssistantEntryIds(entries, sessionState, live, effectiveResetId, waitPresentations) {
+  const suppressed = new Set();
+  if (!Array.isArray(entries) || entries.length === 0) return suppressed;
+  const activeTaskId = live?.run?.taskId !== undefined && live?.run?.taskId !== null
+    ? String(live.run.taskId)
+    : null;
+  const activeRequestId = activeTaskId !== null
+    ? (sessionState?.turnByTask?.[activeTaskId] ?? null)
+    : null;
+
+  const groupsByKey = new Map();
+  let currentSequentialKey = null;
+  let lastGroupKey = null;
+
+  const ensureGroup = (key) => {
+    let group = groupsByKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        requestId: null,
+        entryIds: [],
+        taskIds: new Set(),
+        assistantCount: 0,
+        textParts: [],
+        hasError: false,
+        hasPendingInteraction: false,
+      };
+      groupsByKey.set(key, group);
+    }
+    return group;
+  };
+
+  for (const entry of entries) {
+    if (!entry || !Number.isSafeInteger(entry.id)) continue;
+    if (effectiveResetId > 0 && entry.id <= effectiveResetId) continue;
+    if (entry.kind === 'pi.reset') {
+      groupsByKey.clear();
+      currentSequentialKey = null;
+      lastGroupKey = null;
+      continue;
+    }
+    if (entry.kind === 'pi.compaction') continue;
+    if (isGoogleAssistantTriggerEntry(entry)) {
+      const reqId = triggerRequestIdOf(entry);
+      const key = reqId !== null ? `req:${reqId}` : `entry:${entry.id}`;
+      const group = ensureGroup(key);
+      if (reqId !== null) group.requestId = reqId;
+      group.entryIds.push(entry.id);
+      currentSequentialKey = key;
+      lastGroupKey = key;
+      continue;
+    }
+    if (
+      entry.kind === 'host.user-message' ||
+      entry.kind === 'host.work-trigger' ||
+      entry.kind === 'pi.user' ||
+      entry.kind === 'host.scope-message'
+    ) {
+      currentSequentialKey = null;
+      continue;
+    }
+    let targetKey = null;
+    const taskKey = entry.byTaskId !== undefined && entry.byTaskId !== null ? String(entry.byTaskId) : null;
+    if (taskKey !== null && sessionState) {
+      const mappedReq = sessionState.turnByTask?.[taskKey];
+      if (typeof mappedReq === 'string' && mappedReq !== '') {
+        const turn = sessionState.completedTurns?.[mappedReq]
+          ?? (sessionState.activeTurn?.requestId === mappedReq ? sessionState.activeTurn : null);
+        if (turn?.sender?.kind === 'host' && turn?.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) {
+          targetKey = `req:${mappedReq}`;
+        } else if (turn) {
+          currentSequentialKey = null;
+          continue;
+        }
+      }
+    }
+    if (targetKey === null) {
+      const attrReplyTo = entry.data?.attribution?.replyTo;
+      if (typeof attrReplyTo === 'string' && groupsByKey.has(`req:${attrReplyTo}`)) {
+        targetKey = `req:${attrReplyTo}`;
+      } else if (currentSequentialKey !== null) {
+        targetKey = currentSequentialKey;
+      }
+    }
+    if (targetKey === null) continue;
+    const group = ensureGroup(targetKey);
+    if (targetKey.startsWith('req:') && group.requestId === null) {
+      group.requestId = targetKey.slice(4);
+    }
+    group.entryIds.push(entry.id);
+    if (taskKey !== null) group.taskIds.add(taskKey);
+    for (const message of entry.model ?? []) {
+      if (!message || typeof message !== 'object') continue;
+      if (message.role === 'assistant') {
+        group.assistantCount += 1;
+        if (
+          message.stopReason === 'error' ||
+          (typeof message.errorMessage === 'string' && message.errorMessage.trim() !== '')
+        ) {
+          group.hasError = true;
+        }
+        const txt = extractRawAssistantText(message.content).trim();
+        if (txt) group.textParts.push(txt);
+      } else if (message.role === 'toolResult') {
+        const waitKey = questionnaireWaitKey(message.details, entry.byTaskId);
+        const wait = waitKey === null ? null : waitPresentations?.get(waitKey);
+        const pres = projectToolPresentation(wait?.details ?? message.details);
+        if (isPendingInteraction(pres)) group.hasPendingInteraction = true;
+      }
+    }
+  }
+
+  for (const group of groupsByKey.values()) {
+    if (group.assistantCount === 0 || group.hasError || group.hasPendingInteraction) continue;
+    if (activeTaskId !== null) {
+      if (group.taskIds.has(activeTaskId)) continue;
+      if (activeRequestId !== null && group.requestId === activeRequestId) continue;
+      if (activeRequestId === null && group.key === lastGroupKey) continue;
+    }
+    const joinedText = group.textParts.join('\n').trim();
+    if (isSilentAssistantReply(joinedText)) {
+      for (const id of group.entryIds) suppressed.add(id);
+    }
+  }
+  return suppressed;
+}
+
 /** 初始空状态。 */
 export function emptyLiveState() {
   return {
@@ -728,6 +904,13 @@ export function projectLiveState(view, sessionState = null, extras = null) {
       ? extras.resetEntryId
       : 0;
   let effectiveResetId = Math.max(sessionResetId, fallbackResetId);
+  const suppressedProactiveEntryIds = collectSilentProactiveAssistantEntryIds(
+    entries,
+    sessionState,
+    live,
+    effectiveResetId,
+    extras?.waitPresentations,
+  );
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
@@ -739,6 +922,9 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     }
     if (effectiveResetId > 0 && Number.isSafeInteger(entry?.id) && entry.id <= effectiveResetId) {
       break;
+    }
+    if (Number.isSafeInteger(entry?.id) && suppressedProactiveEntryIds.has(entry.id)) {
+      continue;
     }
     const projected = projectEntry(entry, sessionState, budget, extras?.waitPresentations);
     if (!projected) continue;

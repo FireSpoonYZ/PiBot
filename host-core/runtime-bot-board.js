@@ -1,5 +1,15 @@
-import { defineDoc, ResetEntry } from '@earendil-works/pi-durable';
+import { defineDoc, LiveDoc, ResetEntry } from '@earendil-works/pi-durable';
+import { BotSessionState, GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE } from './bot-session-context.js';
 import { projectToolPresentation } from './tool-presentation.js';
+
+export { GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE };
+export const GOOGLE_ASSISTANT_BOARD_RESULT_KIND = 'proactive-google';
+export const GOOGLE_ASSISTANT_DESENSITIZED_BOARD_SUMMARY = '有新的邮件或日程待查看';
+export const GOOGLE_ASSISTANT_DESENSITIZED_PREVIEW = '邮件与日程更新';
+
+export function isSilentAssistantReply(text) {
+  return typeof text !== 'string' || text.trim() === '' || /^\(?\s*pass\s*\)?\.?$/i.test(text.trim());
+}
 
 export const BotBoardResult = defineDoc({
   kind: 'host.bot-board-result',
@@ -27,14 +37,100 @@ function bounded(text, max) {
   return text.slice(0, max).toWellFormed();
 }
 
-export function botBoardResultHooks(getHarness) {
+function isGoogleAssistantEntryData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  if (data.turn?.sender?.kind === 'host' && data.turn?.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) {
+    return true;
+  }
+  if (data.attribution?.kind === 'host' && data.attribution?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE) {
+    return true;
+  }
+  return false;
+}
+
+async function detectProactiveTurnFromHarness(harness, conversationId, taskId, context) {
+  if (!harness || conversationId === undefined || conversationId === null) return false;
+  const taskKey = taskId !== undefined && taskId !== null ? String(taskId) : null;
+  if (typeof harness.snapshot === 'function' && taskKey !== null) {
+    try {
+      const sessionState = await harness.snapshot(BotSessionState, conversationId, context);
+      const reqId = sessionState?.turnByTask?.[taskKey];
+      const turn = typeof reqId === 'string' && reqId !== ''
+        ? (sessionState?.completedTurns?.[reqId] ??
+           (sessionState?.activeTurn?.requestId === reqId ? sessionState.activeTurn : null))
+        : (sessionState?.activeTurn?.taskId !== undefined && String(sessionState.activeTurn.taskId) === taskKey
+          ? sessionState.activeTurn
+          : null);
+      if (turn) {
+        return turn.sender?.kind === 'host' && turn.sender?.sourceType === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+      }
+    } catch {
+      // Fall through to LiveDoc inspection.
+    }
+    // Note: host.bot-board beforeRequest runs before host.request-context populates BotSessionState.turnByTask.
+    // Inspect LiveDoc.run.inputs -> submission.entry to identify the incoming turn reliably before beforeRequest clears.
+    try {
+      const live = await harness.snapshot(LiveDoc, conversationId, context);
+      const run = live?.run;
+      if (run && String(run.taskId) === taskKey && Array.isArray(run.inputs) && run.inputs.length > 0 && typeof harness.commit === 'function') {
+        for (const subId of run.inputs) {
+          const entry = await harness.commit(async (tx) => {
+            if (typeof tx.submission !== 'function' || typeof tx.entry !== 'function') return null;
+            const rec = await tx.submission(subId);
+            if (!rec || rec.type !== 'input' || rec.entry === undefined) return null;
+            return await tx.entry(rec.entry);
+          }, context);
+          if (entry && isGoogleAssistantEntryData(entry.data)) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // Ignore if mock harness lacks LiveDoc/submission lookup.
+    }
+  }
+  return false;
+}
+
+export function botBoardResultHooks(getHarness, options = {}) {
+  async function resolveIsProactiveTurn(conversationId, taskId, context) {
+    if (typeof options?.isProactiveAssistantTurn === 'function') {
+      try {
+        return Boolean(await options.isProactiveAssistantTurn(conversationId, taskId, context));
+      } catch {
+        return false;
+      }
+    }
+    if (typeof options?.getTurnSourceType === 'function') {
+      try {
+        return (await options.getTurnSourceType(conversationId, taskId, context)) === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+      } catch {
+        return false;
+      }
+    }
+    return detectProactiveTurnFromHarness(getHarness?.(), conversationId, taskId, context);
+  }
+
+  async function resolveIsDedicatedBot(conversationId, context) {
+    if (typeof options?.isDedicatedAssistantBot !== 'function') return false;
+    try {
+      return Boolean(await options.isDedicatedAssistantBot(conversationId, context));
+    } catch {
+      return false;
+    }
+  }
+
   return {
     async beforeRequest(request, api, context) {
+      const isProactive = await resolveIsProactiveTurn(api.conversationId, api.taskId, context);
       await getHarness().commit(async (tx) => {
         const doc = await tx.doc(BotBoardResult, api.conversationId);
         if (doc.taskId !== String(api.taskId)) {
           doc.taskId = String(api.taskId);
-          doc.lastResult = null;
+          // Background proactive assistant checks must NOT wipe an unread positive alert on start.
+          if (!isProactive) {
+            doc.lastResult = null;
+          }
         }
       }, context);
     },
@@ -43,17 +139,36 @@ export function botBoardResultHooks(getHarness) {
       const entry = await api.entry(run.answer, context);
       const message = entry?.model?.find((item) => item.role === 'assistant');
       if (!message) return;
-      const summary = bounded(message.content.filter((block) => block.type === 'text')
-        .map((block) => block.text).join('\n').trim(), 500);
+      const rawText = Array.isArray(message.content)
+        ? message.content.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text).join('\n').trim()
+        : (typeof message.content === 'string' ? message.content.trim() : '');
+      const isProactive = await resolveIsProactiveTurn(api.conversationId, api.taskId, context);
+      if (isProactive && isSilentAssistantReply(rawText)) {
+        // Silent "(pass)" or empty proactive sweep: preserve any existing unread positive alert.
+        return;
+      }
+      let nextResult;
+      if (isProactive) {
+        nextResult = {
+          id: String(run.answer),
+          completedAt: new Date().toISOString(),
+          summary: GOOGLE_ASSISTANT_DESENSITIZED_BOARD_SUMMARY,
+          kind: GOOGLE_ASSISTANT_BOARD_RESULT_KIND,
+        };
+      } else {
+        const isDedicated = await resolveIsDedicatedBot(api.conversationId, context);
+        nextResult = {
+          id: String(run.answer),
+          completedAt: new Date().toISOString(),
+          summary: isDedicated ? GOOGLE_ASSISTANT_DESENSITIZED_PREVIEW : bounded(rawText, 500),
+        };
+      }
       await getHarness().commit(async (tx) => {
         const doc = await tx.doc(BotBoardResult, api.conversationId);
         // Stop/reset invalidates taskId too: a late hook cannot resurrect a result.
         if (doc.taskId !== String(api.taskId) || doc.lastResult?.id === String(run.answer)) return;
-        doc.lastResult = {
-          id: String(run.answer),
-          completedAt: new Date().toISOString(),
-          summary,
-        };
+        doc.lastResult = nextResult;
       }, context);
     },
   };

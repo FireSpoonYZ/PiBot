@@ -16,11 +16,16 @@ const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
 const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+export const GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE = 'google-workspace-assistant';
 const PRIVATE_HOST_SOURCE_TYPES = new Set(['schedule', 'task_dispatch']);
 
-/** Host 侧合法的受信事件来源白名单（含 Google Workspace 规则与内部 schedule/task_dispatch）。 */
+/** Host 侧合法的受信事件来源白名单（含 Google Workspace 规则/主动助手与内部 schedule/task_dispatch）。 */
 export function isAllowedHostSourceType(value) {
-  return isTrustedHostSourceType(value) || PRIVATE_HOST_SOURCE_TYPES.has(value);
+  return (
+    isTrustedHostSourceType(value) ||
+    value === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE ||
+    PRIVATE_HOST_SOURCE_TYPES.has(value)
+  );
 }
 
 export const BOT_SESSION_CHECKPOINT_INTERVAL = 128;

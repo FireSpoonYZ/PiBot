@@ -52,6 +52,7 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
     // 主会话人格来自真实 SOUL.md；未提供时保留旧 role 以兼容遗留导入路径。
     instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
+    ...(options.selectedExtensions ? { extensions: options.selectedExtensions } : {}),
     tools: initialToolsChange(options.removeTools),
     ...(options.codemodeOnly ? { modelTools: codemodeModelTools(options) } : {}),
   });
@@ -173,7 +174,27 @@ export function agentProfileChange(state, profile) {
   const pluginTools = profile?.pluginTools ?? [];
   const pluginNames = new Set(pluginTools.map((tool) => tool.name));
   const current = state?.tools;
-  if (Array.isArray(current)) {
+  if (profile?.strictTools === true && Array.isArray(current)) {
+    const allowedToolMap = new Map(
+      (profile.selectedExtensions ?? [])
+        .flatMap((extension) => extension.tools ?? [])
+        .map((tool) => [tool.name, tool]),
+    );
+    for (const tool of desired) {
+      allowedToolMap.delete(typeof tool === 'string' ? tool : tool.name);
+    }
+    const kept = current.filter((name) => allowedToolMap.has(name));
+    const added = pluginTools
+      .filter((tool) => allowedToolMap.has(tool.name) && !kept.includes(tool.name))
+      .map((tool) => tool.name);
+    const nextNames = [...kept, ...added];
+    const unchanged =
+      nextNames.length === current.length &&
+      nextNames.every((name, index) => name === current[index]);
+    if (!unchanged) {
+      change.tools = nextNames.map((name) => allowedToolMap.get(name) ?? { name });
+    }
+  } else if (Array.isArray(current)) {
     const added = pluginTools.filter((tool) => !current.includes(tool.name));
     if (added.length) change.tools = [...current.map((name) => ({ name })), ...added];
   } else {

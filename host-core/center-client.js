@@ -18,6 +18,9 @@ import {
   createAntigravityErrorEvent,
 } from './antigravity-provider.js';
 
+const GOOGLE_ASSISTANT_POLL_HEADER = 'x-pibot-google-assistant';
+const GOOGLE_ASSISTANT_POLL_VALUE = 'batch-v1';
+
 function centerError(code, message) {
   return Object.assign(new Error(message), { code });
 }
@@ -515,7 +518,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', {
       method: 'POST',
       body: { cursor: options.cursor },
-      headers: { [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION },
+      headers: {
+        [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION,
+        [GOOGLE_ASSISTANT_POLL_HEADER]: GOOGLE_ASSISTANT_POLL_VALUE,
+      },
       signal: options.signal,
     }),
     stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
@@ -533,8 +539,25 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
     // 中心共享 Google Workspace 状态（只读，复用 device Bearer 认证，不授予普通 Host owner 凭据）。
     getGoogleStatus: (options = {}) => request('/api/host/google/status', { signal: options?.signal }),
-    listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
-    callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
+    listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', {
+      method: 'POST',
+      body: {
+        botId,
+        ...(typeof options.backgroundProactive === 'boolean' ? { backgroundProactive: options.backgroundProactive } : {}),
+      },
+      signal: options.signal,
+    }),
+    callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', {
+      method: 'POST',
+      body: {
+        botId,
+        name,
+        args,
+        callId,
+        ...(typeof options.backgroundProactive === 'boolean' ? { backgroundProactive: options.backgroundProactive } : {}),
+      },
+      signal: options.signal,
+    }),
     streamAntigravity(payload, options = {}) {
       const eventStream = createAssistantMessageEventStream();
       const requestId = randomUUID();

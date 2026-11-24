@@ -16,7 +16,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
-  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule' | 'google-workspace-assistant';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -556,7 +556,8 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
     (raw.sourceType === 'schedule' ||
       raw.sourceType === 'webhook' ||
       raw.sourceType === 'task_dispatch' ||
-      raw.sourceType === 'google-workspace-rule')
+      raw.sourceType === 'google-workspace-rule' ||
+      raw.sourceType === 'google-workspace-assistant')
   ) {
     out.sourceType = raw.sourceType;
   }
@@ -922,6 +923,22 @@ function extractCompletedTaskReply(tools: readonly ChatToolCallItem[]): string {
   return '';
 }
 
+const SILENT_PROACTIVE_PASS_RE = /^\(?\s*pass\s*\)?\.?$/i;
+
+function isSilentProactiveAssistantText(text: string | undefined): boolean {
+  const trimmed = typeof text === 'string' ? text.trim() : '';
+  return trimmed === '' || SILENT_PROACTIVE_PASS_RE.test(trimmed);
+}
+
+function isProactiveGoogleAssistantTrigger(turn: ChatTurn | null | undefined): boolean {
+  return Boolean(
+    turn &&
+      turn.role === 'user' &&
+      turn.attribution?.kind === 'host' &&
+      turn.attribution?.sourceType === 'google-workspace-assistant',
+  );
+}
+
 export function parseHistoryEntries(
   items: Array<Record<string, unknown>>,
   clearedAfterEntryId = 0,
@@ -931,6 +948,9 @@ export function parseHistoryEntries(
   let activeUserStartMs: number | undefined;
   let currentAssistant: AssistantTurnAccumulator | null = null;
   let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
+  let lastUserTriggerTurn: ChatTurn | null = null;
+  const silentEmptyTriggerIds = new Set<string>();
+  const silentEmptyReplyTos = new Set<string>();
 
   const knownBots = options?.knownBots;
   const hasDurableWaitsOption = options !== undefined && Object.prototype.hasOwnProperty.call(options, 'durableWaits');
@@ -1316,7 +1336,7 @@ export function parseHistoryEntries(
 
         finalizeCurrentAssistant(false);
         activeUserStartMs = msgTimestamp;
-        turns.push({
+        const userTurn: ChatTurn = {
           id: `${String(item.id ?? i)}-${mIdx}`,
           role: 'user',
           entryId: Number.isFinite(numericId) ? numericId : 0,
@@ -1325,7 +1345,9 @@ export function parseHistoryEntries(
           startedAt: msgTimestamp,
           timestamp: msgTimestamp,
           ...(itemAttr ? { attribution: itemAttr } : {}),
-        });
+        };
+        turns.push(userTurn);
+        lastUserTriggerTurn = userTurn;
         continue;
       }
 
@@ -1448,6 +1470,11 @@ export function parseHistoryEntries(
           (entry.stopReason === 'error' || entry.isError === true ? 'model_error' : undefined);
 
         if (!messageHasDisplay && !error) {
+          if (itemAttr?.replyTo) {
+            silentEmptyReplyTos.add(itemAttr.replyTo);
+          } else if (isProactiveGoogleAssistantTrigger(lastUserTriggerTurn)) {
+            silentEmptyTriggerIds.add(lastUserTriggerTurn!.id);
+          }
           continue;
         }
 
@@ -1801,10 +1828,67 @@ export function parseHistoryEntries(
 
   finalizeCurrentAssistant(isBusy);
 
+  // Suppress settled silent `(pass)` / empty proactive Google Workspace assistant sweeps
+  // (both host trigger bubble and assistant bubble) so background no-op checks do not clutter
+  // chat, while keeping durable audit entries untouched and never hiding positive alerts,
+  // errors, pending interactive prompts, or in-flight runs.
+  const suppressedTurnIds = new Set<string>();
+  const lastTurn = turns.at(-1) ?? null;
+  const isAssistantTurnInFlight = (turn: ChatTurn): boolean =>
+    Boolean(
+      turn.isStreaming === true ||
+        (turn.tools ?? []).some((tool) => tool.status === 'running') ||
+        (isBusy && turn === lastTurn),
+    );
+  for (let idx = 0; idx < turns.length; idx++) {
+    const trigger = turns[idx];
+    if (!isProactiveGoogleAssistantTrigger(trigger)) continue;
+    const triggerMessageId = trigger.attribution?.messageId;
+    const matchedAssistants: ChatTurn[] = [];
+    if (triggerMessageId) {
+      for (const candidate of turns) {
+        if (candidate.role === 'assistant' && candidate.attribution?.replyTo === triggerMessageId) {
+          matchedAssistants.push(candidate);
+        }
+      }
+    }
+    if (matchedAssistants.length === 0) {
+      const next = turns[idx + 1];
+      if (
+        next &&
+        next.role === 'assistant' &&
+        (!next.attribution?.replyTo || next.attribution.replyTo === triggerMessageId)
+      ) {
+        matchedAssistants.push(next);
+      }
+    }
+    if (matchedAssistants.length > 0) {
+      const hasNonSilentOrActive = matchedAssistants.some(
+        (assistant) =>
+          isAssistantTurnInFlight(assistant) ||
+          Boolean(assistant.error) ||
+          pendingToolPrompts(assistant.tools ?? []).length > 0 ||
+          !isSilentProactiveAssistantText(assistant.text),
+      );
+      if (!hasNonSilentOrActive) {
+        suppressedTurnIds.add(trigger.id);
+        for (const assistant of matchedAssistants) suppressedTurnIds.add(assistant.id);
+      }
+    } else if (!(isBusy && idx === turns.length - 1)) {
+      if (
+        silentEmptyTriggerIds.has(trigger.id) ||
+        (triggerMessageId !== undefined && silentEmptyReplyTos.has(triggerMessageId))
+      ) {
+        suppressedTurnIds.add(trigger.id);
+      }
+    }
+  }
+
   // 1v1 对话页显示 primary（用户主聊）与 dm（1v1 Bot 私聊任务执行）轮；
   // 群聊（room）轮保持隔离在群聊页面内，不在各 Bot 的 1v1 对话页中刷屏。
   return turns.filter(
     (turn) =>
+      !suppressedTurnIds.has(turn.id) &&
       turn.collaborative !== true &&
       (turn.attribution === undefined || turn.attribution.channel !== 'room') &&
       (turn.role === 'user' ||

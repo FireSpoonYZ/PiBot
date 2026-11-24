@@ -1239,7 +1239,7 @@ export interface Attribution {
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
   /** Trusted Host entry source only; never accepted from a user sender. */
-  sourceType?: 'webhook' | 'google-workspace-rule' | 'schedule' | 'task_dispatch';
+  sourceType?: 'webhook' | 'google-workspace-rule' | 'google-workspace-assistant' | 'schedule' | 'task_dispatch';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -1359,6 +1359,13 @@ export interface BotBoardParams {
   botIds: string[];
 }
 
+export interface BotBoardResult {
+  id: string;
+  completedAt: string;
+  summary: string;
+  kind?: 'proactive-google';
+}
+
 export interface BotBoardItem {
   botId: string;
   /** Public primary conversation UUID, even before a native conversation exists. */
@@ -1368,7 +1375,7 @@ export interface BotBoardItem {
   attention: null | { kind: 'questionnaire'; requestId: string; summary: string; count: number };
   progress: null | { completed: number; total: number; current: string | null };
   /** Committed success only, hidden while non-idle; summary <=500, attention/current <=200 characters. */
-  lastResult: null | { id: string; completedAt: string; summary: string };
+  lastResult: null | BotBoardResult;
   taskId?: string | null;
   taskTitle?: string | null;
   taskStatusLine?: string | null;
