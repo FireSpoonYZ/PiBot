@@ -15,6 +15,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { McpClient } from '@earendil-works/pi-mcp';
+import * as googleWorkspaceContract from '../../center-contract/google-workspace.js';
 import { mailCalendarTools } from './mail-calendar-tools.js';
 import { fileTools } from './file-tools.js';
 import {
@@ -24,6 +25,40 @@ import {
 
 export { GOOGLE_WORKSPACE_INSTALLATION_ID };
 
+const FALLBACK_GOOGLE_ASSISTANT_ALLOWED_TOOLS = Object.freeze([
+  'gmail_search',
+  'gmail_read',
+  'gmail_draft',
+  'calendar_list',
+  'calendar_get',
+  'calendar_suggest-time',
+  'contacts_find',
+  'drive_search',
+  'drive_list',
+  'drive_read',
+  'docs_read',
+  'sheets_read',
+]);
+
+export const PROACTIVE_ASSISTANT_ALLOWED_TOOLS = Object.freeze(
+  Array.isArray(googleWorkspaceContract.GOOGLE_ASSISTANT_ALLOWED_TOOLS)
+    ? [...googleWorkspaceContract.GOOGLE_ASSISTANT_ALLOWED_TOOLS]
+    : [...FALLBACK_GOOGLE_ASSISTANT_ALLOWED_TOOLS],
+);
+
+const ALLOWED_PROACTIVE_TOOLS = new Set(PROACTIVE_ASSISTANT_ALLOWED_TOOLS);
+
+const FORBIDDEN_PROACTIVE_DRAFT_KEYS = Object.freeze([
+  'to',
+  'cc',
+  'bcc',
+  'replyAll',
+  'forward',
+  'draft',
+  'attach',
+  'attachments',
+]);
+
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const AMBIGUOUS_ACCOUNT_CODES = new Set([
   'GOOGLE_ACCOUNT_AMBIGUOUS',
@@ -32,7 +67,7 @@ const AMBIGUOUS_ACCOUNT_CODES = new Set([
   'AMBIGUOUS_ACCOUNT',
 ]);
 
-// Model arguments must never supply caller/actor or secret fields.
+// Model arguments must never supply caller/actor, execution-mode, or secret fields.
 const FORBIDDEN_MODEL_ARG_KEYS = new Set([
   'askedBy',
   'caller',
@@ -48,6 +83,7 @@ const FORBIDDEN_MODEL_ARG_KEYS = new Set([
   'refreshToken',
   'clientSecret',
   'authorization',
+  'backgroundProactive',
   '__proto__',
   'constructor',
   'prototype',
@@ -299,7 +335,51 @@ function safeAccountList(list) {
   return items.length ? items : undefined;
 }
 
-async function formatToolError(err, accounts) {
+function filterAllowedAccountChoices(choices, allowedAccounts) {
+  if (!Array.isArray(choices)) return undefined;
+  if (!allowedAccounts) return choices.length ? choices : undefined;
+  const filtered = choices.filter(
+    (entry) => typeof entry?.email === 'string' && allowedAccounts.has(entry.email.toLowerCase()),
+  );
+  return filtered.length ? filtered : undefined;
+}
+
+export function resolveReadDraftPolicy(caller, getAssistantBinding) {
+  if (typeof getAssistantBinding !== 'function') {
+    return { restricted: false, allowedAccounts: null, mode: null };
+  }
+  const binding = getAssistantBinding();
+  if (
+    !binding
+    || binding.enabled !== true
+    || typeof caller?.deviceId !== 'string'
+    || !caller.deviceId
+    || typeof caller?.botId !== 'string'
+    || !caller.botId
+    || binding.deviceId !== caller.deviceId
+    || binding.botId !== caller.botId
+  ) {
+    return { restricted: false, allowedAccounts: null, mode: null };
+  }
+  const restricted = binding.mode === 'dedicated'
+    || (binding.mode === 'existing' && caller.backgroundProactive === true);
+  if (!restricted) {
+    return { restricted: false, allowedAccounts: null, mode: binding.mode ?? null };
+  }
+  const normalizedAccounts = Array.isArray(binding.accounts)
+    ? binding.accounts
+      .filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+      .map((entry) => entry.trim().toLowerCase())
+    : [];
+  const allowedAccounts = normalizedAccounts.length > 0 ? new Set(normalizedAccounts) : null;
+  return {
+    restricted: true,
+    allowedAccounts,
+    mode: binding.mode,
+  };
+}
+
+async function formatToolError(err, accounts, allowedAccounts = null) {
   const rawCode = typeof err?.code === 'string' ? err.code : '';
   const code = SAFE_ERROR_CODE.test(rawCode) ? rawCode : 'GOOGLE_TOOL_ERROR';
   const rawMessage = typeof err?.message === 'string' && err.message.trim()
@@ -314,11 +394,17 @@ async function formatToolError(err, accounts) {
   if (typeof err?.account === 'string' && err.account.trim()) payload.account = err.account.trim();
   const enableUrl = safeHttpsUrl(err?.enableUrl);
   if (enableUrl) payload.enableUrl = enableUrl;
-  let accountChoices = safeAccountList(err?.accounts ?? err?.details?.accounts);
+  let accountChoices = filterAllowedAccountChoices(
+    safeAccountList(err?.accounts ?? err?.details?.accounts),
+    allowedAccounts,
+  );
   if (!accountChoices && AMBIGUOUS_ACCOUNT_CODES.has(code) && typeof accounts?.status === 'function') {
     try {
       const current = await accounts.status();
-      accountChoices = safeAccountList(current?.accounts);
+      accountChoices = filterAllowedAccountChoices(
+        safeAccountList(current?.accounts),
+        allowedAccounts,
+      );
     } catch {
       // Do not mask the original error if status lookup fails.
     }
@@ -338,6 +424,7 @@ export function createGoogleWorkspaceMcpServer({
   accounts,
   tools = [...mailCalendarTools, ...fileTools],
   getCaller = () => undefined,
+  getAssistantBinding = null,
 }) {
   if (!accounts || typeof accounts.api !== 'function') {
     throw new Error('Google Workspace accounts service with api() is required');
@@ -348,13 +435,20 @@ export function createGoogleWorkspaceMcpServer({
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: list.map(({ name, description, inputSchema }) => ({
-      name,
-      ...(description ? { description } : {}),
-      inputSchema,
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const caller = getCaller?.() ?? {};
+    const policy = resolveReadDraftPolicy(caller, getAssistantBinding);
+    const visibleTools = policy.restricted
+      ? list.filter((tool) => ALLOWED_PROACTIVE_TOOLS.has(tool.name))
+      : list;
+    return {
+      tools: visibleTools.map(({ name, description, inputSchema }) => ({
+        name,
+        ...(description ? { description } : {}),
+        inputSchema,
+      })),
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request?.params?.name;
@@ -365,21 +459,79 @@ export function createGoogleWorkspaceMcpServer({
         content: [{ type: 'text', text: JSON.stringify({ error: { code: 'NOT_FOUND', message: 'Unknown Google Workspace tool' } }) }],
       };
     }
+    let policy = { restricted: false, allowedAccounts: null, mode: null };
     try {
+      const caller = getCaller?.() ?? {};
+      policy = resolveReadDraftPolicy(caller, getAssistantBinding);
+      if (policy.restricted && !ALLOWED_PROACTIVE_TOOLS.has(tool.name)) {
+        throw Object.assign(
+          new Error(`Tool "${tool.name}" is disabled for proactive Google assistant`),
+          { code: 'FORBIDDEN' },
+        );
+      }
       const cleanArgs = sanitizeModelArgs(request?.params?.arguments);
+      if (policy.restricted) {
+        if (tool.name === 'gmail_read' && (cleanArgs.download !== undefined || cleanArgs.out !== undefined)) {
+          throw Object.assign(
+            new Error('Attachment download to disk is disabled for proactive Google assistant'),
+            { code: 'FORBIDDEN' },
+          );
+        }
+        if (tool.name === 'gmail_draft') {
+          const hasReplyTo = typeof cleanArgs.replyTo === 'string' && cleanArgs.replyTo.trim().length > 0;
+          const hasForbiddenDraftField = FORBIDDEN_PROACTIVE_DRAFT_KEYS.some((key) => cleanArgs[key] !== undefined);
+          if (!hasReplyTo || hasForbiddenDraftField) {
+            throw Object.assign(
+              new Error('Proactive assistant drafts are restricted to in-thread replies without altering recipients or attachments'),
+              { code: 'FORBIDDEN' },
+            );
+          }
+        }
+      }
       const accountArg = extractAccountArg(cleanArgs);
+      if (policy.restricted && policy.allowedAccounts && accountArg && accountArg.includes('@')) {
+        if (!policy.allowedAccounts.has(accountArg.toLowerCase())) {
+          throw Object.assign(
+            new Error('Google account is not permitted for proactive Google assistant'),
+            { code: 'FORBIDDEN' },
+          );
+        }
+      }
+      const effectiveAccountArg = policy.restricted && policy.allowedAccounts
+        ? (accountArg ?? (policy.allowedAccounts.size === 1 ? [...policy.allowedAccounts][0] : undefined))
+        : accountArg;
       let api;
       try {
-        api = await accounts.api(accountArg);
+        api = await accounts.api(effectiveAccountArg);
       } catch (error) {
         // Only Center account resolution, never tool output or document text, may offer account choices.
-        if (error?.code !== 'GOOGLE_ACCOUNT_AMBIGUOUS' || accountArg) throw error;
-        const result = await formatToolError(error, accounts);
-        const choices = safeAccountList(error.accounts ?? error.details?.accounts);
+        if (error?.code !== 'GOOGLE_ACCOUNT_AMBIGUOUS' || effectiveAccountArg) throw error;
+        const allowedSet = policy.restricted ? policy.allowedAccounts : null;
+        const rawChoices = safeAccountList(error.accounts ?? error.details?.accounts);
+        const choices = filterAllowedAccountChoices(rawChoices, allowedSet);
+        const errorForFormat = allowedSet
+          ? Object.assign(
+              new Error(
+                choices?.length
+                  ? `Specify which allowed Google account to use (${choices.map((entry) => entry.email).filter(Boolean).join(', ')}).`
+                  : 'Specify which allowed Google account to use.',
+              ),
+              { code: 'GOOGLE_ACCOUNT_AMBIGUOUS', accounts: choices ?? [] },
+            )
+          : error;
+        const result = await formatToolError(errorForFormat, accounts, allowedSet);
         if (choices) result._meta = { 'pibot/accountChoices': choices.slice(0, 16) };
         return result;
       }
-      const caller = getCaller?.() ?? {};
+      if (policy.restricted && policy.allowedAccounts) {
+        const resolvedEmail = typeof api?.email === 'string' ? api.email.trim().toLowerCase() : '';
+        if (!resolvedEmail || !policy.allowedAccounts.has(resolvedEmail)) {
+          throw Object.assign(
+            new Error('Google account is not permitted for proactive Google assistant'),
+            { code: 'FORBIDDEN' },
+          );
+        }
+      }
       const toolContext = {
         api,
         signal: extra?.signal,
@@ -391,7 +543,7 @@ export function createGoogleWorkspaceMcpServer({
       const result = await tool.run(cleanArgs, toolContext);
       return formatToolResult(result, tool.name);
     } catch (err) {
-      return await formatToolError(err, accounts);
+      return await formatToolError(err, accounts, policy.restricted ? policy.allowedAccounts : null);
     }
   });
 
@@ -484,6 +636,7 @@ export function createGoogleWorkspaceMcpAdapter({
   accounts,
   tools = [...mailCalendarTools, ...fileTools],
   requestTimeoutMs = 120_000,
+  getAssistantBinding = null,
 }) {
   // Validate tools eagerly so malformed definitions fail fast on startup.
   const normalized = normalizeTools(tools);
@@ -497,6 +650,7 @@ export function createGoogleWorkspaceMcpAdapter({
       accounts,
       tools: normalized.list,
       getCaller: () => callerStore.getStore(),
+      getAssistantBinding,
     });
     const transport = createInProcessMcpTransport(server);
     const client = new McpClient({

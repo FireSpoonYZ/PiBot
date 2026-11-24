@@ -897,7 +897,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return { status: 'approved', authenticated: true, csrfToken: reply.generateCsrf() };
   });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
-  if (google) registerGoogleWorkspaceRoutes(app, { route, store, bridge, publicUrl, google });
+  if (google) registerGoogleWorkspaceRoutes(app, { route, store, bridge, notifyDevice: notify, learning, publicUrl, google });
   const taskCoordinator = registerTaskRoutes({
     route,
     host,
@@ -958,9 +958,20 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   if (google?.accounts) {
     // The setup wizard reads readiness; configuring clients and grants remains owner-only.
-    host('GET', '/api/host/google/status', (_req, reply) => {
+    host('GET', '/api/host/google/status', async (_req, reply) => {
       reply.header('Cache-Control', 'no-store');
-      return google.accounts.status();
+      const status = await google.accounts.status();
+      const assistant = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+      return {
+        ...status,
+        assistant: assistant ? {
+          enabled: Boolean(assistant.enabled),
+          deviceId: assistant.deviceId,
+          botId: assistant.botId,
+          mode: assistant.mode,
+          accounts: Array.isArray(assistant.accounts) ? [...assistant.accounts] : [],
+        } : null,
+      };
     });
   }
   host('GET', '/api/host/model-picker', modelPicker);
@@ -1083,8 +1094,23 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef)));
   });
-  host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
-  host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); }, GOOGLE_TOOL_CALL_BODY_LIMIT);
+  host('POST', '/api/host/capabilities/:installationId/tools/list', req => {
+    const body = object(req.body);
+    if (body.backgroundProactive !== undefined && typeof body.backgroundProactive !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'backgroundProactive must be boolean');
+    }
+    return execution.listTools(req.centerDevice.deviceId, req.params.installationId, body);
+  });
+  host('POST', '/api/host/capabilities/:installationId/tools/call', req => {
+    const body = object(req.body);
+    text(body.callId, 'callId');
+    text(body.name, 'name');
+    object(body.args);
+    if (body.backgroundProactive !== undefined && typeof body.backgroundProactive !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'backgroundProactive must be boolean');
+    }
+    return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body);
+  }, GOOGLE_TOOL_CALL_BODY_LIMIT);
   const operations = createOperations?.({
     store, packages, bridge, execution, skills, learning, botManagement, catalog, notify, notifyAll, notifyInstallation, publicUrl, action,
     // Invoke the same domain callback, not a synthetic HTTP request or an owner session.

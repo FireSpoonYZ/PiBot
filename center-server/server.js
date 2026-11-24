@@ -148,7 +148,10 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     bridge = openHostBridge({ dataRoot, store, relay });
     oauth = openMcpOAuth({ store, publicUrl });
     googleAccounts = await openGoogleAccounts({ store, publicUrl });
-    googleWorkspaceMcp = createGoogleWorkspaceMcpAdapter({ accounts: googleAccounts });
+    googleWorkspaceMcp = createGoogleWorkspaceMcpAdapter({
+      accounts: googleAccounts,
+      getAssistantBinding: () => (typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null),
+    });
     const builtinAdapters = new Map([[GOOGLE_WORKSPACE_INSTALLATION_ID, googleWorkspaceMcp]]);
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth, builtinAdapters });
     packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });

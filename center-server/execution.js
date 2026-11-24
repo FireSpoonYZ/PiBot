@@ -138,7 +138,7 @@ export function openCenterExecution({ store, packages, oauth, builtinAdapters = 
     },
     listTools(deviceId, id, input) {
       if (builtins.has(id)) {
-        return useBuiltin(deviceId, id, input?.botId, null, async client => ({
+        return useBuiltin(deviceId, id, input?.botId, { backgroundProactive: input?.backgroundProactive === true }, async client => ({
           tools: (await client.listTools()).map(({ name, description, inputSchema }) => ({ name, ...(description ? { description } : {}), inputSchema })),
         }));
       }
@@ -155,7 +155,7 @@ export function openCenterExecution({ store, packages, oauth, builtinAdapters = 
     },
     callTool(deviceId, id, input) {
       if (builtins.has(id)) {
-        return useBuiltin(deviceId, id, input?.botId, { callId: input?.callId }, async client => {
+        return useBuiltin(deviceId, id, input?.botId, { callId: input?.callId, backgroundProactive: input?.backgroundProactive === true }, async client => {
           if (!(await client.listTools()).some(tool => tool.name === input.name)) fail('FORBIDDEN', 'Tool unavailable');
           return client.callTool(input.name, input.args);
         });
