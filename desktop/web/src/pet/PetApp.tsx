@@ -299,13 +299,6 @@ export function PetApp() {
         const nextKey = targetKey(payload);
         snapshotRef.current = payload;
 
-        // Capture existing latest assistant message ID on first ready snapshot so opening
-        // the pet stays calm & ambient instead of popping old history immediately.
-        if (initialReplyCapturedRef.current === null && payload.connection === 'ready') {
-          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
-          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
-        }
-
         if (payload.questionnaire?.presentation.requestId) {
           setRecentQuestionId(payload.questionnaire.presentation.requestId);
         }
@@ -315,11 +308,17 @@ export function PetApp() {
           stopReading();
           setReplyToRead(null);
           setRecentQuestionId(null);
-          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
-          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
+          initialReplyCapturedRef.current = null;
           const text = nextKey ? readLocal(draftKey(nextKey)) : '';
           draftRef.current = text;
           setDraft(text);
+        }
+
+        // Capture existing latest assistant message ID on the first ready snapshot for each
+        // target bot so opening the pet stays calm & ambient instead of popping old history.
+        if (initialReplyCapturedRef.current === null && payload.connection === 'ready') {
+          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
+          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
         }
         if (sessionChanged) {
           cancelRecording();
@@ -672,8 +671,9 @@ export function PetApp() {
       };
     }
 
-    // Priority 2b: Local error notice or offline state when user opened composer / triggered error
-    const errText = notice || voiceStatus.error || snapshot.error;
+    // Priority 2b: Local error notice, or offline/unconfigured state after user clicks mascot
+    const connError = snapshot.connection === 'ready' || composerOpen ? snapshot.error : null;
+    const errText = notice || voiceStatus.error || connError;
     if (errText && !dismissedIds.has(`err:${errText}`)) {
       return {
         kind: 'handoff',
@@ -754,6 +754,7 @@ export function PetApp() {
     return null;
   }, [
     busy,
+    composerOpen,
     ctxMenuOpen,
     dismissedIds,
     dndMode,

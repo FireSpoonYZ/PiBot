@@ -1,5 +1,7 @@
 //! Lightweight local pet window. The main webview owns all bot/broker state.
 use std::{
+  fs,
+  path::PathBuf,
   sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
@@ -150,6 +152,66 @@ pub struct DesktopPet {
   geometry: Mutex<PetGeometry>,
   operation: tokio::sync::Mutex<()>,
   destroyed: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedPetState {
+  #[serde(default)]
+  visible: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  x: Option<i32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  y: Option<i32>,
+}
+
+fn persisted_state_path(app: &AppHandle) -> Option<PathBuf> {
+  app.path().app_config_dir().ok().map(|dir| dir.join("pet-state.json"))
+}
+
+fn load_persisted_state(app: &AppHandle) -> PersistedPetState {
+  let Some(path) = persisted_state_path(app) else {
+    return PersistedPetState::default();
+  };
+  fs::read_to_string(path)
+    .ok()
+    .and_then(|raw| serde_json::from_str::<PersistedPetState>(&raw).ok())
+    .unwrap_or_default()
+}
+
+fn save_persisted_state(app: &AppHandle, state: &PersistedPetState) {
+  let Some(path) = persisted_state_path(app) else {
+    return;
+  };
+  let Some(parent) = path.parent() else {
+    return;
+  };
+  let Ok(serialized) = serde_json::to_vec_pretty(state) else {
+    return;
+  };
+  if fs::create_dir_all(parent).is_err() {
+    return;
+  }
+  let temp = path.with_extension("json.tmp");
+  if fs::write(&temp, serialized).is_ok() {
+    let _ = fs::rename(&temp, &path).or_else(|_| {
+      let _ = fs::remove_file(&path);
+      fs::rename(&temp, &path)
+    });
+  }
+}
+
+fn save_current_preference(app: &AppHandle, visible: bool) {
+  let pet = app.state::<DesktopPet>();
+  let pos = pet.geometry.lock().unwrap_or_else(|e| e.into_inner()).last_collapsed_pos;
+  save_persisted_state(
+    app,
+    &PersistedPetState {
+      visible,
+      x: pos.map(|p| p.x),
+      y: pos.map(|p| p.y),
+    },
+  );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -811,6 +873,43 @@ fn snapshot_collapsed_pos_before_hide(app: &AppHandle, window: &WebviewWindow) {
   geo.hit_rects.clear();
 }
 
+/// Restores saved position and re-opens the pet if it was enabled before exit.
+pub fn restore_if_enabled(app: &AppHandle) {
+  let saved = load_persisted_state(app);
+  if let (Some(x), Some(y)) = (saved.x, saved.y) {
+    let pet = app.state::<DesktopPet>();
+    let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
+    geo.last_collapsed_pos = Some(PhysicalPosition::new(x, y));
+  }
+  if saved.visible {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+      let _ = control(&app, "show", None).await;
+    });
+  }
+}
+
+/// Tears down the pet window during application exit without clearing the saved visibility preference.
+pub async fn shutdown(app: &AppHandle) {
+  let pet = app.state::<DesktopPet>();
+  let _operation = pet.operation.lock().await;
+  let was_visible = pet.visible.load(Ordering::Acquire);
+  let destroyed = pet.destroyed.notified();
+  tokio::pin!(destroyed);
+  destroyed.as_mut().enable();
+  if let Some(window) = app.get_webview_window(PET_LABEL) {
+    snapshot_collapsed_pos_before_hide(app, &window);
+    if was_visible {
+      save_current_preference(app, true);
+    }
+    if window.destroy().is_ok() {
+      let _ = tokio::time::timeout(Duration::from_secs(2), destroyed).await;
+    }
+  }
+  pet.visible.store(false, Ordering::Release);
+  pet.expanded.store(false, Ordering::Release);
+}
+
 /// Public control helper used by tray & app lifecycle.
 pub async fn control(
   app: &AppHandle,
@@ -851,6 +950,7 @@ pub async fn control_with_layout(
       };
       apply_window_region(&window, &hit_rects, composited);
       pet.visible.store(true, Ordering::Release);
+      save_current_preference(app, true);
     }
     "hide" => {
       // destroy() only queues the native operation. Keep show/hide serialized until
@@ -867,6 +967,7 @@ pub async fn control_with_layout(
       }
       pet.visible.store(false, Ordering::Release);
       pet.expanded.store(false, Ordering::Release);
+      save_current_preference(app, false);
     }
     "set-expanded" => {
       let expanded = expanded.ok_or_else(|| {
@@ -993,6 +1094,9 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         };
         if dock_changed {
           publish(&app);
+        }
+        if pet.visible.load(Ordering::Acquire) {
+          save_current_preference(&app, true);
         }
       });
     }
@@ -1144,5 +1248,16 @@ mod tests {
     assert!(top_row.width < rect.width);
     assert_eq!(mid_row.x, rect.x);
     assert_eq!(mid_row.width, rect.width);
+  }
+
+  #[test]
+  fn persisted_pet_state_round_trips_and_defaults_safely() {
+    let state = PersistedPetState { visible: true, x: Some(1740), y: Some(896) };
+    let json = serde_json::to_string(&state).unwrap();
+    let decoded: PersistedPetState = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, state);
+
+    let minimal: PersistedPetState = serde_json::from_str(r#"{"visible":true}"#).unwrap();
+    assert_eq!(minimal, PersistedPetState { visible: true, x: None, y: None });
   }
 }

@@ -222,7 +222,7 @@ pub fn run() {
         let window = window.clone();
         tauri::async_runtime::spawn(async move {
           close_browser_window(&app, guest_ids).await;
-          let _ = desktop_pet::control(&app, "hide", None).await;
+          desktop_pet::shutdown(&app).await;
           let _ = window.destroy();
         });
       }
@@ -269,6 +269,7 @@ pub fn run() {
       if let Err(error) = desktop_tray::install(app.handle()) {
         eprintln!("Failed to create the PiBot system tray: {error}");
       }
+      desktop_pet::restore_if_enabled(app.handle());
       Ok(())
     });
 
