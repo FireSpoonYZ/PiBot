@@ -116,7 +116,7 @@ async function runTurnWithTools({
         toolName: tc.name,
         content,
         ...(result.details !== undefined ? { details: result.details } : {}),
-        isError: false,
+        isError: result.isError === true,
         timestamp: Date.now(),
       });
     }
@@ -258,7 +258,7 @@ async function run() {
       `[STEP 3/6] same-session model/reasoning switch ok: ${primaryModel.id}/${reasoningA} -> ${secondaryModel.id}/${reasoningB} mem=${memMarker} switch=${switchMarker}`,
     );
 
-    // 4. MCP pibot-bridge -> Host read tool round-trip & single execution location
+    // 4. An ordinary Host error must reach agy, which can retry in the same turn.
     const fileToken = 'HOST_FILE_' + randomBytes(8).toString('hex');
     const hostTargetFile = path.join(hostWorkDir, 'host-secret-' + randomBytes(6).toString('hex') + '.txt');
     writeFileSync(hostTargetFile, `Verification payload\n${fileToken}\n`, 'utf8');
@@ -266,6 +266,15 @@ async function run() {
     assert.equal(existsSync(centerWorkspaceFile), false, 'test file must live only in Host workspace, not Center workspace');
 
     const toolSessionId = 'verify-tool-' + randomBytes(4).toString('hex');
+    const retryMarker = 'VERIFY_RETRY_READ';
+    let firstRead = true;
+    const recoveringRead = {
+      async execute(...args) {
+        if (!firstRead) return readTool.execute(...args);
+        firstRead = false;
+        return { output: [{ type: 'text', text: retryMarker }], isError: true };
+      },
+    };
     const toolMessages = [
       createInitialSystemMessage(
         'You MUST call the `read` tool to inspect any file requested by the user. Never guess file contents.',
@@ -273,7 +282,7 @@ async function run() {
       ),
       {
         role: 'user',
-        content: `Use the read tool to read "${hostTargetFile}" and reply with the exact HOST_FILE_... token inside it.`,
+        content: `Use the read tool to read "${hostTargetFile}". If it returns ${retryMarker}, call read again with the same path. Reply with the exact HOST_FILE_... token inside it.`,
         timestamp: Date.now(),
       },
     ];
@@ -285,11 +294,11 @@ async function run() {
       messages: toolMessages,
       reasoning: reasoningA,
       hostEnv,
-      readTool,
+      readTool: recoveringRead,
       timeoutMs,
     });
     assert.equal(toolRes.sawToolUse, true, 'model must yield a toolUse turn via MCP pibot-bridge instead of reading Center-side');
-    assert.ok(toolRes.toolExecutions >= 1, 'Host read tool must execute at least once');
+    assert.ok(toolRes.toolExecutions >= 2, 'agy must retry after the ordinary Host tool error');
     assert.equal(toolRes.message.stopReason, 'stop', 'tool round-trip turn must finish cleanly');
     assert.ok(extractText(toolRes.message).includes(fileToken), `tool round-trip reply missing file token ${fileToken}`);
     console.log(

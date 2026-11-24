@@ -97,12 +97,14 @@ async function httpToolRoundTrip(t, { failResponse = false, nativeToolError = fa
 
   driver.setOnRun(async ctx => {
     if (driver.runs.length === 1) {
+      const args = { path: 'fixture.txt' };
+      ctx.emit({ type: 'tool_start', toolCallId: 'native-read', name: 'read_file', args, mcpServer: 'pibot-bridge' });
       try {
         const res = await fetch(ctx.mcp.bridge.serverConfig(ctx.mcp.token).url, {
           method: 'POST', headers: headers(ctx.mcp.token), signal: requestSignal,
           body: JSON.stringify({
             jsonrpc: '2.0', id: 1, method: 'tools/call',
-            params: { name: 'read_file', arguments: { path: 'fixture.txt' } },
+            params: { name: 'read_file', arguments: args },
           }),
         });
         received = { status: res.status, frame: readRpcResponse(await res.text()) };
@@ -112,7 +114,10 @@ async function httpToolRoundTrip(t, { failResponse = false, nativeToolError = fa
         transportError = err;
       }
       if (nativeToolError) {
-        ctx.emit({ type: 'tool_error', name: 'read_file', message: 'native failed to consume', mcpServer: 'pibot-bridge' });
+        ctx.emit({
+          type: 'tool_error', toolCallId: 'native-read', name: 'read_file',
+          message: 'native failed to consume', mcpServer: 'pibot-bridge',
+        });
       }
     }
     const reply = driver.runs.length === 1 ? 'native tool turn ended' : 'follow-up completed';
