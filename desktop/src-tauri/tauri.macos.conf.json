@@ -9,7 +9,8 @@
     "macOS": {
       "minimumSystemVersion": "13.5",
       "signingIdentity": "-",
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "infoPlist": "Info.plist"
     }
   }
 }

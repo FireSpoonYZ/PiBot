@@ -1,6 +1,6 @@
 [package]
 name = "pibot"
-version = "0.0.31"
+version = "0.0.32"
 edition = "2021"
 publish = false
 
@@ -21,8 +21,9 @@ tauri-plugin-dialog = "=2.8.3"
 tauri-plugin-single-instance = "=2.5.5"
 tauri-plugin-updater = "=2.14.1"
 tempfile = "=3.27.0"
-reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "json", "multipart"] }
 sha2 = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]

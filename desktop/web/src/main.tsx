@@ -1,17 +1,6 @@
-// Module 17 desktop 入口：装配 App，加载样式；错误以可见状态呈现，不写原始日志。
-import { createRoot } from 'react-dom/client';
-import { createDesktopClient } from './api';
-import './app.css';
-import { DesktopApp } from './App';
-import { NoticeProvider } from '../../../web/src/notice';
-
-const container = document.getElementById('root');
-if (!container) {
-  throw new Error('root container missing');
+// Load only the surface requested by the native window.
+if (new URLSearchParams(window.location.search).get('view') === 'pet') {
+  void import('./pet/main');
+} else {
+  void import('./desktopMain');
 }
-const api = createDesktopClient();
-createRoot(container).render(
-  <NoticeProvider>
-    <DesktopApp api={api} />
-  </NoticeProvider>,
-);

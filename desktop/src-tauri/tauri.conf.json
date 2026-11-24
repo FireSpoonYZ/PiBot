@@ -1,6 +1,6 @@
 {
   "productName": "pibot",
-  "version": "0.0.31",
+  "version": "0.0.32",
   "identifier": "com.example.launcherprobe.desktop",
   "build": {
     "beforeBuildCommand": "node ../host-core/build-desktop.js --web",
@@ -31,9 +31,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; media-src 'self' blob: data:",
       "capabilities": [
-        "main"
+        "main",
+        "pet"
       ],
       "assetProtocol": {
         "enable": false,

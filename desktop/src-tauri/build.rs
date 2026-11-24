@@ -1,5 +1,7 @@
 const APP_COMMANDS: &[&str] = &[
   "desktop_request",
+  "desktop_pet",
+  "desktop_pet_voice",
   "desktop_open_center",
   "desktop_observe",
   "desktop_browser_guest",
@@ -26,6 +28,7 @@ fn main() {
   println!("cargo:rerun-if-changed=../build/icons/icon.ico");
   println!("cargo:rerun-if-changed=../build/icons/icon.png");
   println!("cargo:rerun-if-changed=capabilities/main.json");
+  println!("cargo:rerun-if-changed=capabilities/pet.json");
   println!("cargo:rerun-if-changed=permissions/clipboard.toml");
   let attributes = tauri_build::Attributes::new()
     .windows_attributes(

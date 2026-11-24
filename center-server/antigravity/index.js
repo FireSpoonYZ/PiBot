@@ -9,6 +9,7 @@
 //   - cancel({ deviceId, sessionId, requestId? }) => Promise<void>
 //   - close() => Promise<void>
 
+import { isDeepStrictEqual } from "node:util";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { hasStoredAcpAuthToken, loginAcpProfile, logoutAcpProfile, probeAcpAuth } from "./auth.ts";
 import { probeAcpCatalog, resolveSessionThoughtLevel } from "./catalog.ts";
@@ -25,6 +26,7 @@ import {
 	extractImages,
 	extractUserPrompt,
 	finalize,
+	isAllowedBridgeServer,
 	newAssistant,
 	RESUME_PROMPT,
 	splitAntigravityTurnContext,
@@ -146,6 +148,55 @@ function isBridgePermissionRequest(req) {
 	return candidates.some((v) => BRIDGE_PERMISSION_RE.test(v));
 }
 
+function sameBridgeCall(native, mcp) {
+	if (native.name !== mcp.name) return false;
+	if (isDeepStrictEqual(native.args, mcp.args)) return true;
+	// AGY adds a display-only summary to ACP rawInput, not to MCP arguments.
+	const { toolSummary, ...args } = native.args;
+	return typeof toolSummary === "string" && !Object.hasOwn(mcp.args, "toolSummary") &&
+		isDeepStrictEqual(args, mcp.args);
+}
+
+// ACP toolCallId and our MCP/Host callId live in different protocols. Pair only
+// unambiguous in-flight calls, never by tool name or by completion order.
+function pairBridgeToolCalls(state) {
+	const nativeCalls = [...state.native.values()];
+	const mcpCalls = [...state.mcp];
+	for (const attempt of mcpCalls) {
+		const matches = nativeCalls.filter((native) => sameBridgeCall(native, attempt));
+		if (matches.length > 1) {
+			attempt.ambiguous = true;
+			continue;
+		}
+		const native = matches[0];
+		if (!native || native.mcp || attempt.paired) continue;
+		if (mcpCalls.some((other) => other !== attempt && !other.paired && sameBridgeCall(native, other))) {
+			attempt.ambiguous = true;
+			continue;
+		}
+		native.mcp = attempt;
+		attempt.paired = true;
+	}
+}
+
+function observeBridgeToolActivity(state, activity) {
+	if (!state || !activity.toolCallId || !isAllowedBridgeServer(activity.mcpServer)) return false;
+	const { toolCallId } = activity;
+	if (activity.type === "tool_start" && !state.native.has(toolCallId)) {
+		const tool = { name: activity.name, args: activity.args, mcp: null };
+		state.native.set(toolCallId, tool);
+		pairBridgeToolCalls(state);
+	} else if (activity.type === "tool_done" || activity.type === "tool_error") {
+		const call = state.native.get(toolCallId)?.mcp;
+		state.native.delete(toolCallId);
+		if (call) {
+			state.mcp.delete(call);
+			return call.isError === true && !call.ambiguous;
+		}
+	}
+	return false;
+}
+
 export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	const profile = resolveProfile({ dataRoot, bin, geminiHome });
 	const usesDefaultAgyBin = bin === undefined && !process.env.PIBOT_AGY_BIN;
@@ -202,6 +253,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			mcpRegistration: null,
 			nativeEpoch: 0,
 			nativeConfig: null,
+			bridgeToolActivity: null,
 			deliveryFailure: null,
 			currentTools: [],
 			listTools: () => slot.currentTools,
@@ -231,6 +283,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		slot.mcpRegistration = null;
 		slot.mcpToken = "";
 		slot.nativeConfig = null;
+		slot.bridgeToolActivity = null;
 		registration?.unregister();
 	}
 
@@ -238,9 +291,11 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		invalidateMcpRegistration(slot);
 		const epoch = slot.nativeEpoch;
 		slot.deliveryFailure = null;
+		const toolActivity = { native: new Map(), mcp: new Set() };
+		slot.bridgeToolActivity = toolActivity;
 		const reg = mcpBridge.registerSession({
 			listTools: slot.listTools,
-			onToolCall: (callId, name, args, signal) => {
+			onToolCall: async (callId, name, args, signal) => {
 				if (slot.nativeEpoch !== epoch || slot.mcpRegistration !== reg ||
 					!slot.turnAbort || slot.turnAbort.signal.aborted || slot.deliveryFailure?.epoch === epoch) {
 					return Promise.reject(new Error("Antigravity MCP call belongs to an inactive native turn"));
@@ -251,7 +306,16 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						isError: true,
 					});
 				}
-				return slot.roundTrips.onToolCall(callId, name, args, signal);
+				const call = { name, args, paired: false, ambiguous: false, isError: false };
+				toolActivity.mcp.add(call);
+				pairBridgeToolCalls(toolActivity);
+				try {
+					const result = await slot.roundTrips.onToolCall(callId, name, args, signal);
+					call.isError = result.isError === true;
+					return result;
+				} finally {
+					if (!call.paired) toolActivity.mcp.delete(call);
+				}
 			},
 			onDeliveryError: (error) => {
 				if (slot.nativeEpoch !== epoch || slot.mcpRegistration !== reg) return;
@@ -555,7 +619,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						consumeActivity(stream, blocks, activity);
 						return true;
 					}
-					consumeActivity(stream, blocks, activity);
+					const matchedMcpToolError = observeBridgeToolActivity(slot.bridgeToolActivity, activity);
+					consumeActivity(stream, blocks, activity, matchedMcpToolError);
 				}
 			};
 
@@ -722,6 +787,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			await rememberConversation(outcome.conversationId, "ready", blocks.partial);
 			throwIfCancelled();
 			slot.turnAbort = null;
+			slot.bridgeToolActivity = null;
 			finishConsumer("stop");
 		} catch (err) {
 			invalidateAuthCacheIfNeeded(err);

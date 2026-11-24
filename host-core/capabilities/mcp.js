@@ -315,6 +315,7 @@ export async function createMcpDriver({ installationId, version, target, dataBou
             name: mcpToolName(installationId, botId, tool.name),
             description: `MCP tool ${tool.name}: ${tool.description ?? ''}`,
             parameters: tool.inputSchema,
+            deferred: true,
             replay: 'unsafe',
             async execute(args, api, invocation) {
               invocation.abortSignal?.throwIfAborted();

@@ -10,6 +10,7 @@ import { openControlServer } from '../../host-core/control-server.js';
 import { normalizeControlCall } from '../../host-core/remote-control-protocol.js';
 import { openRuntime } from '../../host-core/runtime.js';
 import { openHost } from '../../host-core/host.js';
+import { mcpToolName } from '../../host-core/capabilities/mcp.js';
 import { PrimaryIndex } from '../../host-core/runtime-docs.js';
 import { GoogleWorkspacePrivacyState } from '../../host-core/google-workspace-privacy.js';
 import { createTurnAdmission } from '../../host-core/runtime-turns.js';
@@ -19,11 +20,13 @@ import { BACKGROUND_CONTEXT as context } from '../../host-core/node_modules/@ear
 import { createModels } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/models.js';
 import { registerApiProvider } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/compat.js';
 import { createAssistantMessageEventStream } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js';
+import { getCurrentTools } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
 import { Harness, LiveDoc, createRegistry } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
 import { admitSubmission } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/harness/submissions.js';
 import { openNodeSqliteStorage } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/storage/sqlite/node.js';
 
 const INSTALLATION = 'integration-questionnaire';
+const MCP_INSTALLATION = 'integration-mcp';
 const PACKAGE_ROOT = fileURLToPath(new URL('../../plugins/ask-user-question/', import.meta.url));
 const MANIFEST = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'capability.json'), 'utf8'));
 const QUESTION = { questions: [{
@@ -60,7 +63,7 @@ function pendingLiveQuestionnaires(liveState) {
 
 // Real Host, control protocol, plugin loader, SDK task scheduler and SQLite. Only
 // Center configuration/credentials and the LLM provider are replaced by fixtures.
-async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0, googleSetup = false } = {}) {
+async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0, googleSetup = false, mcp = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pibot-always-on-e2e-'));
   const dataRoot = join(root, 'host');
   const cwd = join(root, 'workspace');
@@ -103,7 +106,7 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   let client;
   let bot;
   let snapshot;
-  const centerClient = { providerAuth: async () => ({ auth: { apiKey: 'fixture-key' }, source: 'center' }) };
+  const centerClient = { providerAuth: async () => ({ auth: { apiKey: 'fixture-key' }, source: 'center' }), ...mcp };
   const centerRuntime = {
     snapshot: { protocol: 1 },
     ...(googleSetup ? {
@@ -191,8 +194,12 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   const botConfigs = [bot, ...peerBots].map(item => ({
     botId: item.botId, cwd,
     model: { modelRef: 'fixture-provider/fixture-model', thinkingLevel: 'off', codemode, codemodeOnly },
-    capabilities: questionnaire ? [{ installationId: INSTALLATION, kind: 'plugin', target: 'host',
-      targetVersion: MANIFEST.version, enabled: true, authorized: true, effectiveConfig: {}, credentialRefs: [] }] : [],
+    capabilities: [
+      ...(questionnaire ? [{ installationId: INSTALLATION, kind: 'plugin', target: 'host',
+        targetVersion: MANIFEST.version, enabled: true, authorized: true, effectiveConfig: {}, credentialRefs: [] }] : []),
+      ...(mcp ? [{ installationId: MCP_INSTALLATION, kind: 'mcp', target: 'center',
+        targetVersion: '1.0.0', enabled: true, authorized: true, effectiveConfig: {}, credentialRefs: [] }] : []),
+    ],
   }));
   snapshot = makeSnapshot(2, botConfigs);
   const applied = await server.applyCenterSnapshot(snapshot);
@@ -263,6 +270,39 @@ function waitId(bot, presentation) {
 function resumeRequestId(bot, presentation) {
   return `wait-${waitId(bot, presentation).slice(0, 40)}`;
 }
+
+test('managed MCP tools are declared and callable after tool_search, not upfront', async t => {
+  const remoteName = 'catalog_probe';
+  const calls = [];
+  const f = await hostFixture(t, { mcp: {
+    async listCapabilityTools() {
+      return { tools: [{ name: remoteName, description: 'Look up a catalog item',
+        inputSchema: { type: 'object', properties: {} } }] };
+    },
+    async callCapabilityTool(installationId, botId, name, args) {
+      calls.push({ installationId, botId, name, args });
+      return { content: text('catalog result') };
+    },
+  } });
+  const toolName = mcpToolName(MCP_INSTALLATION, f.bot.botId, remoteName);
+  f.state.handler = () => {
+    if (f.state.calls.length === 1) {
+      return [{ type: 'toolCall', id: 'find-catalog', name: 'tool_search', arguments: { query: remoteName, limit: 1 } }];
+    }
+    if (f.state.calls.length === 2) {
+      return [{ type: 'toolCall', id: 'use-catalog', name: toolName, arguments: {} }];
+    }
+    return text('completed');
+  };
+  await f.client.submit(f.bot.botId, { requestId: 'mcp-catalog', text: 'Look up the catalog item' });
+  await f.done('mcp-catalog');
+
+  const [first, afterSearch] = f.state.calls.map(request => getCurrentTools(request.messages));
+  assert.ok(first.some(tool => tool.name === 'tool_search'));
+  assert.ok(!first.some(tool => tool.name === toolName));
+  assert.ok(afterSearch.some(tool => tool.name === toolName));
+  assert.deepEqual(calls, [{ installationId: MCP_INSTALLATION, botId: f.bot.botId, name: remoteName, args: {} }]);
+});
 
 test('real Host schedule handoff keeps its Stop fence across restart and private origins stay private', async t => {
   const f = await hostFixture(t);

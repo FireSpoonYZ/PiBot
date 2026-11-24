@@ -8,13 +8,13 @@
   background: var(--border-subtle);
 }
 
-/* ————— Chat Transcript Turns (Editorial Assistant + Mineral User) ————— */
+/* ————— Chat Transcript Turns (Full-Width Left-Aligned Assistant + Mineral User) ————— */
 
 .bot-chat-bubble.assistant {
   --table-edge-bg: var(--ground);
   width: 100%;
-  max-width: min(68ch, 100%);
-  align-self: flex-start;
+  max-width: 100%;
+  align-self: stretch;
   text-align: left;
   padding: var(--space-1, 4px) 0;
   border: 0;
@@ -23,10 +23,6 @@
   color: var(--ink-primary);
   box-shadow: none;
   line-height: 1.65;
-}
-
-.bot-chat-bubble.assistant:has(.table-scroll) {
-  max-width: 100%;
 }
 
 .bot-chat-bubble.user {

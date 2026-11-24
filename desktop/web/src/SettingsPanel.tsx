@@ -1,3 +1,4 @@
+import { DesktopPetSettings } from './pet/DesktopPetSettings';
 // 桌面客户端全画布设置工作区（.desktop-settings-view）：左侧导航栏 + 右侧 720px 单列内容。
 import {
   Archive,
@@ -893,7 +894,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
               <div className="settings-pane-header">
                 <h3>{t('外观与对话', 'Appearance & Chat')}</h3>
                 <p className="metadata">
-                  {t('设置界面主题、工具输出展示方式与语音朗读倍速。', 'Configure interface theme, tool output visibility, and speech rate.')}
+                  {t('设置界面主题、悬浮桌宠、工具输出展示方式与主聊天语音朗读倍速。', 'Configure interface theme, desktop pet, tool output visibility, and main chat speech rate.')}
                 </p>
               </div>
 
@@ -910,6 +911,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
                   ]}
                 />
               </section>
+
+              <DesktopPetSettings />
 
               <section className="settings-section">
                 <h4>{t('对话与语音', 'Chat & Speech')}</h4>
@@ -946,7 +949,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                     <span className="settings-row-label">
                       <span>{t('语音朗读倍速', 'Speech Rate')}</span>
                       <span className="metadata" style={{ display: 'block' }}>
-                        {t('调整回复朗读的默认语速', 'Adjust default playback speed for spoken replies')}
+                        {t('调整主聊天回复朗读的默认语速（桌宠语速在桌宠语音设置中单独配置）', 'Default playback speed for main chat replies (pet speech rate is configured in the pet)')}
                       </span>
                     </span>
                     <select
