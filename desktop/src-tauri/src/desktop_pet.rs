@@ -18,8 +18,8 @@ use crate::BridgeError;
 
 pub const PET_LABEL: &str = "pet";
 const WINDOW_EVENT: &str = "pibot:pet-window";
-/// Ambient mascot window: holds the 88px mascot + subtle breathing room + side hover rail.
-const COLLAPSED_SIZE: (f64, f64) = (152.0, 116.0);
+/// Ambient mascot window: holds the 96px mascot + hover rail + shadow breathing room.
+const COLLAPSED_SIZE: (f64, f64) = (164.0, 128.0);
 const EXPANDED_SIZE: (f64, f64) = (448.0, 560.0);
 const MAX_STAGE_WIDTH: f64 = 520.0;
 const MAX_STAGE_HEIGHT: f64 = 640.0;
@@ -27,7 +27,7 @@ const MAX_STAGE_HEIGHT: f64 = 640.0;
 /// short thought bubbles never flip orientation as they grow into replies or QA cards.
 const ORIENTATION_PROBE_SIZE: (f64, f64) = (448.0, 480.0);
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const STAGE_PADDING: f64 = 6.0;
+const STAGE_PADDING: f64 = 12.0;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DOCK_RADIUS: i32 = 22;
 
@@ -689,12 +689,18 @@ fn apply_layout(
     #[cfg(windows)]
     apply_window_region(window, &[], composited);
 
+    let growing = target_size.width > current_size.width || target_size.height > current_size.height;
     apply_linux_size_lock(window, None);
+    if growing && old_position != Some(next_pos) {
+      let _ = window.set_position(next_pos);
+    }
     window
       .set_size(target_size)
       .map_err(|_| native_error("Could not resize desktop pet"))?;
     apply_linux_size_lock(window, Some(target_size));
-    if old_position != Some(next_pos) {
+    if !growing && old_position != Some(next_pos) {
+      let _ = window.set_position(next_pos);
+    } else if growing && window.outer_position().ok() != Some(next_pos) {
       let _ = window.set_position(next_pos);
     }
   }
@@ -1026,16 +1032,16 @@ mod tests {
   use super::*;
 
   const WORK_1080: WorkArea = WorkArea { x: 0, y: 0, width: 1920, height: 1040 };
-  const COLLAPSED_1X: PhysicalSize<u32> = PhysicalSize::new(152, 116);
+  const COLLAPSED_1X: PhysicalSize<u32> = PhysicalSize::new(164, 128);
   const PROBE_1X: PhysicalSize<u32> = PhysicalSize::new(448, 480);
 
   #[test]
   fn dynamic_resize_locks_dock_across_all_four_corners_and_returns_cleanly() {
     let bubble_1x = PhysicalSize::new(370, 320);
     let cases = [
-      (PhysicalPosition::new(1752, 908), DockSide::Right, PanelSide::Top),
-      (PhysicalPosition::new(20, 908), DockSide::Left, PanelSide::Top),
-      (PhysicalPosition::new(1752, 20), DockSide::Right, PanelSide::Bottom),
+      (PhysicalPosition::new(1740, 896), DockSide::Right, PanelSide::Top),
+      (PhysicalPosition::new(20, 896), DockSide::Left, PanelSide::Top),
+      (PhysicalPosition::new(1740, 20), DockSide::Right, PanelSide::Bottom),
       (PhysicalPosition::new(20, 20), DockSide::Left, PanelSide::Bottom),
     ];
     for (start, expected_dock, expected_panel) in cases {

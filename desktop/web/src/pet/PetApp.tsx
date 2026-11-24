@@ -49,10 +49,24 @@ import { petWindow } from './windowApi';
 const AUTO_READ_KEY = 'pibot-desktop-pet-auto-read:v1';
 const AUTO_FADE_KEY = 'pibot-desktop-pet-auto-fade:v1';
 const DND_KEY = 'pibot-desktop-pet-dnd:v1';
-const COLLAPSED_W = 152;
-const COLLAPSED_H = 116;
-const STAGE_PAD = 6;
+const COLLAPSED_W = 164;
+const COLLAPSED_H = 128;
+const MAX_STAGE_W = 520;
+const MAX_STAGE_H = 640;
+const STAGE_PAD = 12;
 const AUTO_FADE_MS = 10_000;
+
+function layoutRectRelativeTo(node: HTMLElement, ancestor: HTMLElement) {
+  let left = 0;
+  let top = 0;
+  let el: HTMLElement | null = node;
+  while (el && el !== ancestor) {
+    left += el.offsetLeft - el.scrollLeft;
+    top += el.offsetTop - el.scrollTop;
+    el = el.offsetParent as HTMLElement | null;
+  }
+  return { left, top, width: node.offsetWidth, height: node.offsetHeight };
+}
 
 const targetKey = (state: DesktopPetSnapshot) =>
   state.deviceId && state.botId ? state.deviceId + ':' + state.botId : '';
@@ -76,6 +90,7 @@ type WindowLayout = { dockSide: PetDockSide; panelSide: PetPanelSide; composited
 type PendingRpc = { resolve: (result: DesktopPetResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 type BubbleDescriptor =
+  | { kind: 'menu'; id: 'menu' }
   | { kind: 'settings'; id: 'settings' }
   | { kind: 'voice'; id: string; text: string }
   | {
@@ -602,6 +617,9 @@ export function PetApp() {
 
   // Polymorphic bubble priority arbitration (single clean bubble at a time)
   const activeBubble = useMemo<BubbleDescriptor | null>(() => {
+    if (ctxMenuOpen) {
+      return { kind: 'menu', id: 'menu' };
+    }
     if (settingsOpen) {
       return { kind: 'settings', id: 'settings' };
     }
@@ -736,6 +754,7 @@ export function PetApp() {
     return null;
   }, [
     busy,
+    ctxMenuOpen,
     dismissedIds,
     dndMode,
     forcedReplyId,
@@ -761,38 +780,46 @@ export function PetApp() {
   }, [activeBubble, autoFade, dismissBubble, hoveringBubble, speaking]);
 
   // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
+  const syncNativeLayoutRef = useRef<() => void>(() => {});
   const syncNativeLayout = useCallback(() => {
     const env = envelopeRef.current;
     const stage = stageRef.current;
     if (!env || !stage) return;
 
-    const envW = Math.ceil(env.scrollWidth + STAGE_PAD * 2);
-    const envH = Math.ceil(env.scrollHeight + STAGE_PAD * 2);
+    // Use unscaled offset dimensions (immune to CSS transform animations and LTR left-overflow).
+    let contentW = env.offsetWidth;
+    const contentH = env.offsetHeight;
+    for (let i = 0; i < env.children.length; i += 1) {
+      const child = env.children[i] as HTMLElement;
+      if (child.offsetWidth > contentW) contentW = child.offsetWidth;
+    }
+
+    const envW = Math.ceil(contentW + STAGE_PAD * 2);
+    const envH = Math.ceil(contentH + STAGE_PAD * 2);
     const hasOverlay = Boolean(activeBubble || composerOpen || ctxMenuOpen);
-    const width = hasOverlay ? Math.max(COLLAPSED_W, envW) : COLLAPSED_W;
-    const height = hasOverlay ? Math.max(COLLAPSED_H, envH) : COLLAPSED_H;
+    const width = hasOverlay ? Math.min(MAX_STAGE_W, Math.max(COLLAPSED_W, envW)) : COLLAPSED_W;
+    const height = hasOverlay ? Math.min(MAX_STAGE_H, Math.max(COLLAPSED_H, envH)) : COLLAPSED_H;
 
     // Only include hit-rects once the viewport has caught up to the target size,
     // preventing stale clipped regions while the window is still growing.
-    const stageRect = stage.getBoundingClientRect();
     const sizeMatches =
-      Math.abs(stageRect.width - width) <= 4 && Math.abs(stageRect.height - height) <= 4;
+      Math.abs(stage.clientWidth - width) <= 4 && Math.abs(stage.clientHeight - height) <= 4;
 
     const hitRects: PetWindowHitRect[] = [];
     if (sizeMatches) {
       const nodes = stage.querySelectorAll<HTMLElement>('[data-pet-hit="true"]');
       nodes.forEach((node) => {
-        const r = node.getBoundingClientRect();
+        const r = layoutRectRelativeTo(node, stage);
         if (r.width <= 1 || r.height <= 1) return;
-        const pad = Number(node.dataset.petHitPad ?? '4');
+        const pad = Number(node.dataset.petHitPad ?? '6');
         const radius = Number(node.dataset.petHitRadius ?? '16');
-        hitRects.push({
-          x: Math.max(0, Math.floor(r.left - pad)),
-          y: Math.max(0, Math.floor(r.top - pad)),
-          width: Math.ceil(r.width + pad * 2),
-          height: Math.ceil(r.height + pad * 2),
-          radius,
-        });
+        const x = Math.max(0, Math.floor(r.left - pad));
+        const y = Math.max(0, Math.floor(r.top - pad));
+        const right = Math.min(stage.clientWidth, Math.ceil(r.left + r.width + pad));
+        const bottom = Math.min(stage.clientHeight, Math.ceil(r.top + r.height + pad));
+        if (right > x && bottom > y) {
+          hitRects.push({ x, y, width: right - x, height: bottom - y, radius });
+        }
       });
     }
 
@@ -809,9 +836,16 @@ export function PetApp() {
     lastLayoutKeyRef.current = key;
 
     void petWindow('set-layout', undefined, { width, height, focus: shouldFocus, hitRects })
-      .then(applyWindowState)
+      .then((nextState) => {
+        applyWindowState(nextState);
+        if (!sizeMatches) {
+          requestAnimationFrame(() => syncNativeLayoutRef.current());
+        }
+      })
       .catch(() => { /* Window may be closing */ });
   }, [activeBubble, applyWindowState, composerOpen, ctxMenuOpen]);
+
+  syncNativeLayoutRef.current = syncNativeLayout;
 
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(syncNativeLayout);
@@ -820,14 +854,16 @@ export function PetApp() {
 
   useEffect(() => {
     const env = envelopeRef.current;
+    const stage = stageRef.current;
     if (!env || typeof ResizeObserver !== 'function') return;
     let raf = 0;
     const schedule = () => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(syncNativeLayout);
+      raf = requestAnimationFrame(() => syncNativeLayoutRef.current());
     };
     const observer = new ResizeObserver(schedule);
     observer.observe(env);
+    if (stage) observer.observe(stage);
     window.addEventListener('resize', schedule);
     return () => {
       cancelAnimationFrame(raf);
@@ -882,11 +918,113 @@ export function PetApp() {
               data-variant={activeBubble.kind}
               data-tone={activeBubble.kind === 'handoff' ? activeBubble.tone : undefined}
               data-pet-hit="true"
-              data-pet-hit-pad="8"
+              data-pet-hit-pad={activeBubble.kind === 'thought' || activeBubble.kind === 'voice' ? '18' : '14'}
               data-pet-hit-radius={activeBubble.kind === 'thought' || activeBubble.kind === 'voice' ? '24' : '18'}
               aria-label={t('桌宠气泡', 'Pet bubble')}
             >
-              {activeBubble.kind === 'settings' ? (
+              {activeBubble.kind === 'menu' ? (
+                <div className="pet-ctx-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      focusPendingRef.current = true;
+                      setComposerOpen((v) => !v);
+                    }}
+                  >
+                    <span>{composerOpen ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      void petWindow('show-main').catch(report);
+                    }}
+                  >
+                    <span>{t('打开主窗口', 'Open main window')}</span>
+                    <ExternalLink size={12} aria-hidden="true" />
+                  </button>
+                  <div className="pet-ctx-sep" />
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={autoRead}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !autoRead;
+                      setAutoRead(next);
+                      writeLocal(AUTO_READ_KEY, String(next));
+                      if (!next) stopReading();
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('自动朗读回复', 'Auto-read replies')}</span>
+                    <span className="pet-ctx-val">{autoRead ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={autoFade}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !autoFade;
+                      setAutoFade(next);
+                      writeLocal(AUTO_FADE_KEY, String(next));
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('回复 10 秒自动淡出', 'Auto-fade replies (10s)')}</span>
+                    <span className="pet-ctx-val">{autoFade ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={dndMode}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !dndMode;
+                      setDndMode(next);
+                      writeLocal(DND_KEY, String(next));
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('勿扰（暂停主动冒泡）', 'Quiet mode')}</span>
+                    <span className="pet-ctx-val">{dndMode ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <div className="pet-ctx-sep" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      cancelRecording();
+                      stopReading();
+                      focusPendingRef.current = true;
+                      setSettingsOpen(true);
+                    }}
+                  >
+                    <span>{t('语音设置…', 'Voice settings…')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item is-danger"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      cancelRecording();
+                      stopReading();
+                      void petWindow('hide').catch(report);
+                    }}
+                  >
+                    <span>{t('隐藏桌宠', 'Hide pet')}</span>
+                  </button>
+                </div>
+              ) : activeBubble.kind === 'settings' ? (
                 <div className="pet-bubble-settings">
                   <VoiceSettings onClose={() => setSettingsOpen(false)} />
                 </div>
@@ -1152,7 +1290,7 @@ export function PetApp() {
               <form
                 className="pet-composer-pill"
                 data-pet-hit="true"
-                data-pet-hit-pad="6"
+                data-pet-hit-pad="12"
                 data-pet-hit-radius="24"
                 onSubmit={(event) => {
                   event.preventDefault();
@@ -1345,7 +1483,7 @@ export function PetApp() {
               type="button"
               className="pet-avatar"
               data-pet-hit="true"
-              data-pet-hit-pad="4"
+              data-pet-hit-pad="10"
               data-pet-hit-radius="26"
               aria-expanded={composerOpen}
               aria-label={t('单击对话，拖动移动，右键菜单', 'Click to chat, drag to move, right-click for menu') + ' · ' + snapshot.botName}
@@ -1413,117 +1551,6 @@ export function PetApp() {
             </button>
           </div>
         </div>
-
-        {/* 3. RIGHT-CLICK CONTEXT MENU */}
-        {ctxMenuOpen ? (
-          <div
-            className="pet-ctx-menu"
-            role="menu"
-            data-pet-hit="true"
-            data-pet-hit-pad="4"
-            data-pet-hit-radius="12"
-          >
-            <button
-              type="button"
-              role="menuitem"
-              className="pet-ctx-item"
-              onClick={() => {
-                setCtxMenuOpen(false);
-                focusPendingRef.current = true;
-                setComposerOpen((v) => !v);
-              }}
-            >
-              <span>{composerOpen ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="pet-ctx-item"
-              onClick={() => {
-                setCtxMenuOpen(false);
-                void petWindow('show-main').catch(report);
-              }}
-            >
-              <span>{t('打开主窗口', 'Open main window')}</span>
-              <ExternalLink size={12} aria-hidden="true" />
-            </button>
-            <div className="pet-ctx-sep" />
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={autoRead}
-              className="pet-ctx-item"
-              onClick={() => {
-                const next = !autoRead;
-                setAutoRead(next);
-                writeLocal(AUTO_READ_KEY, String(next));
-                if (!next) stopReading();
-                setCtxMenuOpen(false);
-              }}
-            >
-              <span>{t('自动朗读回复', 'Auto-read replies')}</span>
-              <span className="pet-ctx-val">{autoRead ? t('开', 'On') : t('关', 'Off')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={autoFade}
-              className="pet-ctx-item"
-              onClick={() => {
-                const next = !autoFade;
-                setAutoFade(next);
-                writeLocal(AUTO_FADE_KEY, String(next));
-                setCtxMenuOpen(false);
-              }}
-            >
-              <span>{t('回复 10 秒自动淡出', 'Auto-fade replies (10s)')}</span>
-              <span className="pet-ctx-val">{autoFade ? t('开', 'On') : t('关', 'Off')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={dndMode}
-              className="pet-ctx-item"
-              onClick={() => {
-                const next = !dndMode;
-                setDndMode(next);
-                writeLocal(DND_KEY, String(next));
-                setCtxMenuOpen(false);
-              }}
-            >
-              <span>{t('勿扰（暂停主动冒泡）', 'Quiet mode')}</span>
-              <span className="pet-ctx-val">{dndMode ? t('开', 'On') : t('关', 'Off')}</span>
-            </button>
-            <div className="pet-ctx-sep" />
-            <button
-              type="button"
-              role="menuitem"
-              className="pet-ctx-item"
-              onClick={() => {
-                setCtxMenuOpen(false);
-                cancelRecording();
-                stopReading();
-                focusPendingRef.current = true;
-                setSettingsOpen(true);
-              }}
-            >
-              <span>{t('语音设置…', 'Voice settings…')}</span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="pet-ctx-item is-danger"
-              onClick={() => {
-                setCtxMenuOpen(false);
-                cancelRecording();
-                stopReading();
-                void petWindow('hide').catch(report);
-              }}
-            >
-              <span>{t('隐藏桌宠', 'Hide pet')}</span>
-            </button>
-          </div>
-        ) : null}
       </div>
     </main>
   );
