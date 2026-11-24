@@ -47,9 +47,15 @@ export interface DesktopPetResult {
   queuedDraft?: { deviceId: string; botId: string; text: string };
 }
 
+export type PetDockSide = 'left' | 'right';
+export type PetPanelSide = 'top' | 'bottom';
+
 export interface DesktopPetWindowState {
   visible: boolean;
   expanded: boolean;
+  dockSide?: PetDockSide;
+  panelSide?: PetPanelSide;
+  composited?: boolean;
 }
 
 export type DesktopPetWindowAction =

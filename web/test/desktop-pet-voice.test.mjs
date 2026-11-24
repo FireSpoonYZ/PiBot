@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createPetVoice, encodeVoiceWav } from '../../desktop/web/src/pet/voice.ts';
+import { createPetVoice, encodeVoiceWav, stripMarkdownForSpeech } from '../../desktop/web/src/pet/voice.ts';
 import { completePetAction } from '../../desktop/web/src/pet/drafts.ts';
+import { resolvePetTheme } from '../../desktop/web/src/pet/theme.ts';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const settings = {
@@ -166,4 +167,58 @@ test('main clears confirmed pet drafts even when the pet window has closed, pres
   values.set(key, 'New draft written while sending');
   completePetAction(action, { id: 'send', ok: true, pendingId: 'durable-record' }, storage);
   assert.equal(values.get(key), 'New draft written while sending');
+});
+
+test('stripMarkdownForSpeech removes syntax, code fences, and raw URLs while preserving prose and identifiers', () => {
+  const md = [
+    '### 检查摘要',
+    '**完成**：请查看 `pet_voice.rs` 和 [官方说明](https://example.com/docs)。',
+    '参考 https://example.com/raw-link 获取更多细节。',
+    '```ts',
+    'const ignored = 42;',
+    '```',
+    '- 第一项 _重点_',
+    '- 第二项 ~~旧文案~~',
+  ].join('\n');
+  const spoken = stripMarkdownForSpeech(md);
+  assert.ok(!spoken.includes('###'));
+  assert.ok(!spoken.includes('**'));
+  assert.ok(!spoken.includes('`'));
+  assert.ok(!spoken.includes('https://'));
+  assert.ok(!spoken.includes('ignored'));
+  assert.ok(spoken.includes('检查摘要'));
+  assert.ok(spoken.includes('pet_voice.rs'));
+  assert.ok(spoken.includes('官方说明'));
+  assert.ok(spoken.includes('第一项 重点'));
+  assert.ok(spoken.includes('第二项 旧文案'));
+
+  // Code-only reply still yields readable fallback instead of empty speech
+  assert.equal(stripMarkdownForSpeech('```js\nconsole.log(1)\n```'), 'console.log(1)');
+});
+
+test('speak strips Markdown syntax before sending text to remote TTS', async (t) => {
+  const sent = [];
+  installEnvironment(t, async input => {
+    if (input.action === 'speak') {
+      sent.push(input.text);
+      return { audioBase64: btoa('audio'), mimeType: 'audio/mpeg' };
+    }
+    return {};
+  });
+  const voice = createPetVoice();
+  t.after(() => voice.dispose());
+  const speaking = voice.speak('### 标题\n**你好** [链接](https://example.com)');
+  await settle();
+  voice.stopSpeaking();
+  await speaking;
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0], '标题\n你好 链接');
+});
+
+test('resolvePetTheme pairs dataset theme and resolved colorScheme across system and explicit modes', () => {
+  assert.deepEqual(resolvePetTheme('dark', false), { theme: 'dark', resolved: 'dark' });
+  assert.deepEqual(resolvePetTheme('light', true), { theme: 'light', resolved: 'light' });
+  assert.deepEqual(resolvePetTheme('system', true), { theme: 'system', resolved: 'dark' });
+  assert.deepEqual(resolvePetTheme('system', false), { theme: 'system', resolved: 'light' });
+  assert.deepEqual(resolvePetTheme(null, true), { theme: 'system', resolved: 'dark' });
 });

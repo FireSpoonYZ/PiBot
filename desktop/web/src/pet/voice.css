@@ -1,17 +1,199 @@
-.pet-voice-settings { display: flex; flex-direction: column; gap: 14px; padding: 14px; min-height: 0; overflow-y: auto; font-size: 13px; }
-.pet-voice-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.pet-voice-heading strong { font-size: 15px; }
-.pet-voice-settings fieldset { border: 1px solid var(--border, #dbe1e9); border-radius: 10px; padding: 12px; margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.pet-voice-settings legend { padding: 0 5px; font-weight: 600; }
-.pet-voice-fields { display: flex; flex-direction: column; gap: 10px; }
-.pet-voice-settings label { display: flex; flex-direction: column; gap: 5px; }
-.pet-voice-settings input:not([type=checkbox]), .pet-voice-settings select { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--surface, #fff); border: 1px solid var(--border, #ccd4df); border-radius: 6px; padding: 7px 8px; }
-.pet-voice-settings input:focus-visible, .pet-voice-settings select:focus-visible, .pet-voice-settings button:focus-visible { outline: 2px solid #2b70f6; outline-offset: 2px; }
-.pet-voice-settings .pet-voice-checkbox { flex-direction: row; align-items: center; }
-.pet-voice-checkbox input { margin: 0; }
-.pet-voice-hint { font-size: 12px; color: var(--text-secondary, #637083); line-height: 1.5; margin: 0; }
-.pet-voice-error { color: #bd2c35; line-height: 1.5; margin: 0; }
-.pet-voice-save { display: flex; align-items: center; gap: 12px; }
-.pet-voice-settings button { font: inherit; cursor: pointer; color: inherit; background: var(--surface, #fff); border: 1px solid var(--border, #ccd4df); border-radius: 6px; padding: 6px 12px; }
-.pet-voice-save button { background: #2b70f6; border-color: #2b70f6; color: #fff; }
-.pet-voice-settings button:disabled { opacity: .6; cursor: default; }
+.pet-voice-settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.pet-voice-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 10px 12px 9px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-overlay);
+}
+
+.pet-voice-heading strong {
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.pet-voice-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scrollbar-width: thin;
+}
+
+.pet-voice-settings fieldset {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  padding: 10px 12px 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+.pet-voice-legend {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  color: var(--ink-primary);
+}
+
+.pet-voice-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.pet-voice-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  color: var(--ink-secondary);
+}
+
+.pet-voice-settings input:not([type=checkbox]),
+.pet-voice-settings select {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-weight: var(--weight-regular);
+  color: var(--ink-primary);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  caret-color: var(--signal-primary);
+}
+
+.pet-voice-settings input::placeholder {
+  color: var(--ink-tertiary);
+}
+
+.pet-voice-settings select {
+  cursor: pointer;
+}
+
+.pet-voice-settings select option,
+.pet-voice-settings select optgroup {
+  background-color: var(--surface-raised);
+  color: var(--ink-primary);
+}
+
+.pet-voice-settings input:not([type=checkbox]):focus,
+.pet-voice-settings select:focus {
+  border-color: var(--signal-primary);
+  outline: none;
+}
+
+.pet-voice-settings input:focus-visible,
+.pet-voice-settings select:focus-visible,
+.pet-voice-settings button:focus-visible {
+  outline: 2px solid var(--signal-primary);
+  outline-offset: 2px;
+}
+
+.pet-voice-settings .pet-voice-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-primary);
+}
+
+.pet-voice-checkbox input {
+  margin: 0;
+  accent-color: var(--signal-primary);
+}
+
+.pet-voice-hint {
+  font-size: 11.5px;
+  color: var(--ink-secondary);
+  line-height: 1.48;
+  margin: 0;
+}
+
+.pet-voice-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--state-danger-border);
+  background: var(--state-danger-soft);
+  color: var(--state-danger-ink);
+  font-size: 12px;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+}
+
+.pet-voice-save {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 9px 14px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-overlay);
+}
+
+.pet-voice-back {
+  font: inherit;
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  color: var(--ink-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+
+.pet-voice-back:hover {
+  background: var(--surface-1);
+}
+
+.pet-voice-submit {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  color: var(--signal-primary-ink);
+  background: var(--signal-primary);
+  border: 1px solid var(--signal-primary);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+
+.pet-voice-submit:hover:not(:disabled) {
+  background: var(--signal-primary-hover);
+  border-color: var(--signal-primary-hover);
+}
+
+.pet-voice-saved {
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  color: var(--state-live-ink);
+}
+
+.pet-voice-settings button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

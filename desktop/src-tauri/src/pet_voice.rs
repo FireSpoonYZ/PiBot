@@ -206,6 +206,18 @@ async fn transcribe(settings: Settings, audio_base64: String) -> Result<Value, B
   Ok(json!({ "text": text }))
 }
 
+fn audio_mime_type(response: &reqwest::Response) -> String {
+  response
+    .headers()
+    .get(reqwest::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.split(';').next())
+    .map(str::trim)
+    .filter(|mime| mime.starts_with("audio/") && mime.len() <= 64)
+    .unwrap_or("audio/mpeg")
+    .to_owned()
+}
+
 async fn speak(settings: Settings, text: String) -> Result<Value, BridgeError> {
   if text.trim().is_empty() || text.len() > 64 * 1024 {
     return Err(error("INVALID_ARGUMENT", "朗读文本为空或过长"));
@@ -218,11 +230,12 @@ async fn speak(settings: Settings, text: String) -> Result<Value, BridgeError> {
     body["voice"] = Value::String(settings.tts.voice.clone());
   }
   let response = checked_response(request(&client, &settings.tts, "/audio/speech")?.json(&body)).await?;
+  let mime_type = audio_mime_type(&response);
   let bytes = response.bytes().await.map_err(|_| error("VOICE_SERVICE", "无法读取语音音频"))?;
   if bytes.is_empty() {
     return Err(error("VOICE_SERVICE", "语音服务返回了空音频"));
   }
-  Ok(json!({ "audioBase64": STANDARD.encode(bytes), "mimeType": "audio/mpeg" }))
+  Ok(json!({ "audioBase64": STANDARD.encode(bytes), "mimeType": mime_type }))
 }
 
 /// A closed pet must not leave a microphone request or remote speech job behind.
@@ -346,5 +359,22 @@ mod tests {
     assert_eq!(body["voice"], "alloy");
     assert_eq!(body["speed"], 1.25);
     assert_eq!(body["response_format"], "mp3");
+  }
+
+  #[tokio::test]
+  async fn speech_forwards_valid_audio_mime_and_falls_back_for_non_audio() {
+    let (wav_base, wav_req) = service("audio/wav; charset=binary", "RIFF-wav");
+    let mut settings = Settings::default();
+    settings.tts.base_url = wav_base;
+    let wav_result = speak(settings, "测试 WAV".into()).await.unwrap();
+    assert_eq!(wav_result["mimeType"], "audio/wav");
+    let _ = wav_req.join().unwrap();
+
+    let (bin_base, bin_req) = service("application/octet-stream", "ID3-fallback");
+    let mut settings = Settings::default();
+    settings.tts.base_url = bin_base;
+    let bin_result = speak(settings, "测试回退".into()).await.unwrap();
+    assert_eq!(bin_result["mimeType"], "audio/mpeg");
+    let _ = bin_req.join().unwrap();
   }
 }

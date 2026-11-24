@@ -41,14 +41,99 @@ export const getPetVoiceSettings = () => command<PetVoiceSettings>({ action: 'se
 export const savePetVoiceSettings = (settings: PetVoiceSettingsInput) =>
   command<PetVoiceSettings>({ action: 'settings-save', settings });
 
+function isEnglishUi(): boolean {
+  return typeof window !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && typeof navigator.language === 'string'
+    && navigator.language.startsWith('en');
+}
+
+function uiText(zh: string, en: string): string {
+  return isEnglishUi() ? en : zh;
+}
+
+const KNOWN_NATIVE_VOICE_MESSAGES_EN: Record<string, string> = {
+  '无法访问语音设置目录': 'Could not access the voice settings folder.',
+  '语音设置无法读取，请重新保存': 'Voice settings could not be read. Save them again.',
+  '无法读取语音设置': 'Could not read voice settings.',
+  '语音接口地址无效': 'Invalid speech API base URL.',
+  '接口需为 HTTPS 地址，本机服务可使用 HTTP；地址中不能包含密钥或参数':
+    'Use an HTTPS URL (HTTP is allowed for local services only) without credentials or query parameters.',
+  '请填写语音模型名称': 'Enter a speech model name.',
+  '朗读引擎无效': 'Invalid speech engine.',
+  '朗读速度应在 0.5 到 2 倍之间': 'Speech rate must be between 0.5× and 2×.',
+  '请先在语音设置中填写接口地址与模型': 'Configure the speech API base URL and model in Voice settings first.',
+  '语音服务请求超时': 'Speech service request timed out.',
+  '无法连接语音服务，请检查地址和网络': 'Could not reach the speech service. Check the URL and network.',
+  '语音服务未返回有效转写结果': 'Speech service did not return a valid transcript.',
+  '语音服务未返回转写文本': 'Speech service did not return transcript text.',
+  '朗读文本为空或过长': 'Speech text is empty or too long.',
+  '无法读取语音音频': 'Could not read speech audio.',
+  '语音服务返回了空音频': 'Speech service returned empty audio.',
+  '语音已停止': 'Speech stopped.',
+  '语音处理失败': 'Speech request failed.',
+};
+
 export function voiceError(error: unknown): string {
   if (error instanceof Error) {
-    if (error.name === 'NotAllowedError') return '请允许 PiBot 使用麦克风';
-    if (error.name === 'NotFoundError') return '未找到可用麦克风';
-    return error.message;
+    if (error.name === 'NotAllowedError') {
+      return uiText('请允许 PiBot 使用麦克风', 'Allow PiBot to access the microphone.');
+    }
+    if (error.name === 'NotFoundError') {
+      return uiText('未找到可用麦克风', 'No microphone was found.');
+    }
+    return isEnglishUi()
+      ? (KNOWN_NATIVE_VOICE_MESSAGES_EN[error.message] ?? error.message)
+      : error.message;
   }
-  if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+  if (error && typeof error === 'object' && 'message' in error) {
+    const msg = String(error.message);
+    if (isEnglishUi()) {
+      const httpMatch = /^语音服务返回 HTTP (\d+)/.exec(msg);
+      if (httpMatch) return `Speech service returned HTTP ${httpMatch[1]}. Check the model and credentials.`;
+      return KNOWN_NATIVE_VOICE_MESSAGES_EN[msg] ?? msg;
+    }
+    return msg;
+  }
   return String(error);
+}
+
+/** Convert Markdown prose to clean spoken text so TTS never reads syntax symbols or URLs aloud. */
+export function stripMarkdownForSpeech(input: string): string {
+  const cleanInline = (raw: string): string =>
+    raw
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+      .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '$1')
+      .replace(/(^|[^\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?=[^\w*]|$)/g, '$1$2')
+      .replace(/(^|[^\w])_(?=\S)([^_]+?)(?<=\S)_(?=[^\w]|$)/g, '$1$2')
+      .replace(/https?:\/\/\S+/gi, '')
+      .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
+      .replace(/^[ \t]*>[ \t]?/gm, '')
+      .replace(/^[ \t]*[-*_]{3,}[ \t]*$/gm, '')
+      .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$/gm, '')
+      .replace(/^[ \t]*\|(.+)\|[ \t]*$/gm, (_m, row: string) =>
+        row.split('|').map((cell) => cell.trim()).filter(Boolean).join('，'))
+      .replace(/^[ \t]*(?:[-*+]|\d+\.)[ \t]+/gm, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+
+  const withoutFences = input.replace(/```[^\n]*\n[\s\S]*?```/g, '\n');
+  const stripped = cleanInline(withoutFences);
+  if (stripped) return stripped;
+  // If the entire message was fenced code or URLs, fall back to readable plain text without fence markers.
+  return input
+    .replace(/```[^\n]*\n?/g, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -182,14 +267,22 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
     state('recording');
     const pending = (async () => {
       if (!navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
-        throw new Error('此桌面环境未提供麦克风录音，请检查系统音频支持');
+        throw new Error(uiText(
+          '此桌面环境未提供麦克风录音，请检查系统音频支持',
+          'Microphone capture is unavailable in this desktop environment. Check system audio support.',
+        ));
       }
       const context = new AudioContext();
       let stream: MediaStream | null = null;
       try {
         // Resume inside the button's user gesture, before awaiting settings or permissions.
         const [, settings] = await Promise.all([context.resume(), getPetVoiceSettings()]);
-        if (!settings.stt.baseUrl || !settings.stt.model) throw new Error('请先设置语音识别接口与模型');
+        if (!settings.stt.baseUrl || !settings.stt.model) {
+          throw new Error(uiText(
+            '请先设置语音识别接口与模型',
+            'Configure the transcription API base URL and model in Voice settings first.',
+          ));
+        }
         if (epoch !== captureEpoch || disposed) return;
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
@@ -205,7 +298,10 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
         const timer = setTimeout(() => {
           if (recording?.epoch !== epoch) return;
           cancelRecording();
-          state('error', '录音已停止：单次最长两分钟，请分段说话');
+          state('error', uiText(
+            '录音已停止：单次最长两分钟，请分段说话',
+            'Recording stopped: maximum 2 minutes per clip.',
+          ));
         }, 120000);
         recording = { epoch, context, stream, source, processor, mute, chunks, timer };
       } finally {
@@ -276,8 +372,14 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
         const stop = () => finish();
         playbackStop = stop;
         audio.onended = () => finish();
-        audio.onerror = () => finish(new Error('无法播放语音，请检查系统音频支持'));
-        void audio.play().catch(() => finish(new Error('语音播放未获允许，请点击朗读按钮重试')));
+        audio.onerror = () => finish(new Error(uiText(
+          '无法播放语音，请检查系统音频支持',
+          'Could not play audio. Check system audio output.',
+        )));
+        void audio.play().catch(() => finish(new Error(uiText(
+          '语音播放未获允许，请点击朗读按钮重试',
+          'Audio playback was blocked. Click Read aloud to try again.',
+        ))));
       });
     } finally {
       if (speechId === requestId) speechId = null;
@@ -287,7 +389,12 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
   async function playSystem(text: string, settings: PetVoiceSettings, epoch: number): Promise<void> {
     const voices = await systemVoices();
     if (disposed || speechEpoch !== epoch) return;
-    if (!voices.length) throw new Error('系统未提供可用声音，请安装系统语音或在设置中选择远程朗读');
+    if (!voices.length) {
+      throw new Error(uiText(
+        '系统未提供可用声音，请安装系统语音或在设置中选择远程朗读',
+        'No system voices are installed. Install a system voice or choose Remote speech API in Voice settings.',
+      ));
+    }
     await new Promise<void>((resolve, reject) => {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = settings.language || navigator.language;
@@ -304,13 +411,17 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
       const stop = () => { finish(); window.speechSynthesis.cancel(); };
       playbackStop = stop;
       utterance.onend = () => finish();
-      utterance.onerror = (event) => finish(new Error('系统朗读失败：' + event.error));
+      utterance.onerror = (event) => finish(new Error(uiText(
+        '系统朗读失败：' + event.error,
+        'System speech failed: ' + event.error,
+      )));
       window.speechSynthesis.speak(utterance);
     });
   }
 
   function speak(text: string): Promise<void> {
-    if (disposed || !text.trim()) return Promise.resolve();
+    const spoken = stripMarkdownForSpeech(text);
+    if (disposed || !spoken) return Promise.resolve();
     const epoch = speechEpoch;
     const task = speechQueue.catch(() => {}).then(async () => {
       if (disposed || epoch !== speechEpoch) return;
@@ -318,8 +429,8 @@ export function createPetVoice(options: { onState?: (status: PetVoiceStatus) => 
       if (disposed || epoch !== speechEpoch) return;
       state('speaking');
       try {
-        if (settings.ttsEngine === 'remote') await playRemote(text, epoch);
-        else await playSystem(text, settings, epoch);
+        if (settings.ttsEngine === 'remote') await playRemote(spoken, epoch);
+        else await playSystem(spoken, settings, epoch);
         if (!disposed && epoch === speechEpoch) state('idle');
       } catch (error) {
         if (disposed || epoch !== speechEpoch) return;

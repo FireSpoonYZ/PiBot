@@ -66,7 +66,7 @@ export function VoiceSettings({ onClose, onSaved }: {
     let active = true;
     void getPetVoiceSettings().then(
       (settings) => { if (active) setForm(toDraft(settings)); },
-      (error) => { if (active) setError(voiceError(error)); },
+      (err) => { if (active) setError(voiceError(err)); },
     );
     return () => { active = false; };
   }, []);
@@ -83,8 +83,8 @@ export function VoiceSettings({ onClose, onSaved }: {
       setForm(toDraft(settings));
       setSaved(true);
       onSaved?.(settings);
-    } catch (error) {
-      setError(voiceError(error));
+    } catch (err) {
+      setError(voiceError(err));
     } finally {
       setBusy(false);
     }
@@ -94,59 +94,73 @@ export function VoiceSettings({ onClose, onSaved }: {
     <form className="pet-voice-settings" onSubmit={(event) => void save(event)}>
       <header className="pet-voice-heading">
         <strong>{t('语音设置', 'Voice settings')}</strong>
-        {onClose && <button type="button" onClick={onClose}>{t('返回', 'Back')}</button>}
+        {onClose && <button type="button" className="pet-voice-back" onClick={onClose}>{t('返回', 'Back')}</button>}
       </header>
-      {error && <p className="pet-voice-error" role="alert">{error}</p>}
-      {!form ? <p>{error ? t('重新打开此面板可重试。', 'Reopen this panel to retry.') : t('正在读取…', 'Loading…')}</p> : (
-        <>
-          <fieldset disabled={busy}>
-            <legend>{t('语音识别', 'Transcription')}</legend>
-            <p className="pet-voice-hint">
-              {t('按住麦克风说话，松开后转成文字。支持 OpenAI 兼容语音接口和本机服务。', 'Hold the microphone to talk; release to transcribe. Use an OpenAI-compatible speech API or a local service.')}
-            </p>
-            <EndpointFields value={form.stt} onChange={(stt) => { setForm({ ...form, stt }); setSaved(false); }} />
-          </fieldset>
-          <fieldset disabled={busy}>
-            <legend>{t('回复朗读', 'Read replies aloud')}</legend>
-            <label>
-              {t('朗读方式', 'Speech engine')}
-              <select value={form.ttsEngine} onChange={(event) => {
-                setForm({ ...form, ttsEngine: event.target.value as 'system' | 'remote' }); setSaved(false);
-              }}>
-                <option value="system">{t('系统声音', 'System voices')}</option>
-                <option value="remote">{t('远程语音接口', 'Remote speech API')}</option>
-              </select>
-            </label>
-            {form.ttsEngine === 'remote' ? (
-              <>
-                <EndpointFields value={form.tts} onChange={(tts) => { setForm({ ...form, tts }); setSaved(false); }} />
-                <label>
-                  {t('声音名称', 'Voice name')}
-                  <input value={form.tts.voice} onChange={(event) => {
-                    setForm({ ...form, tts: { ...form.tts, voice: event.target.value } }); setSaved(false);
-                  }} />
-                </label>
-              </>
-            ) : <p className="pet-voice-hint">{t('使用系统已安装的声音；没有可用声音时可选择远程接口。', 'Uses installed system voices; choose a remote API if none are available.')}</p>}
-            <label>
-              {t('语速', 'Speech rate')}
-              <select value={form.speechRate} onChange={(event) => {
-                setForm({ ...form, speechRate: Number(event.target.value) }); setSaved(false);
-              }}>
-                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
-              </select>
-            </label>
-            <label>
-              {t('语言', 'Language')}
-              <input value={form.language} placeholder={t('zh-CN，留空跟随系统', 'e.g. en-US; blank follows system')}
-                onChange={(event) => { setForm({ ...form, language: event.target.value }); setSaved(false); }} />
-            </label>
-          </fieldset>
-          <div className="pet-voice-save">
-            <button type="submit" disabled={busy}>{busy ? t('保存中…', 'Saving…') : t('保存', 'Save')}</button>
-            {saved && <span role="status">{t('已保存', 'Saved')}</span>}
-          </div>
-        </>
+      <div className="pet-voice-body">
+        {error && <p className="pet-voice-error" role="alert">{error}</p>}
+        {!form ? (
+          <p className="pet-voice-hint">
+            {error ? t('重新打开此面板可重试。', 'Reopen this panel to retry.') : t('正在读取…', 'Loading…')}
+          </p>
+        ) : (
+          <>
+            <fieldset disabled={busy} aria-labelledby="pet-voice-stt-legend">
+              <h3 id="pet-voice-stt-legend" className="pet-voice-legend">{t('语音识别', 'Transcription')}</h3>
+              <p className="pet-voice-hint">
+                {t('按住麦克风说话，松开后转成文字。支持 OpenAI 兼容语音接口和本机服务。', 'Hold the microphone to talk; release to transcribe. Use an OpenAI-compatible speech API or a local service.')}
+              </p>
+              <EndpointFields value={form.stt} onChange={(stt) => { setForm({ ...form, stt }); setSaved(false); }} />
+            </fieldset>
+            <fieldset disabled={busy} aria-labelledby="pet-voice-tts-legend">
+              <h3 id="pet-voice-tts-legend" className="pet-voice-legend">{t('回复朗读', 'Read replies aloud')}</h3>
+              <label>
+                {t('朗读方式', 'Speech engine')}
+                <select value={form.ttsEngine} onChange={(event) => {
+                  setForm({ ...form, ttsEngine: event.target.value as 'system' | 'remote' }); setSaved(false);
+                }}>
+                  <option value="system">{t('系统声音', 'System voices')}</option>
+                  <option value="remote">{t('远程语音接口', 'Remote speech API')}</option>
+                </select>
+              </label>
+              {form.ttsEngine === 'remote' ? (
+                <>
+                  <EndpointFields value={form.tts} onChange={(tts) => { setForm({ ...form, tts }); setSaved(false); }} />
+                  <label>
+                    {t('声音名称', 'Voice name')}
+                    <input value={form.tts.voice} onChange={(event) => {
+                      setForm({ ...form, tts: { ...form.tts, voice: event.target.value } }); setSaved(false);
+                    }} />
+                  </label>
+                </>
+              ) : (
+                <p className="pet-voice-hint">
+                  {t('使用系统已安装的声音；没有可用声音时可选择远程接口。', 'Uses installed system voices; choose a remote API if none are available.')}
+                </p>
+              )}
+              <label>
+                {t('语速', 'Speech rate')}
+                <select value={form.speechRate} onChange={(event) => {
+                  setForm({ ...form, speechRate: Number(event.target.value) }); setSaved(false);
+                }}>
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+                </select>
+              </label>
+              <label>
+                {t('语言', 'Language')}
+                <input value={form.language} placeholder={t('zh-CN，留空跟随系统', 'e.g. en-US; blank follows system')}
+                  onChange={(event) => { setForm({ ...form, language: event.target.value }); setSaved(false); }} />
+              </label>
+            </fieldset>
+          </>
+        )}
+      </div>
+      {form && (
+        <footer className="pet-voice-save">
+          <button type="submit" className="pet-voice-submit" disabled={busy}>
+            {busy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
+          </button>
+          {saved && <span className="pet-voice-saved" role="status">{t('已保存', 'Saved')}</span>}
+        </footer>
       )}
     </form>
   );
