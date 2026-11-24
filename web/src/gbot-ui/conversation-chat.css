@@ -159,13 +159,15 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  width: 100%;
   min-width: 0;
-  max-width: min(68ch, 94%);
+  max-width: 100%;
 }
 
 .conversation-chat-message--user {
   align-self: flex-end;
   align-items: flex-end;
+  width: auto;
   max-width: min(460px, 85%);
 }
 
@@ -208,6 +210,10 @@
   gap: 6px;
   min-width: 0;
   max-width: 100%;
+}
+
+.conversation-chat-message:not(.conversation-chat-message--user) .conversation-chat-message__body {
+  width: 100%;
 }
 
 .conversation-chat-message--user .conversation-chat-message__body {
@@ -284,6 +290,8 @@
 
 .conversation-chat-message:not(.conversation-chat-message--user) .conversation-chat-message__bubble {
   --table-edge-bg: var(--ground, var(--color-bg, var(--bg)));
+  width: 100%;
+  text-align: left;
   padding: var(--space-1, 4px) 2px;
   border: 0;
   border-radius: 0;

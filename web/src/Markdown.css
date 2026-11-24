@@ -1,5 +1,5 @@
 /* Shared Markdown Surface Styles (Android + Desktop).
- * Comfortable 65-72ch prose measure, crisp inset code blocks, clean hairline tables,
+ * Full-width left-aligned prose, crisp inset code blocks, clean hairline tables,
  * zero raw color literals, and full reduced-motion support.
  */
 
@@ -12,12 +12,7 @@
 }
 
 .markdown p {
-  max-width: 72ch;
   text-wrap: pretty;
-}
-
-.markdown :is(ul, ol, blockquote) {
-  max-width: 72ch;
 }
 
 .markdown pre {
