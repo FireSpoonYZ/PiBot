@@ -1045,6 +1045,7 @@ export function consumeActivity(
 	stream: AssistantMessageEventStream,
 	blocks: BlockState,
 	activity: DriverActivity,
+	matchedMcpToolError = false,
 ): "parked" | "continue" {
 	switch (activity.type) {
 		case "text":
@@ -1069,6 +1070,9 @@ export function consumeActivity(
 			if (!isAllowedBridgeServer(activity.mcpServer)) {
 				throw new DisallowedNativeToolError(activity.name, activity.mcpServer);
 			}
+			// A matching MCP isError result is model input, not a failed ACP turn.
+			// The delivery barrier still checks whether that response was written.
+			if (matchedMcpToolError) return "continue";
 			throw new Error(`Antigravity bridge tool "${activity.name}" failed: ${activity.message}`);
 		case "bridge_call":
 			emitToolUse(

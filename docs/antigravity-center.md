@@ -27,9 +27,9 @@ PiBot 每次实际发送的上下文投影是恢复依据。Center 按 `(deviceI
 | 取消、异常退出或 Host 未承接上次输出 | 不再把旧 native 历史视为已确认上下文；后续请求依据 PiBot 实际保留的历史恢复。 |
 | SDK 原生 `/compact` 或自动压缩 | 摘要请求使用独立的 AGY 会话身份和摘要系统指令；身份与持久任务绑定，同一压缩任务重试保持稳定，任务结束后回收临时 driver、MCP 注册和绑定。`max_tokens` 或未知／缺失结束原因即使已有文字也明确失败，不以部分摘要替换原历史。 |
 
-Center 持久化 `ready`、`parked`、`uncertain` 状态及恢复所需的检查点。发送会改变 native 历史的请求前先记录不确定状态；工具挂起时先保存恢复信息，再向 Host 交付工具调用。工具结果必须通过本地 MCP 发送屏障；发送失败或 ACP `tool_error` 都不能确认 `ready`。每次新 native turn 都轮换 MCP 注册，拒绝旧 turn 的迟到调用。存储写入失败会返回错误，不会把未保存的恢复状态当成成功同步。这里只持久化可恢复的数据，进程内等待中的 Promise 和 MCP 连接仍随进程结束；普通会话最多保留 64 个完全空闲的内存 slot，按最近使用顺序回收并保留持久检查点，正在运行或等待工具的会话不参与淘汰；最后一个工具等待到期时会主动检查是否超出上限。[服务层状态转换](../center-server/antigravity/index.js)
+Center 持久化 `ready`、`parked`、`uncertain` 状态及恢复所需的检查点。发送会改变 native 历史的请求前先记录不确定状态；工具挂起时先保存恢复信息，再向 Host 交付工具调用。工具结果必须通过本地 MCP 发送屏障；发送失败、未能与受信桥接结果核对的 ACP `tool_error`，或 ACP 报告成功结果对应的工具失败，都不能确认 `ready`。每次新 native turn 都轮换 MCP 注册，拒绝旧 turn 的迟到调用。存储写入失败会返回错误，不会把未保存的恢复状态当成成功同步。这里只持久化可恢复的数据，进程内等待中的 Promise 和 MCP 连接仍随进程结束；普通会话最多保留 64 个完全空闲的内存 slot，按最近使用顺序回收并保留持久检查点，正在运行或等待工具的会话不参与淘汰；最后一个工具等待到期时会主动检查是否超出上限。[服务层状态转换](../center-server/antigravity/index.js)
 
-当前对原生 `tool_error` 的保守处理可能中断普通工具错误后的同轮自纠正；真实 agy 对这类错误的映射仍需验收，后续重建保留历史中的工具错误正文和 `isError` 标记。
+普通 Host 工具失败以 `isError: true` 连同错误正文交付 MCP；确认 ACP 的 `tool_error` 对应这次错误结果时，让 agy 继续原轮，不自动重放工具。如果不能唯一配对，仍按未确认失败中止。后续重建保留错误正文和 `isError` 标记。
 
 重建回放覆盖当前投影中的所有 provider 回答、工具调用 ID 和参数、工具结果、错误及历史图片。历史图片按回放中的编号附加；自动 recall 仍遵守上述临时 hook 规则。回放不再默认截断为 8,000 字符，也不会因为普通正文出现 compaction 标记而丢掉前面的记录。完整回放会增加输入 token 和图片传输成本，并受 HTTP／ACP 帧大小、模型上下文等上限约束；超限请求必须显式失败，不能裁掉内容后仍推进检查点。若发送前就能判定回放超限，失败请求不作废旧绑定，也不取消旧轮正在等待的工具。
 
@@ -146,7 +146,7 @@ PIBOT_AGY_BIN=/usr/local/bin/agy \
   node scripts/verify-antigravity-acp.mjs
 ```
 
-- **验证范围**：直接调用 `center-server/antigravity/index.js` 的 `openAntigravity`，使用真实 `agy` 与真实 Host `read` 工具（读取仓库外临时随机文件），验证 `catalog`、两轮上下文记忆、同会话模型与支持强度切换并保留旧记忆、MCP `pibot-bridge` 到 Host `read` 工具执行唯一位置、内置工具限制探测（仅声明 Host `read` 时不得通过原生 `run_command`/`write_file` 在 Center workspace 写入 sentinel），以及 `cancel({ deviceId, sessionId })` 取消。
+- **验证范围**：直接调用 `center-server/antigravity/index.js` 的 `openAntigravity`，使用真实 `agy` 与真实 Host `read` 工具（读取仓库外临时随机文件），验证 `catalog`、两轮上下文记忆、同会话模型与支持强度切换并保留旧记忆、Host `read` 返回普通工具错误后 agy 通过 MCP 在同一轮重试成功（文件只在 Host 上）、内置工具限制探测（仅声明 Host `read` 时不得通过原生 `run_command`/`write_file` 在 Center workspace 写入 sentinel），以及 `cancel({ deviceId, sessionId })` 取消。
 - **未覆盖范围**：不启动 Center HTTP 服务、管理 API 或 Host Provider。
 
 ### 2. Center HTTP + Host Provider 工具往返验证（[`scripts/verify-antigravity-center.mjs`](../scripts/verify-antigravity-center.mjs)）

@@ -131,45 +131,65 @@ test('ACP rejects a tool result whose MCP waiter disappears during persistence a
   });
 });
 
-test('ACP rejects a native tool_error after a failed Host result and replays the actual error on explicit retry', { timeout: 15_000 }, async t => {
+test('ACP keeps the native turn open for a delivered Host tool error and lets the model retry', { timeout: 15_000 }, async t => {
   await centerCase(t, 'tool-error-retry', async ({ driver, service }) => {
     const errorText = 'HOST_READ_ERROR: the requested file does not exist';
-    let delivered;
+    const args = { path: 'fixture.txt' };
+    const server = 'pibot-bridge';
     driver.setOnRun(async ctx => {
-      if (driver.runs.length === 1) {
-        delivered = await ctx.mcp.handler.onToolCall('failed-read', 'read_file', { path: 'missing-file' }, ctx.signal);
-        ctx.emit({
-          type: 'tool_error', name: 'read_file', toolCallId: 'failed-read',
-          mcpServer: 'pibot-bridge', message: 'native reported the failed Host tool result',
-        });
-        finishTurn(ctx, 'native nevertheless attempted to finish');
-      } else {
-        finishTurn(ctx, 'recovered with the real failed tool result');
-      }
+      ctx.emit({
+        type: 'tool_start', toolCallId: 'native-first', name: 'read_file',
+        args: { ...args, toolSummary: 'Read fixture.txt' }, mcpServer: server,
+      });
+      const failed = await ctx.mcp.handler.onToolCall('host-first', 'read_file', args, ctx.signal);
+      assert.equal(failed.isError, true);
+      assert.deepEqual(failed.content, [{ type: 'text', text: errorText }]);
+      ctx.emit({
+        type: 'tool_error', toolCallId: 'native-first', name: 'read_file', mcpServer: server, message: 'tool failed',
+      });
+      ctx.emit({ type: 'tool_start', toolCallId: 'native-retry', name: 'read_file', args, mcpServer: server });
+      const retried = await ctx.mcp.handler.onToolCall('host-retry', 'read_file', args, ctx.signal);
+      assert.equal(retried.isError, false);
+      ctx.emit({ type: 'tool_done', toolCallId: 'native-retry', name: 'read_file', args, mcpServer: server });
+      finishTurn(ctx, retried.content[0].text);
     });
-    const initial = [BASE_SYSTEM, user('Read the missing file.')];
+
+    const initial = [BASE_SYSTEM, user('Read the file.')];
     const first = await send(service, initial);
     assert.equal(first.terminal.reason, 'toolUse');
-    const messages = [
-      ...initial, first.terminal.message,
-      toolResult('failed-read', 'read_file', errorText, 12, true),
-    ];
-    const failed = await send(service, messages);
-    assert.equal(delivered?.isError, true);
-    assert.ok(delivered.content.some(block => block.type === 'text' && block.text === errorText));
-    assert.equal(failed.terminal.type, 'error');
-    assert.equal(driver.runs.length, 1, 'a native tool error must not trigger an automatic prompt replay');
+    const history = [...initial, first.terminal.message, toolResult('host-first', 'read_file', errorText, 12, true)];
+    const second = await send(service, history);
+    assert.equal(second.terminal.reason, 'toolUse');
+    assert.equal(second.terminal.message.content.find(block => block.type === 'toolCall')?.id, 'host-retry');
+    const result = await send(service, [
+      ...history, second.terminal.message, toolResult('host-retry', 'read_file', 'retry succeeded', 13),
+    ]);
+    assert.equal(result.terminal.reason, 'stop');
+    assert.equal(messageText(result.terminal.message), 'retry succeeded');
+    assert.equal(driver.runs.length, 1, 'the model retries inside the original native turn without prompt replay');
+  });
+});
 
-    const retried = await send(service, messages);
-    assert.equal(retried.terminal.reason, 'stop');
-    assert.equal(driver.runs.length, 2);
-    assert.equal(driver.runs[1].request.conversationId, null);
-    const replay = driver.runs[1].request.contextBlock.text;
-    assert.ok(replay.includes('Read the missing file.'));
-    assert.ok(replay.includes('failed-read'));
-    assert.ok(replay.includes(errorText));
-    assert.ok(replay.includes('"isError":true'), 'recovery must preserve that the tool failed');
-    assert.ok(!replay.includes('native nevertheless attempted to finish'));
+test('ACP does not use one Host error to excuse an ambiguous native failure', { timeout: 15_000 }, async t => {
+  await centerCase(t, 'ambiguous-tool-error', async ({ driver, service }) => {
+    const args = { path: 'fixture.txt' };
+    const native = { name: 'read_file', mcpServer: 'pibot-bridge' };
+    driver.setOnRun(async ctx => {
+      ctx.emit({ type: 'tool_start', toolCallId: 'native-first', args, ...native });
+      ctx.emit({ type: 'tool_start', toolCallId: 'native-other', args, ...native });
+      const response = await ctx.mcp.handler.onToolCall('host-call', 'read_file', args, ctx.signal);
+      assert.equal(response.isError, true);
+      ctx.emit({ type: 'tool_error', toolCallId: 'native-other', message: 'tool failed', ...native });
+      finishTurn(ctx);
+    });
+    const initial = [BASE_SYSTEM, user('Read the file.')];
+    const first = await send(service, initial);
+    assert.equal(first.terminal.reason, 'toolUse');
+    const result = await send(service, [
+      ...initial, first.terminal.message, toolResult('host-call', 'read_file', 'file missing', 12, true),
+    ]);
+    assert.equal(result.terminal.type, 'error');
+    assert.match(result.terminal.error.errorMessage, /Antigravity bridge tool "read_file" failed/);
   });
 });
 
