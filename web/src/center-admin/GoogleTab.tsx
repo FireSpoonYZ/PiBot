@@ -581,7 +581,8 @@ export function GoogleTab({
         const currentBot = liveBots.find(
           b => b.deviceId === existingCfg.deviceId && b.botId === existingCfg.botId,
         );
-        setAssistantBotName(currentBot?.name || tr('邮件与日程管家', 'Mail & Calendar Assistant'));
+        const t = tr;
+        setAssistantBotName(currentBot?.name || t('邮件与日程管家', 'Mail & Calendar Assistant'));
         setAssistantModelRef('');
         setAssistantTargetBotKey(
           existingCfg.mode === 'existing'
@@ -614,7 +615,8 @@ export function GoogleTab({
       setAssistantMode('dedicated');
       setAssistantDedicatedAction('create');
       setAssistantDeviceId(defaultDevice);
-      setAssistantBotName(tr('邮件与日程管家', 'Mail & Calendar Assistant'));
+      const t = tr;
+      setAssistantBotName(t('邮件与日程管家', 'Mail & Calendar Assistant'));
       setAssistantModelRef('');
       setAssistantTargetBotKey(defaultBot ? botKey(defaultBot.deviceId, defaultBot.botId) : '');
       setAssistantAccounts(fallbackEmails);
@@ -1657,14 +1659,8 @@ export function GoogleTab({
         setBanner({
           tone: 'ok',
           text: createdName
-            ? t(
-                `已创建专职管家 Bot「${createdName}」并启用主动邮箱与日程感知`,
-                `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring`,
-              )
-            : t(
-                '已启用主动邮箱与日程感知',
-                'Proactive mail & calendar assistant enabled',
-              ),
+            ? t(`已创建专职管家 Bot「${createdName}」并启用主动邮箱与日程感知`, `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring`)
+            : t('已启用主动邮箱与日程感知', 'Proactive mail & calendar assistant enabled'),
         });
       }
     } catch (err) {
@@ -1729,10 +1725,7 @@ export function GoogleTab({
       await loadAll({ silent: true });
       setBanner({
         tone: 'info',
-        text: t(
-          '已移除主动邮箱与日程管家绑定（不会删除已有 Bot 或撤销 Google 账号授权）',
-          'Removed proactive assistant binding (existing Bots and Google accounts were kept).',
-        ),
+        text: t('已移除主动邮箱与日程管家绑定（不会删除已有 Bot 或撤销 Google 账号授权）', 'Removed proactive assistant binding (existing Bots and Google accounts were kept).'),
       });
     } catch (err) {
       setModal(null);
@@ -2088,10 +2081,7 @@ export function GoogleTab({
                       <span className="ca-pill ca-pill-muted">{t('未开启', 'Not configured')}</span>
                     </div>
                     <span className="ca-row-sub">
-                      {t(
-                        '自动按批次聚合新邮件与会前日程提醒；可创建独立专职管家 Bot 或交给已有 Bot，后台仅读信与草拟回复、绝不自动外发。',
-                        'Batch new mail and pre-meeting reminders automatically with a dedicated assistant Bot or an existing Bot. Background runs are strictly read & draft only.',
-                      )}
+                      {t('自动按批次聚合新邮件与会前日程提醒；可创建独立专职管家 Bot 或交给已有 Bot，后台仅读信与草拟回复、绝不自动外发。', 'Batch new mail and pre-meeting reminders automatically with a dedicated assistant Bot or an existing Bot. Background runs are strictly read & draft only.')}
                     </span>
                   </div>
                   <div className="ca-row-actions">
@@ -2190,15 +2180,9 @@ export function GoogleTab({
                           {t('批次与简报节奏', 'Batch & digest schedule')}
                         </span>
                         <span className="ca-google-assistant-meta-value">
-                          {t(
-                            `每 ${assistant.batchWindowMinutes} 分钟聚合`,
-                            `Batch every ${assistant.batchWindowMinutes}m`,
-                          )}
+                          {t(`每 ${assistant.batchWindowMinutes} 分钟聚合`, `Batch every ${assistant.batchWindowMinutes}m`)}
                           {assistant.digestTimes.length > 0
-                            ? t(
-                                ` · 简报 ${assistant.digestTimes.join('、')}`,
-                                ` · Digests ${assistant.digestTimes.join(', ')}`,
-                              )
+                            ? t(` · 简报 ${assistant.digestTimes.join('、')}`, ` · Digests ${assistant.digestTimes.join(', ')}`)
                             : t(' · 仅实时批次', ' · Batch only')}
                         </span>
                       </div>
@@ -2652,14 +2636,8 @@ export function GoogleTab({
                   </div>
                   <span className="ca-row-sub">
                     {assistant
-                      ? `${formatBotDisplay(assistant.deviceId, assistant.botId)} · ${t(
-                          `每 ${assistant.batchWindowMinutes} 分钟聚合`,
-                          `Batch every ${assistant.batchWindowMinutes}m`,
-                        )}${assistant.digestTimes.length > 0 ? ` · ${assistant.digestTimes.join(', ')}` : ''}`
-                      : t(
-                          '不想手动逐条配置过滤规则？开启主动管家即可按批次自动归纳新邮件与会前日程。',
-                          'Want automatic mail batching and pre-meeting summaries without managing individual filter rules? Enable the proactive assistant.',
-                        )}
+                      ? `${formatBotDisplay(assistant.deviceId, assistant.botId)} · ${t(`每 ${assistant.batchWindowMinutes} 分钟聚合`, `Batch every ${assistant.batchWindowMinutes}m`)}${assistant.digestTimes.length > 0 ? ` · ${assistant.digestTimes.join(', ')}` : ''}`
+                      : t('不想手动逐条配置过滤规则？开启主动管家即可按批次自动归纳新邮件与会前日程。', 'Want automatic mail batching and pre-meeting summaries without managing individual filter rules? Enable the proactive assistant.')}
                   </span>
                 </div>
                 <div className="ca-row-actions">
@@ -3783,10 +3761,7 @@ export function GoogleTab({
               ? t('账号已连接 · 开启主动邮箱与日程感知？', 'Account Connected · Enable Proactive Assistant?')
               : t('配置主动邮箱与日程管家', 'Set Up Proactive Mail & Calendar Assistant')
         }
-        description={t(
-          '选择由独立专职管家 Bot 或已有 Bot 在后台聚合新邮件与会前日程提醒；随时可在账号或规则页修改。',
-          'Choose a dedicated assistant Bot or an existing Bot to batch incoming mail and pre-meeting reminders. You can change or pause this anytime.',
-        )}
+        description={t('选择由独立专职管家 Bot 或已有 Bot 在后台聚合新邮件与会前日程提醒；随时可在账号或规则页修改。', 'Choose a dedicated assistant Bot or an existing Bot to batch incoming mail and pre-meeting reminders. You can change or pause this anytime.')}
         variant="modal"
         wide
       >
@@ -3814,10 +3789,7 @@ export function GoogleTab({
                   <span className="ca-pill ca-pill-ok">{t('推荐', 'Recommended')}</span>
                 </span>
                 <span className="ca-row-sub">
-                  {t(
-                    '独立会话与记忆，不干扰主 Bot，后台仅读信与草拟回复、绝不自动外发。',
-                    'Isolated session and memory without crowding your main Bot; background runs read & draft replies only, never auto-send.',
-                  )}
+                  {t('独立会话与记忆，不干扰主 Bot，后台仅读信与草拟回复、绝不自动外发。', 'Isolated session and memory without crowding your main Bot; background runs read & draft replies only, never auto-send.')}
                 </span>
               </span>
             </button>
@@ -3839,10 +3811,7 @@ export function GoogleTab({
                   <span>{t('选项 2：交给已有 Bot（如主 Bot）', 'Option 2: Assign to Existing Bot (e.g. Main Bot)')}</span>
                 </span>
                 <span className="ca-row-sub">
-                  {t(
-                    '无需切换聊天；后台邮件批次禁止自动发信，普通邮件按早晚简报合并以免占满主上下文，跨 Bot Skill 共享仍保持隔离。',
-                    'No chat switching; background mail batches cannot auto-send, routine mail merges into scheduled digests to protect main context, and cross-Bot skill isolation stays intact.',
-                  )}
+                  {t('无需切换聊天；后台邮件批次禁止自动发信，普通邮件按早晚简报合并以免占满主上下文，跨 Bot Skill 共享仍保持隔离。', 'No chat switching; background mail batches cannot auto-send, routine mail merges into scheduled digests to protect main context, and cross-Bot skill isolation stays intact.')}
                 </span>
               </span>
             </button>
@@ -3877,10 +3846,7 @@ export function GoogleTab({
                 <>
                   {devices.length === 0 ? (
                     <CaNotice tone="warn">
-                      {t(
-                        '当前中心暂无已配对主机设备。请先在桌面端或手机端配对设备，或稍后再开启主动管家。',
-                        'No paired host devices are available on this Center yet. Pair a device first, then configure the proactive assistant.',
-                      )}
+                      {t('当前中心暂无已配对主机设备。请先在桌面端或手机端配对设备，或稍后再开启主动管家。', 'No paired host devices are available on this Center yet. Pair a device first, then configure the proactive assistant.')}
                     </CaNotice>
                   ) : (
                     <div className="ca-grid-2">
@@ -3948,10 +3914,7 @@ export function GoogleTab({
                       ))}
                     </select>
                     <p className="ca-field-help">
-                      {t(
-                        '推荐选择响应快、成本较低的模型处理高频邮件批次与日程摘要。',
-                        'Recommended: pick a fast, low-cost model for frequent mail batches and calendar summaries.',
-                      )}
+                      {t('推荐选择响应快、成本较低的模型处理高频邮件批次与日程摘要。', 'Recommended: pick a fast, low-cost model for frequent mail batches and calendar summaries.')}
                     </p>
                   </div>
                 </>
@@ -3961,10 +3924,7 @@ export function GoogleTab({
             <div className="ca-google-assistant-subcard">
               {activeBots.length === 0 ? (
                 <CaNotice tone="warn">
-                  {t(
-                    '当前中心暂无可用 Bot。你可以切换到「选项 1」直接创建独立专职管家 Bot。',
-                    'No active Bots found on this Center. Switch to Option 1 to create a dedicated assistant Bot.',
-                  )}
+                  {t('当前中心暂无可用 Bot。你可以切换到「选项 1」直接创建独立专职管家 Bot。', 'No active Bots found on this Center. Switch to Option 1 to create a dedicated assistant Bot.')}
                 </CaNotice>
               ) : (
                 <div className="ca-field">
@@ -4071,10 +4031,7 @@ export function GoogleTab({
                 }}
               />
               <p className="ca-field-help">
-                {t(
-                  '逗号或空格分隔，最多 6 个；留空表示仅按批次聚合。',
-                  'Comma or space separated, up to 6 slots; leave empty for batch-only.',
-                )}
+                {t('逗号或空格分隔，最多 6 个；留空表示仅按批次聚合。', 'Comma or space separated, up to 6 slots; leave empty for batch-only.')}
               </p>
             </div>
           </div>
@@ -4084,10 +4041,7 @@ export function GoogleTab({
             <div className="ca-google-assistant-switch-text">
               <span className="ca-field-label">{t('会前日程提醒', 'Pre-meeting calendar reminders')}</span>
               <span className="ca-row-sub">
-                {t(
-                  '自动在会议开始前汇总参会人与相关背景提醒你。',
-                  'Remind you before upcoming meetings with attendee and mail context.',
-                )}
+                {t('自动在会议开始前汇总参会人与相关背景提醒你。', 'Remind you before upcoming meetings with attendee and mail context.')}
               </span>
               {assistantCalendarEnabled && (
                 <div className="ca-inline-row ca-mt-2" style={{ gap: 8 }}>
@@ -4127,14 +4081,8 @@ export function GoogleTab({
               </span>
               <span className="ca-row-sub">
                 {assistantMode === 'dedicated'
-                  ? t(
-                      '仅写入该专职管家 Bot 自己的私有主库，不向其他 Bot 或共享记忆外泄。',
-                      'Writes only to this dedicated Bot’s private primary bank; never exported to shared memory or other Bots.',
-                    )
-                  : t(
-                      '默认关闭以保持主 Bot 长期记忆干净；如开启，仅限写入该 Bot 自己的私有主库。',
-                      'Off by default to keep your main Bot’s memory clean; when enabled, strictly limited to its own private primary bank.',
-                    )}
+                  ? t('仅写入该专职管家 Bot 自己的私有主库，不向其他 Bot 或共享记忆外泄。', 'Writes only to this dedicated Bot’s private primary bank; never exported to shared memory or other Bots.')
+                  : t('默认关闭以保持主 Bot 长期记忆干净；如开启，仅限写入该 Bot 自己的私有主库。', 'Off by default to keep your main Bot’s memory clean; when enabled, strictly limited to its own private primary bank.')}
               </span>
             </div>
             <CaSwitch
@@ -4204,10 +4152,7 @@ export function GoogleTab({
         title={t('移除主动邮箱与日程管家绑定', 'Remove Proactive Assistant Binding')}
         description={
           assistant
-            ? t(
-                `移除与「${formatBotDisplay(assistant.deviceId, assistant.botId)}」的主动管家绑定后，后台新邮件与会前聚合推送将停止；不会删除该 Bot，也不会撤销 Google 账号授权。`,
-                `Removing the proactive assistant binding for "${formatBotDisplay(assistant.deviceId, assistant.botId)}" stops background mail and calendar batching without deleting the Bot or revoking Google access.`,
-              )
+            ? t(`移除与「${formatBotDisplay(assistant.deviceId, assistant.botId)}」的主动管家绑定后，后台新邮件与会前聚合推送将停止；不会删除该 Bot，也不会撤销 Google 账号授权。`, `Removing the proactive assistant binding for "${formatBotDisplay(assistant.deviceId, assistant.botId)}" stops background mail and calendar batching without deleting the Bot or revoking Google access.`)
             : ''
         }
         confirmLabel={assistantRemoving ? t('正在移除…', 'Removing…') : t('移除绑定', 'Remove binding')}

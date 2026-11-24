@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { LiveDoc, ResetEntry } from '@earendil-works/pi-durable';
+import { LiveDoc, ResetEntry } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
 import {
   BASE_BEHAVIOR_PROMPT,
   DEFAULT_GOOGLE_ASSISTANT_SOUL,
@@ -182,19 +182,20 @@ test('createWebhookConsumer routes trusted google-workspace-assistant events str
   const failClosedWebhooks = [];
   const failClosedReceipts = [];
   let polledFailClosed = false;
+  const noHandlerClient = {
+    async pollWebhookEvents() {
+      if (polledFailClosed) return { items: [], nextCursor: null };
+      polledFailClosed = true;
+      return { items: [makeAssistantWebhookEvent({ id: 'evt-assistant-2', requestId: 'req-assistant-2' })], nextCursor: null };
+    },
+    async reportWebhookEvent(eventId, receipt) {
+      failClosedReceipts.push({ eventId, receipt });
+      return { ok: true };
+    },
+  };
   const consumerNoHandler = createWebhookConsumer({
     deviceId: 'dev-1',
-    getClient: () => ({
-      async pollWebhookEvents() {
-        if (polledFailClosed) return { items: [], nextCursor: null };
-        polledFailClosed = true;
-        return { items: [makeAssistantWebhookEvent({ id: 'evt-assistant-2', requestId: 'req-assistant-2' })], nextCursor: null };
-      },
-      async reportWebhookEvent(eventId, receipt) {
-        failClosedReceipts.push({ eventId, receipt });
-        return { ok: true };
-      },
-    }),
+    getClient: () => noHandlerClient,
     getRuntime: () => ({ getSubmission: async () => null }),
     isReady: () => true,
     getStopStates: async () => [{ botId: 'bot-assistant', stopEpoch: 1, pendingStopEpoch: null }],
@@ -221,21 +222,22 @@ test('createWebhookConsumer routes trusted google-workspace-assistant events str
   // Partial marker envelope (missing dataBoundary) must be rejected and never routed to submitWebhook.
   const partialWebhooks = [];
   let polledPartial = false;
+  const partialClient = {
+    async pollWebhookEvents() {
+      if (polledPartial) return { items: [], nextCursor: null };
+      polledPartial = true;
+      return {
+        items: [makeAssistantWebhookEvent({ id: 'evt-partial', requestId: 'req-partial', dataBoundary: undefined })],
+        nextCursor: null,
+      };
+    },
+    async reportWebhookEvent() {
+      return { ok: true };
+    },
+  };
   const consumerPartial = createWebhookConsumer({
     deviceId: 'dev-1',
-    getClient: () => ({
-      async pollWebhookEvents() {
-        if (polledPartial) return { items: [], nextCursor: null };
-        polledPartial = true;
-        return {
-          items: [makeAssistantWebhookEvent({ id: 'evt-partial', requestId: 'req-partial', dataBoundary: undefined })],
-          nextCursor: null,
-        };
-      },
-      async reportWebhookEvent() {
-        return { ok: true };
-      },
-    }),
+    getClient: () => partialClient,
     getRuntime: () => ({ getSubmission: async () => null }),
     isReady: () => true,
     getStopStates: async () => [{ botId: 'bot-assistant', stopEpoch: 1, pendingStopEpoch: null }],
@@ -747,9 +749,10 @@ test('BotBoardResult preserves positive proactive alert across silent (pass) swe
   const submissions = new Map();
   const entries = new Map();
 
+  const initialBoardDoc = () => ({ taskId: null, lastResult: null });
   const harness = {
     async snapshot(docDef, convId) {
-      if (docDef === BotBoardResult) return boardDocs.get(convId) ?? docDef.initial();
+      if (docDef === BotBoardResult) return boardDocs.get(convId) ?? initialBoardDoc();
       if (docDef === BotSessionState) return sessionDocs.get(convId) ?? null;
       if (docDef === LiveDoc) return liveDocs.get(convId) ?? null;
       return null;
@@ -758,7 +761,7 @@ test('BotBoardResult preserves positive proactive alert across silent (pass) swe
       const tx = {
         async doc(docDef, convId) {
           if (docDef === BotBoardResult) {
-            if (!boardDocs.has(convId)) boardDocs.set(convId, docDef.initial());
+            if (!boardDocs.has(convId)) boardDocs.set(convId, initialBoardDoc());
             return boardDocs.get(convId);
           }
           throw new Error(`unexpected doc ${docDef?.kind}`);
@@ -998,7 +1001,17 @@ test('google-workspace-assistant source propagates through execution context, re
       },
     },
   };
-  const sessionState = BotSessionState.initial();
+  const sessionState = {
+    schema: 1,
+    lastImportedLocalId: 0,
+    importedCount: 0,
+    clearedThroughEntryId: 0,
+    activeTurn: null,
+    turnByTask: {},
+    outgoing: {},
+    completedTurns: {},
+    updatedAt: null,
+  };
   const fakeHarness = {
     async snapshot(docDef) {
       if (docDef === PrimaryIndex) return { byPrimary: { 'pub-1': 7 } };

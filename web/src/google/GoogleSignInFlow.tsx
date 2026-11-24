@@ -645,7 +645,9 @@ export function GoogleSignInFlow({
         );
         setAssistantMode('dedicated');
         setAssistantDeviceId(defaultDev || identity.targetDeviceId);
-        setAssistantBotName(tRef.current('邮件与日程管家', 'Mail & Calendar Assistant'));
+        const translate = tRef.current;
+        const t = translate;
+        setAssistantBotName(t('邮件与日程管家', 'Mail & Calendar Assistant'));
         setAssistantTargetBotKey(defaultBot ? `${defaultBot.deviceId}::${defaultBot.botId}` : '');
         setAssistantDigestTimes(formatDigestTimesInput(defaultDigestTimesForMode('dedicated')));
         setAssistantDigestDirty(false);
@@ -726,14 +728,8 @@ export function GoogleSignInFlow({
       const createdName = res.createdBot?.role;
       setAssistantEnabledSummary(
         createdName
-          ? t(
-              `已创建独立专职管家 Bot「${createdName}」并启用主动邮箱与日程感知。`,
-              `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring.`,
-            )
-          : t(
-              '已为所选 Bot 启用主动邮箱与日程感知，可在中心管理页随时调整设置。',
-              'Proactive mail & calendar assistant enabled. You can adjust settings anytime in Center Admin.',
-            ),
+          ? t(`已创建独立专职管家 Bot「${createdName}」并启用主动邮箱与日程感知。`, `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring.`)
+          : t('已为所选 Bot 启用主动邮箱与日程感知，可在中心管理页随时调整设置。', 'Proactive mail & calendar assistant enabled. You can adjust settings anytime in Center Admin.'),
       );
       setAssistantProbe('hidden');
     } catch (cause) {
@@ -897,10 +893,7 @@ export function GoogleSignInFlow({
               <span>{t('开启主动邮箱与日程管家？', 'Enable Proactive Mail & Calendar Assistant?')}</span>
             </div>
             <p className="gws-muted">
-              {t(
-                '可选择创建独立专职管家或交给已有 Bot 后台聚合新邮件与会前提醒，后台仅读信与草拟回复、绝不自动外发。',
-                'Batch incoming mail and pre-meeting reminders with a dedicated assistant Bot or an existing Bot. Background runs read & draft only, never auto-send.',
-              )}
+              {t('可选择创建独立专职管家或交给已有 Bot 后台聚合新邮件与会前提醒，后台仅读信与草拟回复、绝不自动外发。', 'Batch incoming mail and pre-meeting reminders with a dedicated assistant Bot or an existing Bot. Background runs read & draft only, never auto-send.')}
             </p>
 
             <div className="gws-mode-list" role="radiogroup" aria-label={t('选择主动管家模式', 'Choose proactive assistant mode')}>
@@ -917,10 +910,7 @@ export function GoogleSignInFlow({
                   <span className="gws-pill is-accent">{t('推荐', 'Recommended')}</span>
                 </span>
                 <span className="gws-mode-desc">
-                  {t(
-                    '独立会话与私人记忆，不打扰主 Bot，后台仅读信与草拟回复。',
-                    'Isolated session & private memory without crowding your main Bot; read & draft only.',
-                  )}
+                  {t('独立会话与私人记忆，不打扰主 Bot，后台仅读信与草拟回复。', 'Isolated session & private memory without crowding your main Bot; read & draft only.')}
                 </span>
               </button>
 
@@ -936,10 +926,7 @@ export function GoogleSignInFlow({
                   <span>{t('选项 2：交给已有 Bot（如主 Bot）', 'Option 2: Assign to Existing Bot (e.g. Main Bot)')}</span>
                 </span>
                 <span className="gws-mode-desc">
-                  {t(
-                    '无需切换聊天；普通邮件默认按 09:00 / 18:00 简报合并，跨 Bot Skill 仍保持隔离。',
-                    'No chat switching; routine mail merges into 09:00 / 18:00 digests with cross-Bot skill isolation intact.',
-                  )}
+                  {t('无需切换聊天；普通邮件默认按 09:00 / 18:00 简报合并，跨 Bot Skill 仍保持隔离。', 'No chat switching; routine mail merges into 09:00 / 18:00 digests with cross-Bot skill isolation intact.')}
                 </span>
               </button>
             </div>
