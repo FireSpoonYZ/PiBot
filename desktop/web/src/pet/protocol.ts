@@ -142,6 +142,8 @@ export interface DesktopPetWindowState {
   dockSide?: PetDockSide;
   panelSide?: PetPanelSide;
   composited?: boolean;
+  width?: number;
+  height?: number;
 }
 
 export type DesktopPetWindowAction =

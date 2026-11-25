@@ -38,11 +38,32 @@ import {
   type DesktopPetResult,
   type DesktopPetSnapshot,
   type DesktopPetWindowState,
-  type PetDockSide,
-  type PetPanelSide,
   type PetProactiveAlert,
   type PetWindowHitRect,
 } from './protocol';
+import {
+  PET_LAYOUT_CONSTANTS,
+  ackComposerOpenNative,
+  beginComposerClose,
+  beginComposerOpen,
+  canCommitComposerOpen,
+  commitComposerOpen,
+  completeComposerClose,
+  createInitialComposerState,
+  doesViewportMatchLayout,
+  evaluateComposerFocusEvent,
+  forceCloseComposer,
+  mergePetOrientation,
+  planComposerCloseLayout,
+  planComposerOpenLayout,
+  shouldHoldOrientationUpdate,
+  shouldRenderComposer,
+  shouldSyncNormalNativeLayout,
+  type ComposerPhase,
+  type ComposerState,
+  type PetOrientation,
+  type ViewportSize,
+} from './composerLayout';
 import { resolvePetTheme } from './theme';
 import { createPetVoice, voiceError, type PetVoiceStatus } from './voice';
 import { VoiceSettings } from './VoiceSettings';
@@ -51,15 +72,8 @@ import { petWindow } from './windowApi';
 const AUTO_READ_KEY = 'pibot-desktop-pet-auto-read:v1';
 const AUTO_FADE_KEY = 'pibot-desktop-pet-auto-fade:v1';
 const DND_KEY = 'pibot-desktop-pet-dnd:v1';
-const COLLAPSED_W = 164;
-const COLLAPSED_H = 128;
-const MAX_STAGE_W = 520;
-const MAX_STAGE_H = 720;
-const STAGE_PAD = 12;
-const COMPOSER_GAP = 8;
 const AUTO_FADE_MS = 10_000;
 const PROACTIVE_AUTO_TUCK_MS = 15_000;
-const BLUR_DISMISS_GRACE_MS = 150;
 
 function layoutRectRelativeTo(node: HTMLElement, ancestor: HTMLElement) {
   let left = 0;
@@ -91,7 +105,6 @@ const postAction = (action: DesktopPetAction) => emitTo('main', PET_EVENTS.actio
 
 type SendFlight = { id: string; key: string; text: string; assistantIds: Set<string> };
 type Recording = { key: string; start: Promise<void>; released: boolean };
-type WindowLayout = { dockSide: PetDockSide; panelSide: PetPanelSide; composited: boolean };
 type PendingRpc = { resolve: (result: DesktopPetResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 type BubbleDescriptor =
@@ -164,12 +177,17 @@ export function PetApp() {
   const t = useText();
   const [snapshot, setSnapshot] = useState(INITIAL_PET_SNAPSHOT);
   const snapshotRef = useRef(snapshot);
-  const [layout, setLayout] = useState<WindowLayout>({
+  const [layout, setLayout] = useState<PetOrientation>({
     dockSide: 'right',
     panelSide: 'top',
     composited: true,
   });
-  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerPhase, setComposerPhase] = useState<ComposerPhase>('closed');
+  const composerStateRef = useRef<ComposerState>(
+    createInitialComposerState({
+      domFocused: typeof document !== 'undefined' ? document.hasFocus() : false,
+    }),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ctxMenuOpen, setCtxMenuOpen] = useState(false);
   const [hoveringDock, setHoveringDock] = useState(false);
@@ -210,20 +228,123 @@ export function PetApp() {
   const avatarPressValidRef = useRef(false);
   const lastLayoutKeyRef = useRef('');
   const focusPendingRef = useRef(false);
-  const showComposer = composerOpen && !settingsOpen;
-  const showComposerRef = useRef(showComposer);
-  showComposerRef.current = showComposer;
-  const windowFocusedRef = useRef(typeof document !== 'undefined' ? document.hasFocus() : false);
-  const composerOpenedAtRef = useRef(0);
-  const hadFocusSinceOpenRef = useRef(false);
+  const activeBubbleRef = useRef<BubbleDescriptor | null>(null);
+  const canRecallReplyRef = useRef(false);
+  const openReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openIpcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeRafRef = useRef<number | null>(null);
+  const showComposer = shouldRenderComposer(composerPhase, settingsOpen);
+  const composerRequested = composerPhase === 'opening' || composerPhase === 'open';
+  const dockCompact = composerPhase === 'open' || composerPhase === 'closing';
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
 
-  const applyWindowState = useCallback((state: DesktopPetWindowState) => {
-    setLayout((prev) => ({
-      dockSide: state.dockSide ?? prev.dockSide,
-      panelSide: state.panelSide ?? prev.panelSide,
-      composited: state.composited ?? prev.composited,
+  const updateComposerState = useCallback((next: ComposerState) => {
+    const prev = composerStateRef.current;
+    composerStateRef.current = next;
+    if (prev.phase !== next.phase) {
+      setComposerPhase(next.phase);
+    }
+  }, []);
+
+  const clearComposerTimers = useCallback(() => {
+    if (openReadyTimerRef.current !== null) {
+      clearTimeout(openReadyTimerRef.current);
+      openReadyTimerRef.current = null;
+    }
+    if (openIpcTimerRef.current !== null) {
+      clearTimeout(openIpcTimerRef.current);
+      openIpcTimerRef.current = null;
+    }
+    if (closeRafRef.current !== null) {
+      cancelAnimationFrame(closeRafRef.current);
+      closeRafRef.current = null;
+    }
+  }, []);
+
+  const resetStageScroll = useCallback(() => {
+    const stage = stageRef.current;
+    if (stage) {
+      if (stage.scrollLeft !== 0) stage.scrollLeft = 0;
+      if (stage.scrollTop !== 0) stage.scrollTop = 0;
+    }
+    const env = envelopeRef.current;
+    if (env) {
+      if (env.scrollLeft !== 0) env.scrollLeft = 0;
+      if (env.scrollTop !== 0) env.scrollTop = 0;
+    }
+    if (typeof document !== 'undefined') {
+      const scrolling = document.scrollingElement;
+      if (scrolling) {
+        if (scrolling.scrollLeft !== 0) scrolling.scrollLeft = 0;
+        if (scrolling.scrollTop !== 0) scrolling.scrollTop = 0;
+      }
+      if (document.documentElement.scrollLeft !== 0) document.documentElement.scrollLeft = 0;
+      if (document.documentElement.scrollTop !== 0) document.documentElement.scrollTop = 0;
+      if (document.body) {
+        if (document.body.scrollLeft !== 0) document.body.scrollLeft = 0;
+        if (document.body.scrollTop !== 0) document.body.scrollTop = 0;
+      }
+    }
+    if (typeof window !== 'undefined' && (window.scrollX !== 0 || window.scrollY !== 0)) {
+      window.scrollTo(0, 0);
+    }
+  }, []);
+
+  const focusComposerNoScroll = useCallback(() => {
+    const el = composerRef.current;
+    if (!el || el.disabled) return;
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      el.focus();
+    }
+    resetStageScroll();
+  }, [resetStageScroll]);
+
+  const readViewportSize = useCallback((): ViewportSize => {
+    const stage = stageRef.current;
+    if (stage && stage.clientWidth > 0 && stage.clientHeight > 0) {
+      return { width: stage.clientWidth, height: stage.clientHeight };
+    }
+    return {
+      width: typeof window !== 'undefined' ? window.innerWidth : PET_LAYOUT_CONSTANTS.COLLAPSED_W,
+      height: typeof window !== 'undefined' ? window.innerHeight : PET_LAYOUT_CONSTANTS.COLLAPSED_H,
+    };
+  }, []);
+
+  const measureNonComposerContent = useCallback(() => {
+    const env = envelopeRef.current;
+    if (!env) {
+      return { baseContentWidth: 0, baseContentHeight: PET_LAYOUT_CONSTANTS.DOCK_HEIGHT };
+    }
+    let maxW = 0;
+    let totalH = 0;
+    for (let i = 0; i < env.children.length; i += 1) {
+      const child = env.children[i] as HTMLElement;
+      if (child.classList.contains('pet-composer-area')) continue;
+      if (child.offsetWidth > maxW) maxW = child.offsetWidth;
+      const style = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(child)
+        : null;
+      const marginTop = style ? parseFloat(style.marginTop) || 0 : 0;
+      const marginBottom = style ? parseFloat(style.marginBottom) || 0 : 0;
+      totalH += child.offsetHeight + marginTop + marginBottom;
+    }
+    return {
+      baseContentWidth: maxW,
+      baseContentHeight: Math.max(PET_LAYOUT_CONSTANTS.DOCK_HEIGHT, Math.ceil(totalH)),
+    };
+  }, []);
+
+  const applyWindowState = useCallback((state: DesktopPetWindowState, forceOrientation = false) => {
+    if (!forceOrientation && shouldHoldOrientationUpdate(composerStateRef.current.phase)) {
+      return;
+    }
+    setLayout((prev) => mergePetOrientation(prev, {
+      dockSide: state.dockSide,
+      panelSide: state.panelSide,
+      composited: state.composited,
     }));
   }, []);
 
@@ -246,6 +367,148 @@ export function PetApp() {
     recordingRef.current = null;
     voice.cancelRecording();
   }, [voice]);
+
+  const tryCommitComposerOpen = useCallback((timedOut = false): boolean => {
+    const current = composerStateRef.current;
+    const viewport = readViewportSize();
+    const check = canCommitComposerOpen(current, viewport, timedOut);
+    if (!check.ready) return false;
+
+    clearComposerTimers();
+    const domFocused = typeof document !== 'undefined' ? document.hasFocus() : false;
+    const { state: nextState, orientation } = commitComposerOpen(current, Date.now(), domFocused);
+    if (orientation) {
+      setLayout((prev) => mergePetOrientation(prev, orientation));
+    }
+    resetStageScroll();
+    updateComposerState(nextState);
+    return true;
+  }, [clearComposerTimers, readViewportSize, resetStageScroll, updateComposerState]);
+
+  const requestOpenComposer = useCallback((options?: { ignoreCurrentBubble?: boolean }) => {
+    const current = composerStateRef.current;
+    if (current.phase === 'opening' || current.phase === 'open') return;
+
+    clearComposerTimers();
+    const { baseContentWidth, baseContentHeight } = options?.ignoreCurrentBubble
+      ? { baseContentWidth: 0, baseContentHeight: PET_LAYOUT_CONSTANTS.DOCK_HEIGHT }
+      : measureNonComposerContent();
+    const target = planComposerOpenLayout({
+      baseContentWidth,
+      baseContentHeight,
+      canRecallReply: canRecallReplyRef.current,
+      draft: draftRef.current,
+    });
+
+    const next = beginComposerOpen(current, target);
+    const token = next.token;
+    updateComposerState(next);
+    lastLayoutKeyRef.current = '';
+
+    openIpcTimerRef.current = setTimeout(() => {
+      if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+        tryCommitComposerOpen(true);
+      }
+    }, PET_LAYOUT_CONSTANTS.OPEN_IPC_TIMEOUT_MS);
+
+    void petWindow('set-layout', undefined, {
+      width: target.width,
+      height: target.height,
+      composerHeight: target.composerHeight,
+      focus: true,
+      hitRects: [],
+    })
+      .then((nextWindowState) => {
+        if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'opening') {
+          return;
+        }
+        const acked = ackComposerOpenNative(composerStateRef.current, token, {
+          dockSide: nextWindowState.dockSide,
+          panelSide: nextWindowState.panelSide,
+          composited: nextWindowState.composited,
+          focused: nextWindowState.focused,
+          width: nextWindowState.width,
+          height: nextWindowState.height,
+        });
+        updateComposerState(acked);
+
+        if (tryCommitComposerOpen(false)) return;
+
+        if (openReadyTimerRef.current !== null) clearTimeout(openReadyTimerRef.current);
+        openReadyTimerRef.current = setTimeout(() => {
+          if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+            tryCommitComposerOpen(true);
+          }
+        }, PET_LAYOUT_CONSTANTS.OPEN_READY_TIMEOUT_MS);
+      })
+      .catch(() => {
+        if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+          tryCommitComposerOpen(true);
+        }
+      });
+  }, [clearComposerTimers, measureNonComposerContent, tryCommitComposerOpen, updateComposerState]);
+
+  const requestCloseComposer = useCallback((options?: { immediate?: boolean }) => {
+    const current = composerStateRef.current;
+    if (current.phase === 'closed') return;
+    if (current.phase === 'closing' && !options?.immediate) return;
+
+    clearComposerTimers();
+    cancelRecording();
+
+    if (options?.immediate) {
+      updateComposerState(forceCloseComposer(current));
+      lastLayoutKeyRef.current = '';
+      return;
+    }
+
+    const next = beginComposerClose(current);
+    const token = next.token;
+    updateComposerState(next);
+    lastLayoutKeyRef.current = '';
+
+    // Wait one paint frame so `.pet-composer-area` unmounts cleanly before shrinking native window.
+    closeRafRef.current = requestAnimationFrame(() => {
+      closeRafRef.current = null;
+      if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'closing') {
+        return;
+      }
+      const hasBubble = Boolean(activeBubbleRef.current);
+      const { baseContentWidth, baseContentHeight } = measureNonComposerContent();
+      const target = planComposerCloseLayout({
+        hasBubble,
+        baseContentWidth,
+        baseContentHeight,
+      });
+      lastLayoutKeyRef.current = JSON.stringify([target.width, target.height, 0, false, []]);
+
+      void petWindow('set-layout', undefined, {
+        width: target.width,
+        height: target.height,
+        composerHeight: 0,
+        focus: false,
+        hitRects: [],
+      })
+        .then((nextWindowState) => {
+          if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'closing') {
+            return;
+          }
+          setLayout((prev) => mergePetOrientation(prev, {
+            dockSide: nextWindowState.dockSide,
+            panelSide: nextWindowState.panelSide,
+            composited: nextWindowState.composited,
+          }));
+          resetStageScroll();
+          updateComposerState(completeComposerClose(composerStateRef.current, token));
+        })
+        .catch(() => {
+          if (composerStateRef.current.token === token && composerStateRef.current.phase === 'closing') {
+            resetStageScroll();
+            updateComposerState(completeComposerClose(composerStateRef.current, token));
+          }
+        });
+    });
+  }, [cancelRecording, clearComposerTimers, measureNonComposerContent, resetStageScroll, updateComposerState]);
 
   const speakMessage = useCallback((id: string, text: string) => {
     cancelRecording();
@@ -396,22 +659,23 @@ export function PetApp() {
         if (disposed) return;
         applyWindowState(payload);
         if (typeof payload.focused === 'boolean') {
-          const hadFocus = windowFocusedRef.current || hadFocusSinceOpenRef.current;
-          windowFocusedRef.current = payload.focused;
-          if (payload.focused) {
-            if (showComposerRef.current) hadFocusSinceOpenRef.current = true;
-          } else if (
-            showComposerRef.current &&
-            !recordingRef.current &&
-            (hadFocus || Date.now() - composerOpenedAtRef.current > BLUR_DISMISS_GRACE_MS)
-          ) {
-            setComposerOpen(false);
+          const result = evaluateComposerFocusEvent(composerStateRef.current, {
+            kind: 'native-focus',
+            focused: payload.focused,
+            documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+            now: Date.now(),
+            isRecording: Boolean(recordingRef.current),
+            isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+          });
+          updateComposerState(result.state);
+          if (result.shouldDismiss) {
+            requestCloseComposer();
           }
         }
         if (!payload.visible) {
           cancelRecording();
           stopReading();
-          setComposerOpen(false);
+          requestCloseComposer({ immediate: true });
           setSettingsOpen(false);
           setCtxMenuOpen(false);
         }
@@ -421,9 +685,12 @@ export function PetApp() {
 
       const windowState = await petWindow('status');
       if (disposed) return;
-      applyWindowState(windowState);
+      applyWindowState(windowState, true);
       if (typeof windowState.focused === 'boolean') {
-        windowFocusedRef.current = windowState.focused;
+        composerStateRef.current = {
+          ...composerStateRef.current,
+          nativeFocused: windowState.focused,
+        };
       }
       await postAction({ id: crypto.randomUUID(), kind: 'ready' });
     };
@@ -437,9 +704,12 @@ export function PetApp() {
       });
       pendingRpcRef.current.clear();
     };
-  }, [applyWindowState, cancelRecording, report, stopReading, t]);
+  }, [applyWindowState, cancelRecording, report, requestCloseComposer, stopReading, t, updateComposerState]);
 
-  useEffect(() => () => { voice.dispose(); }, [voice]);
+  useEffect(() => () => {
+    clearComposerTimers();
+    voice.dispose();
+  }, [clearComposerTimers, voice]);
 
   // Theme & page visibility sync
   useEffect(() => {
@@ -475,7 +745,7 @@ export function PetApp() {
       else if (voiceStatus.phase === 'speaking') stopReading();
       else if (ctxMenuOpen) setCtxMenuOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
-      else if (composerOpen) setComposerOpen(false);
+      else if (composerPhase === 'open' || composerPhase === 'opening') requestCloseComposer();
       else if (revealedProactiveId) {
         const tuckedId = revealedProactiveId;
         setRevealedProactiveId(null);
@@ -489,37 +759,48 @@ export function PetApp() {
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [cancelRecording, composerOpen, ctxMenuOpen, revealedProactiveId, settingsOpen, stopReading, voiceStatus.phase]);
+  }, [cancelRecording, composerPhase, ctxMenuOpen, requestCloseComposer, revealedProactiveId, settingsOpen, stopReading, voiceStatus.phase]);
 
-  // Auto-focus composer textarea when user opens the floating composer pill
+  // Auto-focus composer textarea without scrolling overflow-clipped containers
   useEffect(() => {
-    if (!showComposer) {
-      hadFocusSinceOpenRef.current = false;
-      return;
-    }
-    composerOpenedAtRef.current = Date.now();
-    hadFocusSinceOpenRef.current = document.hasFocus() || windowFocusedRef.current;
-    focusPendingRef.current = true;
-    const raf = requestAnimationFrame(() => composerRef.current?.focus());
-    const timer = setTimeout(() => composerRef.current?.focus(), 40);
+    if (!showComposer) return;
+    focusComposerNoScroll();
+    const raf = requestAnimationFrame(() => {
+      if (composerStateRef.current.phase === 'open' && document.activeElement !== composerRef.current) {
+        focusComposerNoScroll();
+      }
+    });
+    const timer = setTimeout(() => {
+      if (composerStateRef.current.phase === 'open' && document.activeElement !== composerRef.current) {
+        focusComposerNoScroll();
+      }
+    }, 40);
     return () => {
       cancelAnimationFrame(raf);
       clearTimeout(timer);
     };
-  }, [showComposer]);
+  }, [focusComposerNoScroll, showComposer]);
 
-  // Dismiss quick composer automatically when the pet window loses OS focus
+  // Dismiss quick composer automatically when the pet window genuinely loses OS focus
   useEffect(() => {
     const onWindowFocus = () => {
-      windowFocusedRef.current = true;
-      if (showComposerRef.current) hadFocusSinceOpenRef.current = true;
+      const result = evaluateComposerFocusEvent(composerStateRef.current, {
+        kind: 'window-focus',
+        now: Date.now(),
+      });
+      updateComposerState(result.state);
     };
     const onWindowBlur = () => {
-      const hadFocus = windowFocusedRef.current || hadFocusSinceOpenRef.current;
-      windowFocusedRef.current = false;
-      if (!showComposerRef.current || recordingRef.current) return;
-      if (hadFocus || Date.now() - composerOpenedAtRef.current > BLUR_DISMISS_GRACE_MS) {
-        setComposerOpen(false);
+      const result = evaluateComposerFocusEvent(composerStateRef.current, {
+        kind: 'window-blur',
+        documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+        now: Date.now(),
+        isRecording: Boolean(recordingRef.current),
+        isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+      });
+      updateComposerState(result.state);
+      if (result.shouldDismiss) {
+        requestCloseComposer();
       }
     };
     window.addEventListener('focus', onWindowFocus);
@@ -528,15 +809,15 @@ export function PetApp() {
       window.removeEventListener('focus', onWindowFocus);
       window.removeEventListener('blur', onWindowBlur);
     };
-  }, []);
+  }, [requestCloseComposer, updateComposerState]);
 
-  // Auto-grow composer textarea (1–3 lines)
-  useEffect(() => {
+  // Auto-grow composer textarea (1–3 lines) before layout measurement
+  useLayoutEffect(() => {
     const el = composerRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 72) + 'px';
-  }, [draft, composerOpen]);
+    el.style.height = Math.min(el.scrollHeight, PET_LAYOUT_CONSTANTS.COMPOSER_TEXTAREA_MAX_HEIGHT) + 'px';
+  }, [draft, showComposer]);
 
   // Close context menu when clicking outside
   useEffect(() => {
@@ -565,7 +846,7 @@ export function PetApp() {
     setSendFlight(flight);
     setNotice('');
     setForcedReplyId(null);
-    setComposerOpen(false);
+    requestCloseComposer();
     stopReading();
     try {
       await postAction({ id: flight.id, kind: 'send', text, deviceId: state.deviceId, botId: state.botId });
@@ -573,7 +854,7 @@ export function PetApp() {
       if (sendFlightRef.current === flight) { sendFlightRef.current = null; setSendFlight(null); }
       report(error);
     }
-  }, [report, stopReading, t]);
+  }, [report, requestCloseComposer, stopReading, t]);
 
   const submitQuestionnaire = useCallback(async (input: QuestionnaireSubmitPayload): Promise<unknown> => {
     const state = snapshotRef.current;
@@ -746,7 +1027,7 @@ export function PetApp() {
     }
 
     // Priority 2b: Local error notice, or offline/unconfigured state after user clicks mascot
-    const connError = snapshot.connection === 'ready' || composerOpen ? snapshot.error : null;
+    const connError = snapshot.connection === 'ready' || showComposer ? snapshot.error : null;
     const errText = notice || voiceStatus.error || connError;
     if (errText && !dismissedIds.has(`err:${errText}`)) {
       return {
@@ -842,7 +1123,6 @@ export function PetApp() {
     return null;
   }, [
     busy,
-    composerOpen,
     ctxMenuOpen,
     dismissedIds,
     dndMode,
@@ -854,12 +1134,14 @@ export function PetApp() {
     recording,
     revealedProactiveId,
     settingsOpen,
+    showComposer,
     snapshot,
     t,
     transcribing,
     tuckedProactiveIds,
     voiceStatus.error,
   ]);
+  activeBubbleRef.current = activeBubble;
 
   // Clear revealed proactive alert state when alert clears or rotates to a newer resultId
   useEffect(() => {
@@ -902,9 +1184,11 @@ export function PetApp() {
   // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
   const syncNativeLayoutRef = useRef<() => void>(() => {});
   const syncNativeLayout = useCallback(() => {
+    if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
     const env = envelopeRef.current;
     const stage = stageRef.current;
     if (!env || !stage) return;
+    resetStageScroll();
 
     // Use unscaled offset dimensions (immune to CSS transform animations and LTR left-overflow).
     let contentW = env.offsetWidth;
@@ -914,20 +1198,26 @@ export function PetApp() {
       if (child.offsetWidth > contentW) contentW = child.offsetWidth;
     }
 
-    const envW = Math.ceil(contentW + STAGE_PAD * 2);
-    const envH = Math.ceil(contentH + STAGE_PAD * 2);
+    const envW = Math.ceil(contentW + PET_LAYOUT_CONSTANTS.STAGE_PAD * 2);
+    const envH = Math.ceil(contentH + PET_LAYOUT_CONSTANTS.STAGE_PAD * 2);
     const hasOverlay = Boolean(activeBubble || showComposer || ctxMenuOpen);
-    const width = hasOverlay ? Math.min(MAX_STAGE_W, Math.max(COLLAPSED_W, envW)) : COLLAPSED_W;
-    const height = hasOverlay ? Math.min(MAX_STAGE_H, Math.max(COLLAPSED_H, envH)) : COLLAPSED_H;
+    const width = hasOverlay
+      ? Math.min(PET_LAYOUT_CONSTANTS.MAX_STAGE_W, Math.max(PET_LAYOUT_CONSTANTS.COLLAPSED_W, envW))
+      : PET_LAYOUT_CONSTANTS.COLLAPSED_W;
+    const height = hasOverlay
+      ? Math.min(PET_LAYOUT_CONSTANTS.MAX_STAGE_H, Math.max(PET_LAYOUT_CONSTANTS.COLLAPSED_H, envH))
+      : PET_LAYOUT_CONSTANTS.COLLAPSED_H;
     const composerEl = composerAreaRef.current;
     const composerHeight = showComposer && composerEl
-      ? Math.ceil(composerEl.offsetHeight + COMPOSER_GAP)
+      ? Math.ceil(composerEl.offsetHeight + PET_LAYOUT_CONSTANTS.COMPOSER_GAP)
       : 0;
 
     // Only include hit-rects once the viewport has caught up to the target size,
     // preventing stale clipped regions while the window is still growing.
-    const sizeMatches =
-      Math.abs(stage.clientWidth - width) <= 4 && Math.abs(stage.clientHeight - height) <= 4;
+    const sizeMatches = doesViewportMatchLayout(
+      { width: stage.clientWidth, height: stage.clientHeight },
+      { width, height },
+    );
 
     const hitRects: PetWindowHitRect[] = [];
     if (sizeMatches) {
@@ -963,39 +1253,44 @@ export function PetApp() {
     void petWindow('set-layout', undefined, { width, height, composerHeight, focus: shouldFocus, hitRects })
       .then((nextState) => {
         applyWindowState(nextState);
-        if (!sizeMatches) {
+        if (!sizeMatches && shouldSyncNormalNativeLayout(composerStateRef.current.phase)) {
           requestAnimationFrame(() => syncNativeLayoutRef.current());
         }
       })
       .catch(() => { /* Window may be closing */ });
-  }, [activeBubble, applyWindowState, ctxMenuOpen, showComposer]);
+  }, [activeBubble, applyWindowState, ctxMenuOpen, resetStageScroll, showComposer]);
 
   syncNativeLayoutRef.current = syncNativeLayout;
 
   useLayoutEffect(() => {
-    const raf = requestAnimationFrame(syncNativeLayout);
-    return () => cancelAnimationFrame(raf);
-  }, [syncNativeLayout, hoveringDock, activeBubble, composerOpen, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
+    if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
+    syncNativeLayout();
+  }, [syncNativeLayout, hoveringDock, activeBubble, composerPhase, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
 
   useEffect(() => {
     const env = envelopeRef.current;
     const stage = stageRef.current;
     if (!env || typeof ResizeObserver !== 'function') return;
     let raf = 0;
-    const schedule = () => {
+    const handleViewportOrContentChange = () => {
+      if (composerStateRef.current.phase === 'opening') {
+        tryCommitComposerOpen(false);
+        return;
+      }
+      if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => syncNativeLayoutRef.current());
     };
-    const observer = new ResizeObserver(schedule);
+    const observer = new ResizeObserver(handleViewportOrContentChange);
     observer.observe(env);
     if (stage) observer.observe(stage);
-    window.addEventListener('resize', schedule);
+    window.addEventListener('resize', handleViewportOrContentChange);
     return () => {
       cancelAnimationFrame(raf);
       observer.disconnect();
-      window.removeEventListener('resize', schedule);
+      window.removeEventListener('resize', handleViewportOrContentChange);
     };
-  }, [syncNativeLayout]);
+  }, [tryCommitComposerOpen]);
 
   const avatar = snapshot.avatar ?? resolveBotAvatarPreset(targetKey(snapshot), snapshot.botName, true);
   const mascotState = recording ? 'listening' : transcribing ? 'thinking' : speaking ? 'dictating' : snapshot.mascotState;
@@ -1021,6 +1316,7 @@ export function PetApp() {
       : 'attention';
 
   const canRecallReply = Boolean(latestReply && (!activeBubble || activeBubble.kind !== 'speech'));
+  canRecallReplyRef.current = canRecallReply;
 
   return (
     <main
@@ -1029,6 +1325,7 @@ export function PetApp() {
       data-dock-side={layout.dockSide}
       data-panel-side={layout.panelSide}
       data-composer-open={showComposer ? 'true' : 'false'}
+      data-composer-phase={composerPhase}
       data-composited={layout.composited ? 'true' : 'false'}
       aria-label={t('PiBot 桌宠', 'PiBot desktop pet')}
     >
@@ -1063,11 +1360,14 @@ export function PetApp() {
                     className="pet-ctx-item"
                     onClick={() => {
                       setCtxMenuOpen(false);
-                      focusPendingRef.current = true;
-                      setComposerOpen((v) => !v);
+                      if (composerStateRef.current.phase === 'open' || composerStateRef.current.phase === 'opening') {
+                        requestCloseComposer();
+                      } else {
+                        requestOpenComposer({ ignoreCurrentBubble: true });
+                      }
                     }}
                   >
-                    <span>{composerOpen ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
+                    <span>{composerRequested ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
                   </button>
                   <button
                     type="button"
@@ -1137,6 +1437,7 @@ export function PetApp() {
                       setCtxMenuOpen(false);
                       cancelRecording();
                       stopReading();
+                      requestCloseComposer({ immediate: true });
                       focusPendingRef.current = true;
                       setSettingsOpen(true);
                     }}
@@ -1473,16 +1774,16 @@ export function PetApp() {
         {/* 2. MASCOT ACTOR DOCK */}
         <div
           ref={dockRef}
-          className={`pet-dock${showComposer ? ' is-composer-open' : ''}`}
+          className={`pet-dock${dockCompact ? ' is-composer-open' : ''}`}
           data-mood={petMood}
           onPointerEnter={() => setHoveringDock(true)}
           onPointerLeave={() => setHoveringDock(false)}
         >
           {/* Hover micro action rail (hidden when idle; zero permanent clutter) */}
-          {!showComposer ? (
+          {!dockCompact ? (
             <div
-              className={`pet-hover-rail${hoveringDock ? ' is-shown' : ''}`}
-              data-pet-hit={hoveringDock ? 'true' : undefined}
+              className={`pet-hover-rail${hoveringDock && composerPhase === 'closed' ? ' is-shown' : ''}`}
+              data-pet-hit={hoveringDock && composerPhase === 'closed' ? 'true' : undefined}
               data-pet-hit-pad="6"
               data-pet-hit-radius="16"
               aria-label={t('桌宠快捷操作', 'Quick pet actions')}
@@ -1526,6 +1827,7 @@ export function PetApp() {
                 onClick={() => {
                   cancelRecording();
                   stopReading();
+                  requestCloseComposer({ immediate: true });
                   focusPendingRef.current = true;
                   setSettingsOpen((v) => !v);
                 }}
@@ -1607,9 +1909,9 @@ export function PetApp() {
                 focusPendingRef.current = true;
                 return;
               }
-              const next = !composerOpen;
-              if (next) {
-                focusPendingRef.current = true;
+              const isOpenOrOpening =
+                composerStateRef.current.phase === 'open' || composerStateRef.current.phase === 'opening';
+              if (!isOpenOrOpening) {
                 if (snapshotRef.current.connection !== 'ready') {
                   setDismissedIds((prev) => {
                     const cleaned = new Set<string>();
@@ -1618,10 +1920,10 @@ export function PetApp() {
                   });
                 }
                 void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(() => {});
+                requestOpenComposer();
               } else {
-                cancelRecording();
+                requestCloseComposer();
               }
-              setComposerOpen(next);
             }}
           >
             <GrokBotAnimatedMark
@@ -1643,22 +1945,53 @@ export function PetApp() {
           <div
             className="pet-composer-area"
             ref={composerAreaRef}
+            onFocus={() => {
+              const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                kind: 'composer-focus',
+                now: Date.now(),
+              });
+              updateComposerState(result.state);
+            }}
             onBlur={(event) => {
               if (recordingRef.current) return;
               const next = event.relatedTarget as Node | null;
               if (next && event.currentTarget.contains(next)) return;
               if (next && dockRef.current?.contains(next)) return;
               if (next) {
-                setComposerOpen(false);
+                const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                  kind: 'composer-blur',
+                  targetInComposer: false,
+                  targetInDock: false,
+                  hasRelatedTarget: true,
+                  documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+                  now: Date.now(),
+                  isRecording: Boolean(recordingRef.current),
+                  isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+                });
+                updateComposerState(result.state);
+                if (result.shouldDismiss) requestCloseComposer();
                 return;
               }
               requestAnimationFrame(() => {
-                if (!showComposerRef.current || recordingRef.current) return;
+                if (composerStateRef.current.phase !== 'open' || recordingRef.current) return;
                 if (avatarPressValidRef.current || pointerRef.current) return;
                 const active = document.activeElement;
-                if (composerAreaRef.current && active && composerAreaRef.current.contains(active)) return;
-                if (active && dockRef.current?.contains(active)) return;
-                setComposerOpen(false);
+                const targetInComposer = Boolean(
+                  composerAreaRef.current && active && composerAreaRef.current.contains(active),
+                );
+                const targetInDock = Boolean(active && dockRef.current?.contains(active));
+                const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                  kind: 'composer-blur',
+                  targetInComposer,
+                  targetInDock,
+                  hasRelatedTarget: false,
+                  documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+                  now: Date.now(),
+                  isRecording: Boolean(recordingRef.current),
+                  isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+                });
+                updateComposerState(result.state);
+                if (result.shouldDismiss) requestCloseComposer();
               });
             }}
           >
@@ -1671,7 +2004,7 @@ export function PetApp() {
                 const target = event.target as HTMLElement | null;
                 if (target && target.closest('textarea, button')) return;
                 event.preventDefault();
-                composerRef.current?.focus();
+                focusComposerNoScroll();
               }}
               onSubmit={(event) => {
                 event.preventDefault();
@@ -1744,7 +2077,7 @@ export function PetApp() {
                         botId: state.botId,
                       }).catch(report);
                     }
-                    composerRef.current?.focus();
+                    focusComposerNoScroll();
                   }}
                 >
                   <Square size={11} fill="currentColor" aria-hidden="true" />
@@ -1777,7 +2110,7 @@ export function PetApp() {
                       return next;
                     });
                     setForcedReplyId(rid);
-                    composerRef.current?.focus();
+                    focusComposerNoScroll();
                   }}
                 >
                   <History size={11} aria-hidden="true" />
