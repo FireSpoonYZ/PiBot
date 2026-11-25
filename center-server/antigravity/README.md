@@ -44,6 +44,6 @@ AGY 强制 Code Mode only：普通工具在 `codemode` 内渐进发现和执行�
 
 ## 实机验收
 
-运行 `scripts/verify-antigravity-appendonly.mjs` 可在隔离目录启动完整 Host、Center 和本地 HTTPS/WSS，连接真实 AGY，验证增量传输、Code Mode 工具图片、原生会话重启、SOUL/clear、用户图片和 model-only 问卷续接。它不连接或修改运行中的 PiBot 服务。
+运行 `scripts/verify-antigravity-appendonly.mjs` 可在隔离目录启动完整 Host、Center 和本地 HTTPS/WSS，连接真实 AGY，验证增量传输、Code Mode 工具图片、原生会话重启、SOUL/clear、用户图片和 model-only 问卷续接。Hindsight 使用脚本内的隔离协议 fixture，经真实 Center 配置和 Host 插件验证 autoRetain、显式 recall 与 clear 后 bank 保留。它不连接或修改运行中的 PiBot 或记忆服务。
 
 先准备依赖和 `npm run center:prepare`；提供已登录的隔离 `PIBOT_AGY_HOME`、`PIBOT_AGY_BIN`，并准备本机 Cua driver（或设置 `E_LAUNCHER_CUA_DRIVER`）。脚本使用 OpenSSL 和 Python Pillow 生成本地测试证书与随机图片，结果写入所打印目录的 `result.json`。不能使用日常 `~/.gemini` 作为验收 profile。

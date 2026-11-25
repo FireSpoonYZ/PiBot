@@ -44,6 +44,25 @@ const ownerPassword = randomBytes(24).toString('hex');
 const credentials = { encryptionKey: randomBytes(32), sessionKey: randomBytes(32),
  ownerPasswordHash: hashOwnerPassword(ownerPassword) };
 const report = {root,model:null,checks:[],wire:[],native:[]};
+const memory = { banks:new Set(), operations:new Set(), retained:[], recalled:[] };
+const secretMemory='MEMORY_'+randomBytes(7).toString('hex').toUpperCase();
+const memoryServer=http.createServer(async(req,res)=>{
+ const chunks=[];for await(const chunk of req)chunks.push(chunk);
+ const body=chunks.length?JSON.parse(Buffer.concat(chunks)):null;
+ const url=new URL(req.url,'http://localhost'),parts=url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+ const bank=parts[3];let status=200,result;
+ if(req.method==='GET'&&url.pathname.endsWith('/banks'))result={banks:[...memory.banks].map(bank_id=>({bank_id})),total:memory.banks.size};
+ else if(req.method==='PUT'&&parts.length===4){memory.banks.add(bank);result={bank_id:bank};}
+ else if(req.method==='GET'&&parts[4]==='operations')result={operation_id:parts[5],status:memory.operations.has(parts[5])?'completed':'not_found'};
+ else if(req.method==='POST'&&parts[4]==='memories'&&parts.length===5){
+  memory.retained.push({bank,body});memory.operations.add(body.operation_id);
+  result={success:true,bank_id:bank,async:true,operation_id:body.operation_id};
+ }else if(req.method==='POST'&&url.pathname.endsWith('/memories/recall')){
+  memory.recalled.push({bank,body});result={results:[{id:'acceptance-memory',text:secretMemory,type:'observation'}],source_facts:{}};
+ }else{status=404;result={error:'Unexpected fixture request'};}
+ res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(result));
+});
+await new Promise(resolve=>memoryServer.listen(0,'127.0.0.1',resolve));
 const save = () => fs.writeFileSync(path.join(root,'result.json'), JSON.stringify(report,null,2));
 const check = (name, detail = {}) => { report.checks.push({name,...detail}); save(); console.log('PASS', name, JSON.stringify(detail)); };
 let center, hostService, control, owner;
@@ -127,6 +146,23 @@ try {
  ({deviceToken}=await owner.request('POST','/api/devices',{deviceId,displayName:'AGY isolated acceptance',platform:'linux',replaceExisting:true}));
  await startHost();
  check('full Host control and WSS relay online');
+ const memoryInstall=(await owner.request('GET','/api/capabilities')).find(i=>i.packageId==='e-launcher.hindsight');
+ assert.ok(memoryInstall);assert.equal(memoryInstall.targetVersion,'1.2.2');
+ const memoryPath='/api/installations/'+memoryInstall.installationId;
+ const memoryConfig=await owner.request('GET',memoryPath+'/config');
+ await owner.request('PUT',memoryPath+'/config',{expectedRevision:memoryConfig.revision,globalConfig:{
+  baseUrl:'http://127.0.0.1:'+memoryServer.address().port,mode:'read-write',sharedMemory:false}});
+ const enabled=await owner.request('POST',memoryPath+'/enable',{requestId:'enable-acceptance-memory'});
+ await until(async()=>{
+  const op=await owner.request('GET','/api/operations/'+enabled.operationId);
+  assert.notEqual(op.phase,'failed',JSON.stringify(op));return op.phase==='applied';
+ },'enable Hindsight');
+ const bindingPath='/api/devices/'+deviceId+'/bots/'+bot.botId+'/capabilities/'+memoryInstall.installationId;
+ const binding=await owner.request('GET',bindingPath);
+ await owner.request('PUT',bindingPath,{expectedRevision:binding.revision,enabled:true,
+  overrides:{projectId:path.basename(root),mode:'read-write',sharedMemory:false}});
+ check('isolated Hindsight 1.2.2 configured through real Center owner API');
+
  const provider=await owner.request('GET','/api/providers/antigravity-acp');
  await owner.request('PUT','/api/providers/antigravity-acp',{expectedRevision:provider.revision,value:{
   name:provider.name,api:provider.api,baseUrl:provider.baseUrl,credentialRef:provider.credentialRef,
@@ -153,6 +189,15 @@ try {
  done(follow);assert.ok(follow.answerText.includes(expected));assert.equal(follow.nativePrompts,1);
  assert.equal(report.native.at(-1).id,firstId);assert.equal(report.wire.at(-1).images.length,0);
  check('incremental next turn preserves native memory without uploading the old image');
+ await until(()=>memory.retained.length>0,'Hindsight auto-retain');
+ assert.equal(memory.recalled.length,0,'AGY must not automatically recall');
+ const memoryBank=memory.retained[0].bank;
+ const recallTool='hindsight_'+createHash('sha256').update(JSON.stringify([memoryInstall.installationId,bot.botId])).digest('hex').slice(0,32)+'_recall';
+ const recalled=await send('explicit-memory','In codemode, inspect describeTool("'+recallTool+'"), then call tools["'+recallTool+'"]({query:"acceptance memory"}) and output the returned content with text(). Return only the exact memory text you received. Do not guess.');
+ done(recalled);assert.ok(recalled.answerText.includes(secretMemory),'real AGY must read the memory tool result');
+ assert.ok(memory.recalled.length>0);
+ check('Hindsight auto-retain and explicit codemode recall work with real AGY, without automatic recall',
+  {answer:recalled.answerText,retains:memory.retained.length,recalls:memory.recalled.length});
  const history=await control.history(bot.botId,{limit:100});
  const userEntry=history.items.find(e=>e.model?.some(m=>m.role==='user'));
  assert.ok(userEntry);
@@ -210,12 +255,16 @@ try {
  done(answered);assert.match(answered.answerText,/Copper|铜/i);
  assert.equal(report.native.filter(p=>p.phase==='question-answer').length,1,'answer is exactly one real new input');
  check('direct model-only questionnaire resumes with the human answer',{answer:answered.answerText});
+ await until(()=>memory.retained.some(r=>JSON.stringify(r.body).includes('NEW_SOUL_OK')),'retain after clear');
+ assert.ok(memory.retained.every(r=>r.bank===memoryBank));
+ check('Hindsight bank survives manual clear',{retains:memory.retained.length,banks:memory.banks.size});
  report.ok=true;save();console.log('ACCEPTANCE_OK',root);
 } catch(error) {
  report.ok=false;report.error={message:error.message,stack:error.stack};save();console.error(error);process.exitCode=1;
 } finally {
  await hostService?.close().catch(e=>console.error('Host close:',e.message));
  await center?.close().catch(e=>console.error('Center close:',e.message));
+ await new Promise(resolve=>{memoryServer.close(resolve);memoryServer.closeAllConnections();});
  for(const socket of sockets)socket.destroy();
  await new Promise(resolve=>proxy.close(resolve));
  AcpConnection.prototype.prompt=originalPrompt;save();
