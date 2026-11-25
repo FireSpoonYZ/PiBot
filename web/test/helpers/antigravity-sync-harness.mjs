@@ -1,7 +1,8 @@
+import { createAntigravityHistoryTransport } from '../../../host-core/antigravity-delta.js';
 // Shared controlled ACP fixture. Real Host, durable SDK and Center remain active.
 import fs from 'node:fs';
 import path from 'node:path';
-import { openAntigravity } from '../../../center-server/antigravity/index.js';
+import { openAntigravity as openNativeAntigravity } from '../../../center-server/antigravity/index.js';
 import { SharedMcpBridge } from '../../../center-server/antigravity/mcp-bridge.ts';
 import { AcpDriver } from '../../../center-server/antigravity/vendor/acp/driver.ts';
 import { openHost } from '../../../host-core/host.js';
@@ -185,6 +186,7 @@ function createControlledAcpDriverHarness(t) {
         model: request.model,
         conversationId: request.conversationId ?? null,
         prompt: request.prompt,
+        systemPrompt: request.systemPrompt, systemHash: request.systemHash,
         images: request.images ? request.images.map((img) => ({ ...img })) : undefined,
         contextBlock: request.contextBlock ? { ...request.contextBlock } : undefined,
         turnRecall: request.turnRecall,
@@ -196,6 +198,7 @@ function createControlledAcpDriverHarness(t) {
 
     let settled = false;
     const finish = (outcome) => {
+      outcome = { promptAttempted: !outcome.sessionLoadFailed, promptTerminal: !outcome.sessionLoadFailed, ...outcome };
       if (settled) return;
       settled = true;
       request.signal?.removeEventListener('abort', onAbort);
@@ -211,23 +214,54 @@ function createControlledAcpDriverHarness(t) {
     request.signal?.addEventListener('abort', onAbort, { once: true });
 
     const ctx = { record, request: record.request, mcpTools, mcp: s.mcp, conversationId: convId, signal: request.signal, emit: ctrl.emit, finish };
-    queueMicrotask(() => {
+    queueMicrotask(async () => {
       if (settled) return;
       const fn = onRunHandler ?? (async (turnCtx) => {
         const reply = `ack:${turnCtx.conversationId}:turn-${runs.length}`;
         turnCtx.emit({ type: 'text', delta: reply });
         turnCtx.finish({ conversationId: turnCtx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
       });
-      Promise.resolve(fn(ctx)).catch((err) => {
+      let promptAttempted = false;
+      try {
+        await request.beforePrompt?.({ conversationId: convId });
+        if (settled) return;
+        promptAttempted = true;
+        await fn(ctx);
+      } catch (err) {
         record.error = err;
-        finish({ conversationId: s.conversationId, status: 'ERROR', response: '', error: err instanceof Error ? err.message : String(err), finished: true, aborted: false });
-      });
+        finish({ conversationId: s.conversationId, status: 'ERROR', response: '', error: err instanceof Error ? err.message : String(err), finished: true, aborted: false, promptAttempted, promptTerminal: promptAttempted });
+      }
     });
     return ctrl.handle;
   });
 
   t.after(() => t.mock.restoreAll());
   return { runs, setOnRun: (fn) => { onRunHandler = fn; }, getDriverState: stateFor };
+}
+
+function openAntigravity(options) {
+  const service = openNativeAntigravity(options);
+  const hosts = new Map();
+  return { ...service, async *stream(params, options) {
+    if (params.delta) {
+      yield* service.stream(params, options);
+      return;
+    }
+    let host = hosts.get(params.deviceId);
+    if (!host) { host = createAntigravityHistoryTransport(); hosts.set(params.deviceId, host); }
+    try {
+      const prepared = host.prepare(params);
+      for await (const event of service.stream({ ...prepared.payload, deviceId: params.deviceId,
+        ...(params.requestId ? { requestId: params.requestId } : {}) }, options)) {
+        if (event.type === 'history_ack') prepared.acknowledge(event);
+        else yield event;
+      }
+    } catch (error) {
+      yield { type: 'error', reason: 'error', error: {
+        ...asstText('', Date.now()), stopReason: 'error', errorMessage: error.message,
+      } };
+    }
+  } };
 }
 
 function openIsolatedAntigravity(rootDir) {
@@ -265,7 +299,7 @@ async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads, cal
           deviceId,
           sessionId: payload.sessionId,
           modelId: payload.modelId,
-          messages: payload.messages,
+          ...(payload.delta ? { delta: payload.delta } : { messages: payload.messages }),
           ...(payload.reasoning !== undefined ? { reasoning: payload.reasoning } : {}),
           ...(Object.hasOwn(payload, 'turnContext') ? { turnContext: payload.turnContext } : {}),
         },
