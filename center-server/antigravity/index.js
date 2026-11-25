@@ -382,6 +382,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		let consumerReleased = false;
 		let nativeEpochForRequest = null;
 		let dispatchClaimed = false;
+		let intentMutated = false;
 		let accepted;
 		let existing;
 		let cleanMessages;
@@ -426,7 +427,10 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		const rollbackUnsent = async (outcome) => {
 			// Cancellation may settle the driver while beforePrompt is still flushing.
 			if (intentWrite) await intentWrite.catch(() => {});
-			if (toolContinuation || outcome?.promptAttempted !== false || !dispatchClaimed) return;
+			if (toolContinuation || outcome?.promptAttempted !== false || !intentMutated) return;
+			// A failed durability barrier can still leave the in-memory intent changed.
+			dispatchClaimed = false;
+			nativeAttempted = false;
 			const latest = store.get(slot.key);
 			store.set(slot.key, {
 				...latest, conversationId: createdNativeId ?? priorNative.conversationId,
@@ -435,8 +439,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				pendingToolCallIds: priorNative.pendingToolCallIds ?? [],
 			});
 			await store.flush();
-			dispatchClaimed = false;
-			nativeAttempted = false;
+			intentMutated = false;
 		};
 		const emitStoredReply = (reply) => {
 			if (reply.reason === "error" || reply.reason === "aborted") {
@@ -621,6 +624,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 									...inputs.map(({ index }) => index)])],
 								pendingToolCallIds: [],
 							});
+							intentMutated = true;
 							await store.flush();
 							dispatchClaimed = true;
 							throwIfCancelled();
@@ -660,7 +664,11 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				await abortSessionTurn(slot, "Antigravity stream interrupted").catch(() => {});
 			}
 			if (nativeHandle) {
-				await rollbackUnsent(await nativeHandle.outcome.catch(() => undefined)).catch(() => {});
+				try {
+					await rollbackUnsent(await nativeHandle.outcome.catch(() => undefined));
+				} catch (rollbackError) {
+					error = rollbackError;
+				}
 			}
 			const aborted = isCancelled() || error?.name === "AbortError";
 			const reason = aborted ? "aborted" : "error";
