@@ -1225,11 +1225,13 @@ a.ca-btn:focus {
   appearance: none;
   border: none;
   border-bottom: 1px solid var(--ca-border);
+  border-radius: 0;
   background: transparent;
   color: var(--ca-text);
   text-align: left;
   font: inherit;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   padding: 9px var(--space-3, 12px);
   display: flex;
   align-items: center;
@@ -1273,6 +1275,7 @@ a.ca-btn:focus {
 .ca-model-option-trigger {
   appearance: none;
   border: none;
+  border-radius: 0;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1282,10 +1285,15 @@ a.ca-btn:focus {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 0;
+  min-height: auto;
   flex: 1;
   padding: 9px var(--space-3, 12px);
   transition: background var(--ca-dur-fast) var(--ca-ease-out);
+}
+
+.ca-model-option-trigger .ca-mono,
+.ca-model-option-main .ca-mono {
+  overflow-wrap: anywhere;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -1438,7 +1446,8 @@ a.ca-btn:focus {
   font: inherit;
   font-size: var(--text-sm, 13px);
   white-space: nowrap;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   padding: 6px 10px;
   border-radius: 5px;
   cursor: pointer;
@@ -2691,7 +2700,8 @@ a.ca-btn:focus {
 .ca-google-choice {
   appearance: none;
   width: 100%;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   text-align: left;
   font: inherit;
   color: var(--ca-text);
@@ -2873,7 +2883,8 @@ a.ca-btn:focus {
 .ca-google-assistant-option {
   appearance: none;
   width: 100%;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   text-align: left;
   font: inherit;
   color: var(--ca-text);

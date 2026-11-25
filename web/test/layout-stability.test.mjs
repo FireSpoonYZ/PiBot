@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -794,4 +795,16 @@ test('F4 scope conversations cache isolates partitions, distinguishes miss vs em
   assert.deepEqual(readCachedScopeConversations(partA, failingStorage), []);
   assert.equal(writeCachedScopeConversations(partA, [roomOlder], failingStorage), false);
   assert.equal(removeCachedScopeConversation(partA, 'room-old', failingStorage), false);
+});
+
+test('center-admin scrollable flex column items do not shrink or collapse to zero min-height', () => {
+  const css = readFileSync(new URL('../src/center-admin/center-admin.css', import.meta.url), 'utf8');
+  for (const selector of ['.ca-model-option', '.ca-menu-item', '.ca-google-choice', '.ca-google-assistant-option']) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    const body = match[1];
+    assert.match(body, /flex-shrink\s*:\s*0\s*;/, `${selector} must set flex-shrink: 0 to prevent squishing inside scrollable flex columns`);
+    assert.doesNotMatch(body, /min-height\s*:\s*0\s*;/, `${selector} must not set min-height: 0 inside flex columns`);
+  }
 });
