@@ -52,7 +52,7 @@ body {
 button, textarea, input, select { font: inherit; color: inherit; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; cursor: pointer; }
 button:disabled { opacity: 0.45; cursor: default; }
-button:focus-visible, textarea:focus-visible { outline: 2px solid var(--signal-primary); outline-offset: 2px; }
+:where(button, textarea):focus-visible { outline: 2px solid var(--signal-primary); outline-offset: 2px; }
 button svg { flex: none; }
 
 /* ==========================================================================
@@ -717,7 +717,7 @@ button svg { flex: none; }
   pointer-events: auto;
   transition: border-color var(--dur-fast) var(--ease-out);
 }
-.pet-composer-pill:focus-within { border-color: var(--signal-primary-border); }
+.pet-composer-pill:focus-within { border-color: var(--ink-tertiary); }
 
 .pet-composer-input {
   flex: 1;
