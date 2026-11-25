@@ -10,6 +10,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 const history = (id, role, text, kind = 'pi.message') => ({ id, kind, messages: [{ role, text }] });
 const idle = () => ({
   busy: false, queuedCount: 0, tools: [], history: [history(1, 'assistant', 'Earlier reply')],
+  lastEntryId: 1,
   generation: null,
   activity: { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null },
 });
@@ -35,7 +36,8 @@ function harness(options = {}) {
     observe(identity, target, callback) {
       const watch = { identity, target, callback, closed: 0 };
       watches.push(watch);
-      queueMicrotask(() => callback({ frame: { type: 'snapshot', botId: target.botId, state: idle() } }));
+      const state = options.initialState?.() ?? idle();
+      queueMicrotask(() => callback({ frame: { type: 'snapshot', botId: target.botId, state } }));
       return { ready: Promise.resolve(), async close() { watch.closed++; } };
     },
     async pending(identity, op, params) {
@@ -220,6 +222,7 @@ test('pet projects active running and durable questionnaires, settled receipt, h
   const runningCards = projectPetCards({
     busy: true,
     queuedCount: 0,
+    lastEntryId: null,
     generation: null,
     history: [],
     tools: [
@@ -282,6 +285,7 @@ test('pet projects active running and durable questionnaires, settled receipt, h
   const durableCards = projectPetCards({
     busy: false,
     queuedCount: 0,
+    lastEntryId: 10,
     generation: null,
     tools: [],
     durableWaits: [{ installationId: 'inst-qa', conversationId: 7, requestId: 'req-qa-1' }],
@@ -300,6 +304,7 @@ test('pet projects active running and durable questionnaires, settled receipt, h
   const staleCards = projectPetCards({
     busy: false,
     queuedCount: 0,
+    lastEntryId: 11,
     generation: null,
     tools: [],
     durableWaits: [],
@@ -358,5 +363,59 @@ test('pet answer-questionnaire reuses callCapabilityAction answerQuestionnaire a
   assert.equal(call.params.installationId, 'inst-qa');
   assert.equal(call.params.request.botId, 'local-main');
   assert.deepEqual(call.params.request.input, payload);
+  h.controller.stop();
+});
+
+test('pet skips old progress, shows new results, and does not replay them on reopen', async () => {
+  const result = (id, presentation) => ({
+    id,
+    kind: 'pi.message',
+    messages: [{ role: 'toolResult', text: '', presentation }],
+  });
+  const task = (taskId, status = 'working') => ({
+    kind: 'task', version: 1, taskId, status, title: 'Update PiBot',
+    cardLabel: 'Progress', stepCount: { done: 3, total: 3 },
+  });
+  const todo = (...tasks) => ({ kind: 'todo', version: 1, installationId: 'inst-todo', tasks });
+  const todoItem = { id: 1, subject: 'Deploy PiBot', status: 'in_progress' };
+  let state = {
+    ...idle(),
+    history: [result(1, task('old')), result(2, todo(todoItem)), result(3, sampleQuestionnaire())],
+    lastEntryId: 3,
+    durableWaits: [{ installationId: 'inst-qa', conversationId: 7, requestId: 'req-qa-1' }],
+  };
+  const h = harness({ initialState: () => state });
+  const update = (...entries) => {
+    const changes = { history: [...state.history, ...entries], lastEntryId: entries.at(-1).id };
+    state = { ...state, ...changes };
+    h.watches.at(-1).callback({ frame: { type: 'update', botId: 'local-main', changes } });
+  };
+
+  h.controller.start();
+  await settle();
+  assert.equal(h.controller.snapshot().task, null);
+  assert.equal(h.controller.snapshot().todo, null);
+  assert.equal(h.controller.snapshot().questionnaire?.interactive, true);
+
+  // Fast tools can settle straight into history; no live slot is needed.
+  update(result(4, task('new')), result(5, task('other', 'done')), result(6, todo(todoItem)));
+  assert.equal(h.controller.snapshot().task?.taskId, 'new');
+  assert.equal(h.controller.snapshot().todo?.tasks.length, 1);
+
+  update(result(7, task('new', 'done')), result(8, todo()));
+  assert.equal(h.controller.snapshot().task, null);
+  assert.equal(h.controller.snapshot().todo, null);
+
+  update(result(9, task('before-close')), result(10, todo(todoItem)));
+  h.controller.stop();
+  const beforeReopen = h.snapshots.length;
+  h.controller.start();
+  await h.controller.handleAction({ id: 'reopen', kind: 'ready' });
+  await settle();
+  assert.equal(h.watches.length, 2);
+  for (const snapshot of h.snapshots.slice(beforeReopen)) {
+    assert.equal(snapshot.task, null);
+    assert.equal(snapshot.todo, null);
+  }
   h.controller.stop();
 });

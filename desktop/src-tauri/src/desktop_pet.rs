@@ -887,6 +887,7 @@ fn apply_layout(
 
 fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
   let window = WebviewWindowBuilder::new(app, PET_LABEL, WebviewUrl::App("index.html?view=pet".into()))
+    // desktop-pet.kwinrule matches "PiBot" exactly; the main window is "Pi Bot".
     .title("PiBot")
     .inner_size(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1)
     .decorations(false)

@@ -72,7 +72,7 @@ function readQuestionnaire(value: unknown): QuestionnairePresentation | null {
 
 function readTodo(value: unknown): TodoPresentation | null {
   if (!isRecord(value) || value.version !== 1 || value.kind !== 'todo') return null;
-  if (!isNonEmpty(value.installationId) || !Array.isArray(value.tasks) || value.tasks.length === 0) return null;
+  if (!isNonEmpty(value.installationId) || !Array.isArray(value.tasks)) return null;
   const valid = value.tasks.every((task) =>
     isRecord(task) &&
     isSafeInt(task.id) &&
@@ -207,6 +207,7 @@ export function projectPetCards(
   live: BotLiveState,
   activity: BotActivity,
   connectionReady: boolean,
+  progressBaselineId = 0,
 ): PetProjectedCards {
   const history = Array.isArray(live.history) ? live.history : [];
   const tools = Array.isArray(live.tools) ? live.tools : [];
@@ -224,10 +225,18 @@ export function projectPetCards(
 
   let questionnaire: PetActiveQuestionnaire | null = null;
   let settledQuestionnaire: QuestionnairePresentation | null = null;
-  let todo: TodoPresentation | null = null;
-  let task: PetTaskCard | null = null;
   let handoff: PetHandoffCard | null = null;
   let activeToolName: string | null = null;
+  const seenTaskIds = new Set<string>();
+  const progress: Pick<PetProjectedCards, 'todo' | 'task'> = { todo: null, task: null };
+  function collectProgress(presentation: unknown): void {
+    progress.todo ??= readTodo(presentation);
+    if (progress.task) return;
+    const task = readTask(presentation);
+    if (!task || seenTaskIds.has(task.taskId)) return;
+    seenTaskIds.add(task.taskId);
+    if (task.status !== 'done' && task.status !== 'cancelled') progress.task = task;
+  }
 
   // 1) Scan live tool slots (newest first) for active presentations & tool names.
   for (let i = tools.length - 1; i >= 0; i -= 1) {
@@ -259,19 +268,11 @@ export function projectPetCards(
     if (!handoff && tool.status === 'running') {
       handoff = readHandoff(pres, tool.callId);
     }
-    if (!todo) {
-      todo = readTodo(pres);
-    }
-    if (!task) {
-      const parsedTask = readTask(pres);
-      if (parsedTask && (parsedTask.status === 'triaging' || parsedTask.status === 'working' || parsedTask.status === 'waiting')) {
-        task = parsedTask;
-      }
-    }
+    collectProgress(pres);
   }
 
   // 2) Scan post-reset history (newest first) for durable pending questionnaires,
-  //    recently settled questionnaires, and fallback todo/task/google-setup cards.
+  //    recently settled questionnaires, google-setup handoff, and post-baseline todo/task progress.
   const seenGoogleSetupRuns = new Set<string>();
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const item = history[i];
@@ -309,14 +310,8 @@ export function projectPetCards(
         }
       }
 
-      if (!todo) {
-        todo = readTodo(rawPres);
-      }
-      if (!task) {
-        const parsedTask = readTask(rawPres);
-        if (parsedTask && (parsedTask.status === 'triaging' || parsedTask.status === 'working' || parsedTask.status === 'waiting')) {
-          task = parsedTask;
-        }
+      if (item.id > progressBaselineId) {
+        collectProgress(rawPres);
       }
     }
   }
@@ -325,8 +320,8 @@ export function projectPetCards(
     activeToolName,
     questionnaire,
     settledQuestionnaire,
-    todo,
-    task,
+    todo: progress.todo?.tasks.length ? progress.todo : null,
+    task: progress.task,
     handoff,
   };
 }
@@ -416,6 +411,8 @@ export function createDesktopPetController(
     observationEpoch += 1;
     const previous = observation;
     observation = null;
+    live = null;
+    value = { ...value, todo: null, task: null };
     if (previous) void previous.close();
   }
 
@@ -423,13 +420,11 @@ export function createDesktopPetController(
     closeObservation();
     identity = null;
     bot = null;
-    live = null;
     publish({
       botId: null, botName: 'PiBot', avatar: null, messages: [],
       activity: resolveBotActivity(null), mascotState: 'idle',
       streamingText: '', generationId: null, canStop: false,
-      activeToolName: null, questionnaire: null, settledQuestionnaire: null,
-      todo: null, task: null, handoff: null,
+      activeToolName: null, questionnaire: null, settledQuestionnaire: null, handoff: null,
     });
   }
 
@@ -445,7 +440,7 @@ export function createDesktopPetController(
     });
   }
 
-  function applyLive(next: BotLiveState): void {
+  function applyLive(next: BotLiveState, progressBaselineId: number): void {
     const previous = live;
     live = next;
     const activity = resolveBotActivity(next);
@@ -455,7 +450,7 @@ export function createDesktopPetController(
       generationSerial += 1;
       generationId = value.deviceId + ':' + value.botId + ':' + generationSerial;
     }
-    const cards = projectPetCards(next, activity, true);
+    const cards = projectPetCards(next, activity, true, progressBaselineId);
     const activeTool = next.tools.find((tool) => tool.status === 'running')
       ?? next.tools.find((tool) => tool.status === 'pending');
     publish({
@@ -483,10 +478,10 @@ export function createDesktopPetController(
 
   function watch(target: DesktopIdentity, primary: BotDirectoryEntry): void {
     closeObservation();
-    live = null;
     const epoch = observationEpoch;
     const key = observedConnection;
     const current = () => active && epoch === observationEpoch && key === connectionKey(api);
+    let progressBaselineId = 0;
     try {
       const handle = api.observe(target, { kind: 'primary', botId: primary.botId }, (event) => {
         if (!current()) return;
@@ -501,9 +496,11 @@ export function createDesktopPetController(
         }
         if (!('botId' in frame) || 'scopeId' in frame || frame.botId !== primary.botId) return;
         if (frame.type === 'snapshot') {
-          applyLive(frame.state);
+          // Existing tool results are history, not new progress.
+          progressBaselineId = frame.state.lastEntryId ?? 0;
+          applyLive(frame.state, progressBaselineId);
         } else if (live) {
-          applyLive({ ...live, ...frame.changes });
+          applyLive({ ...live, ...frame.changes }, progressBaselineId);
         }
       });
       observation = handle;
@@ -794,7 +791,6 @@ export function createDesktopPetController(
     unsubscribe?.();
     unsubscribe = null;
     closeObservation();
-    live = null;
   }
 
   async function send(action: Extract<DesktopPetAction, { kind: 'send' }>): Promise<DesktopPetResult> {
