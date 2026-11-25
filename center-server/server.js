@@ -10,7 +10,7 @@ import { registerAuth } from './auth.js';
 import { registerClientReleaseRoutes } from './client-releases.js';
 import { registerRoutes } from './routes.js';
 import { openOperations } from './operations/index.js';
-import { OPERATION_ERROR_STATUS } from './operations/errors.js';
+import { OPERATION_ERROR_MESSAGES, OPERATION_ERROR_STATUS } from './operations/errors.js';
 import { operationScopes } from '../center-contract/operations/index.js';
 import { registerMcpOAuth } from './mcp/oauth.js';
 import { validateClients, validateSupportedScopes } from './mcp/oauth-store.js';
@@ -139,7 +139,9 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       else if (error.statusCode === 400 && !Object.hasOwn(status, code)) code = 'INVALID_ARGUMENT';
       else if (['OFFLINE', 'NOT_CONNECTED', 'DISCONNECTED', 'CONNECT_FAILED'].includes(code)) code = 'DEVICE_OFFLINE';
       if (!Object.hasOwn(status, code)) code = 'INTERNAL_ERROR';
-      reply.code(status[code] || 500).send({ error: { code, message: code === 'INTERNAL_ERROR' ? 'Internal error' : code.replaceAll('_', ' ').toLowerCase() } });
+      const message = code === 'AGY_HISTORY_CHANGED' ? OPERATION_ERROR_MESSAGES[code]
+        : code === 'INTERNAL_ERROR' ? 'Internal error' : code.replaceAll('_', ' ').toLowerCase();
+      reply.code(status[code] || 500).send({ error: { code, message } });
     });
     // The relay shares this HTTP server: native ws noServer handleUpgrade on
     // /v1/link keeps first-frame auth, hello timeout, backpressure and

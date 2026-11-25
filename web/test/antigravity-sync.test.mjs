@@ -44,25 +44,30 @@ test('ACP /clear rotates the persisted Host identity and creates a clean native 
     await runtime.clearHistory(bot.botId);
     await send('after-clear', 'A new conversation starts here.');
     assert.notEqual(captured[0].sessionId, captured[1].sessionId);
-    assert.ok(!JSON.stringify(captured[1].messages).includes('OLD_HISTORY_SECRET_7'));
+    assert.ok(!JSON.stringify(captured[1].delta.messages).includes('OLD_HISTORY_SECRET_7'));
     assert.equal(driver.runs[1].request.conversationId, null);
     assert.notEqual(driver.runs[1].assignedConversationId, nativeId);
     assert.ok(!JSON.stringify(driver.runs[1].request).includes('OLD_HISTORY_SECRET_7'));
   });
 });
 
-test('ACP SOUL changes rebuild native context with updated instructions and retained conversation', async t => {
-  await realHostCase(t, async ({ driver, runtime, captured, bot, send }) => {
+test('ACP SOUL changes require explicit clear before updated instructions reach native', async t => {
+  await realHostCase(t, async ({ driver, env, runtime, captured, bot, send }) => {
     await send('before-soul', 'Hello.');
     const soul = await runtime.getBotSoul(bot.botId);
     const marker = 'NEW_SOUL_RULE_8_REQUIRED';
-    await runtime.setBotSoul(bot.botId, { expectedRevision: soul.revision, text: `${soul.text}\n${marker}` });
-    await send('after-soul', 'Please continue.');
-    assert.ok(JSON.stringify(captured[1].messages).includes(marker));
-    assert.ok(JSON.stringify(driver.runs[1].request).includes(marker));
+    await runtime.setBotSoul(bot.botId, { expectedRevision: soul.revision, text: soul.text + '\n' + marker });
+    await runtime.submit(bot.botId, { requestId: 'after-soul', text: 'Please continue.', origin: USER_ORIGIN });
+    const rejected = await env.waitForSubmission(bot.botId, 'after-soul');
+    assert.notEqual(rejected.status, 'done');
+    const history = await runtime.history(bot.botId, { limit: 30 });
+    assert.match(JSON.stringify(history), /AGY_HISTORY_CHANGED|\/clear/);
+    assert.equal(driver.runs.length, 1, 'changed Soul must not create or prompt another native session');
+    assert.equal(captured.length, 1, 'Host should reject changed configuration before upload');
+    await runtime.clearHistory(bot.botId);
+    await send('after-soul-clear', 'Start with the new Soul.');
+    assert.match(driver.runs[1].request.systemPrompt, new RegExp(marker));
     assert.equal(driver.runs[1].request.conversationId, null);
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('Hello.'));
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('ack:'));
   });
 });
 
@@ -74,85 +79,84 @@ function request(service, messages, sessionId = 'audit-session') {
 }
 const user = (text, timestamp = 10) => ({ role: 'user', content: text, timestamp });
 
-test('ACP catch-up preserves long history without acknowledging truncated content', async t => {
+test('ACP sends all unsent user inputs once without replaying acknowledged history', async t => {
   const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-digest-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-batch-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
-    const first = await request(service, [BASE_SYSTEM, user('initial')]);
-    const messages = [BASE_SYSTEM, user('initial'), first.terminal.message,
-      user('UNSENT_SECRET_9', 12), asstText('X'.repeat(9000), 13, 'other-provider'), user('back to agy', 14)];
+    const firstInput = [BASE_SYSTEM, user('initial')];
+    const first = await request(service, firstInput);
+    const longInput = 'UNSENT_SECRET_9 ' + 'X'.repeat(9000);
+    const messages = [...firstInput, first.terminal.message, user(longInput, 12), user('latest input', 14)];
     const second = await request(service, messages);
     assert.equal(second.terminal.reason, 'stop');
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('UNSENT_SECRET_9'));
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('X'.repeat(9000)));
-    assert.ok(!driver.runs[1].request.contextBlock.text.includes('[truncated]'));
+    assert.ok(driver.runs[1].request.prompt.includes(longInput));
+    assert.ok(driver.runs[1].request.prompt.includes('latest input'));
+    assert.equal(driver.runs[1].request.contextBlock, undefined);
+    assert.ok(!driver.runs[1].request.prompt.includes('ack:'));
     await request(service, [...messages, second.terminal.message, user('next', 16)]);
-    assert.equal(driver.runs[2].request.conversationId, driver.runs[1].assignedConversationId);
+    assert.equal(driver.runs[2].request.conversationId, driver.runs[0].assignedConversationId);
+    assert.ok(!driver.runs[2].request.prompt.includes(longInput));
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP new bindings replay retained own-provider assistant content', async t => {
+test('ACP new bindings reject retained assistant history instead of silently replaying it', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-new-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
-    await request(service, [BASE_SYSTEM, user('Earlier question'), asstText('ANSWER_ONLY_MARKER_10', 11), user('Use the earlier answer', 12)]);
-    assert.equal(driver.runs[0].request.conversationId, null);
-    assert.ok(driver.runs[0].request.contextBlock.text.includes('Earlier question'));
-    assert.ok(JSON.stringify(driver.runs[0].request).includes('ANSWER_ONLY_MARKER_10'));
+    const result = await request(service, [BASE_SYSTEM, user('Earlier question'), asstText('ANSWER_ONLY_MARKER_10', 11), user('Use the earlier answer', 12)]);
+    assert.equal(result.terminal.reason, 'error');
+    assert.match(result.terminal.error.errorMessage, /AGY_HISTORY_CHANGED.*\/clear/);
+    assert.equal(driver.runs.length, 0);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP Center restart restores the actual parked tool result in a rebuilt native context', async t => {
+test('ACP Center restart requires clear for a lost parked native continuation', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-park-'));
   let service = openIsolatedAntigravity(rootDir);
   try {
     driver.setOnRun(async ctx => {
-      if (driver.runs.length === 1) {
-        await ctx.mcp.handler.onToolCall('parked-id', 'read_file', { path: 'README.md' }, ctx.signal);
-        ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: '', finished: true, aborted: false });
-      } else {
-        ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'continued', finished: true, aborted: false });
-      }
+      await ctx.mcp.handler.onToolCall('parked-id', 'read_file', { path: 'README.md' }, ctx.signal);
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: '', finished: true, aborted: false });
     });
-    const initial = [BASE_SYSTEM, user('TRIGGER_PARK: read file')];
-    assert.equal((await request(service, initial)).terminal.reason, 'toolUse');
+    const initial = [BASE_SYSTEM, user('Read file')];
+    const first = await request(service, initial);
+    assert.equal(first.terminal.reason, 'toolUse');
     await service.close();
     service = openIsolatedAntigravity(rootDir);
-    const result = await request(service, [...initial, asstToolCall('parked-id', 'read_file', { path: 'README.md' }, 11), toolResult('parked-id', 'read_file', 'UNIQUE_TOOL_RESULT_11', 12)]);
-    assert.equal(result.terminal.reason, 'stop');
-    assert.equal(driver.runs[1].request.conversationId, null);
-    assert.ok(JSON.stringify(driver.runs[1].request).includes('UNIQUE_TOOL_RESULT_11'));
-    assert.ok(JSON.stringify(driver.runs[1].request).includes('parked-id'));
+    const result = await request(service, [...initial, first.terminal.message, toolResult('parked-id', 'read_file', 'UNIQUE_TOOL_RESULT_11', 12)]);
+    assert.equal(result.terminal.reason, 'error');
+    assert.match(result.terminal.error.errorMessage, /\/clear/);
+    assert.equal(driver.runs.length, 1, 'the real tool result cannot be replayed into a replacement native session');
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP session/load failure rebuilds full context before a single safe retry', async t => {
+test('ACP session/load failure asks for clear without creating a replacement session', async t => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-load-'));
   const captures = [];
   let newCount = 0;
   t.mock.getter(AcpConnection.prototype, 'alive', () => true);
   t.mock.method(AcpConnection.prototype, 'start', async () => {});
-  t.mock.method(AcpConnection.prototype, 'newSession', async () => ({ sessionId: `native-${++newCount}` }));
+  t.mock.method(AcpConnection.prototype, 'newSession', async () => ({ sessionId: 'native-' + ++newCount }));
   t.mock.method(AcpConnection.prototype, 'loadSession', async () => { throw new Error('session file missing'); });
   t.mock.method(AcpConnection.prototype, 'setConfigOption', async () => ({}));
-  t.mock.method(AcpConnection.prototype, 'prompt', async (sessionId, prompt, images, contextBlock) => {
-    captures.push({ sessionId, prompt, images, contextBlock });
+  t.mock.method(AcpConnection.prototype, 'prompt', async (sessionId, prompt, images, contextBlock, recall, lifecycle) => {
+    captures.push({ sessionId, prompt });
+    lifecycle?.onTerminal?.();
     return { stopReason: 'end_turn' };
   });
   const service = openIsolatedAntigravity(rootDir);
   try {
-    const first = await request(service, [BASE_SYSTEM, user('OLD_CONTEXT_MARKER_12')]);
+    const initial = [BASE_SYSTEM, user('OLD_CONTEXT_MARKER_12')];
+    const first = await request(service, initial);
     assert.equal(first.terminal.reason, 'stop');
-    const result = await request(service, [BASE_SYSTEM, user('OLD_CONTEXT_MARKER_12'), first.terminal.message, user('Next question', 12)]);
-    assert.equal(result.terminal.reason, 'stop');
-    assert.notEqual(captures[0].sessionId, captures[1].sessionId);
-    assert.equal(captures.length, 2);
-    assert.equal(newCount, 2);
-    assert.ok(JSON.stringify(captures[1]).includes('OLD_CONTEXT_MARKER_12'));
-    assert.ok(JSON.stringify(captures[1]).includes(BASE_SYSTEM.content));
+    const result = await request(service, [...initial, first.terminal.message, user('Next question', 12)]);
+    assert.equal(result.terminal.reason, 'error');
+    assert.match(result.terminal.error.errorMessage, /\/clear/);
+    assert.equal(captures.length, 1);
+    assert.equal(newCount, 1);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
@@ -164,25 +168,30 @@ test('ACP repeated text deltas preserve all received characters', () => {
   assert.equal(acc.text, 'x'.repeat(65));
 });
 
-test('ACP preserves leading and trailing whitespace in current user and recovered tool result text', async t => {
+test('ACP preserves current user and live tool-result whitespace without replay', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-whitespace-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
     const userText = '  KEEP_USER_WHITESPACE\n  ';
-    await request(service, [BASE_SYSTEM, { role: 'user', content: [{ type: 'text', text: userText }], timestamp: 10 }]);
+    const initial = [BASE_SYSTEM, { role: 'user', content: [{ type: 'text', text: userText }], timestamp: 10 }];
+    const first = await request(service, initial);
     assert.ok(driver.runs[0].request.prompt.endsWith(userText));
-
     const resultText = '  KEEP_RESULT_WHITESPACE\n  ';
-    const messages = [BASE_SYSTEM, user('Read the file.'),
-      asstToolCall('whitespace-call', 'read_file', { path: 'README.md' }, 11),
-      toolResult('whitespace-call', 'read_file', [{ type: 'text', text: resultText }], 12)];
-    const [collected] = collectToolResults(messages, ['whitespace-call']);
-    assert.equal(collected.text, resultText);
-    const recovered = await request(service, messages);
-    assert.equal(recovered.terminal.reason, 'stop');
-    assert.equal(driver.runs[1].request.conversationId, null);
-    assert.ok(driver.runs[1].request.contextBlock.text.includes(JSON.stringify(resultText)));
+    let delivered;
+    driver.setOnRun(async ctx => {
+      delivered = await ctx.mcp.handler.onToolCall('whitespace-call', 'read_file', { path: 'README.md' }, ctx.signal);
+      ctx.emit({ type: 'text', delta: 'read complete' });
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'read complete', finished: true, aborted: false });
+    });
+    const messages = [...initial, first.terminal.message, user('Read the file.', 11)];
+    const parked = await request(service, messages);
+    assert.equal(parked.terminal.reason, 'toolUse');
+    const continuation = [...messages, parked.terminal.message, toolResult('whitespace-call', 'read_file', resultText, 12)];
+    assert.equal(collectToolResults(continuation, ['whitespace-call'])[0].text, resultText);
+    assert.equal((await request(service, continuation)).terminal.reason, 'stop');
+    assert.equal(delivered.content[0].text, resultText);
+    assert.equal(driver.runs.length, 2, 'tool continuation stays in the same native turn');
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
@@ -244,49 +253,51 @@ test('ACP append-only conversation reuses its binding without replaying acknowle
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP same-length history edits rebuild instead of trusting the old message count', async t => {
+test('ACP same-length history edits require clear and leave the native session untouched', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-rewrite-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
     const first = await request(service, [BASE_SYSTEM, user('WRONG_OLD_FACT')]);
-    await request(service, [BASE_SYSTEM, user('CORRECTED_FACT'), first.terminal.message, user('continue', 20)]);
-    assert.equal(driver.runs[1].request.conversationId, null);
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('CORRECTED_FACT'));
-    assert.ok(!driver.runs[1].request.contextBlock.text.includes('WRONG_OLD_FACT'));
+    const result = await request(service, [BASE_SYSTEM, user('CORRECTED_FACT'), first.terminal.message, user('continue', 20)]);
+    assert.equal(result.terminal.reason, 'error');
+    assert.match(result.terminal.error.errorMessage, /\/clear/);
+    assert.equal(driver.runs.length, 1);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP compressed BC projections rebuild with the new auxiliary summary', async t => {
+test('ACP refuses a BC projection instead of rewriting native history', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-compress-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
-    await request(service, [BASE_SYSTEM, user('old-one'), asstText('old-answer', 11), user('old-two', 12), asstText('old-answer-two', 13), user('before compression', 14)]);
-    const messages = [BASE_SYSTEM, { ...user('BC_SUMMARY_MUST_REACH_AGY', 0), bcSummaryMaterial: true }, user('after compression', 20)];
+    await request(service, [BASE_SYSTEM, user('before compression', 14)]);
+    const messages = [BASE_SYSTEM, { ...user('BC_SUMMARY', 0), bcSummaryMaterial: true }, user('after compression', 20)];
     const result = await drainEventStream(service.stream({ deviceId: 'audit-device', sessionId: 'audit-session', modelId: MODEL_ID, messages,
       turnContext: { inputIndex: 2, auxiliaryIndices: [1] } }));
-    assert.equal(result.terminal.reason, 'stop');
-    assert.equal(driver.runs[1].request.conversationId, null);
-    assert.ok(driver.runs[1].request.contextBlock.text.includes('BC_SUMMARY_MUST_REACH_AGY'));
-    assert.ok(!driver.runs[1].request.contextBlock.text.includes('old-one'));
+    assert.equal(result.terminal.reason, 'error');
+    assert.match(result.terminal.error.errorMessage, /\/clear/);
+    assert.equal(driver.runs.length, 1);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP unacknowledged completed output cannot make a retried input reuse stale native history', async t => {
+test('ACP retransmits a completed cached answer without prompting the native model twice', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-retry-'));
   const service = openIsolatedAntigravity(rootDir);
   try {
     const messages = [BASE_SYSTEM, user('request whose response was lost')];
-    await request(service, messages);
-    await request(service, messages);
-    assert.equal(driver.runs[1].request.conversationId, null);
-    assert.notEqual(driver.runs[1].assignedConversationId, driver.runs[0].assignedConversationId);
+    const first = await request(service, messages);
+    const retried = await request(service, messages);
+    assert.deepEqual(retried.terminal.message.content, first.terminal.message.content);
+    assert.equal(retried.terminal.message.timestamp, first.terminal.message.timestamp);
+    assert.equal(driver.runs.length, 1);
+    await request(service, [...messages, retried.terminal.message, user('A new turn', 20)]);
+    assert.equal(driver.runs[1].request.conversationId, driver.runs[0].assignedConversationId);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP cancellation invalidates the old native binding before retry', async t => {
+test('ACP cancellation preserves native identity and does not redispatch the interrupted input', async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-sync-cancel-'));
   const service = openIsolatedAntigravity(rootDir);
@@ -295,18 +306,22 @@ test('ACP cancellation invalidates the old native binding before retry', async t
     const first = await request(service, initial);
     const messages = [...initial, first.terminal.message, user('interrupted question', 20)];
     driver.setOnRun(async ctx => {
-      if (driver.runs.length === 2) { ctx.emit({ type: 'text', delta: 'partial discarded output' }); return; }
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'recovered', finished: true, aborted: false });
+      if (driver.runs.length === 2) { ctx.emit({ type: 'text', delta: 'partial output' }); return; }
+      ctx.emit({ type: 'text', delta: 'continued' });
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'continued', finished: true, aborted: false });
     });
     const pending = request(service, messages);
     await waitUntil(() => driver.runs.length === 2);
     await service.cancel({ deviceId: 'audit-device', sessionId: 'audit-session' });
-    assert.equal((await pending).terminal.reason, 'aborted');
-    const retried = await request(service, messages);
-    assert.equal(retried.terminal.reason, 'stop');
-    assert.equal(driver.runs[2].request.conversationId, null);
-    assert.ok(driver.runs[2].request.contextBlock.text.includes('established history'));
-    assert.ok(!JSON.stringify(driver.runs[2].request).includes('partial discarded output'));
+    const cancelled = await pending;
+    assert.equal(cancelled.terminal.reason, 'aborted');
+    assert.equal((await request(service, messages)).terminal.reason, 'aborted');
+    assert.equal(driver.runs.length, 2);
+    const continued = await request(service, [...messages, cancelled.terminal.error, user('Continue from the interruption.', 21)]);
+    assert.equal(continued.terminal.reason, 'stop');
+    assert.equal(driver.runs[2].request.conversationId, driver.runs[0].assignedConversationId);
+    assert.ok(!driver.runs[2].request.prompt.includes('interrupted question'));
+    assert.equal(driver.runs[2].request.contextBlock, undefined);
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
@@ -330,52 +345,36 @@ test('ACP refuses to start another native turn when the recovery checkpoint cann
     const recovered = await request(service, messages);
     assert.equal(recovered.terminal.reason, 'stop');
     assert.equal(driver.runs.length, 2);
-    assert.equal(driver.runs[1].request.conversationId, null, 'recovery must rebuild the uncertain native binding');
+    assert.equal(driver.runs[1].request.conversationId, driver.runs[0].assignedConversationId, 'a failed receipt write must not rebuild the native session');
   } finally { await closeAndRemove({ antigravity: service, rootDir }); }
 });
 
-test('ACP native SDK compaction uses an isolated identity and its own summarization instructions', async t => {
+test('ACP Host compaction requires clear without changing the persisted conversation', async t => {
   await realHostCase(t, async ({ driver, runtime, captured, bot, send }) => {
     await send('long-history', 'older conversation material '.repeat(3500));
     await send('recent-history', 'keep this recent material '.repeat(3500));
-    const chatIdentity = captured[0].sessionId;
+    const history = await runtime.history(bot.botId, { limit: 30 });
     const before = captured.length;
-    const compacted = await runtime.compact(bot.botId);
-    assert.equal(compacted.compacted, true);
-    assert.ok(captured.length > before);
-    const summaryRequest = captured[before];
-    assert.notEqual(summaryRequest.sessionId, chatIdentity);
-    const identity = JSON.parse(summaryRequest.sessionId);
-    assert.equal(identity[0], 'antigravity-compaction');
-    assert.equal(identity[1], chatIdentity);
-    assert.ok(Number.isSafeInteger(identity[2]));
-    assert.equal(driver.runs[before].request.conversationId, null);
-    assert.ok(driver.runs[before].request.prompt.includes('context summarization assistant'));
-    await send('after-compaction', 'Continue after compaction.');
-    assert.equal(captured.at(-1).sessionId, chatIdentity);
+    await assert.rejects(runtime.compact(bot.botId), /\/clear/);
+    assert.equal(captured.length, before);
+    assert.deepEqual(await runtime.history(bot.botId, { limit: 30 }), history);
+    await send('after-compaction', 'Continue without rewriting history.');
+    assert.equal(driver.runs.at(-1).request.conversationId, driver.runs[0].assignedConversationId);
   });
 });
 
-test('ACP real Host history editing forks the binding and retains the earlier native answer', async t => {
-  await realHostCase(t, async ({ driver, env, runtime, captured, bot, send }) => {
-    driver.setOnRun(async ctx => {
-      const reply = driver.runs.length === 1 ? 'ANSWER_ONLY_KEEP_AFTER_FORK' : 'later answer';
-      ctx.emit({ type: 'text', delta: reply });
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
-    });
+test('ACP real Host rejects history editing without forking the native binding', async t => {
+  await realHostCase(t, async ({ driver, runtime, captured, bot, send }) => {
     await send('edit-first', 'First retained question.');
     await send('edit-second', 'Second original question.');
     const history = await runtime.history(bot.botId, { limit: 30 });
     const target = history.items.find(entry => entry.model?.some(message => message.role === 'user' && JSON.stringify(message.content).includes('Second original question.')));
     assert.ok(target);
-    await runtime.editMessage(bot.botId, { entryId: target.id, requestId: 'edit-revised', text: 'Second revised question.' });
-    assert.equal((await env.waitForSubmission(bot.botId, 'edit-revised')).status, 'done');
-    assert.notEqual(captured.at(-1).sessionId, captured[0].sessionId);
-    const replay = driver.runs.at(-1).request;
-    assert.equal(replay.conversationId, null);
-    assert.ok(replay.contextBlock.text.includes('ANSWER_ONLY_KEEP_AFTER_FORK'));
-    assert.ok(replay.contextBlock.text.includes('First retained question.'));
-    assert.ok(!JSON.stringify(replay).includes('Second original question.'));
+    await assert.rejects(runtime.editMessage(bot.botId, { entryId: target.id, requestId: 'edit-revised', text: 'Second revised question.' }), /\/clear/);
+    assert.deepEqual(await runtime.history(bot.botId, { limit: 30 }), history);
+    assert.equal(captured.length, 2);
+    assert.equal(driver.runs.length, 2);
+    assert.equal(driver.runs[1].request.conversationId, driver.runs[0].assignedConversationId);
   });
 });
 

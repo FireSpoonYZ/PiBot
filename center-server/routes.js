@@ -216,6 +216,50 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   const listOwnerDevices = () => bridge.listDevices().map(presentDevice);
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
+  async function preflightModelChange(deviceId, botId, current, next) {
+    if (next?.modelRef === current?.modelRef
+      || !next?.modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) return;
+    // The Host owns conversation history. Never persist a selection that it cannot apply.
+    await bridge.call(deviceId, 'assertModelSelectionAllowed', { botId, modelRef: next.modelRef });
+  }
+
+  async function putBotModelConfig(req) {
+    const { deviceId, botId } = req.params;
+    const body = object(req.body);
+    const value = validate(selectionSchema, body.value);
+    const current = store.getBotModelConfig(deviceId, botId);
+    if (body.expectedRevision !== current.revision) fail('REVISION_CONFLICT', 'Revision does not match');
+    const globalRevision = store.getModelConfig().revision;
+    await preflightModelChange(deviceId, botId, current.effective, { ...current.global, ...value });
+    if (store.getModelConfig().revision !== globalRevision) fail('REVISION_CONFLICT', 'Global model selection changed; retry');
+    return changed(store.putBotModelConfig(deviceId, botId, body.expectedRevision, value), deviceId);
+  }
+
+  async function putGlobalModelConfig(req) {
+    const body = object(req.body);
+    const value = validate(selectionSchema, body.value);
+    const current = store.getModelConfig();
+    if (body.expectedRevision !== current.revision) fail('REVISION_CONFLICT', 'Revision does not match');
+    if (value.modelRef === current.global.modelRef || !value.modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) {
+      return changed(store.putModelConfig(body.expectedRevision, value));
+    }
+    const affected = [];
+    for (const device of listOwnerDevices()) {
+      for (const bot of store.listDeviceBots(device.deviceId)) {
+        const selection = store.getBotModelConfig(device.deviceId, bot.botId);
+        affected.push({ deviceId: device.deviceId, botId: bot.botId, selection });
+      }
+    }
+    await Promise.all(affected.map(({ deviceId, botId, selection }) =>
+      preflightModelChange(deviceId, botId, selection.effective, { ...value, ...selection.overrides })));
+    for (const { deviceId, botId, selection } of affected) {
+      if (store.getBotModelConfig(deviceId, botId).revision !== selection.revision) {
+        fail('REVISION_CONFLICT', 'Bot model selection changed; retry');
+      }
+    }
+    return changed(store.putModelConfig(body.expectedRevision, value));
+  }
+
   const providerInput = async (id, overrides = {}) => {
     const stored = required(store.getProvider(id), 'Provider');
     const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim() ? stored.custom.baseUrl : stored.baseUrl;
@@ -371,7 +415,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(result);
   }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
-  route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
+  route('PUT', '/api/model-config', putGlobalModelConfig, true);
   route('GET', '/api/devices', () => listOwnerDevices());
   // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
@@ -540,7 +584,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
   }, true);
   route('GET', '/api/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
-  route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); }, true);
+  route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', putBotModelConfig, true);
   const credentialId = assertPublicCredentialId;
   route('GET', '/api/credentials/:id', req => required(store.getCredential(credentialId(req.params.id)), 'Credential'));
   route('PUT', '/api/credentials/:id', req => changed(store.putCredential(credentialId(req.params.id), object(req.body))), true);
@@ -1000,7 +1044,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
   });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
-  host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', putBotModelConfig);
   host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities', req => {
     const { deviceId, botId } = req.params;
     if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');

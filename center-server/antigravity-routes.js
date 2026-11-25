@@ -1,17 +1,15 @@
 import {
   ANTIGRAVITY_API,
   ANTIGRAVITY_CANCEL_PATH,
-  ANTIGRAVITY_MAX_FRAME_BYTES,
   ANTIGRAVITY_PROVIDER_ID,
   ANTIGRAVITY_STREAM_PATH,
 } from '../center-contract/antigravity.js';
-import { validateAntigravityTurnContext } from './antigravity/turn-context.js';
+import { AGY_DELTA_VERSION, historyChanged, isHash } from '../center-contract/antigravity-delta.js';
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const STREAM_BODY_KEYS = new Set(['sessionId', 'requestId', 'modelId', 'messages', 'reasoning', 'turnContext']);
+const STREAM_BODY_KEYS = new Set(['sessionId', 'requestId', 'modelId', 'delta', 'reasoning', 'turnContext']);
 const CANCEL_BODY_KEYS = new Set(['sessionId', 'requestId']);
 const MAX_ID_LENGTH = 256;
-const MAX_MESSAGES = 4096;
 const MAX_MESSAGE_PARTS = 512;
 const MAX_SYSTEM_TOOLS = 512;
 const CATALOG_TIMEOUT_MS = 30_000;
@@ -142,6 +140,7 @@ function validateMessage(msg) {
 
 function validateStreamBody(raw) {
   if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', 'Expected an object');
+  if (!raw.delta) throw historyChanged('Upgrade this Host version before retrying');
   assertAllowedKeys(raw, STREAM_BODY_KEYS, 'request');
   const sessionId = assertBoundedId(raw.sessionId, 'sessionId');
   const modelId = assertBoundedId(raw.modelId, 'modelId');
@@ -149,20 +148,36 @@ function validateStreamBody(raw) {
   if (raw.reasoning !== undefined && (typeof raw.reasoning !== 'string' || !THINKING_LEVELS.has(raw.reasoning))) {
     fail('INVALID_ARGUMENT', 'Invalid reasoning level');
   }
-  if (!Array.isArray(raw.messages) || raw.messages.length < 1 || raw.messages.length > MAX_MESSAGES) {
-    fail('INVALID_ARGUMENT', 'Invalid messages');
+  const delta = raw.delta;
+  if (!isPlainObject(delta)) fail('INVALID_ARGUMENT', 'Invalid history delta');
+  assertAllowedKeys(delta, new Set(['version', 'offset', 'prefixHash', 'configHash', 'config', 'messages']), 'delta');
+  if (delta.version !== AGY_DELTA_VERSION || !Number.isSafeInteger(delta.offset) || delta.offset < 0 ||
+      !isHash(delta.prefixHash) || !isHash(delta.configHash) || !Array.isArray(delta.messages) ||
+      !Number.isSafeInteger(delta.offset + delta.messages.length)) {
+    fail('INVALID_ARGUMENT', 'Invalid history delta');
   }
-  for (const msg of raw.messages) validateMessage(msg);
-  const turnContext =
-    raw.turnContext !== undefined ? validateAntigravityTurnContext(raw.messages, raw.turnContext) : undefined;
-  return {
-    sessionId,
-    ...(requestId !== undefined ? { requestId } : {}),
-    modelId,
-    messages: raw.messages,
-    ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}),
-    ...(turnContext !== undefined ? { turnContext } : {}),
-  };
+  for (const message of delta.messages) {
+    validateMessage(message);
+    if (message.role === 'system') fail('INVALID_ARGUMENT', 'System messages belong to config');
+  }
+  if (delta.config !== undefined) {
+    if (!isPlainObject(delta.config)) fail('INVALID_ARGUMENT', 'Invalid configuration');
+    assertAllowedKeys(delta.config, new Set(['systemPrompt', 'tools', 'routingPolicy']), 'config');
+    if (typeof delta.config.systemPrompt !== 'string' || typeof delta.config.routingPolicy !== 'string' ||
+        !Array.isArray(delta.config.tools)) fail('INVALID_ARGUMENT', 'Invalid configuration');
+    validateSystemMessage({ role: 'system', content: delta.config.systemPrompt, toolsAdded: delta.config.tools });
+  }
+  const end = delta.offset + delta.messages.length;
+  const turnContext = raw.turnContext;
+  if (!isPlainObject(turnContext)) fail('INVALID_ARGUMENT', 'Invalid turnContext');
+  assertAllowedKeys(turnContext, new Set(['inputIndex', 'routeNote']), 'turnContext');
+  if (!Number.isSafeInteger(turnContext.inputIndex) || turnContext.inputIndex < 0 ||
+      turnContext.inputIndex !== end - 1 ||
+      (turnContext.routeNote !== undefined && typeof turnContext.routeNote !== 'string')) {
+    fail('INVALID_ARGUMENT', 'Invalid turnContext');
+  }
+  return { sessionId, ...(requestId !== undefined ? { requestId } : {}), modelId, delta,
+    ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}), turnContext };
 }
 
 function validateCancelBody(raw) {
@@ -319,7 +334,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
   host('POST', ANTIGRAVITY_STREAM_PATH, async (req, reply) => {
     const { deviceId, token } = req.centerDevice;
-    const { sessionId, requestId, modelId, messages, reasoning, turnContext } = validateStreamBody(req.body);
+    const { sessionId, requestId, modelId, delta, reasoning, turnContext } = validateStreamBody(req.body);
     assertDeviceAuthorized(deviceId, modelId);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
     if (req.raw.aborted || req.raw.destroyed || reply.raw.destroyed) {
@@ -333,7 +348,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
         sessionId,
         ...(requestId !== undefined ? { requestId } : {}),
         modelId,
-        messages,
+        delta,
         ...(reasoning !== undefined ? { reasoning } : {}),
         ...(turnContext !== undefined ? { turnContext } : {}),
       },
@@ -410,7 +425,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
       }
       if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end();
     }
-  }, ANTIGRAVITY_MAX_FRAME_BYTES);
+  }, Number.MAX_SAFE_INTEGER);
 
   host('POST', ANTIGRAVITY_CANCEL_PATH, async req => {
     const { sessionId, requestId } = validateCancelBody(req.body);

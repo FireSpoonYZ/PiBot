@@ -152,7 +152,7 @@ import {
   useHideToolOutput,
   useText,
 } from './ui';
-import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
+import { deleteBotAndVerify, formatActionableDirectoryError, hasAntigravityHistory, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 import {
   useGlobalTasks,
   TaskBoardView,
@@ -4797,6 +4797,8 @@ ${newer}` : draftSnapshot;
   const canStopBot = Boolean(
     activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) && isChatTargetOnline,
   );
+  const nativeHistoryLocked = hasAntigravityHistory(activeBot?.modelRef,
+    [...chatHistory, ...array<Record<string, unknown>>(effectiveChatLive?.history)], currentClearedAfter);
   const activeEditing = editingTurn && activeBot && editingTurn.botKey === activeBot.key ? editingTurn : null;
   const effectiveLocalDraft = activeEditing ? activeEditing.text : chatDraft;
   const effectiveLocalAttachments = activeEditing ? activeEditing.attachments : chatDraftAttachments;
@@ -4813,7 +4815,7 @@ ${newer}` : draftSnapshot;
     }
     if (bubbleActionTurn) {
       const nextEditable =
-        bubbleActionTurn.editable && !isBotBusy && !isStoppingBot && !sendingReceipt;
+        bubbleActionTurn.editable && !nativeHistoryLocked && !isBotBusy && !isStoppingBot && !sendingReceipt;
       const nextCanRetry =
         bubbleActionTurn.canRetry && chatTurnAdmission?.phase === 'failed';
       const hasActions = Boolean(
@@ -4824,7 +4826,7 @@ ${newer}` : draftSnapshot;
       } else if (nextEditable !== bubbleActionTurn.editable || nextCanRetry !== bubbleActionTurn.canRetry) {
         setBubbleActionTurn(prev => {
           if (!prev) return null;
-          const editable = prev.editable && !isBotBusy && !isStoppingBot && !sendingReceipt;
+          const editable = prev.editable && !nativeHistoryLocked && !isBotBusy && !isStoppingBot && !sendingReceipt;
           const canRetry = prev.canRetry && chatTurnAdmission?.phase === 'failed';
           if (!prev.turn.text.trim() && !editable && !canRetry) return null;
           return { ...prev, editable, canRetry };
@@ -4836,16 +4838,17 @@ ${newer}` : draftSnapshot;
       screen !== 'chat' ||
       !activeBot ||
       editingTurn.botKey !== activeBot.key ||
+      nativeHistoryLocked ||
       isBotBusy ||
       isStoppingBot ||
       sendingReceipt
     ) {
       setEditingTurn(null);
     }
-  }, [bubbleActionTurn, voiceCapturing, editingTurn, editSubmitting, screen, activeBot, isBotBusy, isStoppingBot, sendingReceipt, chatTurnAdmission?.phase]);
+  }, [bubbleActionTurn, voiceCapturing, editingTurn, editSubmitting, screen, activeBot, nativeHistoryLocked, isBotBusy, isStoppingBot, sendingReceipt, chatTurnAdmission?.phase]);
 
   const canEditHistoryTurn = Boolean(
-    activeBot &&
+    !nativeHistoryLocked && activeBot &&
       !activeBot.archivedAt &&
       isChatTargetOnline &&
       (activeBot.hostKind === 'local' ? localHost?.phase === 'running' : remoteConnected) &&

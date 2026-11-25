@@ -31,9 +31,9 @@ function credentialAuth(credential, resolver, providerId) {
   };
 }
 
-export function nativeCenterProvider(provider, savedModels, credential, resolver, streamAntigravity) {
+export function nativeCenterProvider(provider, savedModels, credential, resolver, streamAntigravity, historyTransport) {
   if (provider.id === ANTIGRAVITY_PROVIDER_ID) {
-    return createAntigravityProvider({ provider, models: savedModels, streamAntigravity });
+    return createAntigravityProvider({ provider, models: savedModels, streamAntigravity, historyTransport });
   }
   if (provider.api === ANTIGRAVITY_API || savedModels.some(model => model.api === ANTIGRAVITY_API)) {
     throw new Error(`Unsupported antigravity API for provider "${provider.id}"`);

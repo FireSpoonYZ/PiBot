@@ -40,6 +40,10 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   function assertCapabilityAllowed(botId, installationId) {
     if (!isOnline()) throw error('CENTER_OFFLINE', 'center is offline');
+    const bound = boundEntry(botId, installationId);
+    if (nativeHistoryExcludes(botId, bound?.instance)) {
+      throw error('EXTENSION_DISABLED', 'Billion Context is disabled for Antigravity sessions');
+    }
     if (!isAuthorized(policy.get(botId)?.get(installationId))) {
       throw error('EXTENSION_DISABLED', 'capability is disabled for this Bot');
     }
@@ -504,6 +508,27 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     } finally { await temporary.close(); }
   }
 
+  function nativeHistoryExcludes(botId, instance) {
+    return services.isAntigravityBot?.(botId) === true
+      && instance?.manifest?.id === BILLION_CONTEXT_MANIFEST_ID;
+  }
+
+  async function capabilitiesForModel(botId, capabilities) {
+    if (services.isAntigravityBot?.(botId) !== true) return capabilities;
+    const allowed = [];
+    for (const capability of capabilities ?? []) {
+      let instance = instancesFor(capability.installationId)[0];
+      if (!instance && capability.kind === 'plugin' && capability.target === 'host') {
+        instance = await installer.getInstalled(capability.installationId);
+      }
+      // Preserve Center authorization/bindings and plugin data, but do not activate BC for native history.
+      allowed.push(nativeHistoryExcludes(botId, instance)
+        ? { ...capability, authorized: isAuthorized(capability), enabled: false }
+        : capability);
+    }
+    return allowed;
+  }
+
   function desiredMap(capabilities) {
     const desired = new Map();
     for (const capability of capabilities ?? []) desired.set(capability.installationId, capability);
@@ -733,6 +758,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
    * 调用方须保证该 Bot 已在安全边界（空闲）。
    */
   async function applyBot(bot, capabilities, { deviceId, credentials, atomic = false, setId = null }) {
+    capabilities = await capabilitiesForModel(bot.botId, capabilities);
     if (atomic) return applyBotAtomic(bot, capabilities, { deviceId, credentials, setId });
     const botId = bot.botId;
     appliedSets.delete(botId);
@@ -826,6 +852,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     const capabilityErrors = [];
     for (const instance of [...instances.values()]) {
       for (const [botId, entry] of [...instance.bots]) {
+        if (nativeHistoryExcludes(botId, instance)) continue;
         try {
           await entry.bot.activate();
         } catch (err) {
@@ -854,6 +881,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   function extensionsFor(botId) {
     return [...instances.values()].flatMap((instance) => {
+      if (nativeHistoryExcludes(botId, instance)) return [];
       const entry = instance.bots.get(botId);
       return entry ? [entry.extension] : [];
     });
@@ -878,6 +906,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   function selectContextProviders(botId) {
     return [...instances.values()].flatMap((instance) => {
+      if (nativeHistoryExcludes(botId, instance)) return [];
       const entry = instance.bots.get(botId);
       const hook = entry?.bot.requestContributions?.prepareContext;
       return hook ? [{ id: instance.installationId, hook, instance, entry }] : [];
@@ -996,6 +1025,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     const botId = await services.resolveConversationBot(api.conversationId);
     let result = request;
     for (const instance of instances.values()) {
+      if (nativeHistoryExcludes(botId, instance)) continue;
       const entry = instance.bots.get(botId);
       const hook = entry?.bot.requestContributions?.beforeRequest;
       if (!hook) continue;

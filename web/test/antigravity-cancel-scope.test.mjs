@@ -5,10 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { connectCenter } from '../../host-core/center-client.js';
+import { createAntigravityHistoryTransport } from '../../host-core/antigravity-delta.js';
 import { registerAntigravityRoutes } from '../../center-server/antigravity-routes.js';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
 import {
-  ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_MAX_FRAME_BYTES, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH,
+  ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH,
 } from '../../center-contract/antigravity.js';
 import {
   createControlledAcpDriverHarness, openIsolatedAntigravity, drainEventStream,
@@ -31,6 +32,10 @@ function payload(text) {
   };
 }
 
+function wirePayload(input) {
+  return createAntigravityHistoryTransport().prepare(input).payload;
+}
+
 function finishTurn(ctx, text) {
   ctx.emit({ type: 'text', delta: text });
   ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: text, finished: true, aborted: false });
@@ -50,6 +55,7 @@ async function openCancelFixture(t, { holdFirstCancel = false } = {}) {
   const serviceStreams = [];
   const serviceCancels = [];
   const nativeTurns = [];
+  const hostHistory = createAntigravityHistoryTransport();
   const cancelGate = Promise.withResolvers();
   let heldCancel = false;
   let client;
@@ -88,9 +94,15 @@ async function openCancelFixture(t, { holdFirstCancel = false } = {}) {
     changed: value => value,
     antigravity: {
       stream(params, options) {
-        const stream = service.stream(params, options);
-        serviceStreams.push({ params, finished: stream.result() });
-        return stream;
+        const source = service.stream(params, options);
+        const completion = Promise.withResolvers();
+        serviceStreams.push({ params, finished: completion.promise });
+        return {
+          async *[Symbol.asyncIterator]() {
+            try { yield* source; }
+            finally { completion.resolve(); }
+          },
+        };
       },
       cancel(params) {
         serviceCancels.push({ ...params });
@@ -146,18 +158,22 @@ async function openCancelFixture(t, { holdFirstCancel = false } = {}) {
     return {
       driver, service, client, streamRequests, cancelRequests, serviceStreams, serviceCancels, nativeTurns, close,
       releaseCancel: () => cancelGate.resolve(),
+      stream(input, options = {}) {
+        const prepared = hostHistory.prepare(input);
+        return client.streamAntigravity(prepared.payload, { ...options, onHistoryAck: prepared.acknowledge });
+      },
       async postJson(url, body) {
         const response = await post(url, body);
         return { status: response.status, body: await response.json() };
       },
-      async legacyStream(body) {
-        const response = await post(ANTIGRAVITY_STREAM_PATH, body);
+      async rawDeltaStream(body) {
+        const response = await post(ANTIGRAVITY_STREAM_PATH, wirePayload(body));
         assert.equal(response.status, 200);
         const events = (await response.text()).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
         return { events, terminal: events.at(-1) };
       },
       nativeTurn(index) {
-        return waitUntil(() => nativeTurns[index], { label: `native turn ${index + 1}` });
+        return waitUntil(() => nativeTurns[index], { timeoutMs: 3_000, label: `native turn ${index + 1}` });
       },
     };
   } catch (error) {
@@ -173,7 +189,7 @@ test('delayed Host cancel POST from T1 cannot cancel T2 in the same session', { 
     const forgedId = 'on-payload-must-not-control-cancellation';
     let hookCalls = 0;
     const onPayload = input => { hookCalls += 1; return { ...input, requestId: forgedId }; };
-    const first = drainEventStream(fixture.client.streamAntigravity(
+    const first = drainEventStream(fixture.stream(
       { ...payload('First attempt'), requestId: 'caller-supplied-id' },
       { signal: AbortSignal.any([controller.signal, t.signal]), onPayload },
     ));
@@ -199,7 +215,10 @@ test('delayed Host cancel POST from T1 cannot cancel T2 in the same session', { 
     assert.ok(fixture.serviceCancels.some(params => params.requestId === firstId), 'disconnect cancellation keeps T1 identity');
     const cancelsBeforeRelease = fixture.serviceCancels.length;
 
-    const second = drainEventStream(fixture.client.streamAntigravity(payload('Second attempt'), { signal: t.signal, onPayload }));
+    const secondInput = payload('First attempt');
+    secondInput.messages.push({ role: 'user', content: 'Second attempt', timestamp: 20 });
+    secondInput.turnContext.inputIndex = secondInput.messages.length - 1;
+    const second = drainEventStream(fixture.stream(secondInput, { signal: t.signal, onPayload }));
     const secondNative = await fixture.nativeTurn(1);
     const secondId = fixture.streamRequests[1].body.requestId;
     assert.match(secondId, UUID_RE);
@@ -213,6 +232,9 @@ test('delayed Host cancel POST from T1 cannot cancel T2 in the same session', { 
     assert.equal(fixture.serviceCancels.length, cancelsBeforeRelease + 1, 'the stale POST reached the actual service');
     assert.equal(fixture.serviceCancels.at(-1).requestId, firstId);
     assert.equal(secondNative.signal.aborted, false, 'stale T1 cancel must leave T2 running');
+    assert.equal(secondNative.request.conversationId, firstNative.conversationId);
+    assert.equal(secondNative.request.prompt.includes('First attempt'), false, 'an interrupted dispatched input must not be resent');
+    assert.equal(secondNative.request.contextBlock, undefined);
     finishTurn(secondNative, 'T2 completed after the stale cancel');
     const secondResult = await second;
     assert.equal(secondResult.terminal?.type, 'done');
@@ -226,7 +248,7 @@ test('delayed Host cancel POST from T1 cannot cancel T2 in the same session', { 
 test('HTTP cancel with the current Host requestId stops the current native turn', { timeout: 15_000 }, async t => {
   const fixture = await openCancelFixture(t);
   try {
-    const result = drainEventStream(fixture.client.streamAntigravity(payload('Cancel this current turn'), { signal: t.signal }));
+    const result = drainEventStream(fixture.stream(payload('Cancel this current turn'), { signal: t.signal }));
     const native = await fixture.nativeTurn(0);
     const requestId = fixture.streamRequests[0].body.requestId;
     const cancelled = await fixture.postJson(ANTIGRAVITY_CANCEL_PATH, { sessionId: SESSION_ID, requestId });
@@ -241,10 +263,10 @@ test('HTTP cancel with the current Host requestId stops the current native turn'
   }
 });
 
-test('legacy HTTP streams and session-wide cancellation still work without requestId', { timeout: 15_000 }, async t => {
+test('delta HTTP streams support explicit session-wide cancellation without requestId', { timeout: 15_000 }, async t => {
   const fixture = await openCancelFixture(t);
   try {
-    const result = fixture.legacyStream(payload('Legacy Host turn'));
+    const result = fixture.rawDeltaStream(payload('Delta Host turn without an optional cancellation ID'));
     const native = await fixture.nativeTurn(0);
     assert.equal(Object.hasOwn(fixture.streamRequests[0].body, 'requestId'), false);
     assert.equal(Object.hasOwn(fixture.serviceStreams[0].params, 'requestId'), false);
@@ -263,7 +285,7 @@ test('legacy HTTP streams and session-wide cancellation still work without reque
 test('invalid explicit requestIds never degrade into session-wide cancellation', { timeout: 20_000 }, async t => {
   const fixture = await openCancelFixture(t);
   try {
-    const result = drainEventStream(fixture.client.streamAntigravity(payload('Keep this native turn alive'), { signal: t.signal }));
+    const result = drainEventStream(fixture.stream(payload('Keep this native turn alive'), { signal: t.signal }));
     const native = await fixture.nativeTurn(0);
     for (const requestId of ['', null, 'x'.repeat(257), ' ', '\u0000']) {
       const cancelCount = fixture.serviceCancels.length;
@@ -272,7 +294,7 @@ test('invalid explicit requestIds never degrade into session-wide cancellation',
       assert.equal(rejectedCancel.status, 400);
       assert.equal(rejectedCancel.body.error.code, 'INVALID_ARGUMENT');
       assert.equal(fixture.serviceCancels.length, cancelCount, 'invalid cancel must be rejected before service forwarding');
-      const rejectedStream = await fixture.postJson(ANTIGRAVITY_STREAM_PATH, { ...payload('Invalid attempt'), requestId });
+      const rejectedStream = await fixture.postJson(ANTIGRAVITY_STREAM_PATH, { ...wirePayload(payload('Invalid attempt')), requestId });
       assert.equal(rejectedStream.status, 400);
       assert.equal(rejectedStream.body.error.code, 'INVALID_ARGUMENT');
       assert.equal(fixture.serviceStreams.length, streamCount, 'invalid stream must not claim the session');
@@ -299,7 +321,21 @@ test('invalid explicit requestIds never degrade into session-wide cancellation',
   }
 });
 
-test('rejected or cancelled replacements cannot steal a parked native turn cancellation identity', { timeout: 15_000 }, async t => {
+test('legacy full-history HTTP input requires a Host upgrade before clear', { timeout: 10_000 }, async t => {
+  const fixture = await openCancelFixture(t);
+  try {
+    const rejected = await fixture.postJson(ANTIGRAVITY_STREAM_PATH, payload('Legacy full-history payload'));
+    assert.equal(rejected.body.error.code, 'AGY_HISTORY_CHANGED');
+    assert.match(rejected.body.error.message, /upgrad/i);
+    assert.match(rejected.body.error.message, /\/clear/);
+    assert.equal(fixture.nativeTurns.length, 0);
+    assert.equal(fixture.serviceStreams.length, 0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('rejected or cancelled requests cannot steal a parked native turn cancellation identity', { timeout: 15_000 }, async t => {
   const driver = createControlledAcpDriverHarness(t);
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-parked-cancel-'));
   const service = openIsolatedAntigravity(rootDir);
@@ -309,8 +345,8 @@ test('rejected or cancelled replacements cannot steal a parked native turn cance
     await ctx.mcp.handler.onToolCall('parked-call', 'read_file', { path: 'README.md' }, ctx.signal);
   });
   try {
-    const first = await drainEventStream(service.stream({ ...payload('Park on read_file'), deviceId: DEVICE_ID, requestId: 'first' }, { signal: t.signal }));
-    assert.equal(first.terminal?.type, 'done');
+    const initial = payload('Park on read_file');
+    const first = await drainEventStream(service.stream({ ...initial, deviceId: DEVICE_ID, requestId: 'first' }, { signal: t.signal }));
     assert.equal(first.terminal?.reason, 'toolUse');
     assert.equal(parkedNative.signal.aborted, false);
     const invalid = await drainEventStream(service.stream({
@@ -319,26 +355,24 @@ test('rejected or cancelled replacements cannot steal a parked native turn cance
     }, { signal: t.signal }));
     assert.equal(invalid.terminal?.type, 'error');
 
-    const oversized = payload('A replacement that would require a replay.');
-    oversized.messages.splice(1, 0, { role: 'user', content: '"'.repeat(ANTIGRAVITY_MAX_FRAME_BYTES / 4), timestamp: 9 });
-    oversized.turnContext.inputIndex = 2;
-    assert.ok(Buffer.byteLength(JSON.stringify(oversized)) < ANTIGRAVITY_MAX_FRAME_BYTES);
-    const rejected = await drainEventStream(service.stream({
-      ...oversized, deviceId: DEVICE_ID, requestId: 'oversized',
+    const rewritten = await drainEventStream(service.stream({
+      ...payload('Edited original input'), deviceId: DEVICE_ID, requestId: 'rewritten',
     }, { signal: t.signal }));
-    assert.match(rejected.terminal?.error?.errorMessage, /ACP frame budget/);
-    assert.equal(parkedNative.signal.aborted, false, 'a rejected replay cannot supersede the parked turn');
+    assert.match(rewritten.terminal?.error?.errorMessage, /AGY_HISTORY_CHANGED.*\/clear/s);
+    assert.equal(parkedNative.signal.aborted, false);
 
-    const replacement = service.stream({
-      ...payload('A replacement cancelled before dispatch.'), deviceId: DEVICE_ID, requestId: 'cancelled-replacement',
-    }, { signal: t.signal });
+    const messages = [...initial.messages, first.terminal.message,
+      { role: 'user', content: 'A queued request cancelled before dispatch.', timestamp: 20 }];
+    const replacement = drainEventStream(service.stream({
+      ...initial, messages, deviceId: DEVICE_ID, requestId: 'cancelled-replacement',
+      turnContext: { inputIndex: messages.length - 1, auxiliaryIndices: [] },
+    }, { signal: t.signal }));
     await service.cancel({ deviceId: DEVICE_ID, sessionId: SESSION_ID, requestId: 'cancelled-replacement' });
-    assert.equal((await drainEventStream(replacement)).terminal?.reason, 'aborted');
-
+    assert.equal((await replacement).terminal?.reason, 'aborted');
     assert.equal(driver.runs.length, 1);
     assert.equal(parkedNative.signal.aborted, false);
     await service.cancel({ deviceId: DEVICE_ID, sessionId: SESSION_ID, requestId: 'first' });
-    assert.equal(parkedNative.signal.aborted, true, 'the parked native turn must still be owned by requestId first');
+    assert.equal(parkedNative.signal.aborted, true, 'only the owning request can cancel the parked native turn');
   } finally {
     try { await service.close(); }
     finally { fs.rmSync(rootDir, { recursive: true, force: true }); }
@@ -346,16 +380,20 @@ test('rejected or cancelled replacements cannot steal a parked native turn cance
 });
 
 for (const abortPoint of ['before serial admission', 'during bridge startup']) {
-  test(`direct continuation abort ${abortPoint} also cancels its inherited parked native turn`, { timeout: 15_000 }, async t => {
+  test(`unclaimed continuation cancellation ${abortPoint} preserves the original waiter for one retry`, { timeout: 15_000 }, async t => {
     const driver = createControlledAcpDriverHarness(t);
     const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-early-abort-'));
     const service = openIsolatedAntigravity(rootDir);
-    const startupEntered = Promise.withResolvers();
     const startupReleased = Promise.withResolvers();
+    let startupEntered = false;
     let parkedNative;
+    let deliveries = 0;
     driver.setOnRun(async ctx => {
       parkedNative = ctx;
-      await ctx.mcp.handler.onToolCall('early-abort-call', 'read_file', { path: 'README.md' }, ctx.signal);
+      const result = await ctx.mcp.handler.onToolCall('early-abort-call', 'read_file', { path: 'README.md' }, ctx.signal);
+      deliveries += 1;
+      assert.equal(result.content[0].text, 'ACTUAL_RESULT_AFTER_EARLY_ABORT');
+      finishTurn(ctx, 'Finished after the unclaimed continuation retry');
     });
     try {
       const initial = payload('Read before the early continuation abort.');
@@ -366,7 +404,7 @@ for (const abortPoint of ['before serial admission', 'during bridge startup']) {
       if (abortPoint === 'during bridge startup') {
         const original = SharedMcpBridge.prototype.ensureStarted;
         t.mock.method(SharedMcpBridge.prototype, 'ensureStarted', async function () {
-          startupEntered.resolve();
+          startupEntered = true;
           await startupReleased.promise;
           return original.call(this);
         });
@@ -376,24 +414,28 @@ for (const abortPoint of ['before serial admission', 'during bridge startup']) {
       const continuation = { ...initial, messages, deviceId: DEVICE_ID,
         turnContext: { inputIndex: messages.length - 1, auxiliaryIndices: [] } };
       const controller = new AbortController();
-      const second = service.stream({ ...continuation, requestId: 'second' }, {
+      if (abortPoint === 'before serial admission') controller.abort();
+      const second = drainEventStream(service.stream({ ...continuation, requestId: 'second' }, {
         signal: AbortSignal.any([controller.signal, t.signal]),
-      });
-      if (abortPoint === 'during bridge startup') await startupEntered.promise;
-      controller.abort();
+      }));
+      if (abortPoint === 'during bridge startup') {
+        await waitUntil(() => startupEntered, { timeoutMs: 3_000, label: 'continuation bridge startup' });
+        controller.abort();
+      }
       startupReleased.resolve();
-      const aborted = await drainEventStream(second);
+      const aborted = await second;
       assert.equal(aborted.terminal?.reason, 'aborted');
-      assert.equal(parkedNative.signal.aborted, true, 'a cancelled continuation must not leave its inherited native turn alive');
-      assert.equal(driver.runs[0].driverState.active, null);
-      assert.equal(driver.runs.length, 1, 'the aborted continuation must not start another native prompt');
-      await assert.rejects(parkedNative.mcp.handler.onToolCall('stale-after-abort', 'read_file', { path: 'x' }, new AbortController().signal), /inactive native turn/);
+      assert.equal(parkedNative.signal.aborted, false, 'the cancelled request never claimed the original turn');
+      assert.equal(deliveries, 0);
+      assert.equal(driver.runs.length, 1);
 
-      driver.setOnRun(ctx => finishTurn(ctx, 'Recovered after early cancellation'));
       const recovered = await drainEventStream(service.stream({ ...continuation, requestId: 'third' }, { signal: t.signal }));
       assert.equal(recovered.terminal?.reason, 'stop');
-      assert.equal(driver.runs[1].request.conversationId, null);
-      assert.ok(driver.runs[1].request.contextBlock.text.includes('ACTUAL_RESULT_AFTER_EARLY_ABORT'));
+      assert.equal(driver.runs.length, 1, 'retry must use the still-live original native prompt');
+      assert.equal(deliveries, 1);
+      assert.equal(driver.runs[0].request.contextBlock, undefined);
+      await assert.rejects(parkedNative.mcp.handler.onToolCall(
+        'stale-after-finish', 'read_file', { path: 'x' }, new AbortController().signal), /inactive native turn/);
     } finally {
       startupReleased.resolve();
       try { await service.close(); }
@@ -404,18 +446,18 @@ for (const abortPoint of ['before serial admission', 'during bridge startup']) {
 
 test('logout cancels a stream still in preflight', { timeout: 15_000 }, async t => {
   const fixture = await openCancelFixture(t);
-  const startupEntered = Promise.withResolvers();
+  let startupEntered = false;
   const startupReleased = Promise.withResolvers();
   const ensureStarted = SharedMcpBridge.prototype.ensureStarted;
   t.mock.method(SharedMcpBridge.prototype, 'ensureStarted', async function () {
-    startupEntered.resolve();
+    startupEntered = true;
     await startupReleased.promise;
     return ensureStarted.call(this);
   });
   fixture.driver.setOnRun(ctx => finishTurn(ctx, 'Dispatch after logout must not happen'));
   try {
-    const result = drainEventStream(fixture.client.streamAntigravity(payload('Preflight during logout'), { signal: t.signal }));
-    await startupEntered.promise;
+    const result = drainEventStream(fixture.stream(payload('Preflight during logout'), { signal: t.signal }));
+    await waitUntil(() => startupEntered, { timeoutMs: 3_000, label: 'preflight startup before logout' });
     await fixture.service.logout();
     startupReleased.resolve();
     assert.equal((await result).terminal?.reason, 'aborted');

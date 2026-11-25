@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ANTIGRAVITY_BRIDGE_SERVER } from "./constants.ts";
-import { ACP_RECALL_HOOK_NAME, ACP_RESOURCE_DISCOVERY_TOOL, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
+import { ACP_RECALL_HOOK_NAME, ACP_NATIVE_BUSINESS_TOOL_MATCHER, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
 
 export const AGENT_NAME = "pibot-center";
 export const AGENT_SYSTEM_FILE = "agent.md";
@@ -57,10 +57,10 @@ export function resolveProfile(opts: {
 	};
 }
 
-export function dedicatedAgentMarkdown(): string {
+export function dedicatedAgentMarkdown(agentName = AGENT_NAME, systemPrompt = ""): string {
 	return [
 		"---",
-		`name: ${AGENT_NAME}`,
+		`name: ${agentName}`,
 		'description: "PiBot Center ACP agent (all workspace tools routed through host MCP bridge)"',
 		"mainAgent: true",
 		"subagent: false",
@@ -79,8 +79,9 @@ export function dedicatedAgentMarkdown(): string {
 		"You are running inside PiBot Center's isolated Antigravity ACP bridge.",
 		"Built-in CLI file, shell, web, and subagent tools are disabled in this profile.",
 		"All workspace, terminal, and user-facing tools are provided dynamically by the host via the `pibot-bridge` MCP server.",
-		"Always use those MCP bridge tools directly. When a bridge tool returns `STILL RUNNING` with a `callId`, call `bridge_poll_result` until the result lands.",
+		"Use pibot-bridge codemode for host tools and call directly offered model-only tools by name. When a bridge tool returns `STILL RUNNING` with a `callId`, call `bridge_poll_result` until the result lands.",
 		"",
+		...(systemPrompt ? [systemPrompt, ""] : []),
 	].join("\n");
 }
 
@@ -162,33 +163,49 @@ function ensureBridgeAllowRule(settingsPath: string): void {
 	writeFileAtomic(resolvedPath, JSON.stringify(updated, null, 2) + "\n");
 }
 
-export function ensureIsolatedProfile(profile: ResolvedProfile): void {
-	fs.mkdirSync(profile.rootDir, { recursive: true, mode: 0o700 });
-	fs.mkdirSync(profile.workspaceDir, { recursive: true, mode: 0o700 });
-	fs.mkdirSync(profile.geminiHome, { recursive: true, mode: 0o700 });
-	const agentDir = path.dirname(profile.agentPath);
+function ensureAgentFiles(agentPath: string, agentName: string, systemPrompt = ""): void {
+	const agentDir = path.dirname(agentPath);
 	fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-
-	// AGY retains the hook specification on session/load. Install it before
-	// session/new, including turns with an empty recall binding.
-	const recallHooksPath = path.join(agentDir, AGENT_RECALL_HOOKS_FILE);
-	const recallHooks = JSON.stringify({
+	// These hooks belong to this custom agent, independently of automatic recall.
+	const hooksPath = path.join(agentDir, AGENT_RECALL_HOOKS_FILE);
+	const hooks = JSON.stringify({
 		[ACP_RECALL_HOOK_NAME]: {
-			PreInvocation: [{ type: "command", command: acpRecallHookCommand(), timeout: 3 }],
+			PreInvocation: [{ type: "command", command: acpRecallHookCommand(), timeout: 6 }],
 			PreToolUse: [{
-				matcher: `^${ACP_RESOURCE_DISCOVERY_TOOL}$`,
+				matcher: ACP_NATIVE_BUSINESS_TOOL_MATCHER,
 				hooks: [{ type: "command", command: acpRecallHookCommand(true), timeout: 3 }],
 			}],
 		},
 	}, null, 2) + "\n";
-	if (!fileMatches(recallHooksPath, recallHooks)) {
-		writeFileAtomic(recallHooksPath, recallHooks);
-	}
+	if (!fileMatches(hooksPath, hooks)) writeFileAtomic(hooksPath, hooks);
+	const content = dedicatedAgentMarkdown(agentName, systemPrompt);
+	if (!fileMatches(agentPath, content)) writeFileAtomic(agentPath, content);
+}
 
-	const content = dedicatedAgentMarkdown();
-	if (!fileMatches(profile.agentPath, content)) {
-		writeFileAtomic(profile.agentPath, content);
-	}
-
+export function ensureIsolatedProfile(profile: ResolvedProfile): void {
+	fs.mkdirSync(profile.rootDir, { recursive: true, mode: 0o700 });
+	fs.mkdirSync(profile.workspaceDir, { recursive: true, mode: 0o700 });
+	fs.mkdirSync(profile.geminiHome, { recursive: true, mode: 0o700 });
+	ensureAgentFiles(profile.agentPath, AGENT_NAME);
 	ensureBridgeAllowRule(profile.settingsPath);
+}
+
+/** Stable custom-agent carrier for one immutable Pi configuration. Concurrent
+ * Bots never replace each other's Soul, and session/load selects the same name. */
+export function ensureSessionAgent(
+	profile: ResolvedProfile,
+	{ systemPrompt = "", systemHash }: { systemPrompt?: string; systemHash?: string } = {},
+): string {
+	if (typeof systemPrompt !== "string") throw new Error("Antigravity system prompt must be text");
+	if (systemHash === undefined && !systemPrompt) {
+		ensureIsolatedProfile(profile);
+		return AGENT_NAME;
+	}
+	if (typeof systemHash !== "string" || !/^[a-f0-9]{64}$/.test(systemHash)) {
+		throw new Error("Antigravity custom agent requires a stable configuration hash");
+	}
+	const agentName = AGENT_NAME + "-" + systemHash.slice(0, 32);
+	const agentPath = path.join(profile.geminiHome, "config", "agents", agentName, AGENT_SYSTEM_FILE);
+	ensureAgentFiles(agentPath, agentName, systemPrompt);
+	return agentName;
 }

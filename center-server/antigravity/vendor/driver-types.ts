@@ -14,6 +14,11 @@ export type UsageEstimate = "estimate" | "direct" | "off";
 
 export type DriverState = "idle" | "starting" | "ready" | "running" | "dead";
 
+export interface ToolResultImage {
+	data: string;
+	mimeType: string;
+}
+
 export interface DriverProfile {
 	cwd: string;
 	model: string;
@@ -32,6 +37,11 @@ export interface DriverTurnRequest extends DriverProfile {
 	 *  an outcome so the caller can rebuild context before creating a session. */
 	conversationId?: string | null;
 	prompt: string;
+	/** Stable per-session custom agent content and its configuration identity. */
+	systemPrompt?: string;
+	systemHash?: string;
+	/** Persist input intent after session setup and before the prompt is attempted. */
+	beforePrompt?: (info: { conversationId: string }) => void | Promise<void>;
 	/** Image blocks riding with the prompt. ACP forwards them as typed
 	 *  content blocks (probe 2026-09-03: 64x64 two-tone PNG answered
 	 *  correctly); on stream-json the provider stages them to files, so the
@@ -99,6 +109,10 @@ export interface TurnOutcome {
 	 *  No model work was started: the caller may rebuild the full context and
 	 *  retry with a new session. Authentication errors do not set this flag. */
 	sessionLoadFailed?: true;
+	/** True once the driver attempts session/prompt; false means no native input was sent. */
+	promptAttempted?: boolean;
+	/** A valid session/prompt terminal response was received, including cancellation. */
+	promptTerminal?: boolean;
 	/** The model demonstrably produced output this turn: an agent_response
 	 *  or tool step was observed, or the settled response/usage is non-empty.
 	 *  Stream-json sets it on every outcome; ACP leaves it undefined.
@@ -170,6 +184,8 @@ export interface TurnDriver {
 	reentry(): TurnHandle | null;
 	/** Resume turn timers after a parked G9 round-trip settles. */
 	kickIdle(): void;
+	/** ACP: deliver tool images in the active prompt, without another prompt RPC. */
+	queueToolResultImages?(toolCallId: string, images: readonly ToolResultImage[]): void;
 	set onTurnEnd(fn: ((outcome: TurnOutcome) => void) | undefined);
 	snapshot(): DriverSnapshot;
 	close(reason: "recycle" | "shutdown", cause?: string): Promise<void>;

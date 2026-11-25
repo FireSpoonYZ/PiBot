@@ -748,6 +748,7 @@ export interface Runtime {
   clearHistory(botId: string): Promise<ClearHistoryResult>;
   /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
   compact(botId: string): Promise<CompactResult>;
+  assertModelSelectionAllowed(botId: string, modelRef: string | null): Promise<{ botId: string; allowed: true }>;
   /** Stop this Bot's accepted primary, room and DM work, preserving history and cancellation receipts. */
   abort(botId: string): Promise<AbortBotResult>;
   /** Recall single (by requestId) or all unplaced user primary queued messages without stopping active work. */
@@ -1584,6 +1585,7 @@ export interface ControlClient {
   getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
+  assertModelSelectionAllowed(botId: string, modelRef: string | null, options?: ControlClientCallOptions): Promise<{ botId: string; allowed: true }>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<AbortBotResult>;
   withdrawQueued(botId: string, input?: WithdrawQueuedInput, options?: ControlClientCallOptions): Promise<WithdrawQueuedResult>;
   steerQueued(botId: string, input: SteerQueuedInput, options?: ControlClientCallOptions): Promise<SteerQueuedResult>;
@@ -2719,6 +2721,7 @@ export interface RemoteControlMethodMap {
   reviewBotSkills: { params: { botId: string; input: BotSkillReviewInput }; result: Record<string, unknown> };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
+  assertModelSelectionAllowed: { params: { botId: string; modelRef: string | null }; result: { botId: string; allowed: true } };
   abort: { params: { botId: string }; result: AbortBotResult };
   withdrawQueued: { params: { botId: string; requestId?: string }; result: WithdrawQueuedResult };
   steerQueued: { params: { botId: string; requestId: string }; result: SteerQueuedResult };

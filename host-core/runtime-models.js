@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { getApiProvider } from '@earendil-works/pi-ai/compat';
 import { nativeCenterProvider } from './native-center-providers.js';
+import { createAntigravityHistoryTransport } from './antigravity-delta.js';
 import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
@@ -481,6 +482,12 @@ function createApiKeyAuth(apiKeyEnv) {
   };
 }
 
+// A Host service owns one registry for its fixed Center connection. Providers
+// may be rebuilt independently; their transport receipts must outlive them.
+// The WeakMap never shares cursors with another registry, and a changed device
+// or Center relay identity also starts a fresh receipt scope.
+const antigravityHistoryByRegistry = new WeakMap();
+
 /** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
 export function applyCenterModels(snapshot, existingModels, authResolver, streamAntigravity) {
   const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
@@ -514,17 +521,22 @@ export function applyCenterModels(snapshot, existingModels, authResolver, stream
     normalizeCodemodeFlag(selection.codemodeOnly, 'codemodeOnly');
     botModels[bot.botId] = selection;
   }
+  const models = existingModels ?? createModels();
+  const previousHistory = antigravityHistoryByRegistry.get(models);
+  const history = previousHistory && previousHistory.deviceId === snapshot.deviceId && previousHistory.linkUrl === snapshot.linkUrl
+    ? previousHistory
+    : { deviceId: snapshot.deviceId, linkUrl: snapshot.linkUrl, transport: createAntigravityHistoryTransport() };
   const built = normalized.map((provider) => {
     const original = snapshot.providers.find((p) => p.id === provider.id);
     let credential;
     if (original.credentialRef !== null) {
       credential = snapshot.credentials[original.credentialRef] ?? null;
     }
-    return nativeCenterProvider(provider, provider.models, credential, authResolver, streamAntigravity);
+    return nativeCenterProvider(provider, provider.models, credential, authResolver, streamAntigravity, history.transport);
   });
-  const models = existingModels ?? createModels();
   models.clearProviders();
   for (const provider of built) models.setProvider(withBillionContextOutputRepair(provider));
+  antigravityHistoryByRegistry.set(models, history);
   return { models, botModels };
 }
 

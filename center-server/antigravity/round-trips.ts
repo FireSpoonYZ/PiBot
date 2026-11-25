@@ -4,8 +4,8 @@
 // Adapted from @estebanforge/pi-antigravity-bridge `src/provider.ts`:
 //   - Exposes ALL tools from `getCurrentTools(messages)` (including builtins)
 //     plus `bridge_poll_result` via the per-session MCP bridge.
-//   - Rejects any non-bridge native operation tool appearing in `session/update`
-//     explicitly with DisallowedNativeToolError instead of silent execution.
+//   - Receives internal/unknown native progress without treating it as a Pi tool.
+//     Dedicated-agent PreToolUse hooks deny native business tools one call at a time.
 //   - Removes stream-json / WrapperReplay / native re-exec paths.
 
 import {
@@ -23,7 +23,7 @@ import { ANTIGRAVITY_POLL_TOOL, type AntigravityTurnContext } from "../../center
 import { ANTIGRAVITY_API, ANTIGRAVITY_BRIDGE_SERVER, ANTIGRAVITY_PROVIDER_ID } from "./constants.ts";
 import type { McpCallToolResult, McpToolDefinition } from "./mcp-bridge.ts";
 import { isHindsightRecallMessage, validateAntigravityTurnContext } from "./turn-context.js";
-import type { DriverActivity, TurnDriver } from "./vendor/driver-types.ts";
+import type { DriverActivity, ToolResultImage, TurnDriver } from "./vendor/driver-types.ts";
 import { toPiUsage } from "./vendor/stream-events.ts";
 
 export { validateAntigravityTurnContext };
@@ -71,21 +71,6 @@ export const BRIDGE_POLL_TOOL_DEF: McpToolDefinition = {
 	description: ANTIGRAVITY_POLL_TOOL.description,
 	inputSchema: ANTIGRAVITY_POLL_TOOL.parameters,
 };
-
-export class DisallowedNativeToolError extends Error {
-	readonly toolName: string;
-	readonly mcpServer?: string;
-
-	constructor(toolName: string, mcpServer?: string) {
-		const scope = mcpServer ? `MCP server "${mcpServer}"` : "Antigravity native tool runtime";
-		super(
-			`Disallowed tool execution: Antigravity attempted "${toolName}" via ${scope} instead of "${ANTIGRAVITY_BRIDGE_SERVER}".`,
-		);
-		this.name = "DisallowedNativeToolError";
-		this.toolName = toolName;
-		this.mcpServer = mcpServer;
-	}
-}
 
 export function isAllowedBridgeServer(mcpServer: string | undefined): boolean {
 	return typeof mcpServer === "string" && BRIDGE_SERVER_RE.test(mcpServer);
@@ -150,6 +135,7 @@ export interface PollView {
 	images?: Array<{ data: string; mimeType: string }>;
 	delivered?: boolean;
 	conversationId?: string;
+	turnId?: string;
 }
 
 export class EscalationRegistry {
@@ -164,8 +150,8 @@ export class EscalationRegistry {
 		}
 	}
 
-	escalate(callId: string, name: string): void {
-		this.#calls.set(callId, { name, state: "running" });
+	escalate(callId: string, name: string, turnId?: string): void {
+		this.#calls.set(callId, { name, state: "running", turnId });
 		this.#trim();
 	}
 
@@ -180,7 +166,7 @@ export class EscalationRegistry {
 		e.state = "done";
 		e.text = text;
 		e.isError = isError;
-		if (images.length > 0) e.images = images;
+		e.images = images.length > 0 ? images : undefined;
 		this.#trim();
 	}
 
@@ -282,16 +268,21 @@ export function formatPollAnswer(callId: string, view: PollView | undefined): Mc
 		};
 	}
 	return {
-		content: [
-			...(view.images ?? []).map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })),
-			{ type: "text", text: view.text || (view.images?.length ? "[image result]" : "(no output)") },
-		],
+		content: [{ type: "text", text: toolResultText(callId, view.text ?? "", view.images?.length ?? 0) }],
 		isError: view.isError ?? false,
 	};
 }
 
+function toolResultText(callId: string, text: string, imageCount: number): string {
+	if (!imageCount) return text || "(no output)";
+	const note = "Visual attachments for Pi host tool result " + JSON.stringify(callId) +
+		": " + imageCount + " image(s), in result order.";
+	return text ? text + "\n\n" + note : note;
+}
+
 interface PendingRoundTrip {
 	name: string;
+	turnId: string;
 	resolve: (r: McpCallToolResult) => void;
 	reject: (e: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
@@ -405,9 +396,19 @@ export class ToolRoundTrips {
 		if (name === POLL_TOOL_NAME) {
 			const targetCallId = typeof args.callId === "string" ? args.callId.trim() : "";
 			const view = targetCallId ? this.poll(targetCallId) : undefined;
-			if (view && view.state !== "running") {
+			if (view?.state === "done") {
+				if (signal.aborted) return Promise.reject(new Error("agy disconnected before the tool result arrived"));
+				const result = view.delivered
+					? formatPollAnswer(targetCallId, view)
+					: this.#toolResult(targetCallId, view.text ?? "", view.isError ?? false, view.images ?? [], view.turnId);
+				if (!view.delivered) {
+					// Retain the receipt, including delivery errors, but release the image payload.
+					this.#escalations.settleDone(targetCallId, blocksToText(result.content), result.isError === true);
+				}
 				this.markDelivered(targetCallId);
+				return Promise.resolve(result);
 			}
+			if (view?.state === "failed") this.markDelivered(targetCallId);
 			return Promise.resolve(formatPollAnswer(targetCallId, view));
 		}
 
@@ -429,7 +430,7 @@ export class ToolRoundTrips {
 			}, BRIDGE_TIMEOUT_MS);
 			const onAbort = () => this.#fail(callId, "agy disconnected before the tool result arrived");
 			signal.addEventListener("abort", onAbort, { once: true });
-			const entry: PendingRoundTrip = { name, resolve, reject, timer, onAbort, signal };
+			const entry: PendingRoundTrip = { name, turnId: handle.id, resolve, reject, timer, onAbort, signal };
 			const escalateAfterMs =
 				typeof this.#escalateAfterMs === "function"
 					? this.#escalateAfterMs(name)
@@ -446,7 +447,7 @@ export class ToolRoundTrips {
 							`escalated bridge call timed out after ${ESCALATED_TIMEOUT_MS / 60_000} minutes`,
 						);
 					}, ESCALATED_TIMEOUT_MS);
-					this.#escalations.escalate(callId, e.name);
+					this.#escalations.escalate(callId, e.name, e.turnId);
 					resolve(formatEscalatedAck({ escalated: true, callId, name: e.name }));
 				}, escalateAfterMs);
 			}
@@ -454,6 +455,41 @@ export class ToolRoundTrips {
 			handle.pushExternal({ type: "bridge_call", callId, name, args });
 		});
 	};
+
+	#toolResult(
+		toolCallId: string,
+		text: string,
+		isError: boolean,
+		images: readonly ToolResultImage[],
+		turnId?: string,
+	): McpCallToolResult {
+		if (images.length) {
+			try {
+				const driver = this.#getDriver();
+				if (!driver.queueToolResultImages || !driver.activeHandle ||
+					(turnId !== undefined && driver.activeHandle.id !== turnId)) {
+					throw new Error("the original native prompt is no longer available");
+				}
+				driver.queueToolResultImages(toolCallId, images);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				this.#log("tool-image-delivery-failed", { callId: toolCallId, reason }, "warn");
+				return {
+					content: [{ type: "text", text: [
+						text,
+						"Tool image delivery failed: " + reason + ".",
+						"The tool already ran. Its images were not delivered; do not repeat side effects to retry an image.",
+					].filter(Boolean).join("\n\n") }],
+					isError: true,
+				};
+			}
+		}
+		// A single image channel: no image block is also emitted through MCP.
+		return {
+			content: [{ type: "text", text: toolResultText(toolCallId, text, images.length) }],
+			isError,
+		};
+	}
 
 	resolve(
 		toolCallId: string,
@@ -470,13 +506,7 @@ export class ToolRoundTrips {
 		if (entry.escalated) {
 			this.#escalations.settleDone(toolCallId, text, isError, images);
 		} else {
-			entry.resolve({
-				content: [
-					...images.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType })),
-					{ type: "text", text: text || (images.length > 0 ? "[image result]" : "(no output)") },
-				],
-				isError,
-			});
+			entry.resolve(this.#toolResult(toolCallId, text, isError, images, entry.turnId));
 		}
 		this.#unparkDriver();
 		this.#log("round-trip-resolved", { callId: toolCallId, name: entry.name, isError });
@@ -1061,15 +1091,12 @@ export function consumeActivity(
 			return "continue";
 		case "tool_start":
 		case "tool_done":
-			// Only host MCP bridge calls are allowed; fail explicitly on native/foreign tools.
-			if (!isAllowedBridgeServer(activity.mcpServer)) {
-				throw new DisallowedNativeToolError(activity.name, activity.mcpServer);
-			}
+			// Native/internal activity is progress, not a request to execute a Pi tool.
 			return "continue";
 		case "tool_error":
-			if (!isAllowedBridgeServer(activity.mcpServer)) {
-				throw new DisallowedNativeToolError(activity.name, activity.mcpServer);
-			}
+			// A rejected native business call is local to that call. Let the agent
+			// follow the hook hint and continue with the Pi bridge.
+			if (!isAllowedBridgeServer(activity.mcpServer)) return "continue";
 			// A matching MCP isError result is model input, not a failed ACP turn.
 			// The delivery barrier still checks whether that response was written.
 			if (matchedMcpToolError) return "continue";
