@@ -8,17 +8,42 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ContextSnapshot } from "./context-sync.ts";
+import type { Message } from "@earendil-works/pi-ai";
+import { AGY_EMPTY_PREFIX, hashValue, isHash } from "../../center-contract/antigravity-delta.js";
+
+export interface ReceivedHistory {
+	version: 1;
+	config: { systemPrompt: string; tools: unknown[]; routingPolicy: string };
+	configHash: string;
+	messages: Message[];
+	prefixes: string[];
+}
+
+export interface StoredReply {
+	end: number;
+	prefixHash: string;
+	reason: "stop" | "toolUse" | "error" | "aborted";
+	message: Message;
+}
 
 export interface AgySession {
 	conversationId: string;
 	lastStepIdx: number;
 	lastMessageCount?: number;
 	turnRecallHook?: true;
-	/** Native configuration acknowledged with this context; absent legacy values rebuild. */
+	/** Native configuration bound to this session; legacy mappings require /clear. */
 	modelId?: string;
 	reasoning?: string | null;
-	/** Only a ready checkpoint authorizes loading a native conversation as-is. */
-	phase?: "ready" | "parked" | "uncertain";
+	/** Native lifecycle is independent of the durable transport receipt below. */
+	phase?: "new" | "ready" | "parked" | "uncertain";
+	/** Durable Host receipt, independent of native prompt consumption. */
+	history?: ReceivedHistory;
+	/** Prefix covered by a native dispatch intent, even if its outcome is unknown. */
+	attemptedThrough?: number;
+	/** User-entry indices covered by a native dispatch intent; queued gaps remain unsent. */
+	consumedUserIndices?: number[];
+	/** Re-deliver an observed result for a transport retry without invoking the model. */
+	reply?: StoredReply;
 	checkpoint?: ContextSnapshot;
 	/** Trailing, non-recall context sent outside the authoritative input prefix. */
 	auxiliaryHashes?: string[];
@@ -56,9 +81,31 @@ function readCheckpoint(value: unknown): ContextSnapshot | undefined {
 	return { version: 1, systemHash: candidate.systemHash, messageHashes: [...candidate.messageHashes] };
 }
 
+function readHistory(value: unknown): ReceivedHistory | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const h = value as ReceivedHistory;
+	if (h.version !== 1 || !h.config || typeof h.config.systemPrompt !== "string" ||
+		!Array.isArray(h.config.tools) || typeof h.config.routingPolicy !== "string" ||
+		!isHash(h.configHash) || hashValue(h.config) !== h.configHash || !Array.isArray(h.messages) ||
+		!Array.isArray(h.prefixes) || h.prefixes.length !== h.messages.length + 1 ||
+		h.prefixes[0] !== AGY_EMPTY_PREFIX || !h.prefixes.every(isHash)) return undefined;
+	return structuredClone(h);
+}
+
+function readReply(value: unknown): StoredReply | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const r = value as StoredReply;
+	if (!Number.isSafeInteger(r.end) || r.end < 0 || !isHash(r.prefixHash) ||
+		!["stop", "toolUse", "error", "aborted"].includes(r.reason) || r.message?.role !== "assistant") return undefined;
+	return structuredClone(r);
+}
+
 function copySession(session: AgySession): AgySession {
 	return {
 		...session,
+		...(session.history ? { history: structuredClone(session.history) } : {}),
+		...(session.consumedUserIndices ? { consumedUserIndices: [...session.consumedUserIndices] } : {}),
+		...(session.reply ? { reply: structuredClone(session.reply) } : {}),
 		...(session.checkpoint ? { checkpoint: {
 			...session.checkpoint, messageHashes: [...session.checkpoint.messageHashes],
 		} } : {}),
@@ -85,6 +132,12 @@ function narrowStoreMap(parsed: unknown): StoreMap {
 		const reasoning = (value as { reasoning?: unknown }).reasoning;
 		const phase = (value as { phase?: unknown }).phase;
 		const checkpoint = readCheckpoint((value as { checkpoint?: unknown }).checkpoint);
+		const history = readHistory((value as { history?: unknown }).history);
+		const reply = readReply((value as { reply?: unknown }).reply);
+		const attemptedThrough = (value as { attemptedThrough?: unknown }).attemptedThrough;
+		const consumed = (value as { consumedUserIndices?: unknown }).consumedUserIndices;
+		const consumedUserIndices = Array.isArray(consumed) && consumed.every((index) => Number.isSafeInteger(index) && index >= 0)
+			? [...new Set(consumed as number[])] : undefined;
 		const auxiliary = (value as { auxiliaryHashes?: unknown }).auxiliaryHashes;
 		const auxiliaryHashes = Array.isArray(auxiliary) && Array.from(auxiliary)
 			.every((hash) => typeof hash === "string" && HASH_RE.test(hash)) ? [...auxiliary] : undefined;
@@ -99,7 +152,12 @@ function narrowStoreMap(parsed: unknown): StoreMap {
 			...(turnRecallHook === true ? { turnRecallHook } : {}),
 			...(typeof modelId === "string" && modelId.length > 0 ? { modelId } : {}),
 			...(reasoning === null || typeof reasoning === "string" ? { reasoning } : {}),
-			...(phase === "ready" || phase === "parked" || phase === "uncertain" ? { phase } : {}),
+			...(phase === "new" || phase === "ready" || phase === "parked" || phase === "uncertain" ? { phase } : {}),
+			...(history ? { history } : {}),
+			...(consumedUserIndices ? { consumedUserIndices } : {}),
+			...(reply ? { reply } : {}),
+			...(typeof attemptedThrough === "number" && Number.isSafeInteger(attemptedThrough) && attemptedThrough >= 0
+				? { attemptedThrough } : {}),
 			...(checkpoint ? { checkpoint } : {}),
 			...(auxiliaryHashes ? { auxiliaryHashes } : {}),
 			...(pendingToolCallIds ? { pendingToolCallIds } : {}),

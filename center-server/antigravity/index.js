@@ -5,7 +5,7 @@
 //   - login({ notify, prompt, signal } = {}) => Promise<void>
 //   - logout() => Promise<void>
 //   - catalog({ signal } = {}) => Promise<Model[]>
-//   - stream({ deviceId, sessionId, requestId?, modelId, messages, reasoning, turnContext }, { signal } = {}) => AssistantMessageEventStream
+//   - stream({ deviceId, sessionId, requestId?, modelId, delta, reasoning, turnContext }, { signal } = {}) => AssistantMessageEventStream
 //   - cancel({ deviceId, sessionId, requestId? }) => Promise<void>
 //   - close() => Promise<void>
 
@@ -13,13 +13,12 @@ import { isDeepStrictEqual } from "node:util";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { hasStoredAcpAuthToken, loginAcpProfile, logoutAcpProfile, probeAcpAuth } from "./auth.ts";
 import { probeAcpCatalog, resolveSessionThoughtLevel } from "./catalog.ts";
-import { buildContextReplay, contextPrefixMatches, createContextSnapshot } from "./context-sync.ts";
+import { acceptHistoryDelta, historyChanged } from "../../center-contract/antigravity-delta.js";
 import { SharedMcpBridge } from "./mcp-bridge.ts";
-import { AGENT_NAME, ensureIsolatedProfile, resolveProfile } from "./profile.ts";
+import { ensureIsolatedProfile, ensureSessionAgent, resolveProfile } from "./profile.ts";
 import { redactText } from "./vendor/redact.ts";
 import {
 	buildFullPrompt,
-	buildLateResultPrompt,
 	collectToolResults,
 	consumeActivity,
 	ensureTextOpen,
@@ -28,12 +27,8 @@ import {
 	finalize,
 	isAllowedBridgeServer,
 	newAssistant,
-	RESUME_PROMPT,
-	splitAntigravityTurnContext,
-	systemPromptFromMessages,
 	toMcpToolDefinitions,
 	ToolRoundTrips,
-	toolsFromMessages,
 } from "./round-trips.ts";
 import { makeSessionKey, SessionStore } from "./sessions.ts";
 import { AcpDriver } from "./vendor/acp/driver.ts";
@@ -43,12 +38,6 @@ const BRIDGE_SERVER_RE = /^(?:pibot|pi)-bridge(?:-\d+)?$/i;
 const BRIDGE_PERMISSION_RE = /^(?:mcp_)?(?:pibot|pi)-bridge(?:-\d+)?(?:_|$)/i;
 const AUTH_CACHE_TTL_MS = 60_000;
 const MAX_IDLE_SESSIONS = 64;
-const KNOWN_MESSAGE_ROLES = new Set(["user", "system", "assistant", "toolResult"]);
-
-function equalHashes(left, right) {
-	return Array.isArray(left) && left.length === right.length &&
-		left.every((hash, index) => hash === right[index]);
-}
 
 function normalizeReasoning(reasoning) {
 	return reasoning ?? null;
@@ -57,16 +46,6 @@ function normalizeReasoning(reasoning) {
 function isValidRequestId(value) {
 	return typeof value === "string" && value.length > 0 && value.length <= 256 &&
 		value.isWellFormed() && value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value);
-}
-
-function isCompactionSession(sessionId) {
-	try {
-		const identity = JSON.parse(sessionId);
-		return Array.isArray(identity) && identity.length === 3 && identity[0] === "antigravity-compaction" &&
-			typeof identity[1] === "string" && identity[1].length > 0 && Number.isSafeInteger(identity[2]);
-	} catch {
-		return false;
-	}
 }
 
 /** Only a result paired with an earlier declared call can resume a tool turn. */
@@ -91,23 +70,25 @@ function pairedToolResultIds(messages) {
 	return paired;
 }
 
-function assertPromptFits(text, images, contextBlock) {
-	const prompt = images.map((image) => ({ type: "image", ...image }));
-	if (contextBlock) {
-		prompt.push({ type: "resource", resource: { ...contextBlock, mimeType: "text/markdown" } });
-	}
-	prompt.push({ type: "text", text });
-	// Reserve room for the RPC envelope and a newly assigned native session ID.
-	// The transport also checks the final encoded frame. Never acknowledge a
-	// shortened transcript merely to make it fit.
+function assertPromptFits(text, images) {
+	const prompt = [...images.map((image) => ({ type: "image", ...image })), { type: "text", text }];
 	if (Buffer.byteLength(JSON.stringify({ prompt }), "utf8") + 4096 > MAX_FRAME_BYTES) {
-		throw new RangeError("Antigravity context exceeds the ACP frame budget; compact the PiBot context before retrying.");
+		throw new RangeError("The new input exceeds the ACP frame budget; send a smaller message.");
 	}
 }
 
-function safeMessageRole(msg) {
-	if (!msg) return "none";
-	return typeof msg.role === "string" && KNOWN_MESSAGE_ROLES.has(msg.role) ? msg.role : "unknown";
+function buildUserBatch(messages) {
+	const images = [];
+	const parts = messages.map((message, index) => {
+		const text = extractUserPrompt({ messages: [message] }, 0) ?? "";
+		const attached = extractImages({ messages: [message] }, 0);
+		const first = images.length + 1;
+		images.push(...attached);
+		if (messages.length === 1) return text;
+		const imageNote = attached.length ? `\nAttached images ${first}-${images.length} belong to this message.` : "";
+		return `[New user message ${index + 1}]${imageNote}\n${text}`;
+	});
+	return { prompt: parts.join("\n\n"), images };
 }
 
 function createAbortError(message) {
@@ -226,9 +207,12 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 
 		const driver = new AcpDriver({
 			bin: profile.bin,
-			binArgs: ["acp", "--agent", AGENT_NAME, "--process-per-session"],
+			binArgs: (request) => ["acp", "--agent", ensureSessionAgent(profile, {
+				systemPrompt: request.systemPrompt, systemHash: request.systemHash,
+			}), "--process-per-session"],
 			geminiDir: profile.geminiHome,
-			enableTurnRecall: true,
+			enableTurnRecall: false,
+			enableToolImages: true,
 			resolveEffort: resolveSessionThoughtLevel,
 			mcpServers: () => [mcpBridge.serverConfig(slot.mcpToken)],
 			permissionPolicy: (req) => (isBridgePermissionRequest(req) ? "auto" : "deny"),
@@ -260,6 +244,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			allowedToolNames: new Set(),
 			activeConsumer: false,
 			preflightRequest: null,
+			queuedRequests: new Set(),
 			nativeOwner: null,
 			turnAbort: null,
 			turnCleanup: null,
@@ -267,7 +252,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			serialUsers: 0,
 			retiring: false,
 			lastUsedAt: Date.now(),
-			compaction: isCompactionSession(sessionId),
 		};
 
 		// Keep an initial registration for the slot; it cannot execute tools until
@@ -331,7 +315,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	async function abortSessionTurn(slot, reason) {
 		invalidateMcpRegistration(slot);
 		const binding = store.get(slot.key);
-		if (binding) store.set(slot.key, { ...binding, phase: "uncertain" });
+		if (binding && (slot.driver.activeHandle || binding.phase === "parked")) {
+			store.set(slot.key, { ...binding, phase: "uncertain" });
+		}
 		const turnAbort = slot.turnAbort;
 		slot.turnAbort = null;
 		slot.roundTrips.failAll(reason, { includeEscalated: true });
@@ -372,184 +358,142 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	}
 
 	async function runStreamTurn(stream, params, signal) {
-		const { deviceId, sessionId, requestId, modelId, messages, reasoning, turnContext: rawTurnContext } = params;
+		const { deviceId, sessionId, requestId, modelId, delta, reasoning, turnContext } = params;
 		const normalizedReasoning = normalizeReasoning(reasoning);
 		const blocks = { partial: newAssistant(modelId), textIdx: null, thinkingIdx: null, started: false };
-
-		if (closed) {
-			finalize(stream, blocks, "error", "Antigravity service is closed");
+		if (closed || typeof deviceId !== "string" || !deviceId || typeof sessionId !== "string" || !sessionId ||
+			typeof modelId !== "string" || !modelId || (requestId !== undefined && !isValidRequestId(requestId))) {
+			finalize(stream, blocks, "error", "Invalid or closed Antigravity stream");
 			return;
 		}
-		if (typeof deviceId !== "string" || !deviceId || typeof sessionId !== "string" || !sessionId) {
-			finalize(stream, blocks, "error", "deviceId and sessionId are required");
+		if (!delta) {
+			finalize(stream, blocks, "error", historyChanged("Upgrade this Host version before retrying").message);
 			return;
 		}
-		if (typeof modelId !== "string" || !modelId) {
-			finalize(stream, blocks, "error", "modelId is required");
-			return;
-		}
-		if (Object.hasOwn(params, "requestId") && !isValidRequestId(requestId)) {
-			finalize(stream, blocks, "error", "Invalid requestId");
-			return;
-		}
-		if (!Array.isArray(messages)) {
-			finalize(stream, blocks, "error", "messages must be an array");
-			return;
-		}
-		if (signal?.aborted) {
-			finalize(stream, blocks, "aborted", "Operation aborted");
-			return;
-		}
-
-		let resolvedTurn;
-		try {
-			resolvedTurn = splitAntigravityTurnContext(messages, rawTurnContext);
-		} catch (err) {
-			const msg = redactText(err instanceof Error ? err.message : String(err));
-			finalize(stream, blocks, "error", msg);
-			return;
-		}
-
-		const inspectInput = (existing, pendingIds) => {
-			const cleanMessages = resolvedTurn.messages;
-			const inputIndex = resolvedTurn.inputIndex;
-			const input = inputIndex === null ? undefined : cleanMessages[inputIndex];
-			const inputRole = input?.role;
-			const pairedIds = pairedToolResultIds(cleanMessages);
-			const userPrompt = extractUserPrompt({ messages: cleanMessages }, inputIndex);
-			const images = extractImages({ messages: cleanMessages }, inputIndex);
-			const resume = inputRole === "assistant" || inputRole === "toolResult";
-			const hasPendingAssistantCall = inputRole === "assistant" && Array.isArray(input.content) &&
-				input.content.some((part) => part?.type === "toolCall" && !pairedIds.has(part.id));
-			let error;
-			if (inputIndex === null || (!resume && !userPrompt && images.length === 0) ||
-				(resume && !existing && !pendingIds.has(input?.toolCallId)) || hasPendingAssistantCall ||
-				(inputRole === "toolResult" && !pairedIds.has(input.toolCallId))) {
-				const turnSource = rawTurnContext !== undefined ? "explicit" : "legacy";
-				console.warn(
-					`[antigravity] no-user-message source=${turnSource} tailRole=${safeMessageRole(messages.at(-1))} inputRole=${safeMessageRole(input)} rawCount=${messages.length} effectiveCount=${cleanMessages.length} contextNotes=${resolvedTurn.contextNotes.length} bound=${Boolean(existing?.conversationId)}`,
-				);
-				error = inputRole === "toolResult" || hasPendingAssistantCall
-					? "Antigravity cannot resume without a paired tool call and its result."
-					: "No user message to send to Antigravity.";
-			}
-			return { cleanMessages, inputIndex, inputRole, pairedIds, userPrompt, images, resume, error };
-		};
 
 		const slot = getOrCreateSession(deviceId, sessionId);
-		// Reject semantically invalid newcomers before they can claim the cancel
-		// scope of a parked turn. This preflight state is never used for dispatch.
-		const admissionError = inspectInput(store.get(slot.key), new Set(slot.roundTrips.pendingIds)).error;
-		if (admissionError) {
-			void trimIdleSessions();
-			finalize(stream, blocks, "error", admissionError);
-			return;
-		}
-		if (slot.activeConsumer) {
-			finalize(stream, blocks, "error", "Antigravity session already has an active stream");
-			return;
-		}
-		slot.activeConsumer = true;
-		// Preflight can be cancelled without changing who owns a parked native turn.
 		const request = { requestId, cancelled: false };
-		slot.preflightRequest = request;
+		slot.queuedRequests.add(request);
 		slot.serialUsers += 1;
-		slot.lastUsedAt = Date.now();
-		const isCancelled = () => closed || signal?.aborted || request.cancelled;
-		let parked = false;
-		let compactionReclaimed = false;
-
 		let releaseSerial;
-		const prevSerial = slot.serialChain;
-		slot.serialChain = new Promise((resolve) => {
-			releaseSerial = resolve;
-		});
-
+		const previousSerial = slot.serialChain;
+		slot.serialChain = new Promise((resolve) => { releaseSerial = resolve; });
+		const isCancelled = () => closed || signal?.aborted || request.cancelled;
 		let consumerReleased = false;
+		let nativeEpochForRequest = null;
+		let dispatchClaimed = false;
+		let accepted;
+		let existing;
+		let cleanMessages;
+		let requestEnd;
+		let nativeAttempted = false;
+		let createdNativeId;
+		let nativeHandle;
+		let priorNative;
+		let intentWrite;
+		let toolContinuation = false;
+
 		const releaseConsumer = () => {
 			if (consumerReleased) return;
 			consumerReleased = true;
+			slot.queuedRequests.delete(request);
 			if (slot.preflightRequest === request) slot.preflightRequest = null;
 			if (slot.nativeOwner === request) detachCallerSignal(slot);
 			slot.activeConsumer = false;
 			slot.lastUsedAt = Date.now();
 		};
-
-		const finishConsumer = (reason, message) => {
+		const finish = (reason, message) => {
 			releaseConsumer();
 			finalize(stream, blocks, reason, message);
 		};
+		const throwIfCancelled = () => {
+			if (nativeEpochForRequest !== null && slot.deliveryFailure?.epoch === nativeEpochForRequest) {
+				throw slot.deliveryFailure.error;
+			}
+			if (isCancelled()) throw createAbortError("Operation aborted");
+		};
+		const rememberReply = async (reason, message, phase) => {
+			const current = store.get(slot.key);
+			if (!current?.history || requestEnd === undefined) return;
+			store.set(slot.key, {
+				...current, phase,
+				pendingToolCallIds: phase === "ready" ? [] : [...new Set([...(current.pendingToolCallIds ?? []), ...slot.roundTrips.pendingIds])],
+				reply: { end: requestEnd, prefixHash: current.history.prefixes[requestEnd],
+					reason, message: structuredClone(message) },
+			});
+			await store.flush();
+		};
+		const rollbackUnsent = async (outcome) => {
+			// Cancellation may settle the driver while beforePrompt is still flushing.
+			if (intentWrite) await intentWrite.catch(() => {});
+			if (toolContinuation || outcome?.promptAttempted !== false || !dispatchClaimed) return;
+			const latest = store.get(slot.key);
+			store.set(slot.key, {
+				...latest, conversationId: createdNativeId ?? priorNative.conversationId,
+				phase: priorNative.phase, attemptedThrough: priorNative.attemptedThrough ?? 0,
+				consumedUserIndices: priorNative.consumedUserIndices ?? [],
+				pendingToolCallIds: priorNative.pendingToolCallIds ?? [],
+			});
+			await store.flush();
+			dispatchClaimed = false;
+			nativeAttempted = false;
+		};
+		const emitStoredReply = (reply) => {
+			if (reply.reason === "error" || reply.reason === "aborted") {
+				stream.push({ type: "error", reason: reply.reason, error: structuredClone(reply.message) });
+			} else {
+				stream.push({ type: "done", reason: reply.reason, message: structuredClone(reply.message) });
+			}
+			stream.end();
+		};
 
 		try {
-			await prevSerial;
-			if (closed) {
-				finishConsumer("error", "Antigravity service is closed");
+			await previousSerial;
+			slot.queuedRequests.delete(request);
+			slot.preflightRequest = request;
+			slot.activeConsumer = true;
+			existing = store.get(slot.key);
+			if (existing && !existing.history) throw historyChanged("The native session uses an older history mapping");
+			accepted = acceptHistoryDelta(existing?.history, delta);
+			requestEnd = accepted.end;
+			cleanMessages = accepted.history.messages.slice(0, requestEnd);
+			if (!turnContext || turnContext.inputIndex !== requestEnd - 1 || requestEnd === 0) {
+				throw new TypeError("Invalid canonical Antigravity input index");
+			}
+			if (!existing && cleanMessages.some((message) => message.role !== "user")) {
+				throw historyChanged("An existing conversation cannot switch into Antigravity");
+			}
+			store.set(slot.key, {
+				...(existing ?? { conversationId: "", lastStepIdx: -1, phase: "new",
+					attemptedThrough: 0, consumedUserIndices: [] }),
+				history: accepted.history,
+			});
+			// Receipt survives cancellation and restart; it does not claim native consumption.
+			await store.flush();
+			stream.push(accepted.ack);
+			throwIfCancelled();
+			const current = store.get(slot.key);
+			priorNative = current;
+			const cachedReply = current?.reply;
+			if (cachedReply?.end === requestEnd && cachedReply.prefixHash === accepted.ack.prefixHash) {
+				emitStoredReply(cachedReply);
 				return;
 			}
-			if (!isCancelled()) {
-				ensureIsolatedProfile(profile);
-				await mcpBridge.ensureStarted();
+			const input = cleanMessages[turnContext.inputIndex];
+			if (input?.role !== "user" && input?.role !== "toolResult") {
+				throw historyChanged("Only a new user input or a paired tool result can advance this session");
 			}
-
-			let nativeEpochForRequest = null;
-			const throwIfCancelled = () => {
-				if (nativeEpochForRequest !== null && slot.deliveryFailure?.epoch === nativeEpochForRequest) {
-					throw slot.deliveryFailure.error;
-				}
-				if (isCancelled()) throw createAbortError("Operation aborted");
-			};
-
-			const existing = store.get(slot.key);
-			const pendingIds = new Set(slot.roundTrips.pendingIds);
-			// Retirement or cancellation can change binding state while queued.
-			const { cleanMessages, inputIndex, inputRole, pairedIds, userPrompt, images, resume, error: inputError } =
-				inspectInput(existing, pendingIds);
-			// Early cancellation must still abort a compatible tool continuation's
-			// inherited turn. Check that compatibility before claiming the turn.
-			if (inputRole !== "toolResult" || inputError || closed) throwIfCancelled();
-			if (inputError) {
-				finishConsumer("error", inputError);
-				return;
+			if (current.phase !== "new" && !current.conversationId) {
+				throw historyChanged("The native conversation mapping is missing");
 			}
-
-			const messageCount = cleanMessages.length;
-			const requestEnd = inputIndex + 1;
-			// A user is the actual prompt. A tool/assistant continuation is history
-			// too: never replace its content with a generic resume instruction.
-			const historyEnd = inputRole === "user" ? inputIndex : requestEnd;
-			const historySnapshot = createContextSnapshot(cleanMessages, { endIndex: historyEnd });
-			const requestSnapshot = createContextSnapshot(cleanMessages, { endIndex: requestEnd });
-			const auxiliaryHashes = createContextSnapshot(resolvedTurn.auxiliaryMessages).messageHashes;
-			const sameAuxiliary = equalHashes(existing?.auxiliaryHashes, auxiliaryHashes);
-			const livePrefix = existing?.phase === "parked" && existing.turnRecallHook === true &&
-				sameAuxiliary && contextPrefixMatches(existing.checkpoint, requestSnapshot);
-			const continuationTail = livePrefix
-				? cleanMessages.slice(0, requestEnd).filter((message) => message.role !== "system")
-					.slice(existing.checkpoint.messageHashes.length)
-				: [];
-			const liveResults = inputRole === "toolResult"
-				? collectToolResults(continuationTail, [...pendingIds]).filter((result) => pairedIds.has(result.toolCallId))
-				: [];
-			const active = liveResults.length > 0 && livePrefix && continuationTail.length > 0 &&
-				continuationTail.every((message) => message.role === "toolResult" && pendingIds.has(message.toolCallId)) &&
-				new Set(continuationTail.map((message) => message.toolCallId)).size === continuationTail.length &&
-				slot.turnAbort && !slot.turnAbort.signal.aborted && slot.mcpRegistration &&
-				slot.nativeConfig?.modelId === modelId && slot.nativeConfig.reasoning === normalizedReasoning
-				? slot.driver.reentry() : null;
-			const superseded = !active && (Boolean(slot.driver.activeHandle) || pendingIds.size > 0);
-			const mcpTools = toMcpToolDefinitions(toolsFromMessages(cleanMessages));
+			const config = accepted.history.config;
+			const mcpTools = toMcpToolDefinitions(config.tools);
 			const claimNativeTurn = () => {
 				slot.preflightRequest = null;
 				slot.nativeOwner = request;
 				slot.currentTools = mcpTools;
 				slot.allowedToolNames = new Set(mcpTools.map((tool) => tool.name));
 			};
-			const reusable = !superseded && existing?.phase === "ready" && existing.turnRecallHook === true &&
-				existing.modelId === modelId && existing.reasoning === normalizedReasoning &&
-				sameAuxiliary && contextPrefixMatches(existing.checkpoint, historySnapshot);
-			const prompt = resume ? RESUME_PROMPT : userPrompt;
-			let loadRetried = false;
-			const claimedResults = new Set();
 			const awaitToolDeliveries = async () => {
 				throwIfCancelled();
 				const registration = slot.mcpRegistration;
@@ -559,41 +503,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				await registration.waitForDeliveries({ signal: slot.turnAbort?.signal });
 				throwIfCancelled();
 			};
-
-			const markUncertain = async (conversationId) => {
-				const prior = store.get(slot.key);
-				const nativeId = conversationId ?? prior?.conversationId;
-				if (nativeId) {
-					store.set(slot.key, {
-						...prior,
-						conversationId: nativeId,
-						lastStepIdx: -1,
-						phase: "uncertain",
-					});
-				}
-				// Retain the uncertain identity as a recovery hint for tool results,
-				// but it can never authorize native history reuse after a restart.
-				await store.flush();
-			};
-			const rememberConversation = async (conversationId, phase, assistant, exposedIds = []) => {
-				const pendingToolCallIds = [...new Set([...slot.roundTrips.pendingIds, ...exposedIds])];
-				store.set(slot.key, {
-					conversationId,
-					lastStepIdx: -1,
-					lastMessageCount: messageCount,
-					turnRecallHook: true,
-					modelId,
-					reasoning: normalizedReasoning,
-					phase: phase === "ready" && pendingToolCallIds.length > 0 ? "parked" : phase,
-					checkpoint: createContextSnapshot(cleanMessages, {
-						endIndex: requestEnd, appendMessages: assistant ? [assistant] : [],
-					}),
-					pendingToolCallIds,
-					auxiliaryHashes,
-				});
-				await store.flush();
-			};
-
 			const drainTurn = async (handle) => {
 				for (;;) {
 					const activity = await handle.next();
@@ -609,13 +518,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 							}],
 							stopReason: "toolUse",
 						};
-						// Persist before the Host can act on this toolUse. A process loss
-						// leaves enough intent to rebuild with the later real result.
-						await rememberConversation(conversationId, "parked", exposed, [activity.callId]);
+						await rememberReply("toolUse", exposed, "parked");
 						throwIfCancelled();
-						// Normal HTTP completion must not abort the still-running ACP turn.
 						releaseConsumer();
-						parked = true;
 						consumeActivity(stream, blocks, activity);
 						return true;
 					}
@@ -624,201 +529,141 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				}
 			};
 
-			const executePrompt = async (spec) => {
-				let conversationId = spec.conversationId;
-				let skipMessages = spec.skipMessages;
-				for (;;) {
-					throwIfCancelled();
-					const replay = buildContextReplay(spec.messages, {
-						endIndex: spec.endIndex,
-						skipMessages,
-						auxiliaryIndices: resolvedTurn.historicalAuxiliaryIndices,
-					});
-					const currentImages = spec.imagesInReplay && !conversationId ? [] : spec.images;
-					const fullPrompt = buildFullPrompt(
-						conversationId ? undefined : systemPromptFromMessages(cleanMessages),
-						"", spec.prompt,
-						{
-							routeNote: resolvedTurn.routeNote,
-							auxiliaryMessages: resolvedTurn.auxiliaryMessages,
-							historyImageCount: replay.images.length,
-							currentImageCount: currentImages.length,
-						},
-					);
-					const runImages = [
-						...replay.images,
-						...resolvedTurn.contextImages,
-						...currentImages,
-					];
-					const contextBlock = replay.text ? {
-						uri: `urn:pibot-bridge:context/${requestSnapshot.systemHash}`,
-						text: replay.text,
-					} : undefined;
-					assertPromptFits(fullPrompt, runImages, contextBlock);
-					// A rejected replay must leave the prior native turn and checkpoint untouched.
-					if (slot.nativeOwner !== request) {
-						claimNativeTurn();
-						if (superseded) await abortSessionTurn(slot, "Context changed before tool continuation");
-						throwIfCancelled();
-					}
-					await markUncertain(conversationId);
-					throwIfCancelled();
-					detachCallerSignal(slot);
-					const turnAbort = new AbortController();
-					slot.turnAbort = turnAbort;
-					nativeEpochForRequest = registerTurnMcp(slot);
-					slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
-					attachCallerSignal(slot, signal);
-					throwIfCancelled();
-					const contentBefore = JSON.stringify(blocks.partial.content);
-					const handle = await slot.driver.run({
-						cwd: profile.workspaceDir,
-						model: modelId,
-						effort: reasoning,
-						mode: "default",
-						skipPermissions: false,
-						conversationId,
-						prompt: fullPrompt,
-						images: runImages.length > 0 ? runImages : undefined,
-						turnRecall: spec.recall,
-						contextBlock,
-						signal: turnAbort.signal,
-					});
-					if (await drainTurn(handle)) return { parked: true };
-					const outcome = await handle.outcome;
-					throwIfCancelled();
-					if (outcome.status === "OK" && !outcome.aborted) await awaitToolDeliveries();
-					if (outcome.sessionLoadFailed === true && conversationId && !loadRetried &&
-						!outcome.aborted && contentBefore === JSON.stringify(blocks.partial.content)) {
-						// The driver guarantees no prompt has been sent in this case.
-						// Rebuild once from the complete authoritative context, never from
-						// the incremental request prepared for the missing conversation.
-						await markUncertain(outcome.conversationId);
-						loadRetried = true;
-						conversationId = null;
-						skipMessages = 0;
-						continue;
-					}
-					if (conversationId && outcome.status === "OK" && !outcome.aborted &&
-						outcome.conversationId !== conversationId) {
-						return { outcome: { ...outcome, status: "ERROR",
-							error: "Antigravity changed its conversation without rebuilding the context." } };
-					}
-					return { outcome };
+			ensureIsolatedProfile(profile);
+			await mcpBridge.ensureStarted();
+			throwIfCancelled();
+			let outcome;
+			const pendingIds = new Set(slot.roundTrips.pendingIds);
+			const persistedPending = current.pendingToolCallIds ?? [];
+			if (input.role === "toolResult") {
+				toolContinuation = true;
+				const pairedIds = pairedToolResultIds(cleanMessages);
+				const results = collectToolResults(cleanMessages, [...pendingIds])
+					.filter((result) => pairedIds.has(result.toolCallId));
+				const handle = slot.driver.reentry();
+				if (!handle || !slot.turnAbort || slot.turnAbort.signal.aborted || !slot.mcpRegistration ||
+					results.length === 0 || !pendingIds.has(input.toolCallId) || !pairedIds.has(input.toolCallId)) {
+					throw historyChanged("The live native tool continuation is unavailable");
 				}
-			};
-
-			let result;
-			if (active) {
+				if (slot.nativeConfig?.modelId !== modelId || slot.nativeConfig.reasoning !== normalizedReasoning) {
+					throw historyChanged("A pending tool continuation must use its original model");
+				}
 				claimNativeTurn();
 				nativeEpochForRequest = slot.nativeEpoch;
-				throwIfCancelled();
-				await markUncertain(existing.conversationId);
-				throwIfCancelled();
+				store.set(slot.key, { ...store.get(slot.key), phase: "uncertain", attemptedThrough: requestEnd });
+				await store.flush();
+				dispatchClaimed = true;
+				nativeAttempted = true;
 				attachCallerSignal(slot, signal);
-				for (const item of liveResults) {
+				for (const item of results) {
+					throwIfCancelled();
 					if (!slot.roundTrips.resolve(item.toolCallId, item.text, item.isError, item.images)) {
-						throw new Error(`Antigravity tool result lost its pending call before delivery: ${item.toolCallId}`);
+						throw new Error("Antigravity tool result lost its pending call before delivery");
 					}
 				}
-				if (await drainTurn(active)) return;
-				result = { outcome: await active.outcome };
-				if (result.outcome.status === "OK" && !result.outcome.aborted) await awaitToolDeliveries();
+				if (await drainTurn(handle)) return;
+				outcome = await handle.outcome;
 			} else {
-				result = await executePrompt({
-					conversationId: reusable ? existing.conversationId : null,
-					skipMessages: reusable ? existing.checkpoint.messageHashes.length : 0,
-					messages: cleanMessages,
-					endIndex: historyEnd,
-					prompt,
-					images,
-					recall: inputRole === "user" ? resolvedTurn.turnRecall : undefined,
+				if (pendingIds.size > 0 || persistedPending.length > 0 || slot.driver.activeHandle) {
+					throw Object.assign(new Error("AGY_TURN_PENDING: input received; finish the pending native tools before the next user turn."),
+						{ code: "AGY_TURN_PENDING" });
+				}
+				const consumed = new Set(current.consumedUserIndices ?? []);
+				const inputs = cleanMessages.flatMap((message, index) =>
+					message.role === "user" && !consumed.has(index) ? [{ message, index }] : []);
+				if (inputs.length === 0) {
+					throw Object.assign(new Error("AGY_INPUT_UNCERTAIN: this input was already dispatched; it will not be sent twice. Send a new message or use /clear."),
+						{ code: "AGY_INPUT_UNCERTAIN" });
+				}
+				const batch = buildUserBatch(inputs.map(({ message }) => message));
+				const prompt = buildFullPrompt(undefined, "", batch.prompt, {
+					routeNote: turnContext.routeNote,
+					currentImageCount: batch.images.length,
 				});
-				if (result.parked) return;
+				assertPromptFits(prompt, batch.images);
+				claimNativeTurn();
+				detachCallerSignal(slot);
+				slot.turnAbort = new AbortController();
+				nativeEpochForRequest = registerTurnMcp(slot);
+				slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
+				attachCallerSignal(slot, signal);
+				throwIfCancelled();
+				const handle = await slot.driver.run({
+					cwd: profile.workspaceDir, model: modelId, effort: reasoning,
+					mode: "default", skipPermissions: false,
+					conversationId: current.conversationId || undefined,
+					systemPrompt: config.systemPrompt, systemHash: accepted.history.configHash,
+					prompt, images: batch.images.length ? batch.images : undefined,
+					beforePrompt: ({ conversationId }) => {
+						intentWrite = (async () => {
+							throwIfCancelled();
+							if (current.conversationId && current.conversationId !== conversationId) {
+								throw historyChanged("The native conversation identity changed");
+							}
+							createdNativeId = conversationId;
+							const latest = store.get(slot.key);
+							store.set(slot.key, {
+								...latest, conversationId, phase: "uncertain",
+								modelId, reasoning: normalizedReasoning, attemptedThrough: requestEnd,
+								consumedUserIndices: [...new Set([...(latest.consumedUserIndices ?? []),
+									...inputs.map(({ index }) => index)])],
+								pendingToolCallIds: [],
+							});
+							await store.flush();
+							dispatchClaimed = true;
+							throwIfCancelled();
+						})();
+						return intentWrite;
+					},
+					signal: slot.turnAbort.signal,
+				});
+				nativeHandle = handle;
+				if (await drainTurn(handle)) return;
+				outcome = await handle.outcome;
+				nativeAttempted = outcome.promptAttempted !== false && dispatchClaimed;
+				await rollbackUnsent(outcome);
 			}
-
-			// An escalated tool can finish while the native turn ends without
-			// polling. Deliver only results present in this authoritative request,
-			// and never resurrect a stale result from an edited/compacted history.
-			if (active && result.outcome.status === "OK" && !result.outcome.aborted) {
-				const more = [];
-				for (const view of slot.roundTrips.claimAllUndelivered()) {
-					const received = collectToolResults(cleanMessages, [view.callId]).at(-1);
-					if (!received || !pairedIds.has(view.callId)) {
-						slot.roundTrips.unclaim(view.callId);
-						continue;
-					}
-					claimedResults.add(view.callId);
-					more.push({ callId: view.callId, name: view.name,
-						reason: "this result completed after your earlier tool acknowledgement; the action has already run",
-						text: received.text, isError: received.isError, images: received.images });
-				}
-				if (more.length > 0) {
-					const resumedMessages = [...cleanMessages, structuredClone(blocks.partial)];
-					result = await executePrompt({
-						conversationId: result.outcome.conversationId ?? null,
-						skipMessages: result.outcome.conversationId
-							? createContextSnapshot(resumedMessages).messageHashes.length : 0,
-						messages: resumedMessages,
-						endIndex: resumedMessages.length,
-						prompt: buildLateResultPrompt(more),
-						images: more.flatMap((item) => item.images),
-						imagesInReplay: true,
-					});
-					if (result.parked) return;
-				}
-			}
-
-			const outcome = result.outcome;
+			if (outcome.sessionLoadFailed) throw historyChanged("The native conversation can no longer be loaded");
 			throwIfCancelled();
-			if (outcome.aborted || outcome.status === "ERROR") {
-				for (const callId of claimedResults) slot.roundTrips.unclaim(callId);
-				await markUncertain(outcome.conversationId);
-				await abortSessionTurn(slot, "Antigravity turn did not finish reliably");
-				finishConsumer(outcome.aborted ? "aborted" : "error",
-					outcome.aborted ? "Operation aborted" : redactText(outcome.error ?? "Antigravity turn failed"));
-				return;
+			if (outcome.aborted || outcome.status === "ERROR" || outcome.promptTerminal !== true) {
+				throw Object.assign(new Error(outcome.error ?? (outcome.aborted ? "Operation aborted" : "Native prompt has no confirmed terminal result")),
+					{ name: outcome.aborted ? "AbortError" : "Error" });
 			}
-			if (!outcome.conversationId) throw new Error("Antigravity completed without a conversation identity");
+			if (!outcome.conversationId || (current.conversationId && outcome.conversationId !== current.conversationId)) {
+				throw historyChanged("The native conversation identity changed");
+			}
 			await awaitToolDeliveries();
-			// The driver already emitted text deltas; its outcome spans all tool continuations.
+			if (slot.roundTrips.pendingIds.length > 0 || slot.roundTrips.claimAllUndelivered().length > 0) {
+				throw new Error("AGY_INPUT_UNCERTAIN: native turn ended before all tool results were delivered; use /clear.");
+			}
 			if (blocks.partial.content.length === 0) ensureTextOpen(stream, blocks);
 			blocks.partial.stopReason = "stop";
-			await rememberConversation(outcome.conversationId, "ready", blocks.partial);
-			throwIfCancelled();
+			await rememberReply("stop", blocks.partial, "ready");
 			slot.turnAbort = null;
 			slot.bridgeToolActivity = null;
-			finishConsumer("stop");
-		} catch (err) {
-			invalidateAuthCacheIfNeeded(err);
+			finish("stop");
+		} catch (error) {
+			invalidateAuthCacheIfNeeded(error);
 			if (slot.nativeOwner === request) {
 				await abortSessionTurn(slot, "Antigravity stream interrupted").catch(() => {});
 			}
-			const aborted = isCancelled() || err?.name === "AbortError";
-			const msg = redactText(err instanceof Error ? err.message : String(err));
-			finishConsumer(aborted ? "aborted" : "error", msg);
+			if (nativeHandle) {
+				await rollbackUnsent(await nativeHandle.outcome.catch(() => undefined)).catch(() => {});
+			}
+			const aborted = isCancelled() || error?.name === "AbortError";
+			const reason = aborted ? "aborted" : "error";
+			const message = redactText(error instanceof Error ? error.message : String(error));
+			blocks.partial.stopReason = reason;
+			blocks.partial.errorMessage = message;
+			if (dispatchClaimed || nativeAttempted) {
+				await rememberReply(reason, blocks.partial, "uncertain").catch(() => {});
+			}
+			finish(reason, message);
 		} finally {
 			releaseConsumer();
-			try {
-				const ownsNative = slot.nativeOwner === request;
-				if (slot.compaction && (!slot.nativeOwner || ownsNative) && !parked &&
-					!slot.driver.activeHandle && slot.roundTrips.pendingIds.length === 0) {
-					try {
-						await retireSessionResources(slot, "compaction finished", ownsNative);
-						compactionReclaimed = true;
-					} catch (error) {
-						console.warn(`[antigravity] compaction cleanup failed: ${redactText(String(error))}`);
-					}
-				}
-			} finally {
-				slot.serialUsers -= 1;
-				if (compactionReclaimed && slot.serialUsers === 0 && !slot.activeConsumer &&
-					!slot.driver.activeHandle && slot.roundTrips.pendingIds.length === 0 && sessions.get(slot.key) === slot) {
-					sessions.delete(slot.key);
-				}
-				releaseSerial();
-				void trimIdleSessions();
-			}
+			slot.serialUsers -= 1;
+			releaseSerial();
+			void trimIdleSessions();
 		}
 	}
 
@@ -1104,6 +949,12 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			}
 			const slot = sessions.get(makeSessionKey(deviceId, sessionId));
 			if (!slot) return;
+			for (const queued of slot.queuedRequests) {
+				if (!scoped || queued.requestId === requestId) {
+					queued.cancelled = true;
+					if (scoped) return;
+				}
+			}
 			const pending = slot.preflightRequest;
 			if (pending && (!scoped || pending.requestId === requestId)) {
 				pending.cancelled = true;

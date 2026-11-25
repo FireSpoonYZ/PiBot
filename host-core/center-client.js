@@ -615,7 +615,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
           }
           if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
               !sessionId.trim() || typeof payload.modelId !== 'string' || !payload.modelId.trim() ||
-              !Array.isArray(payload.messages)) {
+              !payload.delta || !Array.isArray(payload.delta.messages)) {
             throw centerError('INVALID_ARGUMENT', 'invalid antigravity stream payload');
           }
           let bodyPayload = payload;
@@ -703,6 +703,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
             if (!text.trim()) return false;
             const parsed = JSON.parse(text);
             const event = assertAntigravityStreamEvent(parsed);
+            if (event.type === 'history_ack') {
+              await options.onHistoryAck?.(event);
+              return false;
+            }
             await options.onProviderStreamEvent?.(event, model);
             if (event.type === 'done' || event.type === 'error') {
               terminalSeen = true;

@@ -1,6 +1,8 @@
 import { createProvider } from '@earendil-works/pi-ai/models';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript';
+import { createAntigravityHistoryTransport } from './antigravity-delta.js';
+import { isHistoryAck } from '../center-contract/antigravity-delta.js';
 
 import { ANTIGRAVITY_API, ANTIGRAVITY_POLL_TOOL, ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 export { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID, ANTIGRAVITY_STREAM_PATH, ANTIGRAVITY_CANCEL_PATH, ANTIGRAVITY_MAX_FRAME_BYTES } from '../center-contract/antigravity.js';
@@ -26,6 +28,7 @@ function assertAssistantMessageShape(message, label) {
 }
 
 export function assertAntigravityStreamEvent(event) {
+  if (isHistoryAck(event)) return event;
   if (!isPlainRecord(event) || typeof event.type !== 'string' || !STREAM_EVENT_TYPES.has(event.type)) {
     throw new Error('Invalid antigravity stream event type');
   }
@@ -102,6 +105,7 @@ export function createAntigravityProvider({ provider, models: savedModels, strea
     };
   });
 
+  const historyTransport = createAntigravityHistoryTransport();
   const streamImpl = (model, context, options) => {
     const eventStream = createAssistantMessageEventStream();
     void (async () => {
@@ -136,7 +140,9 @@ export function createAntigravityProvider({ provider, models: savedModels, strea
           eventStream.push(createAntigravityErrorEvent(model, new Error('Request was aborted'), true));
           return;
         }
-        const source = streamAntigravity(payload, {
+        const prepared = historyTransport.prepare(payload);
+        const source = streamAntigravity(prepared.payload, {
+          onHistoryAck: prepared.acknowledge,
           signal: options?.signal,
           model,
           onResponse: options?.onResponse,
@@ -148,6 +154,7 @@ export function createAntigravityProvider({ provider, models: savedModels, strea
         let sawTerminal = false;
         for await (const rawEvent of source) {
           const event = assertAntigravityStreamEvent(rawEvent);
+          if (event.type === 'history_ack') { prepared.acknowledge(event); continue; }
           eventStream.push(event);
           if (event.type === 'done' || event.type === 'error') {
             sawTerminal = true;
