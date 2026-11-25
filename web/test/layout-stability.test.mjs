@@ -808,3 +808,43 @@ test('center-admin scrollable flex column items do not shrink or collapse to zer
     assert.doesNotMatch(body, /min-height\s*:\s*0\s*;/, `${selector} must not set min-height: 0 inside flex columns`);
   }
 });
+
+test('assistant replies stay left-aligned and span full chat width across desktop, mobile, and scope surfaces', () => {
+  const extractRule = (css, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  const transcriptCss = readFileSync(new URL('../../desktop/web/src/ChatTranscript.css', import.meta.url), 'utf8');
+  const desktopBubble = extractRule(transcriptCss, '.desktop-shell .desktop-transcript .bot-chat-bubble');
+  assert.match(desktopBubble, /align-self\s*:\s*stretch\s*;/);
+  assert.match(desktopBubble, /width\s*:\s*100%\s*;/);
+  assert.match(desktopBubble, /max-width\s*:\s*100%\s*;/);
+  assert.match(desktopBubble, /text-align\s*:\s*left\s*;/);
+  assert.doesNotMatch(desktopBubble, /max-width\s*:[^;]*\bch\b/);
+
+  for (const relPath of ['../../desktop/web/src/app.css', '../src/hub/chat.css', '../src/styles.css']) {
+    const css = readFileSync(new URL(relPath, import.meta.url), 'utf8');
+    const assistantBubble = extractRule(css, '.bot-chat-bubble.assistant');
+    assert.match(assistantBubble, /width\s*:\s*100%\s*;/, `${relPath} .bot-chat-bubble.assistant must span 100% width`);
+    assert.match(assistantBubble, /max-width\s*:\s*100%\s*;/, `${relPath} .bot-chat-bubble.assistant must not cap max-width below 100%`);
+    assert.match(assistantBubble, /align-self\s*:\s*stretch\s*;/, `${relPath} .bot-chat-bubble.assistant must stretch across turn`);
+    assert.match(assistantBubble, /text-align\s*:\s*left\s*;/, `${relPath} .bot-chat-bubble.assistant must stay left-aligned`);
+  }
+
+  const markdownCss = readFileSync(new URL('../src/Markdown.css', import.meta.url), 'utf8');
+  assert.doesNotMatch(markdownCss, /max-width\s*:[^;]*\bch\b/, 'Markdown.css must not cap prose width with ch units');
+
+  const scopeChatCss = readFileSync(new URL('../src/gbot-ui/conversation-chat.css', import.meta.url), 'utf8');
+  const scopeMsg = extractRule(scopeChatCss, '.conversation-chat-message');
+  assert.match(scopeMsg, /width\s*:\s*100%\s*;/);
+  assert.match(scopeMsg, /max-width\s*:\s*100%\s*;/);
+  const scopeBotBubble = extractRule(
+    scopeChatCss,
+    '.conversation-chat-message:not(.conversation-chat-message--user) .conversation-chat-message__bubble',
+  );
+  assert.match(scopeBotBubble, /width\s*:\s*100%\s*;/);
+  assert.match(scopeBotBubble, /text-align\s*:\s*left\s*;/);
+});
