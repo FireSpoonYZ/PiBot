@@ -76,7 +76,8 @@ export function createAntigravityErrorEvent(model, error, aborted = false) {
   };
 }
 
-export function createAntigravityProvider({ provider, models: savedModels, streamAntigravity }) {
+export function createAntigravityProvider({ provider, models: savedModels, streamAntigravity,
+  historyTransport = createAntigravityHistoryTransport() }) {
   if (!provider || provider.id !== ANTIGRAVITY_PROVIDER_ID) {
     throw new Error(`Antigravity provider id must be "${ANTIGRAVITY_PROVIDER_ID}"`);
   }
@@ -105,7 +106,6 @@ export function createAntigravityProvider({ provider, models: savedModels, strea
     };
   });
 
-  const historyTransport = createAntigravityHistoryTransport();
   const streamImpl = (model, context, options) => {
     const eventStream = createAssistantMessageEventStream();
     void (async () => {
