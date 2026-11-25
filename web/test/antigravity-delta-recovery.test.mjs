@@ -79,7 +79,8 @@ test('cached toolUse remains replayable while its exact native waiter is alive',
     assert.equal(first.terminal.reason, 'toolUse');
     const retried = await send(service, [BASE_SYSTEM, source], 'retry');
     assert.equal(retried.terminal.reason, 'toolUse');
-    assert.deepEqual(retried.terminal.message, first.terminal.message);
+    const { durationMs: _elapsed, ...firstMessage } = first.terminal.message;
+    assert.deepEqual(retried.terminal.message, firstMessage);
     assert.equal(driver.runs.length, 1);
     const completed = await send(service, [
       BASE_SYSTEM, source, first.terminal.message, toolResult('live-call', 'read_file', 'DELIVER_ONCE', 12),
