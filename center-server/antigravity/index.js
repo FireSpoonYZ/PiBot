@@ -521,11 +521,12 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				await registration.waitForDeliveries({ signal: slot.turnAbort?.signal });
 				throwIfCancelled();
 			};
-			const drainTurn = async (handle) => {
+			const drainTurn = async (handle, { suppressText = false } = {}) => {
 				for (;;) {
 					const activity = await handle.next();
 					if (!activity) return false;
 					throwIfCancelled();
+					if (suppressText && (activity.type === "text" || activity.type === "thought")) continue;
 					if (activity.type === "bridge_call") {
 						const conversationId = slot.driver.snapshot().conversationId;
 						if (!conversationId) throw new Error("Antigravity tool call has no native conversation");
@@ -590,7 +591,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 							throw new Error("Antigravity tool result lost its pending call before delivery");
 						}
 					}
-					if (await drainTurn(handle)) return;
+					if (await drainTurn(handle, { suppressText: inputs.length > 0 })) return;
 					outcome = await handle.outcome;
 				} else {
 					if (pendingIds.size > 0 || persistedPending.length > 0 || slot.driver.activeHandle) {
@@ -670,7 +671,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					slot.turnAbort = null;
 					slot.bridgeToolActivity = null;
 					store.set(slot.key, { ...store.get(slot.key), phase: "ready", pendingToolCallIds: [], reply: undefined });
-					await store.flush();
 					current = store.get(slot.key);
 					priorNative = current;
 					toolContinuation = false;
@@ -681,6 +681,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					createdNativeId = undefined;
 					intentWrite = undefined;
 					nativeEpochForRequest = null;
+					// A failed ready barrier must not cache the old turn as a result for
+					// users that have not been dispatched. A later request retries the write.
+					await store.flush();
 					throwIfCancelled();
 					continue;
 				}

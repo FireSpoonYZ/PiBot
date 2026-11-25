@@ -147,3 +147,157 @@ for (const failRollback of [false, true]) {
     }
   });
 }
+
+
+test('a failed ready checkpoint cannot cache an error for an unsent queued user', { timeout: 15_000 }, async t => {
+  const driver = createControlledAcpDriverHarness(t);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-ready-write-failure-'));
+  const service = openIsolatedAntigravity(rootDir);
+  const originalFlush = SessionStore.prototype.flush;
+  const queued = { role: 'user', content: 'U2: select Copper after the tool finishes.', timestamp: 13 };
+  let readyFailed = false;
+  let delivered = 0;
+  let queuedDispatches = 0;
+  t.mock.method(SessionStore.prototype, 'flush', async function () {
+    const binding = this.get(makeSessionKey(DEVICE_ID, SESSION_ID));
+    if (!readyFailed && delivered === 1 && binding?.phase === 'ready' &&
+        binding.consumedUserIndices?.length === 1 && binding.history.messages.length === 4) {
+      readyFailed = true;
+      throw new Error('FIXTURE_READY_FLUSH_FAILED');
+    }
+    return originalFlush.call(this);
+  });
+  driver.setOnRun(async ctx => {
+    if (driver.runs.length === 1) {
+      const result = await ctx.mcp.handler.onToolCall('ready-call', 'read_file', { path: 'fixture.txt' }, ctx.signal);
+      assert.equal(result.content[0].text, 'READY_TOOL_RESULT');
+      delivered += 1;
+      ctx.emit({ type: 'thought', delta: 'OLD_WAITING_THOUGHT' });
+      complete(ctx, 'Waiting for your selection.');
+      return;
+    }
+    queuedDispatches += 1;
+    assert.match(ctx.request.prompt, /U2: select Copper/);
+    assert.doesNotMatch(ctx.request.prompt, /U1:|READY_TOOL_RESULT/);
+    assert.equal(ctx.request.contextBlock, undefined);
+    complete(ctx, 'QUEUED_ANSWER_DONE');
+  });
+  try {
+    const first = await send(service, [BASE_SYSTEM, source], 'first');
+    assert.equal(first.terminal.reason, 'toolUse');
+    const messages = [BASE_SYSTEM, source, first.terminal.message,
+      toolResult('ready-call', 'read_file', 'READY_TOOL_RESULT', 12), queued];
+    const failed = await send(service, messages, 'ready-write-fails');
+    assert.equal(failed.terminal.type, 'error');
+    assert.match(failed.terminal.error.errorMessage, /FIXTURE_READY_FLUSH_FAILED/);
+    assert.doesNotMatch(JSON.stringify(failed.events), /Waiting for your selection|OLD_WAITING_THOUGHT/);
+    assert.equal(readyFailed, true);
+    assert.equal(delivered, 1);
+    assert.equal(queuedDispatches, 0);
+    assert.equal(driver.runs.length, 1);
+    const checkpoint = readBinding(rootDir);
+    assert.equal(checkpoint.phase, 'ready');
+    assert.deepEqual(checkpoint.pendingToolCallIds, []);
+    assert.deepEqual(checkpoint.consumedUserIndices, [0]);
+    assert.equal(checkpoint.reply, undefined, 'the unsent user has no result receipt');
+
+    const retried = await send(service, messages, 'retry-same-delta');
+    assert.equal(retried.terminal.reason, 'stop');
+    assert.equal(messageText(retried.terminal.message), 'QUEUED_ANSWER_DONE');
+    assert.equal(delivered, 1, 'the completed old tool is never delivered twice');
+    assert.equal(queuedDispatches, 1);
+    assert.equal(driver.runs.length, 2);
+    assert.equal(driver.runs[1].request.conversationId, driver.runs[0].assignedConversationId);
+    assert.deepEqual(readBinding(rootDir).consumedUserIndices, [0, 3]);
+    const duplicate = await send(service, messages, 'duplicate-finished-delta');
+    assert.equal(duplicate.terminal.reason, 'stop');
+    assert.equal(queuedDispatches, 1);
+  } finally {
+    try { await service.close(); }
+    finally { fs.rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});
+
+test('a tool-result-tail retry preserves queued user input after the next prompt never dispatched', { timeout: 15_000 }, async t => {
+  const driver = createControlledAcpDriverHarness(t);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-queued-user-retry-'));
+  const service = openIsolatedAntigravity(rootDir);
+  const originalFlush = SessionStore.prototype.flush;
+  const queued = { role: 'user', content: 'U2: choose Copper after the native tools finish.', timestamp: 13 };
+  const deliveries = [0, 0];
+  let intentFailed = false;
+  let queuedDispatches = 0;
+  t.mock.method(SessionStore.prototype, 'flush', async function () {
+    const binding = this.get(makeSessionKey(DEVICE_ID, SESSION_ID));
+    if (!intentFailed && binding?.consumedUserIndices?.includes(3)) {
+      intentFailed = true;
+      throw new Error('FIXTURE_QUEUED_INTENT_FLUSH_FAILED');
+    }
+    return originalFlush.call(this);
+  });
+  driver.setOnRun(async ctx => {
+    if (driver.runs.length === 1) {
+      const first = await ctx.mcp.handler.onToolCall('queued-first', 'read_file', { path: 'first.txt' }, ctx.signal);
+      assert.equal(first.content[0].text, 'FIRST_REAL_RESULT');
+      deliveries[0] += 1;
+      ctx.emit({ type: 'text', delta: 'OLD_WAITING_TEXT' });
+      ctx.emit({ type: 'thought', delta: 'OLD_WAITING_THOUGHT' });
+      const second = await ctx.mcp.handler.onToolCall('queued-followup', 'read_file', { path: 'second.txt' }, ctx.signal);
+      assert.equal(second.content[0].text, 'SECOND_REAL_RESULT');
+      deliveries[1] += 1;
+      complete(ctx, 'old native turn finished after its follow-up tool');
+      return;
+    }
+    queuedDispatches += 1;
+    assert.match(ctx.request.prompt, /U2: choose Copper/);
+    assert.doesNotMatch(ctx.request.prompt, /U1:|FIRST_REAL_RESULT|SECOND_REAL_RESULT/);
+    assert.equal(ctx.request.contextBlock, undefined);
+    complete(ctx, 'QUEUED_USER_COMPLETED_ONCE');
+  });
+  try {
+    const first = await send(service, [BASE_SYSTEM, source], 'first');
+    assert.equal(first.terminal.reason, 'toolUse');
+    const withQueuedUser = [BASE_SYSTEM, source, first.terminal.message,
+      toolResult('queued-first', 'read_file', 'FIRST_REAL_RESULT', 12), queued];
+    const parked = await send(service, withQueuedUser, 'deliver-first-and-queue-user');
+    assert.equal(parked.terminal.reason, 'toolUse');
+    assert.equal(parked.terminal.message.content.find(part => part.type === 'toolCall')?.id, 'queued-followup');
+    assert.equal(messageText(parked.terminal.message), '', 'old waiting text is not part of the queued user response');
+    assert.doesNotMatch(JSON.stringify(parked.events), /OLD_WAITING_TEXT|OLD_WAITING_THOUGHT/);
+    assert.equal(driver.runs.length, 1);
+    assert.equal(queuedDispatches, 0);
+    assert.deepEqual(readBinding(rootDir).consumedUserIndices, [0]);
+
+    const messages = [...withQueuedUser, parked.terminal.message,
+      toolResult('queued-followup', 'read_file', 'SECOND_REAL_RESULT', 14)];
+    const failed = await send(service, messages, 'deliver-followup-before-unsent-prompt');
+    assert.equal(failed.terminal.type, 'error');
+    assert.match(failed.terminal.error.errorMessage, /FIXTURE_QUEUED_INTENT_FLUSH_FAILED/);
+    assert.doesNotMatch(JSON.stringify(failed.events), /old native turn finished|OLD_WAITING/);
+    assert.equal(intentFailed, true);
+    assert.deepEqual(deliveries, [1, 1]);
+    assert.equal(queuedDispatches, 0);
+    assert.equal(driver.runs.length, 2, 'the second handle failed before calling the model');
+    const checkpoint = readBinding(rootDir);
+    assert.equal(checkpoint.phase, 'ready');
+    assert.deepEqual(checkpoint.pendingToolCallIds, []);
+    assert.deepEqual(checkpoint.consumedUserIndices, [0]);
+    assert.equal(checkpoint.reply, undefined);
+
+    const retried = await send(service, messages, 'retry-tool-result-tail');
+    assert.equal(retried.terminal.reason, 'stop');
+    assert.equal(messageText(retried.terminal.message), 'QUEUED_USER_COMPLETED_ONCE');
+    assert.deepEqual(deliveries, [1, 1]);
+    assert.equal(queuedDispatches, 1);
+    assert.equal(driver.runs.length, 3);
+    assert.equal(driver.runs[2].request.conversationId, driver.runs[0].assignedConversationId);
+    assert.deepEqual(readBinding(rootDir).consumedUserIndices, [0, 3]);
+    const duplicate = await send(service, messages, 'duplicate-completed-tool-result-tail');
+    assert.equal(duplicate.terminal.reason, 'stop');
+    assert.equal(queuedDispatches, 1);
+    assert.deepEqual(deliveries, [1, 1]);
+  } finally {
+    try { await service.close(); }
+    finally { fs.rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});
