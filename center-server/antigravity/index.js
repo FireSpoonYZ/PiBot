@@ -477,6 +477,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			throwIfCancelled();
 			const current = store.get(slot.key);
 			priorNative = current;
+			if (current.modelId && current.modelId !== modelId) {
+				throw historyChanged("The model changed in an existing Antigravity conversation");
+			}
 			const cachedReply = current?.reply;
 			if (cachedReply?.end === requestEnd && cachedReply.prefixHash === accepted.ack.prefixHash) {
 				if (cachedReply.reason === "toolUse") {
