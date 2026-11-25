@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowLeft,
   AudioLines,
+  ChevronsDownUp,
   ChevronsUpDown,
   ClipboardCheck,
   Clock,
@@ -12,6 +13,7 @@ import {
   Globe,
   LayoutDashboard,
   Loader2,
+  MessageSquareOff,
   PanelLeft,
   ScanLine,
   Server,
@@ -33,7 +35,15 @@ import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem } from '../../../host-core/index.js';
 import { CenterAdminPanel, type CenterTransport } from '../center-admin';
-import { humanizeError, useAction, useCollapseToolOutput, useHideToolOutput, useText } from '../ui';
+import {
+  humanizeError,
+  useAction,
+  useCollapseBotDm,
+  useCollapseToolOutput,
+  useHideBotDm,
+  useHideToolOutput,
+  useText,
+} from '../ui';
 import { useNotice, type NoticeTone } from '../notice';
 import { useConnectionPhaseContext } from '../connection';
 import { LabelStack, ReservedSlot, Skeleton } from '../layout';
@@ -247,6 +257,8 @@ export function HubSettingsView({
   const [remoteApiReady, setRemoteApiReady] = useState(false);
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
+  const [hideBotDm, setHideBotDm] = useHideBotDm();
+  const [collapseBotDm, setCollapseBotDm] = useCollapseBotDm();
 
   const pageHydrated =
     page === 'overview'
@@ -941,6 +953,36 @@ export function HubSettingsView({
                 )}
               />
             )}
+            <ListRow
+              leading={<MessageSquareOff />}
+              title={t('隐藏 Bot 间私聊', 'Hide bot-to-bot DMs')}
+              subtitle={t('不在对话框显示与其他 Bot 的私聊，可在 Bot 资料页查看', 'Keep peer bot DMs out of chat; still viewable in bot profile')}
+              trailing={(
+                <Switch
+                  label={t('隐藏 Bot 间私聊', 'Hide bot-to-bot DMs')}
+                  checked={hideBotDm}
+                  onCheckedChange={setHideBotDm}
+                />
+              )}
+            />
+            <ListRow
+              className={`hst-sub-setting-row${hideBotDm ? ' is-inactive' : ''}`}
+              leading={<ChevronsDownUp />}
+              title={t('默认折叠 Bot 间私聊', 'Collapse bot-to-bot DMs')}
+              subtitle={
+                hideBotDm
+                  ? t('关闭「隐藏 Bot 间私聊」后生效，默认折叠接收与发送内容', 'Applies when bot DMs are shown; collapses incoming & outgoing DMs')
+                  : t('默认折叠与其他 Bot 接收和发送的私聊内容，点击可展开', 'Collapse incoming & outgoing peer DMs by default; tap to expand')
+              }
+              trailing={(
+                <Switch
+                  label={t('默认折叠 Bot 间私聊', 'Collapse bot-to-bot DMs')}
+                  checked={collapseBotDm}
+                  onCheckedChange={setCollapseBotDm}
+                  disabled={hideBotDm}
+                />
+              )}
+            />
             <ListRow
               leading={<AudioLines />}
               title={t('语音朗读倍速', 'Speech rate')}

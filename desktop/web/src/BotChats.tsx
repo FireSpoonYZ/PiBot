@@ -18,6 +18,7 @@ import {
   Image as ImageIcon,
   LockKeyhole,
   MessageSquare,
+  MessagesSquare,
   Monitor,
   MoreHorizontal,
   PanelLeftClose,
@@ -5235,7 +5236,31 @@ function PrimaryChatPane({
                 </div>
                 <BotProfile api={api} centerApi={centerApi} bot={bot} page={isManagementPage ? 'management' : 'profile'} onSaved={onProfileSaved} />
                 {isProfilePage ? (
-                  <nav className="inspector-links" aria-label="Bot 设置">
+                  <nav className="inspector-links" aria-label={t('Bot 设置', 'Bot settings')}>
+                    {onOpenPrivateChats ? (
+                      <section className="inspector-link-group">
+                        <h3 className="inspector-section-title">{t('Bot 协作', 'Bot collaboration')}</h3>
+                        <button
+                          type="button"
+                          className="inspector-dm-entry"
+                          onClick={() => {
+                            setInspectorTab(null);
+                            onOpenPrivateChats(bot);
+                          }}
+                        >
+                          <span className="inspector-dm-icon" aria-hidden="true">
+                            <MessagesSquare size={16} />
+                          </span>
+                          <span className="inspector-dm-copy">
+                            <span className="inspector-dm-title">{t('查看该 Bot 的私聊', 'View this bot’s private chats')}</span>
+                            <span className="inspector-dm-sub">
+                              {t('查看与其他 Bot 的收发私聊记录', 'Browse incoming & outgoing peer bot DMs')}
+                            </span>
+                          </span>
+                          <ChevronRight size={15} className="inspector-dm-chevron" aria-hidden="true" />
+                        </button>
+                      </section>
+                    ) : null}
                     {inspectorGroups.map(group => (
                       <section className="inspector-link-group" key={group.title}>
                         <h3 className="inspector-section-title">{group.title}</h3>

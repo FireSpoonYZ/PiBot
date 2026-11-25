@@ -106,7 +106,9 @@ import {
   type BotActivity,
 } from './botActivity';
 import {
+  chatTurnsWithoutBotDm,
   chatTurnsWithoutToolOutput,
+  isBotDmSendToTool,
   latestEntryChannel,
   matchesScopedLiveBinding,
   mergeHistoryWaitProjection,
@@ -138,7 +140,18 @@ import {
   type ImageAttachmentData,
   type PickedImageSource,
 } from './imageAttachments';
-import { ErrorNotice, array, errorText, record, useAction, useCollapseToolOutput, useHideToolOutput, useText } from './ui';
+import {
+  ErrorNotice,
+  array,
+  errorText,
+  record,
+  useAction,
+  useCollapseBotDm,
+  useCollapseToolOutput,
+  useHideBotDm,
+  useHideToolOutput,
+  useText,
+} from './ui';
 import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 import {
   useGlobalTasks,
@@ -390,6 +403,8 @@ export function HostPage({
   const shellConnPhase = useConnectionPhaseContext();
   const [hideToolOutput] = useHideToolOutput();
   const [collapseToolOutput] = useCollapseToolOutput();
+  const [hideBotDm] = useHideBotDm();
+  const [collapseBotDm] = useCollapseBotDm();
   const action = useAction();
   const activeCenter = useContext(ActiveCenter);
   const centerConn = useCenterConnection();
@@ -5263,13 +5278,12 @@ ${newer}` : draftSnapshot;
     return filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
   }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter, activeDurableWaits]);
 
-  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
-  // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
+  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊或隐藏私聊的后台工作。
+  const chatLiveChannel = liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId);
   const chatLiveIsCollaborative = Boolean(
-    isBotBusy &&
-      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) === 'room',
+    isBotBusy && (chatLiveChannel === 'room' || (hideBotDm && chatLiveChannel === 'dm')),
   );
-  // 群聊工作的流式文本/工具名不渲染进 1v1 聊天忙状态。
+  // 群聊以及隐藏态 Bot 私聊的流式文本/工具名不渲染进 1v1 聊天忙状态。
   const displayLiveToolName = chatLiveIsCollaborative || hideToolOutput ? null : activeLiveToolName;
   const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
 
@@ -5279,9 +5293,9 @@ ${newer}` : draftSnapshot;
     return parseHistoryEntries(allChatItems, effectiveClearedAfter, {
       liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(effectiveChatLive?.tools),
       isBusy: isBotBusy,
-      // 群聊（room）生成的流式文本不进 1v1 聊天：隐藏轮由 parser 归轮过滤。
+      // 群聊（room）或隐藏态 Bot 私聊（dm）生成的流式文本不进 1v1 聊天。
       liveGeneratingText: displayGeneratingText,
-      // 与 displayGeneratingText 同一过滤口径：缺 attribution 的群聊生成块同样不进 1v1 聊天。
+      // 与 displayGeneratingText 同一过滤口径：缺 attribution 的隐藏协作生成块同样不进 1v1 聊天。
       liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : effectiveChatLive?.generation?.blocks,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
@@ -5289,7 +5303,7 @@ ${newer}` : draftSnapshot;
       knownBots,
       durableWaits: activeDurableWaits,
     });
-  }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots, activeDurableWaits]);
+  }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, displayGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots, activeDurableWaits]);
 
   const currentGoogleSetup = useMemo(
     () => selectCurrentGoogleSetup(allChatTurns),
@@ -5301,9 +5315,16 @@ ${newer}` : draftSnapshot;
     [botActivity],
   );
 
+  const chatTurnsAfterDm = useMemo(
+    () => (hideBotDm ? chatTurnsWithoutBotDm(allChatTurns) : allChatTurns),
+    [allChatTurns, hideBotDm],
+  );
   const displayedChatTurns = useMemo(
-    () => hideToolOutput ? chatTurnsWithoutToolOutput(allChatTurns) : allChatTurns,
-    [allChatTurns, hideToolOutput],
+    () =>
+      hideToolOutput
+        ? chatTurnsWithoutToolOutput(chatTurnsAfterDm, { preserveBotDmSendTo: !hideBotDm })
+        : chatTurnsAfterDm,
+    [chatTurnsAfterDm, hideToolOutput, hideBotDm],
   );
   const chatSearchActive = chatSearchOpen && Boolean(chatSearchQuery.trim());
   const visibleTurns = useMemo(() => {
@@ -5312,14 +5333,19 @@ ${newer}` : draftSnapshot;
     return displayedChatTurns.filter(
       turn =>
         turn.text.toLowerCase().includes(q) ||
-        (!hideToolOutput && Boolean(
+        Boolean(turn.attribution?.name && turn.attribution.name.toLowerCase().includes(q)) ||
+        Boolean(
           turn.tools?.some(
             tool =>
-              tool.name.toLowerCase().includes(q) ||
-              (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
-              (tool.output && tool.output.toLowerCase().includes(q)),
+              (isBotDmSendToTool(tool, turn) &&
+                ((tool.sendTo?.text && tool.sendTo.text.toLowerCase().includes(q)) ||
+                  (tool.sendTo?.targetName && tool.sendTo.targetName.toLowerCase().includes(q)))) ||
+              (!hideToolOutput &&
+                (tool.name.toLowerCase().includes(q) ||
+                  (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
+                  (tool.output && tool.output.toLowerCase().includes(q)))),
           ),
-        )),
+        ),
     );
   }, [displayedChatTurns, chatSearchOpen, chatSearchQuery, hideToolOutput]);
 
@@ -6269,7 +6295,7 @@ ${newer}` : draftSnapshot;
   const chatAdmissionActive = chatTurnAdmission?.phase === 'failed' &&
     (effectiveChatLive !== undefined || (chatPending?.botKey === activeBot?.key &&
       (chatReceipt?.status === undefined || chatReceipt.status === 'queued')));
-  const latestTurn = allChatTurns.at(-1);
+  const latestTurn = chatTurnsAfterDm.at(-1);
   const latestTurnHasError = Boolean(latestTurn?.role === 'assistant' && latestTurn.error);
   const submissionHasTurnError = Boolean(
     submission &&
@@ -6312,6 +6338,7 @@ ${newer}` : draftSnapshot;
       screen === 'bot-screen' ||
       screen === 'bot-browser' ||
       screen === 'bot-skills' ||
+      (screen === 'dm' && nav.previous?.screen === 'bot-profile') ||
       (screen === 'settings-center-admin' && nav.previous?.screen === 'bot-profile');
     const key = activeBot?.key ?? null;
     const previous = profileEditKeyRef.current;
@@ -6692,6 +6719,7 @@ ${newer}` : draftSnapshot;
           inTauriUi={inTauriUi}
           collapseToolOutput={collapseToolOutput}
           hideToolOutput={hideToolOutput}
+          collapseBotDm={collapseBotDm}
           botPanelConnected={botPanelConnected}
           toolScopeKey={toolScopeKey}
           action={action}
@@ -7076,6 +7104,7 @@ ${newer}` : draftSnapshot;
             onBack={closeBotProfile}
             onSave={() => void handleSaveBotEdit('profile')}
             onOpenAvatarPicker={openAvatarPicker}
+            onOpenBotDms={() => openBotDmList(activeBot)}
             onOpenModelSettings={() => (canOpenRemoteBotConfig ? openModelPickerSheet('model') : openCenterSettings())}
             onOpenSoul={() => {
               if (!botSoul || botSoulKey !== activeBot.key || botSoulError) {

@@ -3,9 +3,12 @@ import test from 'node:test';
 import { projectLiveState } from '../../host-core/runtime-live-projection.js';
 import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import {
+  chatTurnsWithoutBotDm,
   chatTurnsWithoutToolOutput,
   formatTurnDuration,
   formatWorkingElapsed,
+  isBotDmSendToTool,
+  isBotDmTurn,
   latestEntryChannel,
   parseHistoryEntries,
   summarizeToolArgs,
@@ -947,4 +950,228 @@ test('C7 tool call block ID stays anchored on first tool ID across 1 -> 2 -> 3 t
     assert.equal(turns[0].blocks?.[0].id, '50-0-tools-tc_anchor');
     assert.equal(turns[0].blocks?.[0].tools.length, expectedCount);
   }
+});
+
+test('chatTurnsWithoutBotDm hides incoming DM turns, DM assistant turns, and outbound DM send_to while preserving primary replies and room send_to', () => {
+  const knownBots = [
+    { botId: 'bot_a', deviceId: 'dev_1', role: '总控助手' },
+    { botId: 'bot_b', deviceId: 'dev_1', role: '研究助手' },
+  ];
+
+  const entries = [
+    // 1. Primary user turn
+    {
+      id: 1,
+      kind: 'pi.user',
+      model: [{ role: 'user', content: [{ type: 'text', text: '让研究助手查一下 Q2 营收' }] }],
+    },
+    // 2. Primary assistant turn calling ensure_dm + send_to (DM, still running/no toolResult yet) + reply to user
+    {
+      id: 2,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'toolCall', id: 'tc_ensure', name: 'ensure_dm', arguments: { deviceId: 'dev_1', botId: 'bot_b' } },
+          ],
+        },
+      ],
+    },
+    {
+      id: 3,
+      kind: 'pi.tool_result',
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_ensure',
+          toolName: 'ensure_dm',
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                scopeId: 'scope_dm_ab',
+                kind: 'dm',
+                members: [
+                  { deviceId: 'dev_1', botId: 'bot_a' },
+                  { deviceId: 'dev_1', botId: 'bot_b' },
+                ],
+              }),
+            },
+          ],
+          isError: false,
+        },
+      ],
+    },
+    {
+      id: 4,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'tc_send_dm',
+              name: 'send_to',
+              arguments: { scopeId: 'scope_dm_ab', text: '请帮我核实 Q2 营收数据' },
+            },
+            {
+              type: 'toolCall',
+              id: 'tc_send_room',
+              name: 'send_to',
+              arguments: { scopeId: 'scope_room_1', text: '已在群里同步进度' },
+            },
+            { type: 'text', text: '已派发给研究助手核实，请稍候。' },
+          ],
+        },
+      ],
+    },
+    {
+      id: 5,
+      kind: 'pi.tool_result',
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_send_room',
+          toolName: 'send_to',
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                scopeId: 'scope_room_1',
+                scopeKind: 'room',
+                category: 'public',
+                targetName: '研发群',
+                status: 'stored',
+              }),
+            },
+          ],
+          isError: false,
+        },
+      ],
+    },
+    // 3. Inbound DM from Bot B
+    {
+      id: 6,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'dm',
+        selfEcho: false,
+        message: {
+          messageId: 'msg_from_b',
+          scopeId: 'scope_dm_ab',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'bot', botId: 'bot_b' },
+          category: 'reply',
+          text: 'Q2 营收为 380 万。',
+          createdAt: '2026-06-01T10:02:00.000Z',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+    // 4. DM-triggered assistant turn (even without data.attribution!)
+    {
+      id: 7,
+      kind: 'host.work-trigger',
+      data: {
+        requestId: 'req_dm_reply',
+        botId: 'bot_a',
+        scopeId: 'scope_dm_ab',
+        turn: {
+          requestId: 'req_dm_reply',
+          kind: 'dm',
+          scopeId: 'scope_dm_ab',
+          replyTarget: { kind: 'dm', scopeId: 'scope_dm_ab', botId: 'bot_b' },
+        },
+      },
+    },
+    {
+      id: 8,
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: '收到，感谢研究助手！' }] }],
+    },
+    // 5. Resumed primary turn answering the human user
+    {
+      id: 9,
+      kind: 'host.work-trigger',
+      data: {
+        requestId: 'req_primary_resume',
+        botId: 'bot_a',
+        scopeId: 'primary',
+        turn: {
+          requestId: 'req_primary_resume',
+          kind: 'primary',
+          replyTarget: { kind: 'primary' },
+        },
+      },
+    },
+    {
+      id: 10,
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: '研究助手已核实：Q2 营收为 380 万。' }] }],
+    },
+  ];
+
+  const allTurns = parseHistoryEntries(entries, 0, {
+    selfBotId: 'bot_a',
+    knownBots,
+  });
+
+  // All 5 turns exist before DM filtering
+  assert.equal(allTurns.length, 5);
+  const dispatchTurn = allTurns[1];
+  const dmSendTool = dispatchTurn.tools?.find((tool) => tool.id === 'tc_send_dm');
+  const roomSendTool = dispatchTurn.tools?.find((tool) => tool.id === 'tc_send_room');
+  assert.ok(dmSendTool);
+  assert.ok(roomSendTool);
+  // ensure_dm result taught parser that scope_dm_ab is a DM with 研究助手 even before send_to toolResult
+  assert.equal(dmSendTool.sendTo?.scopeKind, 'dm');
+  assert.equal(dmSendTool.sendTo?.targetName, '研究助手');
+  assert.equal(isBotDmSendToTool(dmSendTool, dispatchTurn), true);
+  assert.equal(isBotDmSendToTool(roomSendTool, dispatchTurn), false);
+  assert.equal(isBotDmTurn(allTurns[2]), true);
+  assert.equal(isBotDmTurn(allTurns[3]), true);
+  assert.equal(isBotDmTurn(allTurns[4]), false);
+
+  // When hideBotDm = true: inbound DM, DM assistant turn, and outbound DM send_to are removed;
+  // primary user turn, primary assistant reply, room send_to, and resumed primary answer stay intact.
+  const withoutDm = chatTurnsWithoutBotDm(allTurns);
+  assert.equal(withoutDm.length, 3);
+  assert.equal(withoutDm[0].text, '让研究助手查一下 Q2 营收');
+  assert.equal(withoutDm[1].text, '已派发给研究助手核实，请稍候。');
+  assert.deepEqual(
+    withoutDm[1].tools?.map((tool) => tool.id),
+    ['tc_ensure', 'tc_send_room'],
+  );
+  assert.equal(withoutDm[2].text, '研究助手已核实：Q2 营收为 380 万。');
+
+  // Primary assistant turn containing ONLY an outbound DM send_to is dropped cleanly when hideBotDm = true
+  const dmOnlyPrimaryTurn = {
+    id: 'dm-only-primary',
+    role: 'assistant',
+    entryId: 20,
+    text: '',
+    tools: [dmSendTool],
+    blocks: [{ id: 'b-dm', kind: 'tools', tools: [dmSendTool] }],
+  };
+  assert.deepEqual(chatTurnsWithoutBotDm([dmOnlyPrimaryTurn]), []);
+
+  // When hideToolOutput = true AND hideBotDm = false (preserveBotDmSendTo: true):
+  // regular tools and room send_to are hidden, while outbound DM send_to stays visible alongside primary text.
+  const hiddenToolsKeepDm = chatTurnsWithoutToolOutput(allTurns, { preserveBotDmSendTo: true });
+  const dispatchAfterHideTools = hiddenToolsKeepDm.find((turn) => turn.id === dispatchTurn.id);
+  assert.ok(dispatchAfterHideTools);
+  assert.equal(dispatchAfterHideTools.text, '已派发给研究助手核实，请稍候。');
+  assert.deepEqual(
+    dispatchAfterHideTools.tools?.map((tool) => tool.id),
+    ['tc_send_dm'],
+  );
+  assert.equal(
+    chatTurnsWithoutToolOutput([dmOnlyPrimaryTurn], { preserveBotDmSendTo: true }).length,
+    1,
+  );
+  // Default chatTurnsWithoutToolOutput (preserveBotDmSendTo omitted/false) preserves existing behavior.
+  assert.deepEqual(chatTurnsWithoutToolOutput([dmOnlyPrimaryTurn]), []);
 });

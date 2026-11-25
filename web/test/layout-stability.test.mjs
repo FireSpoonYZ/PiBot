@@ -848,3 +848,63 @@ test('assistant replies stay left-aligned and span full chat width across deskto
   assert.match(scopeBotBubble, /width\s*:\s*100%\s*;/);
   assert.match(scopeBotBubble, /text-align\s*:\s*left\s*;/);
 });
+
+test('desktop bot list lets hub-list-scroll own wheel scrolling and avoids scrollbar-width overriding webkit scrollbars', () => {
+  const extractRule = (css, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  const desktopAppCss = readFileSync(new URL('../../desktop/web/src/app.css', import.meta.url), 'utf8');
+  const appHubBotList = extractRule(desktopAppCss, '.hub-bot-list');
+  assert.doesNotMatch(
+    appHubBotList,
+    /overflow(?:-y)?\s*:\s*(?:auto|scroll)\b/,
+    'app.css .hub-bot-list must not create a nested scroll container inside .hub-list-scroll',
+  );
+  assert.doesNotMatch(
+    appHubBotList,
+    /overscroll-behavior(?:-y)?\s*:\s*(?:contain|none)\b/,
+    'app.css .hub-bot-list must not trap wheel scroll chaining inside .hub-list-scroll',
+  );
+
+  const botChatsCss = readFileSync(new URL('../../desktop/web/src/BotChats.css', import.meta.url), 'utf8');
+  const listScroll = extractRule(botChatsCss, '.hub-list-scroll');
+  assert.match(listScroll, /overflow-y\s*:\s*auto\s*;/);
+  assert.match(listScroll, /overscroll-behavior\s*:\s*contain\s*;/);
+
+  const botList = extractRule(botChatsCss, '.hub-bot-list');
+  assert.match(botList, /overflow\s*:\s*visible\s*;/);
+  assert.match(botList, /overscroll-behavior\s*:\s*auto\s*;/);
+
+  const tokensCss = readFileSync(new URL('../src/design-system/tokens.css', import.meta.url), 'utf8');
+  assert.match(
+    tokensCss,
+    /@supports\s+not\s+selector\(::-webkit-scrollbar\)\s*\{[\s\S]*?scrollbar-width\s*:\s*thin\s*;[\s\S]*?scrollbar-color\s*:/,
+    'tokens.css must guard scrollbar-width/scrollbar-color so WebKitGTK and Chromium keep custom ::-webkit-scrollbar styles',
+  );
+  const tokensWithoutGuard = tokensCss.replace(
+    /@supports\s+not\s+selector\(::-webkit-scrollbar\)\s*\{[\s\S]*?\}\s*\}/,
+    '',
+  );
+  assert.doesNotMatch(
+    tokensWithoutGuard,
+    /scrollbar-(?:width|color)\s*:/,
+    'tokens.css must not emit unguarded scrollbar-width/scrollbar-color rules',
+  );
+
+  for (const relPath of [
+    '../../desktop/web/src/app.css',
+    '../../desktop/web/src/pet/pet.css',
+    '../../desktop/web/src/pet/voice.css',
+  ]) {
+    const css = readFileSync(new URL(relPath, import.meta.url), 'utf8');
+    assert.doesNotMatch(
+      css,
+      /scrollbar-width\s*:\s*thin\b/,
+      `${relPath} must not set scrollbar-width: thin directly (breaks ::-webkit-scrollbar in WebKitGTK/Chromium)`,
+    );
+  }
+});

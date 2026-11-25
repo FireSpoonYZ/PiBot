@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import type { ChatToolCallItem } from './chatTurnModel';
 import { formatTurnDuration, pendingToolPrompts, resolveToolPresentationActive } from './chatTurnModel';
+import { BotDmFoldCard } from './BotDmCard';
 import {
   readToolPresentation,
   ToolPresentationCard,
@@ -70,6 +71,12 @@ export interface ToolCallCardProps {
   variant?: 'mobile' | 'desktop';
   requesterName?: string;
   collapseOutput: boolean;
+  /** 默认折叠 Bot 间私聊（发往 DM 的 send_to 卡片）。 */
+  collapseBotDm?: boolean;
+  /** 位于外层已折叠的 DM 执行轮内部时为 true，避免二次折叠。 */
+  insideBotDmTurn?: boolean;
+  /** 会话搜索命中时自动展开折叠的 DM 卡片。 */
+  forceExpandBotDm?: boolean;
   /** 仅作初始展开态（省略时回退 !collapseOutput）；用户手动切换后不再被自动覆写。 */
   defaultOpen?: boolean;
   presentationOnly?: boolean;
@@ -92,6 +99,9 @@ export function ToolCallCard({
   variant,
   requesterName,
   collapseOutput,
+  collapseBotDm = false,
+  insideBotDmTurn = false,
+  forceExpandBotDm = false,
   defaultOpen,
   presentationOnly = false,
   depth = 0,
@@ -150,6 +160,11 @@ export function ToolCallCard({
     : tool.id;
 
   const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
+  const isDmSendTo = Boolean(
+    !tool.parentCallId &&
+      tool.name === 'send_to' &&
+      (sendTo?.scopeKind === 'dm' || (insideBotDmTurn && sendTo?.scopeKind !== 'room')),
+  );
   const sendToTarget = sendTo
     ? (sendTo.targetName ||
        (sendTo.scopeKind === 'room' ? t('群聊', 'Group chat') : t('对端 Bot', 'Peer Bot')))
@@ -227,7 +242,7 @@ export function ToolCallCard({
     />
   ) : null;
 
-  if (presentationOnly) return presentationCard;
+  if (presentationOnly && !isDmSendTo) return presentationCard;
   if (isGoogleSetupHistory) {
     return (
       <div key={`${scopeKey}:${tool.id}`} role="listitem" className="gws-history-listitem">
@@ -295,6 +310,184 @@ export function ToolCallCard({
     </>
   );
 
+  const renderDetailPanel = () => (
+    <div id={panelId} className="tool-call-panel">
+      {tool.error ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('错误', 'Error')}</span>
+          <pre className="tool-call-error">{tool.error}</pre>
+        </div>
+      ) : null}
+
+      {script !== undefined ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('脚本', 'Script')}</span>
+          <pre className="tool-call-code">{script}</pre>
+        </div>
+      ) : mobileCompact && argsEntries.length > 0 ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('参数', 'Arguments')}</span>
+          <dl className="tool-call-kv-list">
+            {argsEntries.map(([key, rawValue]) => {
+              const formatted = formatCompactArgValue(rawValue);
+              const isLong = isLongCompactArgValue(formatted);
+              const isValExpanded = Boolean(expandedArgKeys[key]);
+              return (
+                <div key={key} className="tool-call-kv-row">
+                  <dt className="tool-call-kv-key">{key}</dt>
+                  <dd className="tool-call-kv-val-cell">
+                    {isLong ? (
+                      <button
+                        type="button"
+                        className={`tool-call-kv-val-toggle${isValExpanded ? ' is-expanded' : ''}`}
+                        aria-expanded={isValExpanded}
+                        onClick={() => setExpandedArgKeys(prev => ({ ...prev, [key]: !prev[key] }))}
+                      >
+                        <span className="tool-call-kv-val-text">
+                          {isValExpanded ? formatted : previewCompactArgValue(formatted)}
+                        </span>
+                        <span className="tool-call-kv-val-action">
+                          {isValExpanded ? t('收起', 'Collapse') : t('展开', 'Expand')}
+                        </span>
+                      </button>
+                    ) : (
+                      <span className="tool-call-kv-val">{formatted}</span>
+                    )}
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+          {args !== undefined ? (
+            <div className="tool-call-raw-wrap">
+              <button
+                type="button"
+                className="tool-call-raw-toggle"
+                aria-expanded={showRawArgs}
+                onClick={() => setShowRawArgs(v => !v)}
+              >
+                {showRawArgs ? t('收起原文', 'Hide raw') : t('查看原文', 'View raw')}
+              </button>
+              {showRawArgs ? <pre className="tool-call-code">{args}</pre> : null}
+            </div>
+          ) : null}
+        </div>
+      ) : args !== undefined ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('参数', 'Arguments')}</span>
+          <pre className="tool-call-code">{args}</pre>
+        </div>
+      ) : codemode ? (
+        <p className="tool-call-notice">{t('此记录未保留脚本。', 'The script is not available in this record.')}</p>
+      ) : tool.argSummary ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('参数摘要', 'Argument preview')}</span>
+          <pre className="tool-call-code">{tool.argSummary}</pre>
+        </div>
+      ) : null}
+
+      {tool.children && tool.children.length > 0 ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">{t('子调用', 'Nested calls')}</span>
+          {renderChildren()}
+        </div>
+      ) : null}
+      {tool.nestedCallsTruncated ? (
+        <p className="tool-call-notice">{t('子调用摘要已截断，部分信息未显示。', 'Nested call summaries are truncated; some information is not shown.')}</p>
+      ) : null}
+      {codemode && tool.status !== 'running' && tool.children === undefined ? (
+        <p className="tool-call-notice">{t('此记录未保留子调用摘要。', 'No nested call summaries were recorded.')}</p>
+      ) : null}
+
+      {tool.output !== undefined ? (
+        <div className="tool-call-section">
+          <span className="tool-call-label">
+            {tool.status === 'running' ? t('实时输出', 'Live output') : t('输出', 'Output')}
+          </span>
+          <pre className="tool-call-code">{tool.output}</pre>
+        </div>
+      ) : codemode ? (
+        <p className="tool-call-notice">{t('暂无记录的文本输出。', 'No recorded text output is available.')}</p>
+      ) : null}
+      {tool.outputTruncated ? (
+        <p className="tool-call-notice">{t('输出已截断。', 'Output is truncated.')}</p>
+      ) : null}
+    </div>
+  );
+
+  if (isDmSendTo) {
+    const dmPeer = sendTo?.targetName?.trim() || t('对端 Bot', 'Peer bot');
+    const dmPeerLabel =
+      sendTo?.category === 'reply'
+        ? t(`回复 ${dmPeer}`, `Reply to ${dmPeer}`)
+        : t(`发给 ${dmPeer}`, `To ${dmPeer}`);
+    const dmStatus: 'idle' | 'running' | 'error' =
+      tool.status === 'error' ? 'error' : tool.status === 'running' ? 'running' : 'idle';
+    const dmTag =
+      tool.status === 'running'
+        ? t('发送中…', 'Sending…')
+        : tool.status === 'error'
+          ? t('发送失败', 'Send failed')
+          : sendToAction ?? t('私聊发送', 'DM sent');
+    const dmPreview = sendTo?.silentPass
+      ? t('本次无需回复（pass）', 'No reply needed (pass)')
+      : (sendTo?.text || (sendTo?.fileCount && sendTo.fileCount > 0 ? t(`${sendTo.fileCount} 个附件`, `${sendTo.fileCount} file(s)`) : ''));
+    const dmMetaParts = [
+      sendTo?.fileCount && sendTo.fileCount > 0 ? t(`${sendTo.fileCount} 个附件`, `${sendTo.fileCount} file(s)`) : '',
+      !presentationOnly && duration ? duration : '',
+    ].filter(Boolean);
+    const showRawToggle = !presentationOnly && hasPanelContent;
+    const rawDetailsOpen = userOpen === true;
+    return (
+      <div
+        key={`${scopeKey}:${tool.id}`}
+        role="listitem"
+        className={`tool-call-card is-${tool.status}${incomplete ? ' is-incomplete' : ''} is-send-to is-dm-send-to`}
+      >
+        <BotDmFoldCard
+          direction="outgoing"
+          peerLabel={dmPeerLabel}
+          tag={dmTag}
+          preview={dmPreview ? dmPreview.replace(/\s+/g, ' ').trim() : undefined}
+          meta={dmMetaParts.join(' · ') || undefined}
+          status={dmStatus}
+          silent={Boolean(sendTo?.silentPass)}
+          inline
+          defaultCollapsed={insideBotDmTurn ? false : collapseBotDm}
+          forceExpand={forceExpandBotDm}
+        >
+          {sendTo?.silentPass ? (
+            <p className="bot-dm-send-to-silent">{t('本次无需回复（pass）', 'No reply needed (pass)')}</p>
+          ) : sendTo?.text ? (
+            <div className="bot-dm-send-to-text">{sendTo.text}</div>
+          ) : tool.error ? (
+            <pre className="tool-call-error">{tool.error}</pre>
+          ) : (
+            <p className="bot-dm-send-to-silent">
+              {tool.status === 'running' ? t('正在发送私聊消息…', 'Sending direct message…') : t('已发送私聊消息', 'Direct message sent')}
+            </p>
+          )}
+          {showRawToggle ? (
+            <div className="bot-dm-send-to-details-bar">
+              <button
+                type="button"
+                className="bot-dm-send-to-details-btn"
+                aria-expanded={rawDetailsOpen}
+                aria-controls={panelId}
+                onClick={() => setUserOpen(!rawDetailsOpen)}
+              >
+                <span>{rawDetailsOpen ? t('收起调用详情', 'Hide call details') : t('查看调用详情', 'View call details')}</span>
+                <ChevronDown size={12} aria-hidden="true" className={`tool-call-chevron${rawDetailsOpen ? ' is-open' : ''}`} />
+              </button>
+            </div>
+          ) : null}
+          {showRawToggle && rawDetailsOpen ? renderDetailPanel() : null}
+        </BotDmFoldCard>
+        {presentationCard}
+      </div>
+    );
+  }
+
   return (
     <div
       key={`${scopeKey}:${tool.id}`}
@@ -344,110 +537,7 @@ export function ToolCallCard({
         </div>
       ) : null}
 
-      {expanded && hasPanelContent ? (
-        <div id={panelId} className="tool-call-panel">
-          {tool.error ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('错误', 'Error')}</span>
-              <pre className="tool-call-error">{tool.error}</pre>
-            </div>
-          ) : null}
-
-          {script !== undefined ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('脚本', 'Script')}</span>
-              <pre className="tool-call-code">{script}</pre>
-            </div>
-          ) : mobileCompact && argsEntries.length > 0 ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('参数', 'Arguments')}</span>
-              <dl className="tool-call-kv-list">
-                {argsEntries.map(([key, rawValue]) => {
-                  const formatted = formatCompactArgValue(rawValue);
-                  const isLong = isLongCompactArgValue(formatted);
-                  const isValExpanded = Boolean(expandedArgKeys[key]);
-                  return (
-                    <div key={key} className="tool-call-kv-row">
-                      <dt className="tool-call-kv-key">{key}</dt>
-                      <dd className="tool-call-kv-val-cell">
-                        {isLong ? (
-                          <button
-                            type="button"
-                            className={`tool-call-kv-val-toggle${isValExpanded ? ' is-expanded' : ''}`}
-                            aria-expanded={isValExpanded}
-                            onClick={() => setExpandedArgKeys(prev => ({ ...prev, [key]: !prev[key] }))}
-                          >
-                            <span className="tool-call-kv-val-text">
-                              {isValExpanded ? formatted : previewCompactArgValue(formatted)}
-                            </span>
-                            <span className="tool-call-kv-val-action">
-                              {isValExpanded ? t('收起', 'Collapse') : t('展开', 'Expand')}
-                            </span>
-                          </button>
-                        ) : (
-                          <span className="tool-call-kv-val">{formatted}</span>
-                        )}
-                      </dd>
-                    </div>
-                  );
-                })}
-              </dl>
-              {args !== undefined ? (
-                <div className="tool-call-raw-wrap">
-                  <button
-                    type="button"
-                    className="tool-call-raw-toggle"
-                    aria-expanded={showRawArgs}
-                    onClick={() => setShowRawArgs(v => !v)}
-                  >
-                    {showRawArgs ? t('收起原文', 'Hide raw') : t('查看原文', 'View raw')}
-                  </button>
-                  {showRawArgs ? <pre className="tool-call-code">{args}</pre> : null}
-                </div>
-              ) : null}
-            </div>
-          ) : args !== undefined ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('参数', 'Arguments')}</span>
-              <pre className="tool-call-code">{args}</pre>
-            </div>
-          ) : codemode ? (
-            <p className="tool-call-notice">{t('此记录未保留脚本。', 'The script is not available in this record.')}</p>
-          ) : tool.argSummary ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('参数摘要', 'Argument preview')}</span>
-              <pre className="tool-call-code">{tool.argSummary}</pre>
-            </div>
-          ) : null}
-
-          {tool.children && tool.children.length > 0 ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">{t('子调用', 'Nested calls')}</span>
-              {renderChildren()}
-            </div>
-          ) : null}
-          {tool.nestedCallsTruncated ? (
-            <p className="tool-call-notice">{t('子调用摘要已截断，部分信息未显示。', 'Nested call summaries are truncated; some information is not shown.')}</p>
-          ) : null}
-          {codemode && tool.status !== 'running' && tool.children === undefined ? (
-            <p className="tool-call-notice">{t('此记录未保留子调用摘要。', 'No nested call summaries were recorded.')}</p>
-          ) : null}
-
-          {tool.output !== undefined ? (
-            <div className="tool-call-section">
-              <span className="tool-call-label">
-                {tool.status === 'running' ? t('实时输出', 'Live output') : t('输出', 'Output')}
-              </span>
-              <pre className="tool-call-code">{tool.output}</pre>
-            </div>
-          ) : codemode ? (
-            <p className="tool-call-notice">{t('暂无记录的文本输出。', 'No recorded text output is available.')}</p>
-          ) : null}
-          {tool.outputTruncated ? (
-            <p className="tool-call-notice">{t('输出已截断。', 'Output is truncated.')}</p>
-          ) : null}
-        </div>
-      ) : null}
+      {expanded && hasPanelContent ? renderDetailPanel() : null}
 
       {presentationCard}
     </div>

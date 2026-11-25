@@ -27,7 +27,14 @@ import { Switch } from '../../../web/src/bot-settings/primitives';
 import { ActionBar, Button, Dialog, InlineNotice, Segmented } from '../../../web/src/components/ui';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
-import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
+import {
+  ErrorNotice,
+  useCollapseBotDm,
+  useCollapseToolOutput,
+  useHideBotDm,
+  useHideToolOutput,
+  useText,
+} from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 import type { CenterAdminTab } from '../../../web/src/center-admin/types';
 
@@ -628,6 +635,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
   const { activeTab, onTabChange, onBack, onOpenCenterAdmin, centerStatus, devices, identity } = props;
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
+  const [hideBotDm, setHideBotDm] = useHideBotDm();
+  const [collapseBotDm, setCollapseBotDm] = useCollapseBotDm();
   const [speechRate, setSpeechRate] = useSpeechRatePreference();
   const [copiedClientId, setCopiedClientId] = useState(false);
   const [centerBusy, setCenterBusy] = useState(false);
@@ -894,7 +903,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
               <div className="settings-pane-header">
                 <h3>{t('外观与对话', 'Appearance & Chat')}</h3>
                 <p className="metadata">
-                  {t('设置界面主题、悬浮桌宠、工具输出展示方式与主聊天语音朗读倍速。', 'Configure interface theme, desktop pet, tool output visibility, and main chat speech rate.')}
+                  {t('设置界面主题、悬浮桌宠、对话内容展示与主聊天语音朗读倍速。', 'Configure interface theme, desktop pet, chat content visibility, and main chat speech rate.')}
                 </p>
               </div>
 
@@ -945,6 +954,35 @@ export function SettingsPanel(props: SettingsPanelProps) {
                       />
                     </label>
                   )}
+                  <label className="settings-row settings-row-link">
+                    <span className="settings-row-label">
+                      <span>{t('隐藏 Bot 间私聊', 'Hide Bot-to-Bot DMs')}</span>
+                      <span className="metadata" style={{ display: 'block' }}>
+                        {t('不在对话框里显示与其他 Bot 的私聊内容，可在 Bot 资料页查看', 'Keep peer bot DMs out of the main chat; still viewable from each bot profile')}
+                      </span>
+                    </span>
+                    <Switch
+                      label={t('隐藏 Bot 间私聊', 'Hide Bot-to-Bot DMs')}
+                      checked={hideBotDm}
+                      onChange={setHideBotDm}
+                    />
+                  </label>
+                  <label className={`settings-row settings-row-sub${hideBotDm ? ' is-inactive' : ' settings-row-link'}`}>
+                    <span className="settings-row-label">
+                      <span>{t('默认折叠 Bot 间私聊', 'Collapse Bot-to-Bot DMs by Default')}</span>
+                      <span className="metadata" style={{ display: 'block' }}>
+                        {hideBotDm
+                          ? t('关闭「隐藏 Bot 间私聊」后生效，默认折叠接收与发送的私聊内容', 'Applies when bot DMs are shown; collapses both incoming and outgoing DMs')
+                          : t('默认折叠与其他 Bot 接收和发送的私聊内容，点击可展开查看', 'Collapse incoming and outgoing peer bot DMs by default; click to expand')}
+                      </span>
+                    </span>
+                    <Switch
+                      label={t('默认折叠 Bot 间私聊', 'Collapse Bot-to-Bot DMs by Default')}
+                      checked={collapseBotDm}
+                      onChange={setCollapseBotDm}
+                      disabled={hideBotDm}
+                    />
+                  </label>
                   <label className="settings-row">
                     <span className="settings-row-label">
                       <span>{t('语音朗读倍速', 'Speech Rate')}</span>

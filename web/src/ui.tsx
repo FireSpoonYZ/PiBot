@@ -11,8 +11,10 @@ import './error-notice.css';
 // The old "hide" setting only collapsed calls. Keep its stored value for that behavior.
 const COLLAPSE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
 const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-chat-hide-tool-output:v1';
+const HIDE_BOT_DM_STORAGE_KEY = 'pibot-chat-hide-bot-dm:v1';
+const COLLAPSE_BOT_DM_STORAGE_KEY = 'pibot-chat-collapse-bot-dm:v1';
 
-function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
+function useBooleanPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
   const changeEvent = key + ':change';
   const read = useCallback(() => {
     try {
@@ -59,11 +61,19 @@ function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, 
 }
 
 export function useHideToolOutput() {
-  return useToolOutputPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
+  return useBooleanPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
 }
 
 export function useCollapseToolOutput() {
-  return useToolOutputPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
+  return useBooleanPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
+}
+
+export function useHideBotDm() {
+  return useBooleanPreference(HIDE_BOT_DM_STORAGE_KEY, true);
+}
+
+export function useCollapseBotDm() {
+  return useBooleanPreference(COLLAPSE_BOT_DM_STORAGE_KEY, true);
 }
 
 export type UiLanguage = 'system' | 'zh' | 'en';

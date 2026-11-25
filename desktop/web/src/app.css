@@ -169,19 +169,17 @@ button:focus-visible { outline-color: var(--signal-primary); }
 ::placeholder { color: var(--ink-tertiary); opacity: .9; }
 
 /* subtle scrollbars for desktop pointer precision */
-@media (hover: hover) and (pointer: fine) {
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb {
-    border-radius: var(--radius-full);
-    border: 2px solid transparent;
-    background-clip: content-box;
-    background-color: var(--border-default);
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: var(--border-strong);
-  }
-  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  background-color: var(--border-default);
 }
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
+}
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 
 .sr-only {
   position: absolute;
@@ -863,7 +861,6 @@ dialog::backdrop { background: var(--scrim); }
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
-  scrollbar-width: thin;
 }
 .image-attachment {
   position: relative;
@@ -1100,7 +1097,7 @@ dialog::backdrop { background: var(--scrim); }
 .hub-search-box input, .hub-search-pill input { flex: 1; min-height: 40px; border: 0; background: transparent; padding: 0; font-size: .95rem; outline: none; }
 .hub-search-clear { width: 24px; height: 24px; min-height: 24px; padding: 0; border: 0; border-radius: 50%; background: var(--line); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; font-size: .85rem; }
 
-.hub-bot-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 2px; padding: 0 12px 12px; }
+.hub-bot-list { flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; padding: 0 12px 12px; }
 .hub-bot-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 8px; border: 0; border-radius: var(--radius-md); background: transparent; text-align: left; transition: background-color var(--dur-fast) var(--ease-out); }
 .hub-bot-row:active { background: var(--surface-hover); }
 @media (hover: hover) and (pointer: fine) {

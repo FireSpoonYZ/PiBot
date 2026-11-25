@@ -838,6 +838,31 @@
 :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-link {
   cursor: pointer;
 }
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub {
+  position: relative;
+  padding-left: var(--space-6);
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: var(--border-default);
+  pointer-events: none;
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub.is-inactive {
+  cursor: default;
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub.is-inactive > .settings-row-label {
+  opacity: 0.56;
+}
+:is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub.is-inactive::before {
+  background: var(--border-subtle);
+}
 @media (hover: hover) and (pointer: fine) {
   :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-link:hover {
     background: var(--surface-1);
@@ -1183,6 +1208,7 @@
   .desktop-dialog.settings-shell-dialog,
   .desktop-shell .rail-item,
   .desktop-settings-nav-item,
+  :is(.settings-shell-dialog, .client-settings-dialog, .desktop-settings-view) .settings-row-sub,
   :is(.desktop-dialog, .desktop-settings-view) .settings-disclosure > summary::before {
     transition: none;
   }

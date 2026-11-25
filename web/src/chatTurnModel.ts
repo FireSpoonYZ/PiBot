@@ -104,6 +104,8 @@ export interface ChatTurn {
   createdAt?: string;
   /** 该轮真实来源（用户/对端 Bot/Host 触发器、DM/群聊/主聊、原始 messageId/replyTo）。 */
   attribution?: MessageAttribution;
+  /** 当后端未带 attribution 但由 1v1 Bot 私聊（dm）触发器派生时标记，确保过滤与折叠不漏网。 */
+  dmChannel?: true;
   /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）；
    *  普通聊天经 parseHistoryEntries 过滤不返回此类轮。 */
   collaborative?: boolean;
@@ -466,15 +468,98 @@ function enrichAttributionName(
   return resolved ? { ...attr, name: resolved } : attr;
 }
 
+interface KnownScopeContext {
+  kinds: Map<string, 'dm' | 'room'>;
+  dmPeerNames: Map<string, string>;
+}
+
+function recordScopeHint(
+  ctx: KnownScopeContext,
+  scopeId: string | undefined,
+  kind: 'dm' | 'room' | undefined,
+  peerName?: string,
+): void {
+  if (!scopeId) return;
+  if (kind === 'dm' || kind === 'room') {
+    ctx.kinds.set(scopeId, kind);
+  }
+  if (kind === 'dm' && peerName) {
+    ctx.dmPeerNames.set(scopeId, peerName);
+  }
+}
+
+function recordScopeHintsFromToolOutput(
+  ctx: KnownScopeContext,
+  toolName: string,
+  outputJsonText: string | undefined,
+  selfBotId: string | undefined,
+  knownBots: readonly KnownBotSummary[] | undefined,
+): void {
+  if (!outputJsonText) return;
+  if (toolName !== 'ensure_dm' && toolName !== 'list_scopes' && toolName !== 'create_room' && toolName !== 'send_to') {
+    return;
+  }
+  try {
+    const parsed = asRecord(JSON.parse(outputJsonText));
+    const pickPeerName = (membersRaw: unknown): string | undefined => {
+      const members = asArray<unknown>(membersRaw);
+      for (const memberRaw of members) {
+        const member = asRecord(memberRaw);
+        const botId = readString(member.botId);
+        const deviceId = readString(member.deviceId);
+        if (!botId || (selfBotId && botId === selfBotId)) continue;
+        return resolveBotDisplayName(knownBots, botId, deviceId);
+      }
+      return undefined;
+    };
+    if (toolName === 'send_to') {
+      const scopeId = readString(parsed.scopeId);
+      const kind = parsed.scopeKind === 'dm' || parsed.scopeKind === 'room' ? parsed.scopeKind : undefined;
+      const peerName = readString(parsed.targetName) ?? resolveBotDisplayName(knownBots, readString(parsed.peerBotId));
+      recordScopeHint(ctx, scopeId, kind, peerName);
+      return;
+    }
+    if (toolName === 'ensure_dm' || toolName === 'create_room') {
+      const scopeObj = asRecord(parsed.scope);
+      const target = Object.keys(scopeObj).length > 0 ? scopeObj : parsed;
+      const scopeId = readString(target.scopeId) ?? readString(parsed.scopeId);
+      const kind =
+        target.kind === 'dm' || target.kind === 'room'
+          ? target.kind
+          : toolName === 'ensure_dm'
+            ? 'dm'
+            : 'room';
+      recordScopeHint(ctx, scopeId, kind, kind === 'dm' ? pickPeerName(target.members) : undefined);
+      return;
+    }
+    if (toolName === 'list_scopes') {
+      for (const entryRaw of asArray<unknown>(parsed.scopes ?? parsed.items)) {
+        const entry = asRecord(entryRaw);
+        const scopeObj = asRecord(entry.scope);
+        const target = Object.keys(scopeObj).length > 0 ? scopeObj : entry;
+        const scopeId = readString(target.scopeId);
+        const kind = target.kind === 'dm' || target.kind === 'room' ? target.kind : undefined;
+        recordScopeHint(ctx, scopeId, kind, kind === 'dm' ? pickPeerName(target.members) : undefined);
+      }
+    }
+  } catch {
+    // Ignore non-JSON tool output.
+  }
+}
+
 function applySendToMetadata(
   tool: ChatToolCallItem,
   args: Record<string, unknown> | undefined,
   outputJsonText: string | undefined,
   knownBots: readonly KnownBotSummary[] | undefined,
+  scopeCtx?: KnownScopeContext,
+  fallbackScopeKind?: 'dm' | 'room',
 ): void {
   if (tool.name !== 'send_to') return;
   const current: SendToToolPreview = { ...(tool.sendTo ?? {}) };
+  let argScopeId: string | undefined;
   if (args) {
+    argScopeId = readString(args.scopeId);
     const rawText = typeof args.text === 'string' ? args.text.trim() : '';
     const files = Array.isArray(args.files) ? args.files.length : 0;
     if (files > 0) current.fileCount = files;
@@ -518,6 +603,15 @@ function applySendToMetadata(
     } catch {
       // Non-JSON error output leaves existing args preview intact.
     }
+  }
+  if (!current.scopeKind && argScopeId && scopeCtx?.kinds.has(argScopeId)) {
+    current.scopeKind = scopeCtx.kinds.get(argScopeId);
+  }
+  if (!current.scopeKind && !argScopeId && fallbackScopeKind) {
+    current.scopeKind = fallbackScopeKind;
+  }
+  if (!current.targetName && argScopeId && scopeCtx?.dmPeerNames.has(argScopeId)) {
+    current.targetName = scopeCtx.dmPeerNames.get(argScopeId);
   }
   if (Object.keys(current).length > 0) {
     tool.sendTo = current;
@@ -953,6 +1047,10 @@ export function parseHistoryEntries(
   const silentEmptyReplyTos = new Set<string>();
 
   const knownBots = options?.knownBots;
+  const scopeCtx: KnownScopeContext = {
+    kinds: new Map(),
+    dmPeerNames: new Map(),
+  };
   const hasDurableWaitsOption = options !== undefined && Object.prototype.hasOwnProperty.call(options, 'durableWaits');
   const activeDurableWaits = hasDurableWaitsOption ? parseActiveDurableWaits(options?.durableWaits) : null;
   const isAuthorizedWait = (presentation: Record<string, unknown> | null): boolean => {
@@ -996,6 +1094,7 @@ export function parseHistoryEntries(
       text: '',
       startedAt: startMs,
       ...(attribution ? { attribution } : {}),
+      ...(effectiveChannel === 'dm' && attribution?.channel !== 'dm' ? { dmChannel: true as const } : {}),
       ...(collaborative ? { collaborative: true } : {}),
     };
     turns.push(turn);
@@ -1060,11 +1159,12 @@ export function parseHistoryEntries(
     joinAdjacent: boolean,
   ): ChatToolCallItem => {
     const summary = summarizeToolArgs(name, args);
+    const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
     const existing = acc.tools.find((itemTool) => itemTool.id === toolId);
     if (existing) {
       if (args && !existing.args) existing.args = args;
       if (summary && !existing.argSummary) existing.argSummary = summary;
-      applySendToMetadata(existing, args, existing.output, knownBots);
+      applySendToMetadata(existing, args, existing.output, knownBots, scopeCtx, fallbackScopeKind);
       return existing;
     }
     const tool: ChatToolCallItem = {
@@ -1074,7 +1174,7 @@ export function parseHistoryEntries(
       ...(args ? { args } : {}),
       ...(summary ? { argSummary: summary } : {}),
     };
-    applySendToMetadata(tool, args, undefined, knownBots);
+    applySendToMetadata(tool, args, undefined, knownBots, scopeCtx, fallbackScopeKind);
     acc.tools.push(tool);
     accPushTool(acc, tool, joinAdjacent);
     return tool;
@@ -1210,6 +1310,14 @@ export function parseHistoryEntries(
     if (item.kind === 'host.work-trigger') {
       const c = entryChannel(item, selfBotId);
       if (c !== undefined) lastBoundaryChannel = c;
+      const target = asRecord(asRecord(asRecord(item.data).turn).replyTarget);
+      const targetKind = target.kind === 'dm' || target.kind === 'room' ? target.kind : undefined;
+      const targetScopeId = readString(target.scopeId);
+      const targetPeerName =
+        targetKind === 'dm'
+          ? resolveBotDisplayName(knownBots, readString(target.botId), readString(target.deviceId))
+          : undefined;
+      recordScopeHint(scopeCtx, targetScopeId, targetKind, targetPeerName);
       finalizeCurrentAssistant(false);
       continue;
     }
@@ -1220,6 +1328,9 @@ export function parseHistoryEntries(
     if (item.kind === 'host.scope-message') {
       finalizeCurrentAssistant(false);
       const isSelfEcho = asRecord(item.data).selfEcho === true || itemAttr?.direction === 'outgoing';
+      if (itemAttr?.scopeId && (itemAttr.channel === 'dm' || itemAttr.channel === 'room')) {
+        recordScopeHint(scopeCtx, itemAttr.scopeId, itemAttr.channel, !isSelfEcho ? itemAttr.name : undefined);
+      }
       if (itemAttr?.channel === 'dm' && !isSelfEcho) {
         const rawMsg = asRecord(asRecord(item.data).message);
         const projectedFirst = asRecord(asArray<unknown>(item.messages)[0]);
@@ -1609,7 +1720,9 @@ export function parseHistoryEntries(
             matched.presentation = projectedPresentation;
             matched.presentationLive = durableWait;
           }
-          applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots);
+          recordScopeHintsFromToolOutput(scopeCtx, matched.name, resultOutput || undefined, selfBotId, knownBots);
+          const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+          applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots, scopeCtx, fallbackScopeKind);
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
           const tool: ChatToolCallItem = {
@@ -1622,7 +1735,9 @@ export function parseHistoryEntries(
             ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: durableWait, durableWait } : {}),
           };
-          applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots);
+          recordScopeHintsFromToolOutput(scopeCtx, toolName, resultOutput || undefined, selfBotId, knownBots);
+          const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+          applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots, scopeCtx, fallbackScopeKind);
           readNestedCalls(tool, entry);
           acc.settledToolIds.add(id);
           acc.tools.push(tool);
@@ -1713,7 +1828,9 @@ export function parseHistoryEntries(
         presentationLive: hasPresentation && (status === 'running' || slotDurableWait),
         durableWait: slotDurableWait,
       };
-      applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
+      recordScopeHintsFromToolOutput(scopeCtx, name, slotOutput || undefined, selfBotId, knownBots);
+      const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+      applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots, scopeCtx, fallbackScopeKind);
       return liveItem;
     };
     const isPlaced = (callId: string) =>
@@ -1962,26 +2079,90 @@ export function pendingToolPrompts(tools: readonly ChatToolCallItem[], parentRun
   });
 }
 
-export function chatTurnsWithoutToolOutput(turns: readonly ChatTurn[]): ChatTurn[] {
+export function isBotDmTurn(turn: Pick<ChatTurn, 'attribution' | 'dmChannel'> | null | undefined): boolean {
+  return Boolean(turn && (turn.attribution?.channel === 'dm' || turn.dmChannel === true));
+}
+
+export function isBotDmSendToTool(
+  tool: ChatToolCallItem,
+  parentTurn?: Pick<ChatTurn, 'attribution' | 'dmChannel'>,
+): boolean {
+  if (tool.parentCallId || tool.name !== 'send_to') return false;
+  if (tool.sendTo?.scopeKind === 'dm') return true;
+  if (tool.sendTo?.scopeKind === 'room') return false;
+  return Boolean(parentTurn && isBotDmTurn(parentTurn));
+}
+
+/** 过滤主对话框里与其他 Bot 的私聊内容（含入站 DM、DM 触发执行轮及主聊内发往 DM 的 send_to）。 */
+export function chatTurnsWithoutBotDm(turns: readonly ChatTurn[]): ChatTurn[] {
+  return turns.flatMap(turn => {
+    if (isBotDmTurn(turn)) return [];
+    if (turn.role !== 'assistant') return [turn];
+    const hasDmSendTo =
+      Boolean(turn.tools?.some(tool => isBotDmSendToTool(tool, turn))) ||
+      Boolean(turn.blocks?.some(block => block.kind === 'tools' && block.tools.some(tool => isBotDmSendToTool(tool, turn))));
+    if (!hasDmSendTo) return [turn];
+    const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
+      if (block.kind !== 'tools') return [block];
+      const kept = block.tools.filter(tool => !isBotDmSendToTool(tool, turn));
+      return kept.length > 0 ? [{ ...block, tools: kept }] : [];
+    });
+    const tools = turn.tools?.filter(tool => !isBotDmSendToTool(tool, turn));
+    const hasTools = Boolean(tools && tools.length > 0);
+    const hasBlocks = Boolean(blocks && blocks.length > 0);
+    if (!turn.text.trim() && !turn.thinking?.trim() && !turn.error && !hasTools && !hasBlocks) {
+      return [];
+    }
+    return [{
+      ...turn,
+      blocks: hasBlocks ? blocks : undefined,
+      tools: hasTools ? tools : undefined,
+      toolSummary: hasTools ? tools!.map(tool => tool.name) : undefined,
+    }];
+  });
+}
+
+export function chatTurnsWithoutToolOutput(
+  turns: readonly ChatTurn[],
+  options?: { preserveBotDmSendTo?: boolean },
+): ChatTurn[] {
+  const preserveDmSendTo = options?.preserveBotDmSendTo === true;
   return turns.flatMap(turn => {
     if (turn.role !== 'assistant') return [turn];
+    const keepTools = (list: readonly ChatToolCallItem[]): ChatToolCallItem[] => {
+      const prompts = pendingToolPrompts(list);
+      if (!preserveDmSendTo) return prompts;
+      const kept: ChatToolCallItem[] = [];
+      for (const tool of list) {
+        if (isBotDmSendToTool(tool, turn)) {
+          kept.push(tool);
+        }
+      }
+      for (const prompt of prompts) {
+        if (!kept.some(item => item.id === prompt.id)) kept.push(prompt);
+      }
+      // 维持原始顺序（顶层 DM send_to + 活跃交互提示）
+      if (kept.length <= 1) return kept;
+      const order = new Map(list.map((item, idx) => [item.id, idx]));
+      return kept.sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+    };
     // Keep pending prompts (including nested ones) without showing their tool calls.
     const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
       if (block.kind === 'text') return [block];
       if (block.kind === 'thinking') return [];
-      const prompts = pendingToolPrompts(block.tools);
-      return prompts.length > 0 ? [{ ...block, tools: prompts }] : [];
+      const kept = keepTools(block.tools);
+      return kept.length > 0 ? [{ ...block, tools: kept }] : [];
     });
-    const prompts = blocks
+    const keptTools = blocks
       ? blocks.flatMap(block => block.kind === 'tools' ? block.tools : [])
-      : pendingToolPrompts(turn.tools ?? []);
-    if (!turn.text.trim() && !turn.error && prompts.length === 0) return [];
+      : keepTools(turn.tools ?? []);
+    if (!turn.text.trim() && !turn.error && keptTools.length === 0) return [];
     return [{
       ...turn,
       blocks: blocks?.length ? blocks : undefined,
       thinking: undefined,
       toolSummary: undefined,
-      tools: prompts.length > 0 ? prompts : undefined,
+      tools: keptTools.length > 0 ? keptTools : undefined,
     }];
   });
 }

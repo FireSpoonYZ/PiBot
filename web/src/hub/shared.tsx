@@ -912,7 +912,11 @@ export function TurnToolCallsSection({
   const hasPresentationOrSendTo = tools.some(
     tool =>
       Boolean(readToolPresentation(tool.presentation)) ||
-      (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
+      (!tool.parentCallId &&
+        tool.name === 'send_to' &&
+        (tool.sendTo?.scopeKind === 'dm' ||
+          cardProps.insideBotDmTurn === true ||
+          Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass)))),
   ) || pendingToolPrompts(tools).length > 0;
   const shouldAggregate = !presentationOnly && (tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo));
   // 初始展开态与自动展开均在渲染期同步推导，不再使用 post-paint useEffect；

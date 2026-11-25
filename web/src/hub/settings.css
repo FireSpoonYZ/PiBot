@@ -230,13 +230,37 @@
 /* 顶部返回按钮占位 */
 .hst-topbar-spacer { width: var(--tap-min); flex: none; }
 
+/* 从属设置项（如「默认折叠 Bot 间私聊」隶属于「隐藏 Bot 间私聊」）：清晰层级缩进 + 左侧细导轨 */
+.hst-settings .hst-sub-setting-row::after {
+  content: '';
+  position: absolute;
+  left: var(--space-4, 16px);
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--border-default);
+  pointer-events: none;
+}
+.hst-settings .hst-sub-setting-row .ui-list-row-main {
+  padding-left: var(--space-7, 28px);
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.hst-settings .hst-sub-setting-row.is-inactive .ui-list-row-main {
+  opacity: 0.56;
+}
+.hst-settings .hst-sub-setting-row.is-inactive::after {
+  background: var(--border-subtle);
+}
+
 /* 底部危险按钮 */
 .hst-exit { margin-top: var(--space-2); }
 .hst-exit .hst-btn { width: 100%; min-height: var(--tap-min); }
 
 @media (prefers-reduced-motion: reduce) {
   .hst-admin-overlay,
-  .hst-btn {
+  .hst-btn,
+  .hst-settings .hst-sub-setting-row .ui-list-row-main {
     transition: none;
   }
   .hst-spin {

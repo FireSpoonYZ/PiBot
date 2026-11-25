@@ -8,6 +8,7 @@ import {
   Cpu,
   Globe,
   LockKeyhole,
+  MessagesSquare,
   Monitor,
   Pencil,
   Plus,
@@ -67,6 +68,7 @@ export interface BotProfileScreenProps {
   onBack(): void;
   onSave(): void;
   onOpenAvatarPicker(preset: GrokAvatarPreset): void;
+  onOpenBotDms(): void;
   onOpenModelSettings(): void;
   onOpenSoul(): void;
   onOpenSkills(): void;
@@ -96,6 +98,7 @@ export function BotProfileScreen({
   onBack,
   onSave,
   onOpenAvatarPicker,
+  onOpenBotDms,
   onOpenModelSettings,
   onOpenSoul,
   onOpenSkills,
@@ -175,6 +178,28 @@ export function BotProfileScreen({
         <ReservedSlot minHeight={44} align="start">
           <ErrorNotice error={profileError} stale={actionBusy} compact onDismiss={onDismissProfileError} />
         </ReservedSlot>
+        <section className="grok-field-section">
+          <h3 className="grok-section-label">{t('Bot 协作', 'Bot collaboration')}</h3>
+          <div className="grok-card-group">
+            <button
+              type="button"
+              className="grok-card-row bot-profile-dm-row"
+              onClick={onOpenBotDms}
+            >
+              <span className="bot-profile-dm-icon" aria-hidden="true">
+                <MessagesSquare size={18} />
+              </span>
+              <span className="bot-profile-dm-text">
+                <span className="grok-row-label">{t('查看该 Bot 的私聊', 'View this bot’s private chats')}</span>
+                <span className="bot-profile-dm-sub">
+                  {t('查看与其他 Bot 的收发私聊记录', 'Browse incoming & outgoing DMs with other bots')}
+                </span>
+              </span>
+              <ChevronRight size={18} className="grok-row-chevron" aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+
         <section className="grok-field-section">
           <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
           <div className="grok-card-group">
