@@ -421,6 +421,7 @@ export function createDesktopPetController(
     identity = null;
     bot = null;
     publish({
+      connection: 'connecting',
       botId: null, botName: 'PiBot', avatar: null, messages: [],
       activity: resolveBotActivity(null), mascotState: 'idle',
       streamingText: '', generationId: null, canStop: false,
@@ -481,7 +482,7 @@ export function createDesktopPetController(
     const epoch = observationEpoch;
     const key = observedConnection;
     const current = () => active && epoch === observationEpoch && key === connectionKey(api);
-    let progressBaselineId = 0;
+    let progressBaselineId: number | null = null;
     try {
       const handle = api.observe(target, { kind: 'primary', botId: primary.botId }, (event) => {
         if (!current()) return;
@@ -496,11 +497,11 @@ export function createDesktopPetController(
         }
         if (!('botId' in frame) || 'scopeId' in frame || frame.botId !== primary.botId) return;
         if (frame.type === 'snapshot') {
-          // Existing tool results are history, not new progress.
-          progressBaselineId = frame.state.lastEntryId ?? 0;
+          // Existing tool results are history, not new progress; capture once per observation.
+          progressBaselineId ??= frame.state.lastEntryId ?? 0;
           applyLive(frame.state, progressBaselineId);
         } else if (live) {
-          applyLive({ ...live, ...frame.changes }, progressBaselineId);
+          applyLive({ ...live, ...frame.changes }, progressBaselineId ?? 0);
         }
       });
       observation = handle;
@@ -701,7 +702,7 @@ export function createDesktopPetController(
         return;
       }
       if (value.deviceId && value.deviceId !== host.deviceId) clearTarget();
-      publish({ deviceId: host.deviceId });
+      if (value.deviceId !== host.deviceId) publish({ deviceId: host.deviceId });
       if (!api.identity || !api.transportConnected) {
         markOffline('客户端尚未连接，请在主界面连接本机 Host。');
         return;
@@ -791,6 +792,23 @@ export function createDesktopPetController(
     unsubscribe?.();
     unsubscribe = null;
     closeObservation();
+    value = {
+      ...value,
+      connection: 'connecting',
+      messages: [],
+      activity: resolveBotActivity(null),
+      mascotState: 'idle',
+      streamingText: '',
+      generationId: null,
+      canStop: false,
+      activeToolName: null,
+      questionnaire: null,
+      settledQuestionnaire: null,
+      todo: null,
+      task: null,
+      handoff: null,
+      error: null,
+    };
   }
 
   async function send(action: Extract<DesktopPetAction, { kind: 'send' }>): Promise<DesktopPetResult> {

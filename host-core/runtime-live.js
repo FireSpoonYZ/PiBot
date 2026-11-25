@@ -489,6 +489,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
         while (state.dirty) {
           state.dirty = false;
           if (state.endReason !== null || !state.started) break;
+          if (state.nativeId !== null && !state.initialized) break;
           let frame;
           if (state.delivered === null || state.forceFrame || (work && state.current !== state.delivered)) {
             frame = {
@@ -570,7 +571,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
     // 单飞行归属装载：对最新 pendingView 先取已提交的 BotSessionState 快照再投影，
     // 保证生成/peer 条目的归属索引覆盖被投影的 view。快照期间到达的新 view 只保留
     // 最新一份，loop 再取一次快照覆盖它（新快照可归属旧帧，反向不行）。
-    // 快照失败停在原地——下一次 view 重新进入装载；不在 finally 里立即重试。
+    // 首次快照失败直接以 session_failed 结束，避免已附着会话永远卡在初始化门控后；
+    // 初始化之后的快照失败停在原地——下一次 view 重新进入装载；不在 finally 里立即重试。
     async function processAttribution() {
       try {
         while (state.endReason === null) {
@@ -580,8 +582,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
           let doc;
           try {
             doc = await getHarness().snapshot(BotSessionState, state.nativeId, CTX);
-          } catch {
-            return; // 等下一次 view 重试；Session 失败由 native.closed 收尾
+          } catch (err) {
+            if (!state.initialized) {
+              end('session_failed', err);
+              void stopNative().catch(() => {});
+            }
+            return; // 已初始化后等下一次 view 重试；Session 失败由 native.closed 收尾
           }
           if (state.endReason !== null) return;
           state.sessionState = doc ?? null;
@@ -791,18 +797,20 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
         return;
       }
       const previous = state.current;
+      const wasInitialized = state.initialized;
       state.current = deepFreeze(next);
       state.initialized = true;
       if (board) {
         state.boardView = view;
         state.boardDetails = extras?.boardDetails ?? null;
       }
-      if (diffLiveState(previous, next) !== null) {
+      const changed = diffLiveState(previous, next) !== null;
+      if (changed) {
         state.seq++;
-        if (state.started) {
-          state.dirty = true;
-          kick();
-        }
+      }
+      if (state.started && (changed || !wasInitialized)) {
+        state.dirty = true;
+        kick();
       }
     }
 

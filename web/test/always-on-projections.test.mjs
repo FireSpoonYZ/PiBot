@@ -587,3 +587,320 @@ test('runtime-live integrates reset watermarks, pre-reset failure gates, pi.comp
     await runtimeLive.close();
   }
 });
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushRuntimeLiveTicks(turns = 4) {
+  for (let i = 0; i < turns; i++) {
+    await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+function emptyConversationView(entries = []) {
+  return {
+    entries,
+    docs: {
+      'pi.live': { run: null, tools: [], nestedTools: [] },
+      'pi.inbox': { items: [] },
+    },
+  };
+}
+
+function createMockConversation(id, initialView, onStop = null) {
+  return {
+    id,
+    async watch() {
+      return {
+        value: initialView,
+        closed: new Promise(() => {}),
+        start() {},
+        async stop() {
+          onStop?.();
+        },
+      };
+    },
+  };
+}
+
+test('runtime-live gates initial snapshot for existing conversation until BotSessionState resolves', async () => {
+  const sessionDoc = createDeferred();
+  const initialView = emptyConversationView([
+    {
+      id: 10,
+      kind: 'host.user-message',
+      model: [{ role: 'user', content: [{ type: 'text', text: 'Earlier question' }] }],
+    },
+    {
+      id: 11,
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Earlier answer' }] }],
+    },
+  ]);
+  const conversation = createMockConversation(11, initialView);
+  const harness = {
+    async snapshot(token) {
+      if (token.definition.kind === 'host.primary-index') return { byPrimary: { public: 11 } };
+      if (token.definition.kind === 'host.bot-session') return sessionDoc.promise;
+      return null;
+    },
+    async conversation(id) {
+      assert.equal(id, 11);
+      return conversation;
+    },
+  };
+  const runtimeLive = createRuntimeLive({
+    host: { getBot: () => ({ botId: 'bot', primaryConversationId: 'public' }) },
+    getHarness: () => harness,
+    resolveWorkContext: async () => null,
+  });
+
+  const frames = [];
+  const watch = await runtimeLive.watch('bot');
+  try {
+    watch.start((frame) => { frames.push(frame); });
+    await flushRuntimeLiveTicks();
+    assert.equal(frames.length, 0);
+
+    sessionDoc.resolve(null);
+    await flushRuntimeLiveTicks();
+
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].type, 'snapshot');
+    assert.equal(frames[0].botId, 'bot');
+    assert.equal(frames[0].conversationId, 'public');
+    assert.equal(frames[0].state.lastEntryId, 11);
+    assert.deepEqual(frames[0].state.history.map((item) => item.id), [10, 11]);
+    assert.equal(frames[0].state.history[0].messages[0].text, 'Earlier question');
+    assert.equal(frames[0].state.history[1].messages[0].text, 'Earlier answer');
+  } finally {
+    sessionDoc.resolve(null);
+    await watch.stop();
+    await runtimeLive.close();
+  }
+});
+
+test('runtime-live delivers initial snapshot at sequence 0 for genuinely empty existing conversation', async () => {
+  const sessionDoc = createDeferred();
+  const conversation = createMockConversation(11, emptyConversationView([]));
+  const harness = {
+    async snapshot(token) {
+      if (token.definition.kind === 'host.primary-index') return { byPrimary: { public: 11 } };
+      if (token.definition.kind === 'host.bot-session') return sessionDoc.promise;
+      return null;
+    },
+    async conversation(id) {
+      assert.equal(id, 11);
+      return conversation;
+    },
+  };
+  const runtimeLive = createRuntimeLive({
+    host: { getBot: () => ({ botId: 'bot', primaryConversationId: 'public' }) },
+    getHarness: () => harness,
+    resolveWorkContext: async () => null,
+  });
+
+  const frames = [];
+  const watch = await runtimeLive.watch('bot');
+  try {
+    watch.start((frame) => { frames.push(frame); });
+    await flushRuntimeLiveTicks();
+    assert.equal(frames.length, 0);
+
+    sessionDoc.resolve(null);
+    await flushRuntimeLiveTicks();
+
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].type, 'snapshot');
+    assert.equal(frames[0].conversationId, 'public');
+    assert.equal(frames[0].sequence, 0);
+    assert.deepEqual(frames[0].state.history, []);
+    assert.equal(frames[0].state.lastEntryId, null);
+  } finally {
+    sessionDoc.resolve(null);
+    await watch.stop();
+    await runtimeLive.close();
+  }
+});
+
+test('runtime-live emits unbound primary snapshot immediately and delivers admission updates after attaching empty conversation', async () => {
+  const sessionDoc = createDeferred();
+  let commitCalls = 0;
+  const emptyConversation = createMockConversation(21, emptyConversationView([]));
+  const harness = {
+    async snapshot(token) {
+      if (token.definition.kind === 'host.primary-index') return null;
+      if (token.definition.kind === 'host.bot-session') return sessionDoc.promise;
+      return null;
+    },
+    async conversation(id) {
+      assert.equal(id, 21);
+      return emptyConversation;
+    },
+    async commit() {
+      commitCalls += 1;
+      throw new Error('watch must not create a primary conversation');
+    },
+  };
+  const runtimeLive = createRuntimeLive({
+    host: { getBot: () => ({ botId: 'bot', primaryConversationId: 'public' }) },
+    getHarness: () => harness,
+    resolveWorkContext: async () => null,
+  });
+
+  const frames = [];
+  const watch = await runtimeLive.watch('bot');
+  try {
+    watch.start((frame) => { frames.push(frame); });
+    await flushRuntimeLiveTicks();
+
+    assert.equal(commitCalls, 0);
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].type, 'snapshot');
+    assert.equal(frames[0].conversationId, 'public');
+    assert.equal(frames[0].sequence, 0);
+    assert.deepEqual(frames[0].state.history, []);
+    assert.equal(frames[0].state.turnAdmission, null);
+
+    await runtimeLive.bind('bot', emptyConversation);
+    runtimeLive.setTurnAdmission(
+      'bot',
+      { requestId: 'req-1', phase: 'checking', source: 'primary' },
+      1,
+      [{ requestId: 'req-1', delivery: 'followUp', preview: 'First message' }],
+    );
+    await flushRuntimeLiveTicks();
+    assert.equal(frames.length, 1);
+
+    sessionDoc.resolve(null);
+    await flushRuntimeLiveTicks();
+
+    assert.equal(frames.length, 2);
+    assert.equal(frames[1].type, 'update');
+    assert.equal(frames[1].conversationId, 'public');
+    assert.equal(frames[1].sequence, 1);
+    assert.deepEqual(frames[1].changes.turnAdmission, {
+      requestId: 'req-1',
+      phase: 'checking',
+      source: 'primary',
+    });
+    assert.equal(frames[1].changes.queuedCount, 1);
+    assert.equal(frames[1].changes.activity.phase, 'preparing');
+    assert.equal(frames[1].changes.activity.requestId, 'req-1');
+  } finally {
+    sessionDoc.resolve(null);
+    await watch.stop();
+    await runtimeLive.close();
+  }
+});
+
+test('runtime-live closes watch with session_failed and stops native watch when initial BotSessionState load rejects', async () => {
+  const sessionDoc = createDeferred();
+  let nativeStopCalls = 0;
+  const conversation = createMockConversation(11, emptyConversationView([
+    {
+      id: 10,
+      kind: 'host.user-message',
+      model: [{ role: 'user', content: [{ type: 'text', text: 'Persisted message' }] }],
+    },
+  ]), () => {
+    nativeStopCalls += 1;
+  });
+  const harness = {
+    async snapshot(token) {
+      if (token.definition.kind === 'host.primary-index') return { byPrimary: { public: 11 } };
+      if (token.definition.kind === 'host.bot-session') return sessionDoc.promise;
+      return null;
+    },
+    async conversation(id) {
+      assert.equal(id, 11);
+      return conversation;
+    },
+  };
+  const runtimeLive = createRuntimeLive({
+    host: { getBot: () => ({ botId: 'bot', primaryConversationId: 'public' }) },
+    getHarness: () => harness,
+    resolveWorkContext: async () => null,
+  });
+
+  const frames = [];
+  const watch = await runtimeLive.watch('bot');
+  try {
+    watch.start((frame) => { frames.push(frame); });
+    await flushRuntimeLiveTicks();
+    assert.equal(frames.length, 0);
+
+    const loadError = new Error('BotSessionState unavailable');
+    sessionDoc.reject(loadError);
+
+    const closed = await watch.closed;
+    assert.equal(closed.reason, 'session_failed');
+    assert.equal(closed.error, loadError);
+    assert.equal(nativeStopCalls, 1);
+    assert.equal(frames.length, 0);
+  } finally {
+    sessionDoc.resolve(null);
+    await watch.stop();
+    await runtimeLive.close();
+  }
+});
+
+test('runtime-live gates bound work watch snapshot until BotSessionState resolves even when work conversation is empty', async () => {
+  const sessionDoc = createDeferred();
+  const workConversation = createMockConversation(31, emptyConversationView([]));
+  const harness = {
+    async snapshot(token) {
+      if (token.definition.kind === 'host.bot-session') return sessionDoc.promise;
+      return null;
+    },
+    async conversation(id) {
+      assert.equal(id, 31);
+      return workConversation;
+    },
+  };
+  const runtimeLive = createRuntimeLive({
+    host: { getBot: () => ({ botId: 'bot', primaryConversationId: 'public' }) },
+    getHarness: () => harness,
+    resolveWorkContext: async () => null,
+  });
+
+  const frames = [];
+  const watch = await runtimeLive.watchWork('bot', 'scope-1');
+  try {
+    watch.start((frame) => { frames.push(frame); });
+    await flushRuntimeLiveTicks();
+
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].type, 'snapshot');
+    assert.equal(frames[0].scopeId, 'scope-1');
+    assert.equal(frames[0].conversationId, null);
+    assert.equal(frames[0].sequence, 0);
+    assert.deepEqual(frames[0].state.history, []);
+
+    await runtimeLive.bindWork('bot', 'scope-1', { nativeId: 31, conversationId: 'work-conv-uuid' });
+    await flushRuntimeLiveTicks();
+    assert.equal(frames.length, 1);
+
+    sessionDoc.resolve(null);
+    await flushRuntimeLiveTicks();
+
+    assert.equal(frames.length, 2);
+    assert.equal(frames[1].type, 'snapshot');
+    assert.equal(frames[1].scopeId, 'scope-1');
+    assert.equal(frames[1].conversationId, 'work-conv-uuid');
+    assert.equal(frames[1].sequence, 1);
+    assert.deepEqual(frames[1].state.history, []);
+  } finally {
+    sessionDoc.resolve(null);
+    await watch.stop();
+    await runtimeLive.close();
+  }
+});

@@ -325,6 +325,7 @@ export function PetApp() {
           stopReading();
           setReplyToRead(null);
           setRecentQuestionId(null);
+          setForcedReplyId(null);
           initialReplyCapturedRef.current = null;
           const text = nextKey ? readLocal(draftKey(nextKey)) : '';
           draftRef.current = text;
