@@ -3,7 +3,7 @@ use std::{
   fs,
   path::PathBuf,
   sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
   },
   time::Duration,
@@ -86,6 +86,17 @@ impl WorkArea {
     }
   }
 
+  fn from_monitor_bounds(monitor: &Monitor) -> Self {
+    let pos = monitor.position();
+    let size = monitor.size();
+    Self {
+      x: pos.x,
+      y: pos.y,
+      width: size.width,
+      height: size.height,
+    }
+  }
+
   fn contains(self, pos: PhysicalPosition<i32>) -> bool {
     pos.x >= self.x
       && pos.y >= self.y
@@ -162,9 +173,35 @@ pub struct DesktopPet {
   visible: AtomicBool,
   expanded: AtomicBool,
   focused: AtomicBool,
+  layout_in_progress: AtomicUsize,
   geometry: Mutex<PetGeometry>,
   operation: tokio::sync::Mutex<()>,
   destroyed: tokio::sync::Notify,
+}
+
+impl DesktopPet {
+  fn is_applying_layout(&self) -> bool {
+    self.layout_in_progress.load(Ordering::Acquire) > 0
+  }
+
+  fn begin_layout_apply(&self) -> LayoutApplyGuard<'_> {
+    self.layout_in_progress.fetch_add(1, Ordering::AcqRel);
+    // Cancel any pending pre-layout user-drag settle timer so it cannot overwrite programmatic state.
+    let mut geo = self.geometry.lock().unwrap_or_else(|e| e.into_inner());
+    geo.move_seq = geo.move_seq.wrapping_add(1);
+    drop(geo);
+    LayoutApplyGuard { pet: self }
+  }
+}
+
+struct LayoutApplyGuard<'a> {
+  pet: &'a DesktopPet,
+}
+
+impl Drop for LayoutApplyGuard<'_> {
+  fn drop(&mut self) {
+    self.pet.layout_in_progress.fetch_sub(1, Ordering::AcqRel);
+  }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,23 +269,36 @@ fn save_current_preference(app: &AppHandle, visible: bool) {
 pub struct DesktopPetWindowState {
   visible: bool,
   expanded: bool,
-  focused: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  focused: Option<bool>,
   dock_side: &'static str,
   panel_side: &'static str,
   composited: bool,
+  width: u32,
+  height: u32,
 }
 
-fn state(app: &AppHandle) -> DesktopPetWindowState {
+fn state_with_focus(
+  app: &AppHandle,
+  focused_override: Option<Option<bool>>,
+) -> DesktopPetWindowState {
   let pet = app.state::<DesktopPet>();
   let geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
+  let focused = focused_override.unwrap_or_else(|| Some(pet.focused.load(Ordering::Acquire)));
   DesktopPetWindowState {
     visible: pet.visible.load(Ordering::Acquire),
     expanded: pet.expanded.load(Ordering::Acquire),
-    focused: pet.focused.load(Ordering::Acquire),
+    focused,
     dock_side: geo.dock_side.as_str(),
     panel_side: geo.panel_side.as_str(),
     composited: geo.composited,
+    width: geo.current_logical_size.0.round().max(1.0) as u32,
+    height: geo.current_logical_size.1.round().max(1.0) as u32,
   }
+}
+
+fn state(app: &AppHandle) -> DesktopPetWindowState {
+  state_with_focus(app, None)
 }
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -257,13 +307,20 @@ pub fn is_visible(app: &AppHandle) -> bool {
     .is_some_and(|pet| pet.visible.load(Ordering::Acquire))
 }
 
-fn publish(app: &AppHandle) -> DesktopPetWindowState {
-  let next = state(app);
+fn publish_with_focus(
+  app: &AppHandle,
+  focused_override: Option<Option<bool>>,
+) -> DesktopPetWindowState {
+  let next = state_with_focus(app, focused_override);
   let _ = app.emit_to("main", WINDOW_EVENT, next);
   let _ = app.emit_to(PET_LABEL, WINDOW_EVENT, next);
   #[cfg(any(windows, target_os = "linux"))]
   crate::desktop_tray::sync_pet_visible(app, next.visible);
   next
+}
+
+fn publish(app: &AppHandle) -> DesktopPetWindowState {
+  publish_with_focus(app, None)
 }
 
 fn native_error(message: &str) -> BridgeError {
@@ -607,6 +664,151 @@ fn rounded_rect_scanlines(rect: RectI, radius: i32) -> Vec<RectI> {
   spans
 }
 
+fn effective_logical_size(
+  requested_logical: (f64, f64),
+  target_physical: PhysicalSize<u32>,
+  area: Option<WorkArea>,
+  scale: f64,
+) -> (f64, f64) {
+  let safe_scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+  let uncapped = LogicalSize::new(requested_logical.0, requested_logical.1)
+    .to_physical::<u32>(safe_scale);
+  let w = if area.is_some() && target_physical.width < uncapped.width {
+    (target_physical.width as f64 / safe_scale).floor().max(1.0)
+  } else {
+    requested_logical.0.round().max(1.0)
+  };
+  let h = if area.is_some() && target_physical.height < uncapped.height {
+    (target_physical.height as f64 / safe_scale).floor().max(1.0)
+  } else {
+    requested_logical.1.round().max(1.0)
+  };
+  (w, h)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeFocusProbe {
+  window_visible: bool,
+  window_minimized: bool,
+  foreground_matches_window: bool,
+  focus_hwnd_present: bool,
+  focus_matches_window: bool,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn evaluate_native_window_focus(probe: NativeFocusProbe) -> bool {
+  if !probe.window_visible || probe.window_minimized {
+    return false;
+  }
+  if probe.focus_hwnd_present {
+    probe.foreground_matches_window && probe.focus_matches_window
+  } else {
+    probe.foreground_matches_window
+  }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LayoutFocusResolution {
+  stored_focused: bool,
+  reported_focused: Option<bool>,
+}
+
+fn resolve_focus_after_layout(
+  prev_focused: bool,
+  probed_focused: Option<bool>,
+  requested_focus: bool,
+) -> LayoutFocusResolution {
+  match (requested_focus, probed_focused) {
+    (_, Some(true)) => LayoutFocusResolution {
+      stored_focused: true,
+      reported_focused: Some(true),
+    },
+    (true, Some(false) | None) => LayoutFocusResolution {
+      stored_focused: prev_focused,
+      reported_focused: if prev_focused { Some(true) } else { None },
+    },
+    (false, Some(false)) => LayoutFocusResolution {
+      stored_focused: false,
+      reported_focused: Some(false),
+    },
+    (false, None) => LayoutFocusResolution {
+      stored_focused: prev_focused,
+      reported_focused: Some(prev_focused),
+    },
+  }
+}
+
+fn resolve_focus_on_query(prev_focused: bool, probed_focused: Option<bool>) -> bool {
+  probed_focused.unwrap_or(prev_focused)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostRegionAction {
+  KeepCleared,
+  Clear { redraw: bool },
+  ApplyRects,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsLayoutCommitPlan {
+  clear_region_before_pos: bool,
+  run_set_window_pos: bool,
+  move_window: bool,
+  resize_window: bool,
+  x: i32,
+  y: i32,
+  width: i32,
+  height: i32,
+  post_region: PostRegionAction,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn plan_windows_layout_commit(
+  current_pos: Option<PhysicalPosition<i32>>,
+  current_outer_size: PhysicalSize<u32>,
+  target_pos: PhysicalPosition<i32>,
+  target_outer_size: PhysicalSize<u32>,
+  has_region_rects: bool,
+) -> WindowsLayoutCommitPlan {
+  let pos_changed = current_pos != Some(target_pos);
+  let size_changed = current_outer_size != target_outer_size;
+  let run_set_window_pos = pos_changed || size_changed;
+  // Clear any stale window region before SetWindowPos whenever dimensions change
+  // (growing OR shrinking) with bRedraw=FALSE so no intermediate frame clips against old bounds.
+  let clear_region_before_pos = size_changed;
+  let post_region = if has_region_rects {
+    PostRegionAction::ApplyRects
+  } else if clear_region_before_pos && run_set_window_pos {
+    PostRegionAction::KeepCleared
+  } else {
+    PostRegionAction::Clear { redraw: true }
+  };
+  WindowsLayoutCommitPlan {
+    clear_region_before_pos,
+    run_set_window_pos,
+    move_window: pos_changed,
+    resize_window: size_changed,
+    x: target_pos.x,
+    y: target_pos.y,
+    width: target_outer_size.width as i32,
+    height: target_outer_size.height as i32,
+    post_region,
+  }
+}
+
+fn select_monitor_index_for_position(
+  monitors: &[(WorkArea, WorkArea)],
+  pos: PhysicalPosition<i32>,
+) -> Option<usize> {
+  monitors
+    .iter()
+    .position(|(work, _)| work.contains(pos))
+    .or_else(|| monitors.iter().position(|(_, bounds)| bounds.contains(pos)))
+}
+
 fn window_monitor(window: &WebviewWindow) -> Option<Monitor> {
   window
     .current_monitor()
@@ -620,11 +822,389 @@ fn monitor_for_position(window: &WebviewWindow, pos: PhysicalPosition<i32>) -> O
     .available_monitors()
     .ok()
     .and_then(|monitors| {
-      monitors
-        .into_iter()
-        .find(|m| WorkArea::from_monitor(m).contains(pos))
+      let rects: Vec<(WorkArea, WorkArea)> = monitors
+        .iter()
+        .map(|m| (WorkArea::from_monitor(m), WorkArea::from_monitor_bounds(m)))
+        .collect();
+      select_monitor_index_for_position(&rects, pos).and_then(|idx| monitors.into_iter().nth(idx))
     })
     .or_else(|| window_monitor(window))
+}
+
+fn resolve_scale_factor(monitor: Option<&Monitor>, window: &WebviewWindow) -> Option<f64> {
+  monitor
+    .map(Monitor::scale_factor)
+    .filter(|s| s.is_finite() && *s > 0.0)
+    .or_else(|| {
+      window
+        .scale_factor()
+        .ok()
+        .filter(|s| s.is_finite() && *s > 0.0)
+    })
+}
+
+#[cfg(windows)]
+unsafe fn hwnd_matches_window(
+  root: windows_sys::Win32::Foundation::HWND,
+  candidate: windows_sys::Win32::Foundation::HWND,
+  include_owned: bool,
+) -> bool {
+  use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, IsChild, GA_ROOT, GA_ROOTOWNER};
+  if root.is_null() || candidate.is_null() {
+    return false;
+  }
+  if candidate == root || IsChild(root, candidate) != 0 {
+    return true;
+  }
+  if GetAncestor(candidate, GA_ROOT) == root {
+    return true;
+  }
+  include_owned && GetAncestor(candidate, GA_ROOTOWNER) == root
+}
+
+#[cfg(windows)]
+fn query_hwnd_focused(hwnd_raw: isize) -> bool {
+  use windows_sys::Win32::Foundation::HWND;
+  use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetGUIThreadInfo, IsIconic, IsWindowVisible, GUITHREADINFO,
+  };
+  if hwnd_raw == 0 {
+    return false;
+  }
+  let hwnd = hwnd_raw as HWND;
+  unsafe {
+    let window_visible = IsWindowVisible(hwnd) != 0;
+    let window_minimized = IsIconic(hwnd) != 0;
+    let fg = GetForegroundWindow();
+    let foreground_matches_window = hwnd_matches_window(hwnd, fg, false);
+    let mut gti: GUITHREADINFO = std::mem::zeroed();
+    gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    let (focus_hwnd_present, focus_matches_window) =
+      if GetGUIThreadInfo(0, &mut gti) != 0 && !gti.hwndFocus.is_null() {
+        (true, hwnd_matches_window(hwnd, gti.hwndFocus, true))
+      } else {
+        (false, false)
+      };
+    evaluate_native_window_focus(NativeFocusProbe {
+      window_visible,
+      window_minimized,
+      foreground_matches_window,
+      focus_hwnd_present,
+      focus_matches_window,
+    })
+  }
+}
+
+#[cfg(windows)]
+fn query_hwnd_has_child_focus(hwnd_raw: isize) -> bool {
+  use windows_sys::Win32::Foundation::HWND;
+  use windows_sys::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GUITHREADINFO};
+  if hwnd_raw == 0 {
+    return false;
+  }
+  let hwnd = hwnd_raw as HWND;
+  unsafe {
+    let mut gti: GUITHREADINFO = std::mem::zeroed();
+    gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    GetGUIThreadInfo(0, &mut gti) != 0
+      && !gti.hwndFocus.is_null()
+      && gti.hwndFocus != hwnd
+      && hwnd_matches_window(hwnd, gti.hwndFocus, true)
+  }
+}
+
+fn query_window_focused(window: &WebviewWindow) -> Option<bool> {
+  #[cfg(windows)]
+  {
+    window.hwnd().ok().map(|raw| query_hwnd_focused(raw.0 as isize))
+  }
+  #[cfg(not(windows))]
+  {
+    window.is_focused().ok()
+  }
+}
+
+#[cfg(windows)]
+unsafe fn set_hwnd_region(
+  hwnd: windows_sys::Win32::Foundation::HWND,
+  rects: &[RectI],
+  redraw: bool,
+) {
+  use windows_sys::Win32::Graphics::Gdi::{
+    CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+  };
+  let redraw_flag = i32::from(redraw);
+  if rects.is_empty() {
+    SetWindowRgn(hwnd, std::ptr::null_mut(), redraw_flag);
+    return;
+  }
+  let combined = CreateRectRgn(0, 0, 0, 0);
+  if combined.is_null() {
+    return;
+  }
+  for r in rects {
+    let part = CreateRectRgn(r.x, r.y, r.x + r.width, r.y + r.height);
+    if !part.is_null() {
+      CombineRgn(combined, combined, part, RGN_OR);
+      DeleteObject(part);
+    }
+  }
+  // Windows takes ownership of `combined` on success.
+  if SetWindowRgn(hwnd, combined, redraw_flag) == 0 {
+    DeleteObject(combined);
+  }
+}
+
+#[cfg(windows)]
+unsafe fn measure_hwnd_geometry(
+  hwnd: windows_sys::Win32::Foundation::HWND,
+) -> (Option<PhysicalPosition<i32>>, Option<PhysicalSize<u32>>, (u32, u32)) {
+  use windows_sys::Win32::Foundation::RECT;
+  use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+  let mut win_rect: RECT = std::mem::zeroed();
+  let mut cli_rect: RECT = std::mem::zeroed();
+  let has_win = GetWindowRect(hwnd, &mut win_rect) != 0;
+  let has_cli = GetClientRect(hwnd, &mut cli_rect) != 0;
+  let pos = has_win.then(|| PhysicalPosition::new(win_rect.left, win_rect.top));
+  let outer = has_win.then(|| {
+    PhysicalSize::new(
+      (win_rect.right - win_rect.left).max(0) as u32,
+      (win_rect.bottom - win_rect.top).max(0) as u32,
+    )
+  });
+  let frame = if has_win && has_cli {
+    let ww = (win_rect.right - win_rect.left).max(0) as u32;
+    let wh = (win_rect.bottom - win_rect.top).max(0) as u32;
+    let cw = (cli_rect.right - cli_rect.left).max(0) as u32;
+    let ch = (cli_rect.bottom - cli_rect.top).max(0) as u32;
+    (ww.saturating_sub(cw), wh.saturating_sub(ch))
+  } else {
+    (0, 0)
+  };
+  (pos, outer, frame)
+}
+
+#[cfg(windows)]
+async fn sync_windows_webview_after_layout(
+  window: &WebviewWindow,
+  hwnd_raw: isize,
+  moved: bool,
+  focus: bool,
+) -> Option<bool> {
+  if !moved && !focus {
+    return Some(query_hwnd_focused(hwnd_raw));
+  }
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  let scheduled = window.with_webview(move |platform_webview| {
+    let controller = platform_webview.controller();
+    unsafe {
+      if moved {
+        let _ = controller.NotifyParentWindowPositionChanged();
+      }
+      if focus && !query_hwnd_has_child_focus(hwnd_raw) {
+        use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+      }
+    }
+    let _ = tx.send(query_hwnd_focused(hwnd_raw));
+  });
+  if scheduled.is_err() {
+    return Some(query_hwnd_focused(hwnd_raw));
+  }
+  rx.await.ok().or_else(|| Some(query_hwnd_focused(hwnd_raw)))
+}
+
+#[cfg(windows)]
+async fn apply_windows_layout_atomic(
+  window: &WebviewWindow,
+  target_pos: PhysicalPosition<i32>,
+  target_size: PhysicalSize<u32>,
+  scale: f64,
+  hit_rects: Vec<LogicalHitRect>,
+  focus: bool,
+) -> Result<Option<bool>, BridgeError> {
+  let hwnd_raw = window
+    .hwnd()
+    .map_err(|_| native_error("Could not read desktop pet handle"))?
+    .0 as isize;
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  window
+    .run_on_main_thread(move || {
+      use windows_sys::Win32::Foundation::HWND;
+      use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, SetForegroundWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+      };
+      let hwnd = hwnd_raw as HWND;
+      let outcome = unsafe {
+        let (cur_pos, cur_outer, (frame_w, frame_h)) = measure_hwnd_geometry(hwnd);
+        let target_outer = PhysicalSize::new(
+          target_size.width.saturating_add(frame_w),
+          target_size.height.saturating_add(frame_h),
+        );
+        let commit = plan_windows_layout_commit(
+          cur_pos,
+          cur_outer.unwrap_or(target_outer),
+          target_pos,
+          target_outer,
+          !hit_rects.is_empty(),
+        );
+
+        if commit.clear_region_before_pos {
+          set_hwnd_region(hwnd, &[], false);
+        }
+
+        let pos_ok = if commit.run_set_window_pos {
+          let mut flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+          if !commit.move_window {
+            flags |= SWP_NOMOVE;
+          }
+          if !commit.resize_window {
+            flags |= SWP_NOSIZE;
+          }
+          // Synchronous atomic move+resize (no SWP_ASYNCWINDOWPOS) so DWM commits both together.
+          SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            commit.x,
+            commit.y,
+            commit.width,
+            commit.height,
+            flags,
+          ) != 0
+        } else {
+          true
+        };
+
+        let (_, actual_outer, _) = measure_hwnd_geometry(hwnd);
+        let final_size = actual_outer.unwrap_or(target_outer);
+        match commit.post_region {
+          PostRegionAction::ApplyRects => {
+            let rects: Vec<RectI> = scale_hit_rects(
+              &hit_rects,
+              final_size.width as i32,
+              final_size.height as i32,
+              scale,
+            )
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+            set_hwnd_region(hwnd, &rects, true);
+          }
+          PostRegionAction::Clear { redraw } => {
+            set_hwnd_region(hwnd, &[], redraw);
+          }
+          PostRegionAction::KeepCleared => {}
+        }
+
+        if focus {
+          let fg = GetForegroundWindow();
+          if !hwnd_matches_window(hwnd, fg, false) {
+            let _ = SetForegroundWindow(hwnd);
+          }
+        }
+
+        (pos_ok, commit.move_window, query_hwnd_focused(hwnd_raw))
+      };
+      let _ = tx.send(outcome);
+    })
+    .map_err(|_| native_error("Could not schedule desktop pet layout update"))?;
+
+  let (pos_ok, moved, focused_after_pos) = rx
+    .await
+    .map_err(|_| native_error("Desktop pet layout update was cancelled"))?;
+  if !pos_ok {
+    return Err(native_error("Could not resize desktop pet"));
+  }
+  if focus && !focused_after_pos {
+    let _ = window.set_focus();
+  }
+  Ok(sync_windows_webview_after_layout(window, hwnd_raw, moved, focus).await)
+}
+
+#[cfg(windows)]
+async fn position_windows_pet_on_create(
+  window: &WebviewWindow,
+  target_pos: PhysicalPosition<i32>,
+  target_size: PhysicalSize<u32>,
+) {
+  let Ok(hwnd_raw) = window.hwnd().map(|h| h.0 as isize) else { return };
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  let scheduled = window.run_on_main_thread(move || {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+      SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    };
+    let hwnd = hwnd_raw as HWND;
+    unsafe {
+      let (_, _, (frame_w, frame_h)) = measure_hwnd_geometry(hwnd);
+      let outer_w = target_size.width.saturating_add(frame_w) as i32;
+      let outer_h = target_size.height.saturating_add(frame_h) as i32;
+      let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+      set_hwnd_region(hwnd, &[], false);
+      let _ = SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        target_pos.x,
+        target_pos.y,
+        outer_w,
+        outer_h,
+        flags,
+      );
+      // Crossing into a different-DPI monitor can trigger WM_DPICHANGED and rescale the rect;
+      // enforce exact target bounds once the HWND resides on the destination monitor.
+      let (actual_pos, actual_outer, (frame_w2, frame_h2)) = measure_hwnd_geometry(hwnd);
+      let expected_outer = PhysicalSize::new(
+        target_size.width.saturating_add(frame_w2),
+        target_size.height.saturating_add(frame_h2),
+      );
+      if actual_pos != Some(target_pos) || actual_outer != Some(expected_outer) {
+        let _ = SetWindowPos(
+          hwnd,
+          std::ptr::null_mut(),
+          target_pos.x,
+          target_pos.y,
+          expected_outer.width as i32,
+          expected_outer.height as i32,
+          flags,
+        );
+      }
+    }
+    let _ = tx.send(());
+  });
+  if scheduled.is_ok() {
+    let _ = rx.await;
+  }
+  let _ = sync_windows_webview_after_layout(window, hwnd_raw, true, false).await;
+}
+
+#[cfg(windows)]
+async fn move_windows_pet_atomic(window: &WebviewWindow, target_pos: PhysicalPosition<i32>) {
+  let Ok(hwnd_raw) = window.hwnd().map(|h| h.0 as isize) else { return };
+  let (tx, rx) = tokio::sync::oneshot::channel();
+  let scheduled = window.run_on_main_thread(move || {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+      SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let hwnd = hwnd_raw as HWND;
+    unsafe {
+      let _ = SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        target_pos.x,
+        target_pos.y,
+        0,
+        0,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSIZE,
+      );
+    }
+    let _ = tx.send(());
+  });
+  if scheduled.is_ok() {
+    let _ = rx.await;
+  }
+  let _ = sync_windows_webview_after_layout(window, hwnd_raw, true, false).await;
 }
 
 fn detect_composited(window: &WebviewWindow) -> bool {
@@ -648,37 +1228,26 @@ fn apply_window_region(
   #[cfg(windows)]
   {
     let _ = composited;
-    let Ok(hwnd_raw) = window.hwnd() else { return };
-    let hwnd = hwnd_raw.0 as usize;
-    let Ok(size) = window.outer_size() else { return };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let rects: Vec<RectI> = scale_hit_rects(hit_rects, size.width as i32, size.height as i32, scale)
-      .into_iter()
-      .map(|(r, _)| r)
-      .collect();
+    let Ok(hwnd_raw) = window.hwnd().map(|h| h.0 as isize) else { return };
+    let monitor = window_monitor(window);
+    let scale = resolve_scale_factor(monitor.as_ref(), window).unwrap_or(1.0);
+    let hit_rects = hit_rects.to_vec();
     let _ = window.run_on_main_thread(move || unsafe {
-      use windows_sys::Win32::Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+      let hwnd = hwnd_raw as windows_sys::Win32::Foundation::HWND;
+      if hit_rects.is_empty() {
+        set_hwnd_region(hwnd, &[], true);
+        return;
+      }
+      let (_, Some(size), _) = measure_hwnd_geometry(hwnd) else {
+        set_hwnd_region(hwnd, &[], true);
+        return;
       };
-      if rects.is_empty() {
-        SetWindowRgn(hwnd as _, std::ptr::null_mut(), 1);
-        return;
-      }
-      let combined = CreateRectRgn(0, 0, 0, 0);
-      if combined.is_null() {
-        return;
-      }
-      for r in rects {
-        let part = CreateRectRgn(r.x, r.y, r.x + r.width, r.y + r.height);
-        if !part.is_null() {
-          CombineRgn(combined, combined, part, RGN_OR);
-          DeleteObject(part);
-        }
-      }
-      // Windows takes ownership of `combined` on success.
-      if SetWindowRgn(hwnd as _, combined, 1) == 0 {
-        DeleteObject(combined);
-      }
+      let rects: Vec<RectI> =
+        scale_hit_rects(&hit_rects, size.width as i32, size.height as i32, scale)
+          .into_iter()
+          .map(|(r, _)| r)
+          .collect();
+      set_hwnd_region(hwnd, &rects, true);
     });
   }
 
@@ -776,19 +1345,18 @@ fn apply_linux_size_lock(window: &WebviewWindow, size: Option<PhysicalSize<u32>>
   let _ = window.set_max_size(size);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 fn apply_linux_size_lock(_window: &WebviewWindow, _size: Option<PhysicalSize<u32>>) {}
 
-fn apply_layout(
+async fn apply_layout(
   app: &AppHandle,
   window: &WebviewWindow,
   request: PetWindowLayoutRequest,
-) -> Result<(), BridgeError> {
+) -> Result<Option<bool>, BridgeError> {
   let pet = app.state::<DesktopPet>();
-  let scale = window
-    .scale_factor()
-    .map_err(|_| native_error("Could not read pet window scale"))?;
   let monitor = window_monitor(window);
+  let scale = resolve_scale_factor(monitor.as_ref(), window)
+    .ok_or_else(|| native_error("Could not read pet window scale"))?;
   let area = monitor.as_ref().map(WorkArea::from_monitor);
   let collapsed_size = cap_size(
     LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(scale),
@@ -801,6 +1369,7 @@ fn apply_layout(
     LogicalSize::new(logical_w, logical_h).to_physical::<u32>(scale),
     area,
   );
+  let applied_logical = effective_logical_size((logical_w, logical_h), target_size, area, scale);
   let probe_size = cap_size(
     LogicalSize::new(
       logical_w.max(ORIENTATION_PROBE_SIZE.0),
@@ -848,44 +1417,65 @@ fn apply_layout(
     geo.anchor_pos = Some(plan.anchor_pos);
     geo.last_collapsed_pos = Some(plan.collapsed_pos);
     geo.expected_window_pos = Some(plan.window_pos);
-    geo.current_logical_size = (logical_w, logical_h);
+    geo.current_logical_size = applied_logical;
     geo.current_composer_height = composer_h_logical;
     (plan, size_changed, pos_changed)
   };
 
   pet.expanded.store(plan.expanded, Ordering::Release);
 
-  if size_changed {
-    // Clear previous region before changing window dimensions so no frames clip against stale bounds.
+  let probed_focused = {
+    let _guard = pet.begin_layout_apply();
     #[cfg(windows)]
-    apply_window_region(window, &[], composited);
-
-    let growing = target_size.width > current_size.width || target_size.height > current_size.height;
-    apply_linux_size_lock(window, None);
-    if growing && pos_changed {
-      let _ = window.set_position(plan.window_pos);
+    {
+      let _ = (size_changed, pos_changed);
+      apply_windows_layout_atomic(
+        window,
+        plan.window_pos,
+        target_size,
+        scale,
+        request.hit_rects,
+        request.focus,
+      )
+      .await?
     }
-    window
-      .set_size(target_size)
-      .map_err(|_| native_error("Could not resize desktop pet"))?;
-    apply_linux_size_lock(window, Some(target_size));
-    if !growing && pos_changed {
-      let _ = window.set_position(plan.window_pos);
-    } else if growing && window.outer_position().ok() != Some(plan.window_pos) {
-      let _ = window.set_position(plan.window_pos);
-    }
-  } else if pos_changed {
-    let _ = window.set_position(plan.window_pos);
-  }
+    #[cfg(not(windows))]
+    {
+      if size_changed {
+        let growing =
+          target_size.width > current_size.width || target_size.height > current_size.height;
+        apply_linux_size_lock(window, None);
+        if growing && pos_changed {
+          let _ = window.set_position(plan.window_pos);
+        }
+        window
+          .set_size(target_size)
+          .map_err(|_| native_error("Could not resize desktop pet"))?;
+        apply_linux_size_lock(window, Some(target_size));
+        if !growing && pos_changed {
+          let _ = window.set_position(plan.window_pos);
+        } else if growing && window.outer_position().ok() != Some(plan.window_pos) {
+          let _ = window.set_position(plan.window_pos);
+        }
+      } else if pos_changed {
+        let _ = window.set_position(plan.window_pos);
+      }
 
-  apply_window_region(window, &request.hit_rects, composited);
-  if request.focus {
-    let _ = window.set_focus();
-  }
-  Ok(())
+      apply_window_region(window, &request.hit_rects, composited);
+      if request.focus {
+        let _ = window.set_focus();
+      }
+      query_window_focused(window)
+    }
+  };
+
+  let prev_focused = pet.focused.load(Ordering::Acquire);
+  let focus_resolution = resolve_focus_after_layout(prev_focused, probed_focused, request.focus);
+  pet.focused.store(focus_resolution.stored_focused, Ordering::Release);
+  Ok(focus_resolution.reported_focused)
 }
 
-fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
+async fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
   let window = WebviewWindowBuilder::new(app, PET_LABEL, WebviewUrl::App("index.html?view=pet".into()))
     // desktop-pet.kwinrule matches "PiBot" exactly; the main window is "Pi Bot".
     .title("PiBot")
@@ -926,6 +1516,7 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
   let mut initial_pos = saved_pos;
   let mut initial_anchor = None;
   let mut initial_dock = DockSide::Right;
+  let mut initial_logical = COLLAPSED_SIZE;
   if let Some(monitor) = monitor {
     let area = monitor.work_area();
     let work = WorkArea::from_monitor(&monitor);
@@ -934,6 +1525,7 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
       LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(scale),
       Some(work),
     );
+    initial_logical = effective_logical_size(COLLAPSED_SIZE, size, Some(work), scale);
     let target = saved_pos.unwrap_or_else(|| {
       let margin = (16.0 * scale).round() as i32;
       PhysicalPosition::new(
@@ -946,10 +1538,18 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     initial_dock = preferred_collapsed_dock_side(clamped, size, Some(work));
     let offset = mascot_anchor_in_window(size, initial_dock, PanelSide::Top, 0, scale);
     initial_anchor = Some(PhysicalPosition::new(clamped.x + offset.x, clamped.y + offset.y));
-    apply_linux_size_lock(&window, None);
-    let _ = window.set_size(size);
-    apply_linux_size_lock(&window, Some(size));
-    let _ = window.set_position(clamped);
+    let _guard = pet.begin_layout_apply();
+    #[cfg(windows)]
+    {
+      position_windows_pet_on_create(&window, clamped, size).await;
+    }
+    #[cfg(not(windows))]
+    {
+      apply_linux_size_lock(&window, None);
+      let _ = window.set_size(size);
+      apply_linux_size_lock(&window, Some(size));
+      let _ = window.set_position(clamped);
+    }
   }
 
   {
@@ -957,7 +1557,7 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     geo.dock_side = initial_dock;
     geo.panel_side = PanelSide::Top;
     geo.composited = composited;
-    geo.current_logical_size = COLLAPSED_SIZE;
+    geo.current_logical_size = initial_logical;
     geo.current_composer_height = 0.0;
     geo.anchor_pos = initial_anchor;
     geo.expected_window_pos = initial_pos;
@@ -974,8 +1574,8 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
 fn snapshot_collapsed_pos_before_hide(app: &AppHandle, window: &WebviewWindow) {
   let pet = app.state::<DesktopPet>();
   let (Ok(pos), Ok(cur_size)) = (window.outer_position(), window.outer_size()) else { return };
-  let scale = window.scale_factor().unwrap_or(1.0);
   let monitor = window_monitor(window);
+  let scale = resolve_scale_factor(monitor.as_ref(), window).unwrap_or(1.0);
   let area = monitor.as_ref().map(WorkArea::from_monitor);
   let collapsed_size = cap_size(
     LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(scale),
@@ -1065,11 +1665,12 @@ pub async fn control_with_layout(
   } else {
     action
   };
+  let mut focus_override: Option<Option<bool>> = None;
   match action {
     "show" => {
       let window = match app.get_webview_window(PET_LABEL) {
         Some(window) => window,
-        None => create(app)?,
+        None => create(app).await?,
       };
       window
         .show()
@@ -1082,7 +1683,11 @@ pub async fn control_with_layout(
       };
       apply_window_region(&window, &hit_rects, composited);
       pet.visible.store(true, Ordering::Release);
-      pet.focused.store(window.is_focused().unwrap_or(false), Ordering::Release);
+      let focused = resolve_focus_on_query(
+        pet.focused.load(Ordering::Acquire),
+        query_window_focused(&window),
+      );
+      pet.focused.store(focused, Ordering::Release);
       save_current_preference(app, true);
     }
     "hide" => {
@@ -1109,7 +1714,7 @@ pub async fn control_with_layout(
       })?;
       if let Some(window) = app.get_webview_window(PET_LABEL) {
         let (width, height) = if expanded { EXPANDED_SIZE } else { COLLAPSED_SIZE };
-        apply_layout(
+        let reported_focused = apply_layout(
           app,
           &window,
           PetWindowLayoutRequest {
@@ -1119,7 +1724,9 @@ pub async fn control_with_layout(
             focus: expanded,
             hit_rects: Vec::new(),
           },
-        )?;
+        )
+        .await?;
+        focus_override = Some(reported_focused);
       }
     }
     "set-layout" => {
@@ -1127,7 +1734,8 @@ pub async fn control_with_layout(
         BridgeError::new("INVALID_ARGUMENT", "layout is required", "not-sent")
       })?;
       if let Some(window) = app.get_webview_window(PET_LABEL) {
-        apply_layout(app, &window, req)?;
+        let reported_focused = apply_layout(app, &window, req).await?;
+        focus_override = Some(reported_focused);
       }
     }
     "show-main" => crate::show_main_window(app),
@@ -1144,7 +1752,12 @@ pub async fn control_with_layout(
         let composited = detect_composited(&window);
         let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
         geo.composited = composited;
-        pet.focused.store(window.is_focused().unwrap_or(false), Ordering::Release);
+        drop(geo);
+        let focused = resolve_focus_on_query(
+          pet.focused.load(Ordering::Acquire),
+          query_window_focused(&window),
+        );
+        pet.focused.store(focused, Ordering::Release);
       }
       return Ok(state(app));
     }
@@ -1156,7 +1769,7 @@ pub async fn control_with_layout(
       ))
     }
   }
-  Ok(publish(app))
+  Ok(publish_with_focus(app, focus_override))
 }
 
 #[tauri::command]
@@ -1196,17 +1809,24 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     }
     WindowEvent::Moved(_) => {
       let app = window.app_handle().clone();
+      let pet = app.state::<DesktopPet>();
       let seq = {
-        let pet = app.state::<DesktopPet>();
         let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
         geo.move_seq = geo.move_seq.wrapping_add(1);
         geo.move_seq
       };
+      if pet.is_applying_layout() {
+        return;
+      }
       tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(160)).await;
         let pet = app.state::<DesktopPet>();
+        let _operation = pet.operation.lock().await;
+        if pet.is_applying_layout() || !pet.visible.load(Ordering::Acquire) {
+          return;
+        }
         let current_seq = pet.geometry.lock().unwrap_or_else(|e| e.into_inner()).move_seq;
-        if current_seq != seq || !pet.visible.load(Ordering::Acquire) {
+        if current_seq != seq {
           return;
         }
         let Some(win) = app.get_webview_window(PET_LABEL) else { return };
@@ -1215,9 +1835,18 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         let work = WorkArea::from_monitor(&monitor);
         let clamped = clamp_to_area(pos, size, work);
         if clamped != pos {
+          let _guard = pet.begin_layout_apply();
+          #[cfg(windows)]
+          move_windows_pet_atomic(&win, clamped).await;
+          #[cfg(not(windows))]
           let _ = win.set_position(clamped);
+        } else {
+          #[cfg(windows)]
+          if let Ok(hwnd_raw) = win.hwnd().map(|h| h.0 as isize) {
+            let _ = sync_windows_webview_after_layout(&win, hwnd_raw, true, false).await;
+          }
         }
-        let scale = win.scale_factor().unwrap_or(1.0);
+        let scale = resolve_scale_factor(Some(&monitor), &win).unwrap_or(1.0);
         let collapsed_size = cap_size(
           LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(scale),
           Some(work),
@@ -1256,15 +1885,34 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         }
       });
     }
-    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+    WindowEvent::Resized(_) => {
       let app = window.app_handle();
+      let pet = app.state::<DesktopPet>();
+      if pet.is_applying_layout() {
+        return;
+      }
       if let Some(win) = app.get_webview_window(PET_LABEL) {
-        let pet = app.state::<DesktopPet>();
         let (hit_rects, composited) = {
           let geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
           (geo.hit_rects.clone(), geo.composited)
         };
         apply_window_region(&win, &hit_rects, composited);
+      }
+    }
+    WindowEvent::ScaleFactorChanged { .. } => {
+      let app = window.app_handle();
+      let pet = app.state::<DesktopPet>();
+      if pet.is_applying_layout() {
+        return;
+      }
+      if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let composited = {
+          let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
+          // Stale hit rects from the previous DPI would clip visuals on Windows after DPI change.
+          geo.hit_rects.clear();
+          geo.composited
+        };
+        apply_window_region(&win, &[], composited);
       }
     }
     WindowEvent::Destroyed => {
@@ -1587,5 +2235,591 @@ mod tests {
 
     let minimal: PersistedPetState = serde_json::from_str(r#"{"visible":true}"#).unwrap();
     assert_eq!(minimal, PersistedPetState { visible: true, x: None, y: None });
+  }
+
+  #[test]
+  fn composer_expand_preserves_anchor_across_orientations_and_dpi_scales() {
+    struct Case {
+      label: &'static str,
+      work: WorkArea,
+      scale: f64,
+      start: PhysicalPosition<i32>,
+      initial_dock: DockSide,
+      composer_logical: (f64, f64, f64), // (width, height, composer_height)
+      expected_dock: DockSide,
+      expected_panel: PanelSide,
+    }
+
+    let cases = [
+      // Real-world 4K 1.5x monitor (DISPLAY2): saved pos (2999, 1446) switches Right -> Center
+      Case {
+        label: "4k_1.5x_right_to_center_top",
+        work: WorkArea { x: 0, y: 0, width: 3840, height: 2088 },
+        scale: 1.5,
+        start: PhysicalPosition::new(2999, 1446),
+        initial_dock: DockSide::Right,
+        composer_logical: (320.0, 180.0, 52.0),
+        expected_dock: DockSide::Center,
+        expected_panel: PanelSide::Top,
+      },
+      // 4K 1.5x with recall chip taller composer (height 207, composer_h 79)
+      Case {
+        label: "4k_1.5x_center_with_recall_chip",
+        work: WorkArea { x: 0, y: 0, width: 3840, height: 2088 },
+        scale: 1.5,
+        start: PhysicalPosition::new(2999, 1446),
+        initial_dock: DockSide::Right,
+        composer_logical: (320.0, 207.0, 79.0),
+        expected_dock: DockSide::Center,
+        expected_panel: PanelSide::Top,
+      },
+      // 1.25x DPI near right edge (cannot fit Center -> stays Right, PanelSide::Top)
+      Case {
+        label: "1.25x_right_edge_top",
+        work: WorkArea { x: 0, y: 0, width: 2400, height: 1300 },
+        scale: 1.25,
+        start: PhysicalPosition::new(2170, 900),
+        initial_dock: DockSide::Right,
+        composer_logical: (320.0, 180.0, 52.0),
+        expected_dock: DockSide::Right,
+        expected_panel: PanelSide::Top,
+      },
+      // 1.25x DPI near left edge (stays Left, PanelSide::Top)
+      Case {
+        label: "1.25x_left_edge_top",
+        work: WorkArea { x: 0, y: 0, width: 2400, height: 1300 },
+        scale: 1.25,
+        start: PhysicalPosition::new(16, 900),
+        initial_dock: DockSide::Left,
+        composer_logical: (320.0, 180.0, 52.0),
+        expected_dock: DockSide::Left,
+        expected_panel: PanelSide::Top,
+      },
+      // 2.0x HiDPI near top-left edge (PanelSide::Bottom, DockSide::Left)
+      Case {
+        label: "2.0x_top_left_panel_bottom",
+        work: WorkArea { x: 0, y: 0, width: 3840, height: 2080 },
+        scale: 2.0,
+        start: PhysicalPosition::new(24, 24),
+        initial_dock: DockSide::Left,
+        composer_logical: (320.0, 207.0, 79.0),
+        expected_dock: DockSide::Left,
+        expected_panel: PanelSide::Bottom,
+      },
+      // 2.0x HiDPI near top-center open space (PanelSide::Bottom, DockSide::Center)
+      Case {
+        label: "2.0x_top_center_panel_bottom",
+        work: WorkArea { x: 0, y: 0, width: 3840, height: 2080 },
+        scale: 2.0,
+        start: PhysicalPosition::new(1800, 24),
+        initial_dock: DockSide::Right,
+        composer_logical: (320.0, 180.0, 52.0),
+        expected_dock: DockSide::Center,
+        expected_panel: PanelSide::Bottom,
+      },
+      // 1.0x near top-right corner (PanelSide::Bottom, DockSide::Right)
+      Case {
+        label: "1.0x_top_right_panel_bottom",
+        work: WORK_1080,
+        scale: 1.0,
+        start: PhysicalPosition::new(1740, 20),
+        initial_dock: DockSide::Right,
+        composer_logical: (320.0, 207.0, 79.0),
+        expected_dock: DockSide::Right,
+        expected_panel: PanelSide::Bottom,
+      },
+    ];
+
+    for case in cases {
+      let collapsed = cap_size(
+        LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(case.scale),
+        Some(case.work),
+      );
+      let target = cap_size(
+        LogicalSize::new(case.composer_logical.0, case.composer_logical.1)
+          .to_physical::<u32>(case.scale),
+        Some(case.work),
+      );
+      let probe = cap_size(
+        LogicalSize::new(
+          case.composer_logical.0.max(ORIENTATION_PROBE_SIZE.0),
+          case.composer_logical.1.max(ORIENTATION_PROBE_SIZE.1),
+        )
+        .to_physical::<u32>(case.scale),
+        Some(case.work),
+      );
+      let composer_h_phys = (case.composer_logical.2 * case.scale).round() as i32;
+      let start_offset =
+        mascot_anchor_in_window(collapsed, case.initial_dock, PanelSide::Top, 0, case.scale);
+      let expected_anchor = PhysicalPosition::new(
+        case.start.x + start_offset.x,
+        case.start.y + start_offset.y,
+      );
+
+      let expanded = plan_dynamic_resize(
+        case.start,
+        collapsed,
+        collapsed,
+        target,
+        probe,
+        false,
+        case.initial_dock,
+        PanelSide::Top,
+        0,
+        composer_h_phys,
+        None,
+        None,
+        Some(case.work),
+        case.scale,
+      );
+
+      assert_eq!(
+        (expanded.dock_side, expanded.panel_side, expanded.expanded),
+        (case.expected_dock, case.expected_panel, true),
+        "orientation mismatch for {}",
+        case.label
+      );
+      // Window must remain strictly inside work area
+      assert!(expanded.window_pos.x >= case.work.x, "x underflow for {}", case.label);
+      assert!(expanded.window_pos.y >= case.work.y, "y underflow for {}", case.label);
+      assert!(
+        expanded.window_pos.x + target.width as i32 <= case.work.x + case.work.width as i32,
+        "x overflow for {}",
+        case.label
+      );
+      assert!(
+        expanded.window_pos.y + target.height as i32 <= case.work.y + case.work.height as i32,
+        "y overflow for {}",
+        case.label
+      );
+
+      // Screen-space mascot center must stay pixel-pinned when unclamped
+      let expanded_offset = mascot_anchor_in_window(
+        target,
+        expanded.dock_side,
+        expanded.panel_side,
+        composer_h_phys,
+        case.scale,
+      );
+      let actual_anchor = PhysicalPosition::new(
+        expanded.window_pos.x + expanded_offset.x,
+        expanded.window_pos.y + expanded_offset.y,
+      );
+      assert_eq!(actual_anchor, expected_anchor, "mascot anchor shifted for {}", case.label);
+
+      // Subsequent growth (e.g., reply bubble appears while composer stays open) preserves orientation & anchor
+      let with_bubble = cap_size(
+        LogicalSize::new(356.0, 440.0).to_physical::<u32>(case.scale),
+        Some(case.work),
+      );
+      let grown = plan_dynamic_resize(
+        expanded.window_pos,
+        target,
+        collapsed,
+        with_bubble,
+        probe,
+        true,
+        expanded.dock_side,
+        expanded.panel_side,
+        composer_h_phys,
+        composer_h_phys,
+        Some(expanded.anchor_pos),
+        Some(expanded.window_pos),
+        Some(case.work),
+        case.scale,
+      );
+      assert_eq!(
+        (grown.dock_side, grown.panel_side),
+        (case.expected_dock, case.expected_panel),
+        "orientation flipped on growth for {}",
+        case.label
+      );
+
+      // Collapse returns to exact original collapsed position
+      let collapsed_back = plan_dynamic_resize(
+        grown.window_pos,
+        with_bubble,
+        collapsed,
+        collapsed,
+        probe,
+        true,
+        grown.dock_side,
+        grown.panel_side,
+        composer_h_phys,
+        0,
+        Some(grown.anchor_pos),
+        Some(grown.window_pos),
+        Some(case.work),
+        case.scale,
+      );
+      assert_eq!(
+        (collapsed_back.window_pos, collapsed_back.expanded),
+        (case.start, false),
+        "collapse failed to restore start for {}",
+        case.label
+      );
+    }
+  }
+
+  #[test]
+  fn multi_monitor_negative_and_offset_work_areas_clamp_and_restore_cleanly() {
+    let display1 = WorkArea { x: -1920, y: 0, width: 1920, height: 1032 };
+    let display2 = WorkArea { x: 0, y: 0, width: 3840, height: 2088 };
+    let display3 = WorkArea { x: 3840, y: 0, width: 1080, height: 1872 };
+
+    // Left-edge bottom corner on negative-X DISPLAY1 (1.0x)
+    let start_d1 = PhysicalPosition::new(-1910, 900);
+    let composer_1x = PhysicalSize::new(320, 207);
+    let p_d1 = plan_dynamic_resize(
+      start_d1,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      composer_1x,
+      PROBE_1X,
+      false,
+      DockSide::Left,
+      PanelSide::Top,
+      0,
+      79,
+      None,
+      None,
+      Some(display1),
+      1.0,
+    );
+    assert_eq!(p_d1.dock_side, DockSide::Left);
+    assert_eq!(p_d1.panel_side, PanelSide::Top);
+    assert_eq!(p_d1.window_pos.x, -1910);
+    // Clamped up so bottom edge stays within display1 work area (y + 207 <= 1032 => y <= 825)
+    assert_eq!(p_d1.window_pos.y, 825);
+
+    let back_d1 = plan_dynamic_resize(
+      p_d1.window_pos,
+      composer_1x,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      PROBE_1X,
+      true,
+      p_d1.dock_side,
+      p_d1.panel_side,
+      79,
+      0,
+      Some(p_d1.anchor_pos),
+      Some(p_d1.window_pos),
+      Some(display1),
+      1.0,
+    );
+    assert_eq!(back_d1.window_pos, start_d1);
+
+    // Bottom-right corner on portrait DISPLAY3 (x >= 3840, 1.0x)
+    let start_d3 = PhysicalPosition::new(3840 + 1080 - 164 - 8, 1872 - 128 - 8);
+    let p_d3 = plan_dynamic_resize(
+      start_d3,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      composer_1x,
+      PROBE_1X,
+      false,
+      DockSide::Right,
+      PanelSide::Top,
+      0,
+      79,
+      None,
+      None,
+      Some(display3),
+      1.0,
+    );
+    assert_eq!(p_d3.dock_side, DockSide::Right);
+    assert_eq!(p_d3.panel_side, PanelSide::Top);
+    assert!(p_d3.window_pos.x >= display3.x);
+    assert!(p_d3.window_pos.x + composer_1x.width as i32 <= display3.x + display3.width as i32);
+    assert_eq!(p_d3.window_pos.y + composer_1x.height as i32, 1872);
+
+    let back_d3 = plan_dynamic_resize(
+      p_d3.window_pos,
+      composer_1x,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      PROBE_1X,
+      true,
+      p_d3.dock_side,
+      p_d3.panel_side,
+      79,
+      0,
+      Some(p_d3.anchor_pos),
+      Some(p_d3.window_pos),
+      Some(display3),
+      1.0,
+    );
+    assert_eq!(back_d3.window_pos, start_d3);
+
+    // Monitor selection prefers work area, then falls back to full monitor bounds (taskbar band)
+    let monitors = [
+      (display1, WorkArea { x: -1920, y: 0, width: 1920, height: 1080 }),
+      (display2, WorkArea { x: 0, y: 0, width: 3840, height: 2160 }),
+      (display3, WorkArea { x: 3840, y: 0, width: 1080, height: 1920 }),
+    ];
+    assert_eq!(
+      select_monitor_index_for_position(&monitors, PhysicalPosition::new(-500, 1050)),
+      Some(0)
+    );
+    assert_eq!(
+      select_monitor_index_for_position(&monitors, PhysicalPosition::new(2999, 1446)),
+      Some(1)
+    );
+    assert_eq!(
+      select_monitor_index_for_position(&monitors, PhysicalPosition::new(4100, 1900)),
+      Some(2)
+    );
+    assert_eq!(
+      select_monitor_index_for_position(&monitors, PhysicalPosition::new(9999, 9999)),
+      None
+    );
+  }
+
+  #[test]
+  fn windows_layout_commit_plan_orders_region_clear_and_atomic_pos_correctly() {
+    // 1. Expand (grow + move left) with empty hit_rects while opening
+    let grow_empty = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2999, 1446)),
+      PhysicalSize::new(246, 192),
+      PhysicalPosition::new(2915, 1446),
+      PhysicalSize::new(480, 270),
+      false,
+    );
+    assert!(grow_empty.clear_region_before_pos);
+    assert!(grow_empty.run_set_window_pos);
+    assert!(grow_empty.move_window);
+    assert!(grow_empty.resize_window);
+    assert_eq!(grow_empty.post_region, PostRegionAction::KeepCleared);
+
+    // 2. Expand with non-empty hit_rects: clears stale region before SetWindowPos, applies new after
+    let grow_rects = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2999, 1446)),
+      PhysicalSize::new(246, 192),
+      PhysicalPosition::new(2915, 1446),
+      PhysicalSize::new(480, 270),
+      true,
+    );
+    assert!(grow_rects.clear_region_before_pos);
+    assert!(grow_rects.run_set_window_pos);
+    assert_eq!(grow_rects.post_region, PostRegionAction::ApplyRects);
+
+    // 3. Shrink (collapse back to right-docked collapsed bounds): MUST still clear stale region
+    //    before SetWindowPos so old right-offset rects do not clip the smaller window.
+    let shrink = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2915, 1446)),
+      PhysicalSize::new(480, 270),
+      PhysicalPosition::new(2999, 1446),
+      PhysicalSize::new(246, 192),
+      true,
+    );
+    assert!(shrink.clear_region_before_pos);
+    assert!(shrink.run_set_window_pos);
+    assert!(shrink.move_window);
+    assert!(shrink.resize_window);
+    assert_eq!(shrink.post_region, PostRegionAction::ApplyRects);
+
+    // 4. Hit-rects-only update after viewport matches: no SetWindowPos, applies rects directly
+    let rects_only = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2915, 1446)),
+      PhysicalSize::new(480, 270),
+      PhysicalPosition::new(2915, 1446),
+      PhysicalSize::new(480, 270),
+      true,
+    );
+    assert!(!rects_only.clear_region_before_pos);
+    assert!(!rects_only.run_set_window_pos);
+    assert_eq!(rects_only.post_region, PostRegionAction::ApplyRects);
+
+    // 5. Move-only without size change: window-relative region stays valid before move
+    let move_only = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2915, 1446)),
+      PhysicalSize::new(480, 270),
+      PhysicalPosition::new(2800, 1400),
+      PhysicalSize::new(480, 270),
+      true,
+    );
+    assert!(!move_only.clear_region_before_pos);
+    assert!(move_only.run_set_window_pos);
+    assert!(move_only.move_window);
+    assert!(!move_only.resize_window);
+    assert_eq!(move_only.post_region, PostRegionAction::ApplyRects);
+
+    // 6. Clear hit-rects without geometry change
+    let clear_only = plan_windows_layout_commit(
+      Some(PhysicalPosition::new(2915, 1446)),
+      PhysicalSize::new(480, 270),
+      PhysicalPosition::new(2915, 1446),
+      PhysicalSize::new(480, 270),
+      false,
+    );
+    assert!(!clear_only.clear_region_before_pos);
+    assert!(!clear_only.run_set_window_pos);
+    assert_eq!(clear_only.post_region, PostRegionAction::Clear { redraw: true });
+  }
+
+  #[test]
+  fn scale_hit_rects_handles_hidpi_and_post_resize_bounds() {
+    let rects = vec![
+      // Avatar centered in 320x180 expanded composer window
+      LogicalHitRect { x: 102.0, y: 6.0, width: 116.0, height: 116.0, radius: 26 },
+      // Composer pill directly below avatar
+      LogicalHitRect { x: 0.0, y: 116.0, width: 320.0, height: 64.0, radius: 24 },
+      // Invalid / NaN / degenerate rects must be ignored
+      LogicalHitRect { x: f64::NAN, y: 0.0, width: 50.0, height: 50.0, radius: 0 },
+      LogicalHitRect { x: 10.0, y: 10.0, width: 1.0, height: 50.0, radius: 0 },
+    ];
+    // At 1.5x, expanded outer size is 480x270: both avatar and full composer pill fit unclipped.
+    let scaled_15 = scale_hit_rects(&rects, 480, 270, 1.5);
+    assert_eq!(scaled_15.len(), 2);
+    assert_eq!(scaled_15[0], (RectI { x: 153, y: 9, width: 174, height: 174 }, 39));
+    assert_eq!(scaled_15[1], (RectI { x: 0, y: 174, width: 480, height: 96 }, 36));
+  }
+
+  #[test]
+  fn native_window_focus_evaluation_handles_webview2_child_and_unfocused_states() {
+    // WebView2 child HWND focused while pet top-level HWND is foreground -> true
+    assert!(evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: true,
+      window_minimized: false,
+      foreground_matches_window: true,
+      focus_hwnd_present: true,
+      focus_matches_window: true,
+    }));
+
+    // Foreground window right after SetForegroundWindow before child HWND grabs focus -> true
+    assert!(evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: true,
+      window_minimized: false,
+      foreground_matches_window: true,
+      focus_hwnd_present: false,
+      focus_matches_window: false,
+    }));
+
+    // Another app is foreground -> false
+    assert!(!evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: true,
+      window_minimized: false,
+      foreground_matches_window: false,
+      focus_hwnd_present: true,
+      focus_matches_window: false,
+    }));
+
+    // Focus HWND belongs to a foreign window -> false
+    assert!(!evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: true,
+      window_minimized: false,
+      foreground_matches_window: true,
+      focus_hwnd_present: true,
+      focus_matches_window: false,
+    }));
+
+    // Hidden or minimized window -> never focused
+    assert!(!evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: false,
+      window_minimized: false,
+      foreground_matches_window: true,
+      focus_hwnd_present: true,
+      focus_matches_window: true,
+    }));
+    assert!(!evaluate_native_window_focus(NativeFocusProbe {
+      window_visible: true,
+      window_minimized: true,
+      foreground_matches_window: true,
+      focus_hwnd_present: true,
+      focus_matches_window: true,
+    }));
+  }
+
+  #[test]
+  fn focus_resolution_protects_against_spurious_false_overwrite_and_echo() {
+    // Query protection ("show" / "status"): preserve tracked focus when probe unavailable
+    assert!(resolve_focus_on_query(true, None));
+    assert!(!resolve_focus_on_query(false, None));
+    assert!(resolve_focus_on_query(false, Some(true)));
+    assert!(!resolve_focus_on_query(true, Some(false)));
+
+    // set-layout with focus=true & live probe true -> confirmed true
+    assert_eq!(
+      resolve_focus_after_layout(false, Some(true), true),
+      LayoutFocusResolution { stored_focused: true, reported_focused: Some(true) }
+    );
+
+    // set-layout with focus=true before OS finishes activating -> suppress spurious `focused: false`
+    assert_eq!(
+      resolve_focus_after_layout(false, Some(false), true),
+      LayoutFocusResolution { stored_focused: false, reported_focused: None }
+    );
+
+    // set-layout with focus=true when already focused -> never clobber `true` with `false`
+    assert_eq!(
+      resolve_focus_after_layout(true, Some(false), true),
+      LayoutFocusResolution { stored_focused: true, reported_focused: Some(true) }
+    );
+
+    // set-layout with focus=false reports real probed state
+    assert_eq!(
+      resolve_focus_after_layout(false, Some(true), false),
+      LayoutFocusResolution { stored_focused: true, reported_focused: Some(true) }
+    );
+    assert_eq!(
+      resolve_focus_after_layout(true, Some(false), false),
+      LayoutFocusResolution { stored_focused: false, reported_focused: Some(false) }
+    );
+    assert_eq!(
+      resolve_focus_after_layout(true, None, false),
+      LayoutFocusResolution { stored_focused: true, reported_focused: Some(true) }
+    );
+  }
+
+  #[test]
+  fn desktop_pet_window_state_serialization_contract() {
+    let focused_state = DesktopPetWindowState {
+      visible: true,
+      expanded: true,
+      focused: Some(true),
+      dock_side: "center",
+      panel_side: "top",
+      composited: true,
+      width: 320,
+      height: 180,
+    };
+    let v = serde_json::to_value(focused_state).unwrap();
+    assert_eq!(v["visible"], true);
+    assert_eq!(v["expanded"], true);
+    assert_eq!(v["focused"], true);
+    assert_eq!(v["dockSide"], "center");
+    assert_eq!(v["panelSide"], "top");
+    assert_eq!(v["composited"], true);
+    assert_eq!(v["width"], 320);
+    assert_eq!(v["height"], 180);
+
+    // During focus:true transition before OS confirms focus, `focused` is omitted instead of `false`
+    let transitioning = DesktopPetWindowState {
+      focused: None,
+      ..focused_state
+    };
+    let v2 = serde_json::to_value(transitioning).unwrap();
+    assert!(v2.get("focused").is_none());
+    assert_eq!(v2["width"], 320);
+    assert_eq!(v2["height"], 180);
+  }
+
+  #[test]
+  fn effective_logical_size_preserves_requested_and_respects_work_area_cap() {
+    let work = WorkArea { x: 0, y: 0, width: 3840, height: 2088 };
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+      let phys = cap_size(LogicalSize::new(320.0, 180.0).to_physical::<u32>(scale), Some(work));
+      assert_eq!(effective_logical_size((320.0, 180.0), phys, Some(work), scale), (320.0, 180.0));
+    }
+
+    // Small monitor caps physical size -> effective logical size reflects actual capped viewport
+    let tiny = WorkArea { x: 0, y: 0, width: 450, height: 300 };
+    let capped_phys = cap_size(LogicalSize::new(380.0, 480.0).to_physical::<u32>(1.5), Some(tiny));
+    assert_eq!(capped_phys, PhysicalSize::new(450, 300));
+    assert_eq!(
+      effective_logical_size((380.0, 480.0), capped_phys, Some(tiny), 1.5),
+      (300.0, 200.0)
+    );
   }
 }
