@@ -326,10 +326,17 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0 var(--space-2);
 }
 
-.hub-bot-list { list-style: none; padding: 0; margin: 0; }
+.hub-bot-list {
+  list-style: none;
+  overflow: visible;
+  overscroll-behavior: auto;
+  padding: 0;
+  margin: 0;
+}
 .hub-bot-list li { margin: 0; }
 
 .archive-countdown { color: var(--state-attention); }
@@ -1855,13 +1862,29 @@
   width: 6px;
   height: 6px;
 }
+.hub-list-scroll::-webkit-scrollbar-track,
+.inspector-body::-webkit-scrollbar-track,
+.composer::-webkit-scrollbar-track,
+.bot-composer .composer-extras::-webkit-scrollbar-track,
+.bot-composer .composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
 .hub-list-scroll::-webkit-scrollbar-thumb,
 .inspector-body::-webkit-scrollbar-thumb,
 .composer::-webkit-scrollbar-thumb,
 .bot-composer .composer-extras::-webkit-scrollbar-thumb,
 .bot-composer .composer-input::-webkit-scrollbar-thumb {
-  background: var(--border-default);
+  border: 1px solid transparent;
+  background-clip: content-box;
+  background-color: var(--border-default);
   border-radius: var(--radius-full);
+}
+.hub-list-scroll::-webkit-scrollbar-thumb:hover,
+.inspector-body::-webkit-scrollbar-thumb:hover,
+.composer::-webkit-scrollbar-thumb:hover,
+.bot-composer .composer-extras::-webkit-scrollbar-thumb:hover,
+.bot-composer .composer-input::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
 }
 
 .stage-empty {

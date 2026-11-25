@@ -181,7 +181,6 @@ button svg { flex: none; }
   max-height: 360px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
 }
 .pet-bubble[data-variant="question"] .pet-bubble-tail {
   border-right-color: var(--signal-primary-border);
@@ -333,7 +332,6 @@ button svg { flex: none; }
   max-height: 240px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
 }
 
 .pet-md { overflow-wrap: anywhere; line-height: 1.55; font-size: 13px; }
