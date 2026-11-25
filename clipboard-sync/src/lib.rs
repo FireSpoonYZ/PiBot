@@ -81,12 +81,11 @@ const AAD_DOMAIN: &[u8] = b"pibot-clipboard-v1:aad:v1";
 /// without performing any normalization.
 ///
 /// Returns `false` if:
-/// - `sensitive` is `true`
 /// - `text` is empty or exceeds [`MAX_TEXT_BYTES`] UTF-8 bytes
 /// - `text` contains a NUL byte (`'\0'`)
 /// - `text` contains any occurrence of `"pibot1."` or `"pibot-clipboard-v1:"`
-pub fn eligible_text(text: &str, sensitive: bool) -> bool {
-    if sensitive || text.is_empty() || text.len() > MAX_TEXT_BYTES {
+pub fn eligible_text(text: &str) -> bool {
+    if text.is_empty() || text.len() > MAX_TEXT_BYTES {
         return false;
     }
     if text.as_bytes().contains(&0) {
@@ -249,7 +248,7 @@ impl GroupKey {
         if !is_valid_timestamp(sent_at) {
             return Err(CryptoError::InvalidTimestamp);
         }
-        if !eligible_text(text, false) {
+        if !eligible_text(text) {
             return Err(CryptoError::IneligibleText);
         }
         let aad = build_aad(sender_id, sent_at)?;
@@ -338,7 +337,7 @@ impl GroupKey {
                 return Err(CryptoError::InvalidPlaintext);
             }
         };
-        if !eligible_text(&text, false) {
+        if !eligible_text(&text) {
             text.zeroize();
             return Err(CryptoError::InvalidPlaintext);
         }
@@ -407,36 +406,35 @@ mod tests {
 
     #[test]
     fn eligible_text_enforces_utf8_byte_bounds_and_nul_without_normalization() {
-        assert!(!eligible_text("", false));
-        assert!(!eligible_text("abc\0def", false));
+        assert!(!eligible_text(""));
+        assert!(!eligible_text("abc\0def"));
 
         // Unnormalized nonempty whitespace, CRLF, and NFD Unicode stay eligible.
-        assert!(eligible_text("   ", false));
-        assert!(eligible_text("  hello\r\nworld  ", false));
-        assert!(eligible_text("e\u{0301}", false));
+        assert!(eligible_text("   "));
+        assert!(eligible_text("  hello\r\nworld  "));
+        assert!(eligible_text("e\u{0301}"));
 
         // Exact 64 KiB ASCII bound.
-        assert!(eligible_text(&"a".repeat(MAX_TEXT_BYTES), false));
-        assert!(!eligible_text(&"a".repeat(MAX_TEXT_BYTES + 1), false));
+        assert!(eligible_text(&"a".repeat(MAX_TEXT_BYTES)));
+        assert!(!eligible_text(&"a".repeat(MAX_TEXT_BYTES + 1)));
 
         // Multi-byte Unicode byte bound: 16,384 x 4-byte emoji == 65,536 bytes.
         let emoji_exact = "🦀".repeat(MAX_TEXT_BYTES / 4);
         assert_eq!(emoji_exact.len(), MAX_TEXT_BYTES);
-        assert!(eligible_text(&emoji_exact, false));
-        assert!(!eligible_text(&"🦀".repeat(MAX_TEXT_BYTES / 4 + 1), false));
+        assert!(eligible_text(&emoji_exact));
+        assert!(!eligible_text(&"🦀".repeat(MAX_TEXT_BYTES / 4 + 1)));
 
         // 3-byte CJK: 21,845 chars (65,535 bytes) + 'a' == 65,536 bytes.
         let mut cjk_exact = "中".repeat(MAX_TEXT_BYTES / 3);
         cjk_exact.push('a');
         assert_eq!(cjk_exact.len(), MAX_TEXT_BYTES);
-        assert!(eligible_text(&cjk_exact, false));
-        assert!(!eligible_text(&"中".repeat(MAX_TEXT_BYTES / 3 + 1), false));
+        assert!(eligible_text(&cjk_exact));
+        assert!(!eligible_text(&"中".repeat(MAX_TEXT_BYTES / 3 + 1)));
     }
 
     #[test]
-    fn eligible_text_blocks_sensitive_and_any_pairing_or_group_code_occurrence() {
-        assert!(!eligible_text("normal text", true));
-        assert!(eligible_text("normal text", false));
+    fn eligible_text_blocks_any_pairing_or_group_code_occurrence() {
+        assert!(eligible_text("123456"));
 
         for blocked in [
             "pibot1.token",
@@ -445,16 +443,13 @@ mod tests {
             "  pibot-clipboard-v1:abc123  ",
             "invite code: pibot-clipboard-v1:embedded-secret",
         ] {
-            assert!(!eligible_text(blocked, false), "should block: {blocked}");
+            assert!(!eligible_text(blocked), "should block: {blocked}");
         }
 
         let key = GroupKey::generate().expect("generate key");
         let code = key.to_code();
-        assert!(!eligible_text(&code, false));
-        assert!(!eligible_text(
-            &format!("paste {code} on other device"),
-            false
-        ));
+        assert!(!eligible_text(&code));
+        assert!(!eligible_text(&format!("paste {code} on other device")));
     }
 
     #[test]

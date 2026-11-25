@@ -397,7 +397,7 @@ pub extern "system" fn Java_com_example_launcherprobe_ClipboardSyncNative_send<'
         let Some(text) = read_required_string(&mut env, &text) else {
             return JNI_FALSE;
         };
-        if !eligible_text(&text, false) {
+        if !eligible_text(&text) {
             return JNI_FALSE;
         }
         let state = lock_state();

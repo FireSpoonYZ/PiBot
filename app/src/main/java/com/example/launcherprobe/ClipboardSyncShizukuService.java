@@ -51,8 +51,8 @@ import java.util.function.IntSupplier;
  *       restrictions block both, {@link #startListening} cleanly returns {@code false}.</li>
  *   <li>Reuses {@link ClipboardSyncController#validateDescription(ClipDescription)} and
  *       {@link ClipboardSyncController#extractSendableText(ClipData)} so own incoming writes,
- *       Shower {@code "pibot"} clips, {@link ClipDescription#EXTRA_IS_SENSITIVE}, URIs/Intents,
- *       non-plain MIME types, and oversized text (&gt; 64 KiB UTF-8) never cross IPC or bounce.</li>
+ *       Shower {@code "pibot"} clips, URIs/Intents, non-plain MIME types, and oversized text
+ *       (&gt; 64 KiB UTF-8) never cross IPC or bounce.</li>
  * </ul>
  */
 public final class ClipboardSyncShizukuService extends IClipboardSyncShizukuService.Stub {
@@ -337,7 +337,7 @@ public final class ClipboardSyncShizukuService extends IClipboardSyncShizukuServ
             return;
         }
         // Metadata pre-filter before crossing Binder IPC to the app process:
-        // avoids waking the app for own incoming sync writes, Shower clips, sensitive clips,
+        // avoids waking the app for own incoming sync writes, Shower clips,
         // non-plain MIME types, or stale pre-online timestamps.
         try {
             ClipDescription desc = clipboardBackend.getPrimaryClipDescription();

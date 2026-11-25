@@ -41,7 +41,7 @@ type UiAction = SyncAction | 'scanCode';
 type ErrorKind =
   | 'offline' | 'notPaired' | 'requiresNewCenter' | 'permission' | 'unsupported'
   | 'unauthorized' | 'certificateError' | 'invalidCode' | 'notConfigured' | 'notEnabled'
-  | 'emptyClipboard' | 'clipboardFormat' | 'clipboardSize' | 'clipboardSensitive'
+  | 'emptyClipboard' | 'clipboardFormat' | 'clipboardSize'
   | 'clipboardRejected' | 'clipboardUnavailable' | 'invalidQr' | 'cameraDenied' | 'scanUnavailable' | 'unknown';
 type Translate = (zh: string, en: string) => string;
 interface SafeNotice { kind: ErrorKind; tone: 'danger' | 'warning'; title: string; detail: string }
@@ -59,7 +59,6 @@ const INVALIDATES_ONLINE = new Set<ErrorKind>([
 const ERROR_PATTERNS: ReadonlyArray<readonly [ErrorKind, RegExp]> = [
   ['clipboardFormat', /\bclipboard_unsupported\b/],
   ['clipboardSize', /\bclipboard_too_large\b/],
-  ['clipboardSensitive', /\bclipboard_sensitive\b/],
   ['clipboardRejected', /\bclipboard_rejected\b/],
   ['clipboardUnavailable', /\bclipboard_unavailable\b/],
   ['emptyClipboard', /\bclipboard_empty\b/],
@@ -142,7 +141,6 @@ function safeErrorNotice(kind: ErrorKind, action: UiAction, t: Translate): SafeN
     notEnabled: { tone: 'warning', title: t('剪贴板同步已关闭', 'Clipboard sync is off'), detail: t('请先开启本机的剪贴板同步。', 'Turn on clipboard sync on this device first.') },
     clipboardFormat: { tone: 'warning', title: t('此内容不支持同步', 'Unsupported clipboard content'), detail: t('仅同步纯文本；不发送图片、文件或应用链接对象。', 'Only plain text can be sent, not images, files, or link objects.') },
     clipboardSize: { tone: 'warning', title: t('剪贴板文本过大', 'Clipboard text is too large'), detail: t('最多支持 64 KiB 的 UTF-8 文本，可以分段复制。', 'Copy a smaller selection. The limit is 64 KiB of UTF-8 text.') },
-    clipboardSensitive: { tone: 'warning', title: t('不会发送敏感内容', 'Sensitive content not sent'), detail: t('此内容被系统或来源应用标记为敏感。', 'The system or source app marked this item as sensitive.') },
     clipboardRejected: { tone: 'warning', title: t('此文本不会同步', 'Clipboard item not sent'), detail: t('已同步的内容、受控屏幕剪贴板、PiBot 配对码和同步组邀请码不会回传。', 'Received clips, controlled-display clips, and PiBot pairing or group codes are never sent.') },
     clipboardUnavailable: { tone: 'warning', title: t('无法读取系统剪贴板', 'System clipboard unavailable'), detail: t('请在 PiBot 前台保持页面聚焦，再试一次。', 'Keep PiBot in the foreground and retry.') },
     invalidQr: { tone: 'danger', title: t('同步组二维码无效', 'Invalid sync group QR code'), detail: t('请扫描另一台设备在剪贴板同步设置中显示的邀请二维码。', 'Scan the invitation QR code shown in another device’s clipboard sync settings.') },
@@ -412,6 +410,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   const busy = busyAction !== null;
   const unsupported = status?.mode === 'unsupported';
   const toggleDisabled = busy || loading || status === null || (unsupported && !status.enabled);
+  const syncHint = t('验证码和密码也可能同步到同组在线设备。请只将可信设备加入同组。', 'Verification codes and passwords may sync to online devices in this group. Only add devices you trust.');
   const groupDisabled = busy || loading || status === null || unsupported;
   const primaryBtn = variant === 'desktop' ? 'primary-button' : 'hst-btn is-primary';
   const secondaryBtn = variant === 'desktop' ? 'secondary-button' : 'hst-btn';
@@ -505,7 +504,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
             <label className="settings-row settings-row-link">
               <span className="settings-row-label">
                 <span>{t('启用本设备剪贴板同步', 'Enable clipboard sync on this device')}</span>
-                <span className="metadata" style={{ display: 'block', fontSize: 12 }}>{t('独立设备开关，默认关闭；与 Host / Bot 状态分开。', 'Separate per-device switch, off by default; independent of Host/Bot status.')}</span>
+                <span className="metadata" style={{ display: 'block', fontSize: 12 }}>{syncHint}</span>
               </span>
               <Switch label={t('启用本设备剪贴板同步', 'Enable clipboard sync on this device')} checked={Boolean(status?.enabled)} disabled={toggleDisabled} onChange={next => void runAction({ action: 'setEnabled', enabled: next })} />
             </label>
@@ -532,7 +531,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   return (
     <div className="cs-root">
       <Section title={t('剪贴板同步', 'Clipboard Sync')} action={<button type="button" className="bs-link" disabled={busy || loading} onClick={() => void refreshStatus(false)}>{t('刷新', 'Refresh')}</button>}>
-        <Row icon={<ClipboardCheck />} title={t('启用本设备剪贴板同步', 'Enable on this device')} subtitle={t('独立设备开关，默认关闭；与本机 Host / Bot 分开。', 'Separate per-device switch, off by default; independent of Host/Bot.')} trailing={<Switch label={t('启用本设备剪贴板同步', 'Enable on this device')} checked={Boolean(status?.enabled)} disabled={toggleDisabled} onChange={next => void runAction({ action: 'setEnabled', enabled: next })} />} />
+        <Row icon={<ClipboardCheck />} title={t('启用本设备剪贴板同步', 'Enable on this device')} subtitle={syncHint} trailing={<Switch label={t('启用本设备剪贴板同步', 'Enable on this device')} checked={Boolean(status?.enabled)} disabled={toggleDisabled} onChange={next => void runAction({ action: 'setEnabled', enabled: next })} />} />
         <Row icon={<CircleAlert />} title={t('同步通道状态', 'Sync channel')} subtitle={presentation.detail} trailing={<Badge tone={presentation.tone}>{presentation.label}</Badge>} />
         <div className="hst-row-static"><span className="bs-row-sub">{t('当前模式', 'Actual mode')}</span><span className="bs-row-title" style={{ marginLeft: 'auto' }}>{modeText(status, 'mobile', t)}</span></div>
         <div className="hst-row-static"><span className="bs-row-sub">{t('同步组', 'Sync group')}</span><span className="bs-row-title" style={{ marginLeft: 'auto' }}>{status === null ? '—' : status.configured ? t('已配置', 'Configured') : t('未配置', 'Not configured')}</span></div>
@@ -569,7 +568,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
               <p className="cs-note">{t('需要已在本机授予 Shizuku 系统权限，且启用后您在其他应用中复制的文本可能会自动发送到当前剪贴板同步组。', 'Requires an existing Shizuku grant on this device. Once authorized, text you copy in other apps can be sent automatically to your sync group.')}</p>
               <label className="cs-check">
                 <input type="checkbox" checked={bgConsent} disabled={busy} onChange={e => setBgConsent(e.target.checked)} />
-                <span>{t('我已授予 Shizuku 权限，并同意在其他应用中复制的文本可被发送。', 'I have granted Shizuku permission and consent that copies in other apps can be sent.')}</span>
+                <span>{t('我已授予 Shizuku 权限，并同意自动发送复制的纯文本，包括验证码和密码。', 'I have granted Shizuku permission and agree to automatically send copied text, including verification codes and passwords.')}</span>
               </label>
               <ActionBar align="end" className="cs-actions">
                 <button type="button" className="hst-btn" disabled={busy} onClick={() => { setBgConsent(false); setBgPromptOpen(false); }}>{t('取消', 'Cancel')}</button>

@@ -76,7 +76,7 @@ impl SystemClipboard {
   }
 
   pub(crate) fn write(&self, text: &str) -> io::Result<()> {
-    if text.len() > MAX_TEXT_BYTES || !eligible_text(text, false) {
+    if text.len() > MAX_TEXT_BYTES || !eligible_text(text) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "clipboard text is not eligible for sync",

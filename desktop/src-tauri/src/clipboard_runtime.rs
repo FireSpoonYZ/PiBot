@@ -1440,7 +1440,7 @@ mod imp {
   }
 
   fn handle_local_copy(core: &Arc<RuntimeCore>, expected_epoch: u64, text: String) {
-    if !eligible_text(&text, false) {
+    if !eligible_text(&text) {
       return;
     }
     let link = {
@@ -1475,7 +1475,7 @@ mod imp {
     expected_fingerprint: &str,
     clip: IncomingClip,
   ) {
-    if !core.incoming.alive.load(Ordering::Acquire) || !eligible_text(&clip.text, false) {
+    if !core.incoming.alive.load(Ordering::Acquire) || !eligible_text(&clip.text) {
       return;
     }
     let link = {

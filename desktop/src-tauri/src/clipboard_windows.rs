@@ -250,7 +250,7 @@ impl SystemClipboard {
 
   pub(crate) fn write(&self, text: &str) -> io::Result<()> {
     // Defense in depth: validate incoming remote text before touching the OS clipboard.
-    if !eligible_text(text, false) {
+    if !eligible_text(text) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "clipboard text is not eligible for sync",
@@ -764,7 +764,7 @@ impl WorkerState {
 
   fn apply_remote_write(&mut self, text: &str) -> io::Result<()> {
     // Defense in depth: verify shared eligibility policy before allocating/writing.
-    if !eligible_text(text, false) {
+    if !eligible_text(text) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "clipboard text is not eligible for sync",
@@ -838,7 +838,7 @@ impl WorkerState {
       return;
     }
 
-    if !eligible_text(&text, false) {
+    if !eligible_text(&text) {
       return;
     }
 
@@ -870,33 +870,12 @@ impl WorkerState {
     // Record this sequence as observed now that we hold a consistent clipboard snapshot.
     self.last_seen_seq = open_seq;
 
-    // 1. Skip our own private write marker (handles post-drop / cross-instance own writes).
+    // Skip our own write marker, not OS history/cloud/monitor exclusion formats.
     if unsafe { IsClipboardFormatAvailable(self.formats.own_marker) } != 0 {
       return None;
     }
 
-    // 2. Honor ExcludeClipboardContentFromMonitorProcessing (presence alone excludes).
-    if unsafe { IsClipboardFormatAvailable(self.formats.exclude_monitor) } != 0 {
-      return None;
-    }
-
-    // 3. Honor CanIncludeInClipboardHistory == 0 (fail closed if present but unreadable).
-    if unsafe { IsClipboardFormatAvailable(self.formats.can_include_history) } != 0 {
-      match read_dword_format(&clip, self.formats.can_include_history) {
-        Some(value) if value != 0 => {}
-        _ => return None,
-      }
-    }
-
-    // 4. Honor CanUploadToCloudClipboard == 0 (fail closed if present but unreadable).
-    if unsafe { IsClipboardFormatAvailable(self.formats.can_upload_cloud) } != 0 {
-      match read_dword_format(&clip, self.formats.can_upload_cloud) {
-        Some(value) if value != 0 => {}
-        _ => return None,
-      }
-    }
-
-    // 5. Skip file-drop / file-only clipboards and non-text clipboards.
+    // Skip file-drop / file-only clipboards and non-text clipboards.
     if unsafe { IsClipboardFormatAvailable(u32::from(CF_HDROP)) } != 0 {
       return None;
     }
@@ -906,23 +885,6 @@ impl WorkerState {
 
     read_bounded_unicode_text(&clip, MAX_TEXT_BYTES)
   }
-}
-
-fn read_dword_format(clip: &ClipboardGuard, format: u32) -> Option<u32> {
-  if format == 0 {
-    return None;
-  }
-  let hdata = unsafe { GetClipboardData(format) };
-  if hdata.is_null() {
-    return None;
-  }
-  let byte_len = unsafe { GlobalSize(hdata as HGLOBAL) };
-  if byte_len < size_of::<u32>() {
-    return None;
-  }
-  let lock = GlobalLockGuard::lock(clip, hdata as HGLOBAL)?;
-  let bytes = unsafe { std::slice::from_raw_parts(lock.as_ptr(), size_of::<u32>()) };
-  Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn read_bounded_unicode_text(clip: &ClipboardGuard, max_utf8_bytes: usize) -> Option<String> {

@@ -4,7 +4,7 @@
 //! Architecture:
 //! - Observer worker owns a dedicated X11 connection and unmapped `InputOnly` window (zero UI
 //!   focus steal), subscribes to `XFixesSelectSelectionInput(CLIPBOARD, SET_SELECTION_OWNER)`,
-//!   ignores pre-existing baseline contents, inspects `TARGETS` for concealed/origin/file-copy
+//!   ignores pre-existing baseline contents, inspects `TARGETS` for origin and file-copy
 //!   markers before fetching text, and reads both single-shot and `INCR` transfers under strict
 //!   byte (`MAX_TEXT_BYTES`) and time (`READ_TIMEOUT`) bounds.
 //! - Selection owner runs on a separate on-demand X11 owner thread (reused across consecutive
@@ -36,9 +36,8 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, CURRENT_TIME, NONE};
 
 use super::fd_util::{self, WakePipe, Waker};
 use super::mime::{
-  self, TextEncoding, CONCEALED_MIMES, FILE_COPY_MIMES, MIME_TEXT, MIME_TEXT_PLAIN,
-  MIME_TEXT_PLAIN_UTF8, MIME_TEXT_PLAIN_UTF8_SPACED, MIME_UTF8_STRING, ORIGIN_MARKER_MIME,
-  ORIGIN_MARKER_VALUE,
+  self, TextEncoding, FILE_COPY_MIMES, MIME_TEXT, MIME_TEXT_PLAIN, MIME_TEXT_PLAIN_UTF8,
+  MIME_TEXT_PLAIN_UTF8_SPACED, MIME_UTF8_STRING, ORIGIN_MARKER_MIME, ORIGIN_MARKER_VALUE,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -84,16 +83,11 @@ struct Atoms {
   pibot_prop: Atom,
   timestamp_prop: Atom,
   origin_marker: Atom,
-  concealed: Vec<Atom>,
   file_copy: Vec<Atom>,
 }
 
 impl Atoms {
   fn intern(conn: &RustConnection) -> io::Result<Self> {
-    let mut concealed = Vec::with_capacity(CONCEALED_MIMES.len());
-    for name in CONCEALED_MIMES {
-      concealed.push(intern_atom(conn, name)?);
-    }
     let mut file_copy = Vec::with_capacity(FILE_COPY_MIMES.len());
     for name in FILE_COPY_MIMES {
       file_copy.push(intern_atom(conn, name)?);
@@ -112,7 +106,6 @@ impl Atoms {
       pibot_prop: intern_atom(conn, "PIBOT_CLIPBOARD_PROP")?,
       timestamp_prop: intern_atom(conn, "PIBOT_CLIPBOARD_TIMESTAMP")?,
       origin_marker: intern_atom(conn, ORIGIN_MARKER_MIME)?,
-      concealed,
       file_copy,
     })
   }
@@ -434,7 +427,7 @@ fn handle_selection_change(
     CURRENT_TIME
   };
 
-  // Step 1: Query TARGETS so we never fetch payload bytes from concealed/origin/non-text offers.
+  // Step 1: Query TARGETS so we only fetch text from external non-file offers.
   let _ = xproto::delete_property(conn, window, atoms.pibot_prop);
   xproto::convert_selection(conn, window, atoms.clipboard, atoms.targets, atoms.pibot_prop, req_time)
     .map_err(|_| ())?;
@@ -491,9 +484,6 @@ fn handle_selection_change(
     .unwrap_or_default();
 
   if targets.contains(&atoms.origin_marker) {
-    return Ok(ReadOutcome::Ignored);
-  }
-  if targets.iter().any(|atom| atoms.concealed.contains(atom)) {
     return Ok(ReadOutcome::Ignored);
   }
   if targets.iter().any(|atom| atoms.file_copy.contains(atom)) {
@@ -601,7 +591,7 @@ fn handle_selection_change(
   let Some(text) = mime::decode_text_bytes(raw_bytes, encoding, MAX_TEXT_BYTES) else {
     return Ok(ReadOutcome::Ignored);
   };
-  if !eligible_text(&text, false) {
+  if !eligible_text(&text) {
     return Ok(ReadOutcome::Ignored);
   }
   if stop_flag.load(Ordering::Acquire) {

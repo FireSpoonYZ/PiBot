@@ -21,7 +21,7 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 /**
- * Verifies plain-text extraction, sensitive flag rejection, own-clip and Shower
+ * Verifies plain-text extraction, including sensitive text, own-clip and Shower
  * "pibot" label rejection, URI/Intent non-dereference rejection, and action parameter validation.
  */
 @RunWith(RobolectricTestRunner.class)
@@ -60,27 +60,6 @@ public class ClipboardSyncFilterTest {
         assertFalse(result.ok);
         assertNull(result.text);
         assertEquals("CLIPBOARD_REJECTED", result.errorCode);
-    }
-
-    @Test
-    public void rejectsSensitiveClipsBooleanAndNumericExtras() {
-        ClipData boolSensitive = ClipData.newPlainText("pw", "hunter2");
-        PersistableBundle boolExtras = new PersistableBundle();
-        boolExtras.putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true);
-        boolSensitive.getDescription().setExtras(boolExtras);
-
-        ClipboardSyncController.ClipReadResult boolResult = ClipboardSyncController.extractSendableText(boolSensitive);
-        assertFalse(boolResult.ok);
-        assertEquals("CLIPBOARD_SENSITIVE", boolResult.errorCode);
-
-        ClipData intSensitive = ClipData.newPlainText("pw", "hunter3");
-        PersistableBundle intExtras = new PersistableBundle();
-        intExtras.putInt(ClipDescription.EXTRA_IS_SENSITIVE, 1);
-        intSensitive.getDescription().setExtras(intExtras);
-
-        ClipboardSyncController.ClipReadResult intResult = ClipboardSyncController.extractSendableText(intSensitive);
-        assertFalse(intResult.ok);
-        assertEquals("CLIPBOARD_SENSITIVE", intResult.errorCode);
     }
 
     @Test
@@ -169,10 +148,14 @@ public class ClipboardSyncFilterTest {
         ClipboardManager manager = RuntimeEnvironment.getApplication().getSystemService(ClipboardManager.class);
         assertNotNull(manager);
 
-        manager.setPrimaryClip(ClipData.newPlainText("note", "from-clipboard-manager"));
+        ClipData sensitive = ClipData.newPlainText("test-code", "123456");
+        PersistableBundle extras = new PersistableBundle();
+        extras.putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true);
+        sensitive.getDescription().setExtras(extras);
+        manager.setPrimaryClip(sensitive);
         ClipboardSyncController.ClipReadResult ok = ClipboardSyncController.readSendableClip(manager);
         assertTrue(ok.ok);
-        assertEquals("from-clipboard-manager", ok.text);
+        assertEquals("123456", ok.text);
 
         manager.setPrimaryClip(ClipData.newPlainText("pibot", "shower-text"));
         ClipboardSyncController.ClipReadResult rejected = ClipboardSyncController.readSendableClip(manager);
