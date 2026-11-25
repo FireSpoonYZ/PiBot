@@ -475,7 +475,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			await store.flush();
 			stream.push(accepted.ack);
 			throwIfCancelled();
-			const current = store.get(slot.key);
+			let current = store.get(slot.key);
 			priorNative = current;
 			if (current.modelId && current.modelId !== modelId) {
 				throw historyChanged("The model changed in an existing Antigravity conversation");
@@ -550,117 +550,148 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			ensureIsolatedProfile(profile);
 			await mcpBridge.ensureStarted();
 			throwIfCancelled();
-			let outcome;
-			const pendingIds = new Set(slot.roundTrips.pendingIds);
-			const persistedPending = current.pendingToolCallIds ?? [];
-			if (input.role === "toolResult") {
-				toolContinuation = true;
-				const pairedIds = pairedToolResultIds(cleanMessages);
-				const results = collectToolResults(cleanMessages, [...pendingIds])
-					.filter((result) => pairedIds.has(result.toolCallId));
-				const handle = slot.driver.reentry();
-				if (!handle || !slot.turnAbort || slot.turnAbort.signal.aborted || !slot.mcpRegistration ||
-					results.length === 0 || !pendingIds.has(input.toolCallId) || !pairedIds.has(input.toolCallId)) {
-					throw historyChanged("The live native tool continuation is unavailable");
-				}
-				if (slot.nativeConfig?.modelId !== modelId || slot.nativeConfig.reasoning !== normalizedReasoning) {
-					throw historyChanged("A pending tool continuation must use its original model");
-				}
-				claimNativeTurn();
-				nativeEpochForRequest = slot.nativeEpoch;
-				store.set(slot.key, { ...store.get(slot.key), phase: "uncertain", attemptedThrough: requestEnd });
-				await store.flush();
-				dispatchClaimed = true;
-				nativeAttempted = true;
-				attachCallerSignal(slot, signal);
-				for (const item of results) {
-					throwIfCancelled();
-					if (!slot.roundTrips.resolve(item.toolCallId, item.text, item.isError, item.images)) {
-						throw new Error("Antigravity tool result lost its pending call before delivery");
-					}
-				}
-				if (await drainTurn(handle)) return;
-				outcome = await handle.outcome;
-			} else {
-				if (pendingIds.size > 0 || persistedPending.length > 0 || slot.driver.activeHandle) {
-					throw Object.assign(new Error("AGY_TURN_PENDING: input received; finish the pending native tools before the next user turn."),
-						{ code: "AGY_TURN_PENDING" });
-				}
+			for (;;) {
+				let outcome;
+				const pendingIds = new Set(slot.roundTrips.pendingIds);
+				const persistedPending = current.pendingToolCallIds ?? [];
 				const consumed = new Set(current.consumedUserIndices ?? []);
 				const inputs = cleanMessages.flatMap((message, index) =>
 					message.role === "user" && !consumed.has(index) ? [{ message, index }] : []);
-				if (inputs.length === 0) {
-					throw Object.assign(new Error("AGY_INPUT_UNCERTAIN: this input was already dispatched; it will not be sent twice. Send a new message or use /clear."),
-						{ code: "AGY_INPUT_UNCERTAIN" });
+				const pairedIds = pairedToolResultIds(cleanMessages);
+				const results = collectToolResults(cleanMessages, [...pendingIds])
+					.filter((result) => pairedIds.has(result.toolCallId));
+				// A detached Host tool can finish without another provider call. Its real
+				// result then arrives before a new user input in the same history delta.
+				// A ready checkpoint also lets a zero-dispatch retry send queued users
+				// even when that request's tail remains the already-delivered tool result.
+				const readyForQueuedUsers = current.phase === "ready" && inputs.length > 0 &&
+					pendingIds.size === 0 && persistedPending.length === 0 && !slot.driver.activeHandle;
+				toolContinuation = results.length > 0 || (input.role === "toolResult" && !readyForQueuedUsers);
+				if (toolContinuation) {
+					const handle = slot.driver.reentry();
+					if (!handle || !slot.turnAbort || slot.turnAbort.signal.aborted || !slot.mcpRegistration ||
+						results.length === 0 || (input.role === "toolResult" &&
+							(!pendingIds.has(input.toolCallId) || !pairedIds.has(input.toolCallId)))) {
+						throw historyChanged("The live native tool continuation is unavailable");
+					}
+					if (slot.nativeConfig?.modelId !== modelId || slot.nativeConfig.reasoning !== normalizedReasoning) {
+						throw historyChanged("A pending tool continuation must use its original model");
+					}
+					claimNativeTurn();
+					nativeEpochForRequest = slot.nativeEpoch;
+					store.set(slot.key, { ...store.get(slot.key), phase: "uncertain", attemptedThrough: requestEnd });
+					await store.flush();
+					dispatchClaimed = true;
+					nativeAttempted = true;
+					attachCallerSignal(slot, signal);
+					for (const item of results) {
+						throwIfCancelled();
+						if (!slot.roundTrips.resolve(item.toolCallId, item.text, item.isError, item.images)) {
+							throw new Error("Antigravity tool result lost its pending call before delivery");
+						}
+					}
+					if (await drainTurn(handle)) return;
+					outcome = await handle.outcome;
+				} else {
+					if (pendingIds.size > 0 || persistedPending.length > 0 || slot.driver.activeHandle) {
+						throw Object.assign(new Error("AGY_TURN_PENDING: input received; finish the pending native tools before the next user turn."),
+							{ code: "AGY_TURN_PENDING" });
+					}
+					if (inputs.length === 0) {
+						throw Object.assign(new Error("AGY_INPUT_UNCERTAIN: this input was already dispatched; it will not be sent twice. Send a new message or use /clear."),
+							{ code: "AGY_INPUT_UNCERTAIN" });
+					}
+					const batch = buildUserBatch(inputs.map(({ message }) => message));
+					const prompt = buildFullPrompt(undefined, "", batch.prompt, {
+						routeNote: turnContext.routeNote,
+						currentImageCount: batch.images.length,
+					});
+					assertPromptFits(prompt, batch.images);
+					claimNativeTurn();
+					detachCallerSignal(slot);
+					slot.turnAbort = new AbortController();
+					nativeEpochForRequest = registerTurnMcp(slot);
+					slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
+					attachCallerSignal(slot, signal);
+					throwIfCancelled();
+					const handle = await slot.driver.run({
+						cwd: profile.workspaceDir, model: modelId, effort: reasoning,
+						mode: "default", skipPermissions: false,
+						conversationId: current.conversationId || undefined,
+						systemPrompt: config.systemPrompt, systemHash: accepted.history.configHash,
+						prompt, images: batch.images.length ? batch.images : undefined,
+						beforePrompt: ({ conversationId }) => {
+							intentWrite = (async () => {
+								throwIfCancelled();
+								if (current.conversationId && current.conversationId !== conversationId) {
+									throw historyChanged("The native conversation identity changed");
+								}
+								createdNativeId = conversationId;
+								const latest = store.get(slot.key);
+								store.set(slot.key, {
+									...latest, conversationId, phase: "uncertain",
+									modelId, reasoning: normalizedReasoning, attemptedThrough: requestEnd,
+									consumedUserIndices: [...new Set([...(latest.consumedUserIndices ?? []),
+										...inputs.map(({ index }) => index)])],
+									pendingToolCallIds: [],
+								});
+								intentMutated = true;
+								await store.flush();
+								dispatchClaimed = true;
+								throwIfCancelled();
+							})();
+							return intentWrite;
+						},
+						signal: slot.turnAbort.signal,
+					});
+					nativeHandle = handle;
+					if (await drainTurn(handle)) return;
+					outcome = await handle.outcome;
+					nativeAttempted = outcome.promptAttempted !== false && dispatchClaimed;
+					await rollbackUnsent(outcome);
 				}
-				const batch = buildUserBatch(inputs.map(({ message }) => message));
-				const prompt = buildFullPrompt(undefined, "", batch.prompt, {
-					routeNote: turnContext.routeNote,
-					currentImageCount: batch.images.length,
-				});
-				assertPromptFits(prompt, batch.images);
-				claimNativeTurn();
-				detachCallerSignal(slot);
-				slot.turnAbort = new AbortController();
-				nativeEpochForRequest = registerTurnMcp(slot);
-				slot.nativeConfig = { modelId, reasoning: normalizedReasoning };
-				attachCallerSignal(slot, signal);
+				if (outcome.sessionLoadFailed) throw historyChanged("The native conversation can no longer be loaded");
 				throwIfCancelled();
-				const handle = await slot.driver.run({
-					cwd: profile.workspaceDir, model: modelId, effort: reasoning,
-					mode: "default", skipPermissions: false,
-					conversationId: current.conversationId || undefined,
-					systemPrompt: config.systemPrompt, systemHash: accepted.history.configHash,
-					prompt, images: batch.images.length ? batch.images : undefined,
-					beforePrompt: ({ conversationId }) => {
-						intentWrite = (async () => {
-							throwIfCancelled();
-							if (current.conversationId && current.conversationId !== conversationId) {
-								throw historyChanged("The native conversation identity changed");
-							}
-							createdNativeId = conversationId;
-							const latest = store.get(slot.key);
-							store.set(slot.key, {
-								...latest, conversationId, phase: "uncertain",
-								modelId, reasoning: normalizedReasoning, attemptedThrough: requestEnd,
-								consumedUserIndices: [...new Set([...(latest.consumedUserIndices ?? []),
-									...inputs.map(({ index }) => index)])],
-								pendingToolCallIds: [],
-							});
-							intentMutated = true;
-							await store.flush();
-							dispatchClaimed = true;
-							throwIfCancelled();
-						})();
-						return intentWrite;
-					},
-					signal: slot.turnAbort.signal,
-				});
-				nativeHandle = handle;
-				if (await drainTurn(handle)) return;
-				outcome = await handle.outcome;
-				nativeAttempted = outcome.promptAttempted !== false && dispatchClaimed;
-				await rollbackUnsent(outcome);
+				if (outcome.aborted || outcome.status === "ERROR" || outcome.promptTerminal !== true) {
+					throw Object.assign(new Error(outcome.error ?? (outcome.aborted ? "Operation aborted" : "Native prompt has no confirmed terminal result")),
+						{ name: outcome.aborted ? "AbortError" : "Error" });
+				}
+				if (!outcome.conversationId || (current.conversationId && outcome.conversationId !== current.conversationId)) {
+					throw historyChanged("The native conversation identity changed");
+				}
+				await awaitToolDeliveries();
+				if (slot.roundTrips.pendingIds.length > 0 || slot.roundTrips.claimAllUndelivered().length > 0) {
+					throw new Error("AGY_INPUT_UNCERTAIN: native turn ended before all tool results were delivered; use /clear.");
+				}
+				if (toolContinuation && inputs.length > 0) {
+					// The old native turn is complete, but this request's users are not.
+					// Persist that boundary without caching a reply for the unfinished input.
+					detachCallerSignal(slot);
+					slot.turnAbort = null;
+					slot.bridgeToolActivity = null;
+					store.set(slot.key, { ...store.get(slot.key), phase: "ready", pendingToolCallIds: [], reply: undefined });
+					await store.flush();
+					current = store.get(slot.key);
+					priorNative = current;
+					toolContinuation = false;
+					dispatchClaimed = false;
+					nativeAttempted = false;
+					intentMutated = false;
+					nativeHandle = undefined;
+					createdNativeId = undefined;
+					intentWrite = undefined;
+					nativeEpochForRequest = null;
+					throwIfCancelled();
+					continue;
+				}
+				if (blocks.partial.content.length === 0) ensureTextOpen(stream, blocks);
+				blocks.partial.stopReason = "stop";
+				await rememberReply("stop", blocks.partial, "ready");
+				slot.turnAbort = null;
+				slot.bridgeToolActivity = null;
+				finish("stop");
+				return;
 			}
-			if (outcome.sessionLoadFailed) throw historyChanged("The native conversation can no longer be loaded");
-			throwIfCancelled();
-			if (outcome.aborted || outcome.status === "ERROR" || outcome.promptTerminal !== true) {
-				throw Object.assign(new Error(outcome.error ?? (outcome.aborted ? "Operation aborted" : "Native prompt has no confirmed terminal result")),
-					{ name: outcome.aborted ? "AbortError" : "Error" });
-			}
-			if (!outcome.conversationId || (current.conversationId && outcome.conversationId !== current.conversationId)) {
-				throw historyChanged("The native conversation identity changed");
-			}
-			await awaitToolDeliveries();
-			if (slot.roundTrips.pendingIds.length > 0 || slot.roundTrips.claimAllUndelivered().length > 0) {
-				throw new Error("AGY_INPUT_UNCERTAIN: native turn ended before all tool results were delivered; use /clear.");
-			}
-			if (blocks.partial.content.length === 0) ensureTextOpen(stream, blocks);
-			blocks.partial.stopReason = "stop";
-			await rememberReply("stop", blocks.partial, "ready");
-			slot.turnAbort = null;
-			slot.bridgeToolActivity = null;
-			finish("stop");
 		} catch (error) {
 			invalidateAuthCacheIfNeeded(error);
 			if (slot.nativeOwner === request) {
