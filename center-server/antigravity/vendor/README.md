@@ -25,6 +25,10 @@ Adapted from upstream [`@estebanforge/pi-antigravity-bridge`](https://www.npmjs.
 
 1. **Node 26 native TypeScript execution**: Updated relative module specifiers from `.js` to `.ts`, kept type-only imports explicit (`import type`), and defined `UsageEstimate` directly in `driver-types.ts` instead of copying Pi CLI's `src/config.ts`.
 2. **Isolated Center profile (`--gemini-dir`)**: Removed `src/acp/home.ts` (which created symlinks into `~/.gemini/antigravity-cli` and filtered global `mcp_config.json`). Replaced `isolateHome` in `acp/connection.ts` and `acp/driver.ts` with explicit `geminiDir` forwarding (`--gemini-dir <geminiDir>`).
-3. **Permission policy inspection**: Passed `AcpPermissionRequest` into `AcpConnectionOptions.permissions(req)` and `AcpDriverOptions.permissionPolicy(req)` (expanding `toolCall` with optional `name` and `_meta`) so `center-server` can fail-closed on non-bridge permission requests.
+3. **Permission policy inspection**: Passed `AcpPermissionRequest` into `AcpConnectionOptions.permissions(req)` and `AcpDriverOptions.permissionPolicy(req)` (expanding `toolCall` with optional `name` and `_meta`) so `center-server` can deny individual non-bridge permission requests.
 4. **Bridge server prefix matching**: Extended `nativeMcpTool` in `acp/events.ts` to match both `pibot-bridge` and `pi-bridge` MCP server prefixes.
 5. **Typed auth error & deterministic child exit**: Added `readonly code = "UNAUTHENTICATED"` on `AcpAuthError`, exposed `AcpConnection.waitForExit()`, and awaited spawned child termination in `AcpDriver.close()` without altering upstream cancel/kill teardown semantics.
+
+## Current PiBot integration
+
+See [the provider contract](../README.md) for append-only history, tool ownership, memory policy and recovery boundaries. The inherited `recall-hook` filenames describe their upstream origin; AGY autoRecall is disabled. PiBot keeps the PreInvocation hook for tool-result image delivery.
