@@ -254,6 +254,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     compact(botId, options) {
       return request('POST', ['v1', 'bots', botId, 'compact'], { ...callOptions(options), body: {} });
     },
+    assertModelSelectionAllowed(botId, modelRef, options) {
+      return request('POST', ['v1', 'bots', botId, 'model-selection', 'validate'], { ...callOptions(options), body: { modelRef } });
+    },
     contextStatus(botId, options) {
       return request('GET', ['v1', 'bots', botId, 'context'], callOptions(options));
     },

@@ -2,6 +2,7 @@
 // sync 把该 Bot 全部收件箱 scope 增量导入主会话；beforeRequest 按真实 run 输入冻结/恢复
 // 本轮来源；发出的请求与已观察回复水位持久化在 BotSessionState，供迟到回复寻源与 UI 归属。
 // 不获取第二条 Bot 准入通道，不写全局「当前频道」，崩溃/重放靠 Durable commit+memo。
+import { createHash } from 'node:crypto';
 import { LiveDoc } from '@earendil-works/pi-durable';
 import { BotSessionState, WORK_TRIGGER_KIND, USER_MESSAGE_KIND, GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
   createSessionMessageEntry, senderAttribution } from './bot-session-context.js';
@@ -104,6 +105,12 @@ function buildTurnRoutingMessage(frozen) {
   };
 }
 
+// Only fixed rules participate in native session configuration; a turn's source/target never does.
+export const TURN_ROUTING_POLICY = createHash('sha256').update(JSON.stringify([
+  DIRECT_START, DESTINATION_GUIDANCE, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE, GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
+  isOrdinaryHumanPrimaryTurn.toString(), describeTurnSource.toString(), buildTurnRoutingMessage.toString(),
+])).digest('hex');
+
 export function applySessionResetState(state, resetEntryId = 0, now = new Date().toISOString()) {
   if (state.activeTurn) {
     state.completedTurns[state.activeTurn.requestId] = {
@@ -114,6 +121,7 @@ export function applySessionResetState(state, resetEntryId = 0, now = new Date()
   if (Number.isSafeInteger(resetEntryId) && resetEntryId > (state.clearedThroughEntryId ?? 0)) {
     state.clearedThroughEntryId = resetEntryId;
   }
+  state.nativeHistoryProvider = null;
   state.updatedAt = now;
 }
 

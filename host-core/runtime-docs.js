@@ -1,5 +1,6 @@
-import { defineDoc, configure, AgentDoc } from '@earendil-works/pi-durable';
+import { defineDoc, configure, AgentDoc, ResetEntry } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -54,7 +55,9 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
     cwd: bot.cwd,
     ...(options.selectedExtensions ? { extensions: options.selectedExtensions } : {}),
     tools: initialToolsChange(options.removeTools),
-    ...(options.codemodeOnly ? { modelTools: codemodeModelTools(options) } : {}),
+    ...(model.provider === ANTIGRAVITY_PROVIDER_ID ? { compaction: { enabled: false } } : {}),
+    ...(options.codemodeOnly || model.provider === ANTIGRAVITY_PROVIDER_ID
+      ? { modelTools: codemodeModelTools({ ...options, antigravity: model.provider === ANTIGRAVITY_PROVIDER_ID }) } : {}),
   });
   draft.byPrimary[primaryId] = record.id;
   return record.id;
@@ -103,7 +106,8 @@ export function codemodeModelTools(profile, modelTools) {
     && tool.name !== 'tool_search'
     && (tool.name === 'ask_user_question' || (tool.callers?.includes('model') && !tool.callers.includes('tools')))
     && !removed.has(tool.name)
-    && (tool.deferred !== true || loaded.has(tool.name)));
+    // AGY declares a stable outer tool set once; model-only tools cannot be discovered inside codemode.
+    && (profile.antigravity === true || tool.deferred !== true || loaded.has(tool.name)));
   return [{ name: 'codemode' }, ...modelOnly.map((tool) => ({ name: tool.name }))];
 }
 
@@ -141,6 +145,15 @@ export function agentProfileChange(state, profile) {
     } else if (current !== next) {
       change.instructions = next;
     }
+  }
+
+  if (profile?.antigravity === true) {
+    // Replace model overrides too: native ACP owns compaction and Pi must not rewrite its history.
+    if (JSON.stringify(state?.compaction) !== JSON.stringify({ enabled: false })) {
+      change.compaction = { enabled: false };
+    }
+  } else if (state?.model?.provider === ANTIGRAVITY_PROVIDER_ID && model && model.provider !== ANTIGRAVITY_PROVIDER_ID) {
+    change.compaction = null;
   }
 
   const thinkingLevel = profile?.thinkingLevel;
@@ -214,11 +227,39 @@ export function agentProfileChange(state, profile) {
   return Object.keys(change).length === 0 ? undefined : change;
 }
 
+async function assertNativeModelChange(current, model, readPage) {
+  if (model?.provider !== ANTIGRAVITY_PROVIDER_ID
+    || (current?.provider === model.provider && current?.modelId === model.modelId)) return;
+  let cursor;
+  for (;;) {
+    const page = await readPage(cursor);
+    for (const entry of page.items) {
+      if (entry.kind === ResetEntry.kind) return;
+      if ((entry.model ?? []).some((message) => message.role !== 'system')) {
+        throw errWithCode('Antigravity can only be selected for an empty session. Use /clear before changing models.', 'AGY_HISTORY_CHANGED');
+      }
+    }
+    if (!page.next) return;
+    cursor = page.next;
+  }
+}
+
+/** Read-only preflight shared by Center configuration and turn admission. */
+export async function assertAntigravityModelSelection(harness, conversationId, model, context) {
+  if (model?.provider !== ANTIGRAVITY_PROVIDER_ID) return;
+  const state = await harness.snapshot(AgentDoc, conversationId, context);
+  const conversation = await harness.conversation(conversationId, context);
+  await assertNativeModelChange(state?.model, model, (cursor) =>
+    conversation.entries({ order: 'descending' }, 200, cursor, context));
+}
+
 /** 在调用方事务内比较并应用人格/工具，返回是否写入。 */
 export async function applyAgentProfileInTx(tx, conversationId, profile) {
   const state = await tx.doc(AgentDoc, conversationId);
   const change = agentProfileChange(state, profile);
   if (!change) return false;
+  await assertNativeModelChange(state?.model, change.model, (cursor) =>
+    tx.scanEntries({ conversationId, order: 'descending' }, 200, cursor));
   await configure(tx, conversationId, change);
   return true;
 }

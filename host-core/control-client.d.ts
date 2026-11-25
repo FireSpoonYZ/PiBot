@@ -148,6 +148,7 @@ export interface ControlClient {
   getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
+  assertModelSelectionAllowed(botId: string, modelRef: string | null, options?: ControlClientCallOptions): Promise<{ botId: string; allowed: true }>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<AbortBotResult>;
   withdrawQueued(botId: string, input?: WithdrawQueuedInput, options?: ControlClientCallOptions): Promise<WithdrawQueuedResult>;
   steerQueued(botId: string, input: SteerQueuedInput, options?: ControlClientCallOptions): Promise<SteerQueuedResult>;

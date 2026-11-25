@@ -74,7 +74,7 @@ import {
 } from '../../../web/src/components/ui';
 import { hasOpenFloatingPopover, isEventInsideFloatingUi } from '../../../web/src/components/ui/Overlay';
 import { BotReadScope } from '../../../web/src/botReadScope';
-import { deleteBotAndVerify } from '../../../web/src/botOperations';
+import { deleteBotAndVerify, hasAntigravityHistory } from '../../../web/src/botOperations';
 import { SendButtonIcon } from '../../../web/src/SendButtonIcon';
 import { useReceiptRecovery } from '../../../web/src/useReceiptRecovery';
 import type {
@@ -4239,18 +4239,20 @@ function PrimaryChatPane({
     isSendingMessage ||
     slashBusy !== null ||
     (effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed');
-  const canEditTurns = Boolean(online && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
+  const nativeHistoryLocked = hasAntigravityHistory(bot.modelRef, [...rawItems, ...(live?.history ?? [])], clearedThroughEntryId);
+  const canEditTurns = Boolean(online && !nativeHistoryLocked && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
   useEffect(() => {
     if (!editingTurn || editSubmitting) return;
     if (
       editingTurn.sess !== sess ||
       editingTurn.botId !== bot.botId ||
+      nativeHistoryLocked ||
       !online ||
       isArchived
     ) {
       setEditingTurn(null);
     }
-  }, [editingTurn, editSubmitting, sess, bot.botId, online, isArchived]);
+  }, [editingTurn, editSubmitting, sess, bot.botId, nativeHistoryLocked, online, isArchived]);
   const startEditTurn = useCallback(
     (turn: ChatTurn) => {
       if (!canEditTurns) return;

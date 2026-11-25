@@ -63,7 +63,8 @@ export function createPlugin({ installationId, version, dataDir, host }) {
       const getBotPolicy = (id) => {
         if (id !== botId || !active || closed) return { enabled: false, canWrite: false };
         try { host.assertCapabilityAllowed(botId, installationId); } catch { return { enabled: false, canWrite: false }; }
-        return { enabled: true, canRead: true, canWrite: mode === 'read-write', mode, retentionFloor: policy.floor };
+        return { enabled: true, canRead: true, canWrite: mode === 'read-write', mode, retentionFloor: policy.floor,
+          autoRecall: host.isAntigravityBot?.(botId) !== true };
       };
       const localHost = Object.create(host.host);
       Object.defineProperty(localHost, 'dataRoot', { value: botDataDir });

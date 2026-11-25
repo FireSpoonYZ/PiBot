@@ -53,6 +53,7 @@ const RETRYABLE_TURN_ERROR_CODES = new Set([
 const PRESERVED_TURN_ERROR_CODES = new Set([
   ...RETRYABLE_TURN_ERROR_CODES,
   'MODEL_NO_VISION',
+  'AGY_HISTORY_CHANGED',
   'INVALID_ARGUMENT',
   'ATTACHMENT_NOT_FOUND',
 ]);
@@ -81,7 +82,7 @@ function boundedTurnError(err) {
 export function createTurnAdmission(deps) {
   const {
     host, getHarness, context, centerRuntime, plugins, models,
-    getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
+    getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd, assertModelSelectionAllowed,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
     trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
     preemptWork, canAdmit = () => true,
@@ -507,6 +508,7 @@ export function createTurnAdmission(deps) {
     // 目录校验在任何模型/插件/cwd 状态变化之前完成；非法 set 即同步失败。
     const pinnedCwd = typeof target?.cwd === 'string' && target.cwd !== bot.cwd ? target.cwd : null;
     if (pinnedCwd !== null) host.assertBotCwd({ cwd: pinnedCwd });
+    await assertModelSelectionAllowed?.(bot, selection);
     if (selection) {
       const nextModels = { ...getBotModels() };
       nextModels[bot.botId] = selection;

@@ -24,7 +24,7 @@ import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
-import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
+import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile, assertAntigravityModelSelection } from './runtime-docs.js';
 import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import {
   RequestContext,
@@ -60,7 +60,7 @@ import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { canDetachPrimaryWait, createRuntimeWaits } from './runtime-waits.js';
 import { TurnQueue } from './runtime-turns-docs.js';
-import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
+import { createBotSessionRuntime, applySessionResetState, TURN_ROUTING_POLICY } from './runtime-bot-session.js';
 import {
   BotSessionState,
   GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
@@ -928,6 +928,7 @@ export async function openRuntime(options) {
     },
     getTurn: (api, context = CTX) => sessions.getTurn(api, context),
     getProactiveAssistantConfig,
+    isAntigravityBot: (botId) => botModels[botId]?.modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/') === true,
     resolveConversationBot: async (id) => {
       const identity = await resolveBotIdentity(host, harness, id, CTX);
       const primary = await harness.snapshot(PrimaryIndex, CTX);
@@ -1050,6 +1051,7 @@ export async function openRuntime(options) {
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
       async beforeThresholdCompaction(agent, api, context) {
+        if (agent?.model?.provider === ANTIGRAVITY_PROVIDER_ID) return { decline: true };
         try {
           if (!online) return;
           if (await plugins.shouldDeclineThresholdCompaction(agent, api, context)) {
@@ -1099,7 +1101,9 @@ export async function openRuntime(options) {
           const preflightTarget = !isAntigravity
             ? computePreflightTargetTokens(model.contextWindow, maxTokens, model.api)
             : undefined;
-          const requestView = await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
+          const requestView = isAntigravity
+            ? sanitizedRequest
+            : await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
           const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
@@ -1127,6 +1131,12 @@ export async function openRuntime(options) {
           }
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
+            if (isAntigravity) {
+              const sessionState = await tx.doc(BotSessionState, api.conversationId);
+              sessionState.nativeHistoryProvider = ANTIGRAVITY_PROVIDER_ID;
+              // Overflow recovery reads the current agent policy after a provider response.
+              await durable.configure(tx, api.conversationId, { compaction: { enabled: false } });
+            }
             doc.prepared = {
               taskId: String(api.taskId), cutoff: checkpoint.cutoff,
               contextWindow: model.contextWindow,
@@ -1293,7 +1303,7 @@ export async function openRuntime(options) {
           throw errWithCode('Antigravity provider payload must be an object', 'INVALID_STATE');
         }
         const turnContext = resolveAntigravityTurnContext(antigravityTurnProvenance.get(api.taskId), payload.messages);
-        return { payload: { ...payload, turnContext } };
+        return { payload: { ...payload, turnContext: { ...turnContext, routingPolicy: TURN_ROUTING_POLICY } } };
       } catch (err) {
         antigravityTurnProvenance.delete(api.taskId);
         if (!context.abortSignal?.aborted) {
@@ -1520,7 +1530,8 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
   const pluginExtensions = plugins.extensionsFor(botId);
   const botHostExtensions = typeof botHostExtensionsFor === 'function' ? botHostExtensionsFor(botId) : [];
-  const codemodeOnly = Boolean(selection.codemodeOnly);
+  const antigravity = model?.provider === ANTIGRAVITY_PROVIDER_ID;
+  const codemodeOnly = antigravity || Boolean(selection.codemodeOnly);
   const codemodeEnabled = Boolean(selection.codemode) || codemodeOnly;
   const proactiveAssistant = proactiveOptions?.getProactiveAssistantConfig?.(botId) ?? null;
   const allowedDedicatedPluginExtensionNames = proactiveOptions?.dedicatedAllowedPluginExtNamesByBot?.get(botId) ?? null;
@@ -1547,6 +1558,7 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
     thinkingLevel: selection.thinkingLevel ?? null,
     codemode: codemodeEnabled,
     codemodeOnly,
+    antigravity,
     ...(model ? { model } : {}),
   };
 }
@@ -2043,6 +2055,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     models,
     getBotModels,
     setBotModels,
+    assertModelSelectionAllowed,
     profileFor,
     botExecutionFingerprint,
     applyBotCwd,
@@ -2488,6 +2501,39 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return updated;
   }
 
+  async function assertModelSelectionAllowed(bot, selection) {
+    if (!selection?.modelRef) return;
+    const model = parseModelRef(selection.modelRef);
+    if (model.provider !== ANTIGRAVITY_PROVIDER_ID) return;
+    const primary = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (primary) await assertAntigravityModelSelection(harness, primary.id, model, CTX);
+  }
+
+  async function assertHistoryCanBeRewritten(bot) {
+    const modelRef = getBotModels()[bot.botId]?.modelRef;
+    if (modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) {
+      throw errWithCode('Antigravity history cannot be edited or compacted by Pi. Use /clear to start a new session.', 'AGY_HISTORY_CHANGED');
+    }
+    const primary = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (!primary) return;
+    const sessionState = await harness.snapshot(BotSessionState, primary.id, CTX);
+    if (sessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID) {
+      throw errWithCode('This history was submitted to Antigravity. Use /clear before editing or compacting.', 'AGY_HISTORY_CHANGED');
+    }
+    let cursor;
+    for (;;) {
+      const page = await primary.entries({ order: 'descending' }, 200, cursor, CTX);
+      for (const entry of page.items) {
+        if (entry.kind === durable.ResetEntry.kind) return;
+        if ((entry.model ?? []).some((message) => message.provider === ANTIGRAVITY_PROVIDER_ID || message.api === ANTIGRAVITY_API)) {
+          throw errWithCode('This history contains an Antigravity session. Use /clear before editing or compacting.', 'AGY_HISTORY_CHANGED');
+        }
+      }
+      if (!page.next) return;
+      cursor = page.next;
+    }
+  }
+
   /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
   async function refreshBotProfiles(bot) {
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
@@ -2501,6 +2547,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const meta = await harness.snapshot(WorkContextState, binding.nativeId, CTX);
       if (!meta?.scopeId || !meta.kind) continue;
       const profile = profileFor(bot.botId, { botId: bot.botId, scopeId: meta.scopeId, kind: meta.kind });
+      if (profile.antigravity) {
+        try { await assertAntigravityModelSelection(harness, binding.nativeId, profile.model, CTX); }
+        catch (err) {
+          // Historical work conversations stay untouched; resuming one applies the same guard at its own boundary.
+          if (err?.code === 'AGY_HISTORY_CHANGED') continue;
+          throw err;
+        }
+      }
       await applyAgentProfile(harness, binding.nativeId, profile, CTX);
     }
   }
@@ -2866,6 +2920,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       normalizeThinkingLevel(selection?.thinkingLevel);
       normalizeCodemodeFlag(selection?.codemode, 'codemode');
       normalizeCodemodeFlag(selection?.codemodeOnly, 'codemodeOnly');
+      await assertModelSelectionAllowed(record, selection);
       const nextModels = { ...getBotModels() };
       if (selection && (selection.modelRef != null || selection.thinkingLevel != null || selection.codemode != null || selection.codemodeOnly != null)) nextModels[botId] = selection;
       else delete nextModels[botId];
@@ -3075,6 +3130,15 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getCurrentDevice: collaboration.getCurrentDevice,
     createBot: createRuntimeBot,
     getBot: (botId) => requireBot(botId),
+    assertModelSelectionAllowed: (botId, modelRef) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (modelRef != null && parseModelRef(modelRef).provider === ANTIGRAVITY_PROVIDER_ID) {
+        await assertBotIdle(bot);
+        if ((await turns.queuedCount(bot)) > 0) throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+      }
+      await assertModelSelectionAllowed(bot, { modelRef });
+      return { botId, allowed: true };
+    }),
     updateBotProfile: (input) => admitBot(input?.botId, async () => {
       const updated = host.updateBotProfile(input);
       if (onBotsSync) await onBotsSync();
@@ -3486,6 +3550,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
           throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
         }
+        await assertHistoryCanBeRewritten(bot);
         const conversation = await idlePrimaryConversation(bot);
         const conversationId = bot.primaryConversationId;
         if (!conversation) return { conversationId, taskId: null };
@@ -3559,6 +3624,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
           throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
         }
+        await assertHistoryCanBeRewritten(bot);
         // 前台历史编辑先抢占并等待后台静默自动反思退出，手动学习作业则保持忙碌门禁拒绝。
         await learning.preemptAndWaitForForeground(botId);
         try {

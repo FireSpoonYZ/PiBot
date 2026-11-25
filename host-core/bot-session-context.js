@@ -44,6 +44,8 @@ export const BotSessionState = defineDoc({
     importedCount: 0,
     // 最近一次 pi.reset 条目 id；随 reset 原子推进，供 live 投影 O(1) 裁剪与跨压缩保留边界。
     clearedThroughEntryId: 0,
+    // An accepted AGY request locks this history even if no assistant response was committed.
+    nativeHistoryProvider: null,
     // 冻结的活动轮 + generation taskId -> requestId 映射（生成轮换任务/工具时归属不丢）。
     activeTurn: null,
     turnByTask: {},

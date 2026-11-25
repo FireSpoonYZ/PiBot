@@ -560,6 +560,16 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
+  if (code === 'AGY_HISTORY_CHANGED' || body.includes('AGY_HISTORY_CHANGED')) {
+    return {
+      tone: 'warning',
+      title: t('请开启新的 Antigravity 会话', 'Start a New Antigravity Session'),
+      description: t('请先输入 /clear，再切换模型或继续使用变更后的人设和工具。Antigravity 会话不支持编辑历史或手动压缩。',
+        'Use /clear before switching models or continuing after instructions or tools change. Antigravity history cannot be edited or manually compacted.'),
+      detail,
+    };
+  }
+
   // 6. Model & Generation errors
   if (code === 'MODEL_NO_VISION' || lower.includes('model does not accept image input')) {
     return {

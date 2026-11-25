@@ -97,6 +97,7 @@ const routes = [
   { method: 'POST', key: '/v1/bots/:botId/history/edit', pattern: /^\/v1\/bots\/([^/]+)\/history\/edit\/?$/, params: ['botId'], hasBody: true, handler: editMessage },
   { method: 'POST', key: '/v1/bots/:botId/history/clear', pattern: /^\/v1\/bots\/([^/]+)\/history\/clear\/?$/, params: ['botId'], hasBody: true, handler: clearHistory },
   { method: 'POST', key: '/v1/bots/:botId/compact', pattern: /^\/v1\/bots\/([^/]+)\/compact\/?$/, params: ['botId'], hasBody: true, handler: compact },
+  { method: 'POST', key: '/v1/bots/:botId/model-selection/validate', pattern: /^\/v1\/bots\/([^/]+)\/model-selection\/validate\/?$/, params: ['botId'], hasBody: true, handler: assertModelSelectionAllowed },
   { method: 'GET', key: '/v1/bots/:botId/memory', pattern: /^\/v1\/bots\/([^/]+)\/memory\/?$/, params: ['botId'], hasBody: false, handler: memoryStatus },
   { method: 'POST', key: '/v1/bots/:botId/memory/recall', pattern: /^\/v1\/bots\/([^/]+)\/memory\/recall\/?$/, params: ['botId'], hasBody: true, handler: memoryRecall },
   { method: 'POST', key: '/v1/bots/:botId/memory/reflect', pattern: /^\/v1\/bots\/([^/]+)\/memory\/reflect\/?$/, params: ['botId'], hasBody: true, handler: memoryReflect },
@@ -552,6 +553,12 @@ async function getBotBoard(host, runtime, params, body, req, res) {
 // /clear 与 /compact 不读取请求体（与 abort 一致），成功才返回新的可见历史边界/压缩结果。
 async function clearHistory(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.clearHistory(params.botId));
+}
+
+async function assertModelSelectionAllowed(_host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: input } = normalizeControlCall('assertModelSelectionAllowed', { ...(body ?? {}), botId: params.botId });
+  writeControlJson(res, 200, await runtime.assertModelSelectionAllowed(input.botId, input.modelRef));
 }
 
 async function compact(host, runtime, params, body, req, res) {
