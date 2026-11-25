@@ -111,3 +111,39 @@ test('PetApp.tsx locks scroll offsets on focus and routes all focus/dismiss path
   assert.match(windowStateBlock[1], /width\?\s*:\s*number\s*;/);
   assert.match(windowStateBlock[1], /height\?\s*:\s*number\s*;/);
 });
+
+test('PetApp.tsx commits open orientation synchronously via flushSync and clears avatarPressValidRef on pointer release', () => {
+  // 1. Synchronous flushSync commit eliminates 1-frame right/left -> center jump in React 19 ResizeObserver
+  assert.match(petAppTsx, /import\s*\{[^}]*\bflushSync\b[^}]*\}\s*from\s*'react-dom'/);
+  assert.match(
+    petAppTsx,
+    /tryCommitComposerOpen[\s\S]*?commitComposerOpen\([\s\S]*?flushSync\(\(\)\s*=>\s*\{[\s\S]*?setLayout\([\s\S]*?updateComposerState\(nextState\);[\s\S]*?\}\);[\s\S]*?resetStageScroll\(\);/,
+  );
+
+  // 2. .pet-avatar clears avatarPressValidRef after pointerup / lostpointercapture via macrotask setTimeout(..., 0)
+  //    so a 1-5px press-release without click never permanently locks blur dismissal
+  assert.match(
+    petAppTsx,
+    /scheduleAvatarPressReset[\s\S]*?setTimeout\(\(\)\s*=>\s*\{[\s\S]*?if\s*\(!pointerRef\.current\)\s*\{[\s\S]*?avatarPressValidRef\.current\s*=\s*false;[\s\S]*?\}\s*\},\s*0\);/,
+  );
+  assert.doesNotMatch(
+    petAppTsx,
+    /queueMicrotask\([^)]*avatarPressValidRef/,
+    'avatarPressValidRef reset must use macrotask setTimeout(..., 0), not queueMicrotask (which runs before click)',
+  );
+  assert.match(
+    petAppTsx,
+    /className="pet-avatar"[\s\S]*?onPointerUp=\{\(\)\s*=>\s*\{[\s\S]*?pointerRef\.current\s*=\s*null;[\s\S]*?scheduleAvatarPressReset\(\);[\s\S]*?\}\}/,
+  );
+  assert.match(
+    petAppTsx,
+    /className="pet-avatar"[\s\S]*?onLostPointerCapture=\{\(\)\s*=>\s*\{[\s\S]*?pointerRef\.current\s*=\s*null;[\s\S]*?scheduleAvatarPressReset\(\);[\s\S]*?\}\}/,
+  );
+  assert.match(petAppTsx, /clearAvatarPressResetTimer\(\);[\s\S]*?voice\.dispose\(\);/);
+
+  // 3. Context menu quick-prompt closes settings panel before opening composer
+  assert.match(
+    petAppTsx,
+    /setSettingsOpen\(false\);\s*requestOpenComposer\(\{\s*ignoreCurrentBubble:\s*true\s*\}\);/,
+  );
+});
