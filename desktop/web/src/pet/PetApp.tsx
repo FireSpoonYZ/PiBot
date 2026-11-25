@@ -54,10 +54,12 @@ const DND_KEY = 'pibot-desktop-pet-dnd:v1';
 const COLLAPSED_W = 164;
 const COLLAPSED_H = 128;
 const MAX_STAGE_W = 520;
-const MAX_STAGE_H = 640;
+const MAX_STAGE_H = 720;
 const STAGE_PAD = 12;
+const COMPOSER_GAP = 8;
 const AUTO_FADE_MS = 10_000;
 const PROACTIVE_AUTO_TUCK_MS = 15_000;
+const BLUR_DISMISS_GRACE_MS = 150;
 
 function layoutRectRelativeTo(node: HTMLElement, ancestor: HTMLElement) {
   let left = 0;
@@ -200,12 +202,20 @@ export function PetApp() {
 
   const stageRef = useRef<HTMLElement | null>(null);
   const envelopeRef = useRef<HTMLDivElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const composerAreaRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const pointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const avatarPressValidRef = useRef(false);
   const lastLayoutKeyRef = useRef('');
   const focusPendingRef = useRef(false);
+  const showComposer = composerOpen && !settingsOpen;
+  const showComposerRef = useRef(showComposer);
+  showComposerRef.current = showComposer;
+  const windowFocusedRef = useRef(typeof document !== 'undefined' ? document.hasFocus() : false);
+  const composerOpenedAtRef = useRef(0);
+  const hadFocusSinceOpenRef = useRef(false);
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
 
@@ -384,6 +394,19 @@ export function PetApp() {
       const windowListener = await listen<DesktopPetWindowState>(PET_EVENTS.window, ({ payload }) => {
         if (disposed) return;
         applyWindowState(payload);
+        if (typeof payload.focused === 'boolean') {
+          const hadFocus = windowFocusedRef.current || hadFocusSinceOpenRef.current;
+          windowFocusedRef.current = payload.focused;
+          if (payload.focused) {
+            if (showComposerRef.current) hadFocusSinceOpenRef.current = true;
+          } else if (
+            showComposerRef.current &&
+            !recordingRef.current &&
+            (hadFocus || Date.now() - composerOpenedAtRef.current > BLUR_DISMISS_GRACE_MS)
+          ) {
+            setComposerOpen(false);
+          }
+        }
         if (!payload.visible) {
           cancelRecording();
           stopReading();
@@ -398,6 +421,9 @@ export function PetApp() {
       const windowState = await petWindow('status');
       if (disposed) return;
       applyWindowState(windowState);
+      if (typeof windowState.focused === 'boolean') {
+        windowFocusedRef.current = windowState.focused;
+      }
       await postAction({ id: crypto.randomUUID(), kind: 'ready' });
     };
     void install().catch(report);
@@ -466,12 +492,42 @@ export function PetApp() {
 
   // Auto-focus composer textarea when user opens the floating composer pill
   useEffect(() => {
-    if (composerOpen && !settingsOpen) {
-      focusPendingRef.current = true;
-      const timer = setTimeout(() => composerRef.current?.focus(), 40);
-      return () => clearTimeout(timer);
+    if (!showComposer) {
+      hadFocusSinceOpenRef.current = false;
+      return;
     }
-  }, [composerOpen, settingsOpen]);
+    composerOpenedAtRef.current = Date.now();
+    hadFocusSinceOpenRef.current = document.hasFocus() || windowFocusedRef.current;
+    focusPendingRef.current = true;
+    const raf = requestAnimationFrame(() => composerRef.current?.focus());
+    const timer = setTimeout(() => composerRef.current?.focus(), 40);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+    };
+  }, [showComposer]);
+
+  // Dismiss quick composer automatically when the pet window loses OS focus
+  useEffect(() => {
+    const onWindowFocus = () => {
+      windowFocusedRef.current = true;
+      if (showComposerRef.current) hadFocusSinceOpenRef.current = true;
+    };
+    const onWindowBlur = () => {
+      const hadFocus = windowFocusedRef.current || hadFocusSinceOpenRef.current;
+      windowFocusedRef.current = false;
+      if (!showComposerRef.current || recordingRef.current) return;
+      if (hadFocus || Date.now() - composerOpenedAtRef.current > BLUR_DISMISS_GRACE_MS) {
+        setComposerOpen(false);
+      }
+    };
+    window.addEventListener('focus', onWindowFocus);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, []);
 
   // Auto-grow composer textarea (1–3 lines)
   useEffect(() => {
@@ -859,9 +915,13 @@ export function PetApp() {
 
     const envW = Math.ceil(contentW + STAGE_PAD * 2);
     const envH = Math.ceil(contentH + STAGE_PAD * 2);
-    const hasOverlay = Boolean(activeBubble || composerOpen || ctxMenuOpen);
+    const hasOverlay = Boolean(activeBubble || showComposer || ctxMenuOpen);
     const width = hasOverlay ? Math.min(MAX_STAGE_W, Math.max(COLLAPSED_W, envW)) : COLLAPSED_W;
     const height = hasOverlay ? Math.min(MAX_STAGE_H, Math.max(COLLAPSED_H, envH)) : COLLAPSED_H;
+    const composerEl = composerAreaRef.current;
+    const composerHeight = showComposer && composerEl
+      ? Math.ceil(composerEl.offsetHeight + COMPOSER_GAP)
+      : 0;
 
     // Only include hit-rects once the viewport has caught up to the target size,
     // preventing stale clipped regions while the window is still growing.
@@ -892,13 +952,14 @@ export function PetApp() {
     const key = JSON.stringify([
       width,
       height,
+      composerHeight,
       shouldFocus,
       hitRects.map((r) => [r.x, r.y, r.width, r.height]),
     ]);
     if (key === lastLayoutKeyRef.current) return;
     lastLayoutKeyRef.current = key;
 
-    void petWindow('set-layout', undefined, { width, height, focus: shouldFocus, hitRects })
+    void petWindow('set-layout', undefined, { width, height, composerHeight, focus: shouldFocus, hitRects })
       .then((nextState) => {
         applyWindowState(nextState);
         if (!sizeMatches) {
@@ -906,7 +967,7 @@ export function PetApp() {
         }
       })
       .catch(() => { /* Window may be closing */ });
-  }, [activeBubble, applyWindowState, composerOpen, ctxMenuOpen]);
+  }, [activeBubble, applyWindowState, ctxMenuOpen, showComposer]);
 
   syncNativeLayoutRef.current = syncNativeLayout;
 
@@ -966,6 +1027,7 @@ export function PetApp() {
       className="pet-stage"
       data-dock-side={layout.dockSide}
       data-panel-side={layout.panelSide}
+      data-composer-open={showComposer ? 'true' : 'false'}
       data-composited={layout.composited ? 'true' : 'false'}
       aria-label={t('PiBot 桌宠', 'PiBot desktop pet')}
     >
@@ -1407,291 +1469,323 @@ export function PetApp() {
           </div>
         ) : null}
 
-        {/* 2. DOCK ROW: FLOATING QUICK COMPOSER PILL + MASCOT ACTOR */}
-        <div className="pet-dock-row">
-          {composerOpen && !settingsOpen ? (
-            <div className="pet-composer-area">
-              <form
-                className="pet-composer-pill"
-                data-pet-hit="true"
-                data-pet-hit-pad="12"
-                data-pet-hit-radius="24"
-                onSubmit={(event) => {
+        {/* 2. MASCOT ACTOR DOCK */}
+        <div
+          ref={dockRef}
+          className={`pet-dock${showComposer ? ' is-composer-open' : ''}`}
+          data-mood={petMood}
+          onPointerEnter={() => setHoveringDock(true)}
+          onPointerLeave={() => setHoveringDock(false)}
+        >
+          {/* Hover micro action rail (hidden when idle; zero permanent clutter) */}
+          {!showComposer ? (
+            <div
+              className={`pet-hover-rail${hoveringDock ? ' is-shown' : ''}`}
+              data-pet-hit={hoveringDock ? 'true' : undefined}
+              data-pet-hit-pad="6"
+              data-pet-hit-radius="16"
+              aria-label={t('桌宠快捷操作', 'Quick pet actions')}
+            >
+              <button
+                type="button"
+                className={`pet-rail-btn${recording ? ' is-recording' : ''}`}
+                disabled={!canSend && !recording}
+                title={t('按住直接说话', 'Hold to talk')}
+                aria-label={t('按住直接说话', 'Hold to talk')}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
                   event.preventDefault();
-                  if (canSend) void sendText(draft);
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  beginRecording();
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  }
+                  void finishRecording();
+                }}
+                onPointerCancel={cancelRecording}
+              >
+                <Mic size={13} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="pet-rail-btn"
+                title={t('打开主窗口', 'Open main window')}
+                aria-label={t('打开主窗口', 'Open main window')}
+                onClick={() => void petWindow('show-main').catch(report)}
+              >
+                <ExternalLink size={12.5} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="pet-rail-btn"
+                title={t('语音设置', 'Voice settings')}
+                aria-label={t('语音设置', 'Voice settings')}
+                onClick={() => {
+                  cancelRecording();
+                  stopReading();
+                  focusPendingRef.current = true;
+                  setSettingsOpen((v) => !v);
                 }}
               >
-                <textarea
-                  ref={composerRef}
-                  rows={1}
-                  className="pet-composer-input"
-                  value={draft}
-                  aria-label={t('发送给本机主助手的消息', 'Message to the local main bot')}
-                  placeholder={snapshot.connection === 'ready'
-                    ? t(`和 ${snapshot.botName} 说点什么…`, `Ask ${snapshot.botName}…`)
-                    : t('本机主助手未连接…', 'Local main bot offline…')}
-                  disabled={!snapshot.botId}
-                  onChange={(event) => changeDraft(event.target.value)}
-                  onCompositionStart={() => { composingRef.current = true; }}
-                  onCompositionEnd={() => { composingRef.current = false; }}
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === 'Enter' &&
-                      !event.shiftKey &&
-                      !composingRef.current &&
-                      !event.nativeEvent.isComposing &&
-                      event.nativeEvent.keyCode !== 229
-                    ) {
-                      event.preventDefault();
-                      if (canSend) void sendText(draft);
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className={`pet-pill-mic${recording ? ' is-listening' : ''}`}
-                  disabled={!canSend && !recording}
-                  title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
-                  aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return;
-                    event.preventDefault();
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                    beginRecording();
-                  }}
-                  onPointerUp={(event) => {
-                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                      event.currentTarget.releasePointerCapture(event.pointerId);
-                    }
-                    void finishRecording();
-                  }}
-                  onPointerCancel={cancelRecording}
-                  onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
-                >
-                  <Mic size={15} aria-hidden="true" />
-                </button>
-                {snapshot.canStop && !draft.trim() ? (
-                  <button
-                    type="button"
-                    className="pet-pill-stop"
-                    title={t('停止当前任务', 'Stop task')}
-                    aria-label={t('停止当前任务', 'Stop task')}
-                    onClick={() => {
-                      const state = snapshotRef.current;
-                      if (state.deviceId && state.botId) {
-                        void postAction({
-                          id: crypto.randomUUID(),
-                          kind: 'stop',
-                          deviceId: state.deviceId,
-                          botId: state.botId,
-                        }).catch(report);
-                      }
-                    }}
-                  >
-                    <Square size={11} fill="currentColor" aria-hidden="true" />
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    className="pet-pill-send"
-                    disabled={!canSend || !draft.trim()}
-                    title={t('发送', 'Send')}
-                    aria-label={t('发送', 'Send')}
-                  >
-                    <ArrowUp size={16} aria-hidden="true" />
-                  </button>
-                )}
-              </form>
-              {canRecallReply ? (
-                <div className="pet-composer-sub" data-pet-hit="true" data-pet-hit-pad="4" data-pet-hit-radius="12">
-                  <button
-                    type="button"
-                    className="pet-recall-chip"
-                    onClick={() => {
-                      if (!latestReply) return;
-                      const rid = `speech:${latestReply.message.id}`;
-                      setDismissedIds((prev) => {
-                        const next = new Set(prev);
-                        next.delete(rid);
-                        return next;
-                      });
-                      setForcedReplyId(rid);
-                    }}
-                  >
-                    <History size={11} aria-hidden="true" />
-                    <span>{t('查看上一条回复', 'Last reply')}</span>
-                  </button>
-                </div>
-              ) : null}
+                <Settings2 size={12.5} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="pet-rail-btn"
+                title={t('隐藏桌宠', 'Hide pet')}
+                aria-label={t('隐藏桌宠', 'Hide pet')}
+                onClick={() => {
+                  cancelRecording();
+                  stopReading();
+                  void petWindow('hide').catch(report);
+                }}
+              >
+                <X size={12.5} aria-hidden="true" />
+              </button>
             </div>
           ) : null}
 
-          <div
-            className={`pet-dock${composerOpen ? ' is-composer-open' : ''}`}
-            data-mood={petMood}
-            onPointerEnter={() => setHoveringDock(true)}
-            onPointerLeave={() => setHoveringDock(false)}
+          {/* Mascot Avatar Button */}
+          <button
+            type="button"
+            className="pet-avatar"
+            data-pet-hit="true"
+            data-pet-hit-pad="10"
+            data-pet-hit-radius="26"
+            aria-expanded={showComposer}
+            aria-label={t('单击对话，拖动移动，右键菜单', 'Click to chat, drag to move, right-click for menu') + ' · ' + snapshot.botName}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              focusPendingRef.current = true;
+              setCtxMenuOpen((open) => !open);
+            }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              setCtxMenuOpen(false);
+              avatarPressValidRef.current = true;
+              pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const pointer = pointerRef.current;
+              if (!pointer || pointer.id !== event.pointerId) return;
+              if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
+              pointerRef.current = null;
+              avatarPressValidRef.current = false;
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              void petWindow('drag').catch(report);
+            }}
+            onPointerUp={() => { pointerRef.current = null; }}
+            onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
+            onLostPointerCapture={() => { pointerRef.current = null; }}
+            onClick={(event) => {
+              if (event.detail > 0 && !avatarPressValidRef.current) return;
+              avatarPressValidRef.current = false;
+              if (settingsOpen) {
+                setSettingsOpen(false);
+                return;
+              }
+              const pendingAlert = snapshotRef.current.proactiveAlert;
+              const alertHidden = Boolean(
+                pendingAlert &&
+                (dndMode || tuckedProactiveIds.has(pendingAlert.resultId)) &&
+                revealedProactiveId !== pendingAlert.resultId,
+              );
+              if (alertHidden && pendingAlert && (!activeBubble || activeBubble.kind === 'progress')) {
+                setTuckedProactiveIds((prev) => {
+                  if (!prev.has(pendingAlert.resultId)) return prev;
+                  const next = new Set(prev);
+                  next.delete(pendingAlert.resultId);
+                  return next;
+                });
+                setRevealedProactiveId(pendingAlert.resultId);
+                focusPendingRef.current = true;
+                return;
+              }
+              const next = !composerOpen;
+              if (next) {
+                focusPendingRef.current = true;
+                if (snapshotRef.current.connection !== 'ready') {
+                  setDismissedIds((prev) => {
+                    const cleaned = new Set<string>();
+                    prev.forEach((item) => { if (!item.startsWith('err:')) cleaned.add(item); });
+                    return cleaned;
+                  });
+                }
+                void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(() => {});
+              } else {
+                cancelRecording();
+              }
+              setComposerOpen(next);
+            }}
           >
-            {/* Hover micro action rail (hidden when idle; zero permanent clutter) */}
-            {!composerOpen ? (
-              <div
-                className={`pet-hover-rail${hoveringDock ? ' is-shown' : ''}`}
-                data-pet-hit={hoveringDock ? 'true' : undefined}
-                data-pet-hit-pad="6"
-                data-pet-hit-radius="16"
-                aria-label={t('桌宠快捷操作', 'Quick pet actions')}
-              >
-                <button
-                  type="button"
-                  className={`pet-rail-btn${recording ? ' is-recording' : ''}`}
-                  disabled={!canSend && !recording}
-                  title={t('按住直接说话', 'Hold to talk')}
-                  aria-label={t('按住直接说话', 'Hold to talk')}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return;
+            <GrokBotAnimatedMark
+              seedId={targetKey(snapshot) || 'desktop-pet'}
+              shape={avatar.shape}
+              color={avatar.color}
+              state={mascotState}
+              size={88}
+              maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
+              isPlaying={pageVisible}
+              isStatic={false}
+            />
+            {showDotBadge ? <span className={`pet-badge-dot is-${dotTone}`} aria-hidden="true" /> : null}
+          </button>
+        </div>
+
+        {/* 3. FLOATING QUICK COMPOSER PILL (DIRECTLY BELOW MASCOT) */}
+        {showComposer ? (
+          <div
+            className="pet-composer-area"
+            ref={composerAreaRef}
+            onBlur={(event) => {
+              if (recordingRef.current) return;
+              const next = event.relatedTarget as Node | null;
+              if (next && event.currentTarget.contains(next)) return;
+              if (next && dockRef.current?.contains(next)) return;
+              if (next) {
+                setComposerOpen(false);
+                return;
+              }
+              requestAnimationFrame(() => {
+                if (!showComposerRef.current || recordingRef.current) return;
+                if (avatarPressValidRef.current || pointerRef.current) return;
+                const active = document.activeElement;
+                if (composerAreaRef.current && active && composerAreaRef.current.contains(active)) return;
+                if (active && dockRef.current?.contains(active)) return;
+                setComposerOpen(false);
+              });
+            }}
+          >
+            <form
+              className="pet-composer-pill"
+              data-pet-hit="true"
+              data-pet-hit-pad="12"
+              data-pet-hit-radius="24"
+              onMouseDown={(event) => {
+                const target = event.target as HTMLElement | null;
+                if (target && target.closest('textarea, button')) return;
+                event.preventDefault();
+                composerRef.current?.focus();
+              }}
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (canSend) void sendText(draft);
+              }}
+            >
+              <textarea
+                ref={composerRef}
+                rows={1}
+                className="pet-composer-input"
+                value={draft}
+                aria-label={t('发送给本机主助手的消息', 'Message to the local main bot')}
+                placeholder={snapshot.connection === 'ready'
+                  ? t(`和 ${snapshot.botName} 说点什么…`, `Ask ${snapshot.botName}…`)
+                  : t('本机主助手未连接…', 'Local main bot offline…')}
+                disabled={!snapshot.botId}
+                onChange={(event) => changeDraft(event.target.value)}
+                onCompositionStart={() => { composingRef.current = true; }}
+                onCompositionEnd={() => { composingRef.current = false; }}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === 'Enter' &&
+                    !event.shiftKey &&
+                    !composingRef.current &&
+                    !event.nativeEvent.isComposing &&
+                    event.nativeEvent.keyCode !== 229
+                  ) {
                     event.preventDefault();
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                    beginRecording();
-                  }}
-                  onPointerUp={(event) => {
-                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    if (canSend) void sendText(draft);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className={`pet-pill-mic${recording ? ' is-listening' : ''}`}
+                disabled={!canSend && !recording}
+                title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
+                aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  beginRecording();
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  }
+                  void finishRecording();
+                }}
+                onPointerCancel={cancelRecording}
+                onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
+              >
+                <Mic size={15} aria-hidden="true" />
+              </button>
+              {snapshot.canStop && !draft.trim() ? (
+                <button
+                  type="button"
+                  className="pet-pill-stop"
+                  title={t('停止当前任务', 'Stop task')}
+                  aria-label={t('停止当前任务', 'Stop task')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    const state = snapshotRef.current;
+                    if (state.deviceId && state.botId) {
+                      void postAction({
+                        id: crypto.randomUUID(),
+                        kind: 'stop',
+                        deviceId: state.deviceId,
+                        botId: state.botId,
+                      }).catch(report);
                     }
-                    void finishRecording();
+                    composerRef.current?.focus();
                   }}
-                  onPointerCancel={cancelRecording}
                 >
-                  <Mic size={13} aria-hidden="true" />
+                  <Square size={11} fill="currentColor" aria-hidden="true" />
                 </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="pet-pill-send"
+                  disabled={!canSend || !draft.trim()}
+                  title={t('发送', 'Send')}
+                  aria-label={t('发送', 'Send')}
+                  onMouseDown={(event) => event.preventDefault()}
+                >
+                  <ArrowUp size={16} aria-hidden="true" />
+                </button>
+              )}
+            </form>
+            {canRecallReply ? (
+              <div className="pet-composer-sub" data-pet-hit="true" data-pet-hit-pad="4" data-pet-hit-radius="12">
                 <button
                   type="button"
-                  className="pet-rail-btn"
-                  title={t('打开主窗口', 'Open main window')}
-                  aria-label={t('打开主窗口', 'Open main window')}
-                  onClick={() => void petWindow('show-main').catch(report)}
-                >
-                  <ExternalLink size={12.5} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="pet-rail-btn"
-                  title={t('语音设置', 'Voice settings')}
-                  aria-label={t('语音设置', 'Voice settings')}
+                  className="pet-recall-chip"
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
-                    cancelRecording();
-                    stopReading();
-                    focusPendingRef.current = true;
-                    setSettingsOpen((v) => !v);
+                    if (!latestReply) return;
+                    const rid = `speech:${latestReply.message.id}`;
+                    setDismissedIds((prev) => {
+                      const next = new Set(prev);
+                      next.delete(rid);
+                      return next;
+                    });
+                    setForcedReplyId(rid);
+                    composerRef.current?.focus();
                   }}
                 >
-                  <Settings2 size={12.5} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="pet-rail-btn"
-                  title={t('隐藏桌宠', 'Hide pet')}
-                  aria-label={t('隐藏桌宠', 'Hide pet')}
-                  onClick={() => {
-                    cancelRecording();
-                    stopReading();
-                    void petWindow('hide').catch(report);
-                  }}
-                >
-                  <X size={12.5} aria-hidden="true" />
+                  <History size={11} aria-hidden="true" />
+                  <span>{t('查看上一条回复', 'Last reply')}</span>
                 </button>
               </div>
             ) : null}
-
-            {/* Mascot Avatar Button */}
-            <button
-              type="button"
-              className="pet-avatar"
-              data-pet-hit="true"
-              data-pet-hit-pad="10"
-              data-pet-hit-radius="26"
-              aria-expanded={composerOpen}
-              aria-label={t('单击对话，拖动移动，右键菜单', 'Click to chat, drag to move, right-click for menu') + ' · ' + snapshot.botName}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                focusPendingRef.current = true;
-                setCtxMenuOpen((open) => !open);
-              }}
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                setCtxMenuOpen(false);
-                avatarPressValidRef.current = true;
-                pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
-                event.currentTarget.setPointerCapture(event.pointerId);
-              }}
-              onPointerMove={(event) => {
-                const pointer = pointerRef.current;
-                if (!pointer || pointer.id !== event.pointerId) return;
-                if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
-                pointerRef.current = null;
-                avatarPressValidRef.current = false;
-                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                  event.currentTarget.releasePointerCapture(event.pointerId);
-                }
-                void petWindow('drag').catch(report);
-              }}
-              onPointerUp={() => { pointerRef.current = null; }}
-              onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
-              onLostPointerCapture={() => { pointerRef.current = null; }}
-              onClick={(event) => {
-                if (event.detail > 0 && !avatarPressValidRef.current) return;
-                avatarPressValidRef.current = false;
-                if (settingsOpen) {
-                  setSettingsOpen(false);
-                  return;
-                }
-                const pendingAlert = snapshotRef.current.proactiveAlert;
-                const alertHidden = Boolean(
-                  pendingAlert &&
-                  (dndMode || tuckedProactiveIds.has(pendingAlert.resultId)) &&
-                  revealedProactiveId !== pendingAlert.resultId,
-                );
-                if (alertHidden && pendingAlert && (!activeBubble || activeBubble.kind === 'progress')) {
-                  setTuckedProactiveIds((prev) => {
-                    if (!prev.has(pendingAlert.resultId)) return prev;
-                    const next = new Set(prev);
-                    next.delete(pendingAlert.resultId);
-                    return next;
-                  });
-                  setRevealedProactiveId(pendingAlert.resultId);
-                  focusPendingRef.current = true;
-                  return;
-                }
-                const next = !composerOpen;
-                if (next) {
-                  focusPendingRef.current = true;
-                  if (snapshotRef.current.connection !== 'ready') {
-                    setDismissedIds((prev) => {
-                      const cleaned = new Set<string>();
-                      prev.forEach((item) => { if (!item.startsWith('err:')) cleaned.add(item); });
-                      return cleaned;
-                    });
-                  }
-                  void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(() => {});
-                } else {
-                  cancelRecording();
-                }
-                setComposerOpen(next);
-              }}
-            >
-              <GrokBotAnimatedMark
-                seedId={targetKey(snapshot) || 'desktop-pet'}
-                shape={avatar.shape}
-                color={avatar.color}
-                state={mascotState}
-                size={88}
-                maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
-                isPlaying={pageVisible}
-                isStatic={false}
-              />
-              {showDotBadge ? <span className={`pet-badge-dot is-${dotTone}`} aria-hidden="true" /> : null}
-            </button>
           </div>
-        </div>
+        ) : null}
       </div>
     </main>
   );

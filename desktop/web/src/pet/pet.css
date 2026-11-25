@@ -70,6 +70,7 @@ button svg { flex: none; }
   pointer-events: none;
 }
 .pet-stage[data-dock-side="left"] { align-items: flex-start; }
+.pet-stage[data-dock-side="center"] { align-items: center; }
 .pet-stage[data-panel-side="bottom"] { justify-content: flex-start; }
 
 .pet-envelope {
@@ -78,26 +79,34 @@ button svg { flex: none; }
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 14px;
   width: max-content;
   height: max-content;
   pointer-events: none;
 }
 .pet-stage[data-dock-side="left"] .pet-envelope { align-items: flex-start; }
-.pet-stage[data-panel-side="bottom"] .pet-envelope { flex-direction: column-reverse; }
+.pet-stage[data-dock-side="center"] .pet-envelope { align-items: center; }
 
 /* ==========================================================================
  * Polymorphic Bubble Container + Dynamic Tail
  * ========================================================================== */
 .pet-bubble-wrap {
+  order: 1;
   flex: none;
+  margin-bottom: 14px;
   pointer-events: auto;
   animation: pet-bubble-enter 200ms var(--ease-out) both;
   transform-origin: bottom right;
 }
 .pet-stage[data-dock-side="left"] .pet-bubble-wrap { transform-origin: bottom left; }
-.pet-stage[data-panel-side="bottom"] .pet-bubble-wrap { transform-origin: top right; }
+.pet-stage[data-dock-side="center"] .pet-bubble-wrap { transform-origin: bottom center; }
+.pet-stage[data-panel-side="bottom"] .pet-bubble-wrap {
+  order: 3;
+  margin-top: 14px;
+  margin-bottom: 0;
+  transform-origin: top right;
+}
 .pet-stage[data-dock-side="left"][data-panel-side="bottom"] .pet-bubble-wrap { transform-origin: top left; }
+.pet-stage[data-dock-side="center"][data-panel-side="bottom"] .pet-bubble-wrap { transform-origin: top center; }
 
 @keyframes pet-bubble-enter {
   from { opacity: 0; transform: translateY(5px) scale(0.96); }
@@ -129,6 +138,7 @@ button svg { flex: none; }
   pointer-events: none;
 }
 .pet-stage[data-dock-side="left"] .pet-bubble-tail { right: auto; left: 41px; }
+.pet-stage[data-dock-side="center"] .pet-bubble-tail { right: auto; left: 50%; margin-left: -6.5px; }
 .pet-stage[data-panel-side="bottom"] .pet-bubble-tail {
   bottom: auto;
   top: -7px;
@@ -138,6 +148,9 @@ button svg { flex: none; }
   border-top: 1px solid var(--border-default);
   border-bottom-right-radius: 0;
   border-top-left-radius: 3px;
+}
+.pet-stage[data-panel-side="bottom"][data-composer-open="true"] .pet-bubble-tail {
+  display: none;
 }
 
 /* Variant: Thought & Voice Listening (pill + 2 cloud dots tail) */
@@ -165,11 +178,26 @@ button svg { flex: none; }
   left: 44px;
   box-shadow: -7px 8px 0 -2.5px var(--surface-overlay), -7px 8px 0 -1.5px var(--border-default);
 }
+.pet-stage[data-dock-side="center"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
+.pet-stage[data-dock-side="center"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
+  right: auto;
+  left: 50%;
+  margin-left: -4.5px;
+  box-shadow: 0 9px 0 -2.5px var(--surface-overlay), 0 9px 0 -1.5px var(--border-default);
+}
 .pet-stage[data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   bottom: auto;
   top: -10px;
   box-shadow: 7px -8px 0 -2.5px var(--surface-overlay), 7px -8px 0 -1.5px var(--border-default);
+}
+.pet-stage[data-dock-side="left"][data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
+.pet-stage[data-dock-side="left"][data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
+  box-shadow: -7px -8px 0 -2.5px var(--surface-overlay), -7px -8px 0 -1.5px var(--border-default);
+}
+.pet-stage[data-dock-side="center"][data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
+.pet-stage[data-dock-side="center"][data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
+  box-shadow: 0 -9px 0 -2.5px var(--surface-overlay), 0 -9px 0 -1.5px var(--border-default);
 }
 
 /* Variant: Questionnaire Decision Bubble */
@@ -648,33 +676,32 @@ button svg { flex: none; }
 .pet-todo-subject { min-width: 0; overflow-wrap: anywhere; }
 
 /* ==========================================================================
- * Dock Row: Floating Quick Composer Pill + Mascot Actor
+ * Floating Quick Composer Pill (Directly Below Mascot)
  * ========================================================================== */
-.pet-dock-row {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  pointer-events: none;
-}
-.pet-stage[data-dock-side="left"] .pet-dock-row {
-  flex-direction: row-reverse;
-  justify-content: flex-end;
-}
-
 .pet-composer-area {
+  order: 3;
+  flex: none;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 5px;
+  margin-top: 8px;
   pointer-events: none;
+  transform-origin: top right;
   animation: pet-composer-in 170ms var(--ease-out) both;
 }
-.pet-stage[data-dock-side="left"] .pet-composer-area { align-items: flex-start; }
+.pet-stage[data-panel-side="bottom"] .pet-composer-area { order: 2; }
+.pet-stage[data-dock-side="left"] .pet-composer-area {
+  align-items: flex-start;
+  transform-origin: top left;
+}
+.pet-stage[data-dock-side="center"] .pet-composer-area {
+  align-items: center;
+  transform-origin: top center;
+}
 @keyframes pet-composer-in {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .pet-composer-pill {
@@ -768,6 +795,7 @@ button svg { flex: none; }
  * Mascot Dock + Hover Quick Rail
  * ========================================================================== */
 .pet-dock {
+  order: 2;
   position: relative;
   display: flex;
   align-items: center;
@@ -778,11 +806,28 @@ button svg { flex: none; }
   flex: none;
   pointer-events: none;
 }
+.pet-stage[data-panel-side="bottom"] .pet-dock {
+  order: 1;
+}
 .pet-dock.is-composer-open {
   width: 96px;
 }
 .pet-stage[data-dock-side="left"] .pet-dock {
   flex-direction: row-reverse;
+}
+.pet-stage[data-dock-side="center"] .pet-dock:not(.is-composer-open) {
+  display: grid;
+  grid-template-columns: 37px 96px 37px;
+  align-items: center;
+  justify-items: start;
+  gap: 0;
+  width: 170px;
+}
+.pet-stage[data-dock-side="center"] .pet-dock:not(.is-composer-open) .pet-hover-rail {
+  grid-column: 1;
+}
+.pet-stage[data-dock-side="center"] .pet-dock:not(.is-composer-open) .pet-avatar {
+  grid-column: 2;
 }
 
 .pet-hover-rail {

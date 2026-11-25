@@ -116,7 +116,7 @@ export interface DesktopPetResult {
   queuedDraft?: { deviceId: string; botId: string; text: string };
 }
 
-export type PetDockSide = 'left' | 'right';
+export type PetDockSide = 'left' | 'right' | 'center';
 export type PetPanelSide = 'top' | 'bottom';
 
 export interface PetWindowHitRect {
@@ -130,6 +130,7 @@ export interface PetWindowHitRect {
 export interface PetWindowLayoutRequest {
   width: number;
   height: number;
+  composerHeight?: number;
   focus?: boolean;
   hitRects?: PetWindowHitRect[];
 }
@@ -137,6 +138,7 @@ export interface PetWindowLayoutRequest {
 export interface DesktopPetWindowState {
   visible: boolean;
   expanded: boolean;
+  focused?: boolean;
   dockSide?: PetDockSide;
   panelSide?: PetPanelSide;
   composited?: boolean;

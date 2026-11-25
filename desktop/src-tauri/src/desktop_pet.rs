@@ -22,14 +22,16 @@ pub const PET_LABEL: &str = "pet";
 const WINDOW_EVENT: &str = "pibot:pet-window";
 /// Ambient mascot window: holds the 96px mascot + hover rail + shadow breathing room.
 const COLLAPSED_SIZE: (f64, f64) = (164.0, 128.0);
-const EXPANDED_SIZE: (f64, f64) = (448.0, 560.0);
+const EXPANDED_SIZE: (f64, f64) = (380.0, 560.0);
 const MAX_STAGE_WIDTH: f64 = 520.0;
-const MAX_STAGE_HEIGHT: f64 = 640.0;
+const MAX_STAGE_HEIGHT: f64 = 720.0;
 /// Probe envelope when choosing bubble/panel orientation from collapsed state so
 /// short thought bubbles never flip orientation as they grow into replies or QA cards.
-const ORIENTATION_PROBE_SIZE: (f64, f64) = (448.0, 480.0);
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const ORIENTATION_PROBE_SIZE: (f64, f64) = (380.0, 480.0);
 const STAGE_PADDING: f64 = 12.0;
+const AVATAR_HALF_SIZE: f64 = 48.0;
+const DOCK_CENTER_OFFSET_Y: f64 = 64.0;
+const EDGE_ANCHOR_OFFSET_X: f64 = STAGE_PADDING + AVATAR_HALF_SIZE;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DOCK_RADIUS: i32 = 22;
 
@@ -37,6 +39,7 @@ const DOCK_RADIUS: i32 = 22;
 enum DockSide {
   Right,
   Left,
+  Center,
 }
 
 impl DockSide {
@@ -44,6 +47,7 @@ impl DockSide {
     match self {
       Self::Right => "right",
       Self::Left => "left",
+      Self::Center => "center",
     }
   }
 }
@@ -116,6 +120,8 @@ pub struct PetWindowLayoutRequest {
   pub width: f64,
   pub height: f64,
   #[serde(default)]
+  pub composer_height: f64,
+  #[serde(default)]
   pub focus: bool,
   #[serde(default)]
   pub hit_rects: Vec<LogicalHitRect>,
@@ -126,7 +132,10 @@ struct PetGeometry {
   panel_side: PanelSide,
   composited: bool,
   last_collapsed_pos: Option<PhysicalPosition<i32>>,
+  anchor_pos: Option<PhysicalPosition<i32>>,
+  expected_window_pos: Option<PhysicalPosition<i32>>,
   current_logical_size: (f64, f64),
+  current_composer_height: f64,
   hit_rects: Vec<LogicalHitRect>,
   move_seq: u64,
 }
@@ -138,7 +147,10 @@ impl Default for PetGeometry {
       panel_side: PanelSide::Top,
       composited: true,
       last_collapsed_pos: None,
+      anchor_pos: None,
+      expected_window_pos: None,
       current_logical_size: COLLAPSED_SIZE,
+      current_composer_height: 0.0,
       hit_rects: Vec::new(),
       move_seq: 0,
     }
@@ -149,6 +161,7 @@ impl Default for PetGeometry {
 pub struct DesktopPet {
   visible: AtomicBool,
   expanded: AtomicBool,
+  focused: AtomicBool,
   geometry: Mutex<PetGeometry>,
   operation: tokio::sync::Mutex<()>,
   destroyed: tokio::sync::Notify,
@@ -219,6 +232,7 @@ fn save_current_preference(app: &AppHandle, visible: bool) {
 pub struct DesktopPetWindowState {
   visible: bool,
   expanded: bool,
+  focused: bool,
   dock_side: &'static str,
   panel_side: &'static str,
   composited: bool,
@@ -230,6 +244,7 @@ fn state(app: &AppHandle) -> DesktopPetWindowState {
   DesktopPetWindowState {
     visible: pet.visible.load(Ordering::Acquire),
     expanded: pet.expanded.load(Ordering::Acquire),
+    focused: pet.focused.load(Ordering::Acquire),
     dock_side: geo.dock_side.as_str(),
     panel_side: geo.panel_side.as_str(),
     composited: geo.composited,
@@ -303,63 +318,105 @@ fn sanitize_logical_size(width: f64, height: f64) -> (f64, f64) {
   (w, h)
 }
 
-fn dock_origin_from_window(
-  window_pos: PhysicalPosition<i32>,
-  window_size: PhysicalSize<u32>,
-  collapsed_size: PhysicalSize<u32>,
-  dock_side: DockSide,
-  panel_side: PanelSide,
-) -> PhysicalPosition<i32> {
-  let x = match dock_side {
-    DockSide::Right => window_pos.x + window_size.width as i32 - collapsed_size.width as i32,
-    DockSide::Left => window_pos.x,
-  };
-  let y = match panel_side {
-    PanelSide::Top => window_pos.y + window_size.height as i32 - collapsed_size.height as i32,
-    PanelSide::Bottom => window_pos.y,
-  };
-  PhysicalPosition::new(x, y)
+fn sanitize_composer_height(composer_height: f64, logical_height: f64) -> f64 {
+  if !composer_height.is_finite() || composer_height <= 0.0 {
+    return 0.0;
+  }
+  let max_below = (logical_height - COLLAPSED_SIZE.1).max(0.0);
+  composer_height.clamp(0.0, max_below).ceil()
 }
 
-fn window_pos_from_dock(
-  dock_pos: PhysicalPosition<i32>,
-  collapsed_size: PhysicalSize<u32>,
-  target_size: PhysicalSize<u32>,
+fn mascot_anchor_in_window(
+  window_size: PhysicalSize<u32>,
   dock_side: DockSide,
   panel_side: PanelSide,
-  area: Option<WorkArea>,
+  composer_height_phys: i32,
+  scale: f64,
 ) -> PhysicalPosition<i32> {
-  let raw_x = match dock_side {
-    DockSide::Right => dock_pos.x + collapsed_size.width as i32 - target_size.width as i32,
-    DockSide::Left => dock_pos.x,
+  let edge_x = (EDGE_ANCHOR_OFFSET_X * scale).round() as i32;
+  let edge_y = (DOCK_CENTER_OFFSET_Y * scale).round() as i32;
+  let w = window_size.width as i32;
+  let h = window_size.height as i32;
+
+  let ax = match dock_side {
+    DockSide::Left => edge_x.min(w / 2),
+    DockSide::Right => (w - edge_x).max(w / 2),
+    DockSide::Center => w / 2,
   };
-  let raw_y = match panel_side {
-    PanelSide::Top => dock_pos.y + collapsed_size.height as i32 - target_size.height as i32,
-    PanelSide::Bottom => dock_pos.y,
+  let ay = match panel_side {
+    PanelSide::Top => (h - edge_y - composer_height_phys.max(0)).clamp(edge_y.min(h / 2), h),
+    PanelSide::Bottom => edge_y.min(h / 2),
   };
-  let raw = PhysicalPosition::new(raw_x, raw_y);
-  area.map_or(raw, |a| clamp_to_area(raw, target_size, a))
+  PhysicalPosition::new(ax, ay)
+}
+
+fn moved_externally(
+  actual_pos: PhysicalPosition<i32>,
+  expected_pos: Option<PhysicalPosition<i32>>,
+) -> bool {
+  match expected_pos {
+    Some(exp) => (actual_pos.x - exp.x).abs() > 2 || (actual_pos.y - exp.y).abs() > 2,
+    None => true,
+  }
+}
+
+fn preferred_collapsed_dock_side_for_anchor(
+  anchor_x: i32,
+  area: Option<WorkArea>,
+) -> DockSide {
+  let Some(area) = area else {
+    return DockSide::Right;
+  };
+  let area_mid_x = area.x + (area.width as i32) / 2;
+  if anchor_x < area_mid_x {
+    DockSide::Left
+  } else {
+    DockSide::Right
+  }
+}
+
+fn collapsed_pos_from_anchor(
+  anchor_pos: PhysicalPosition<i32>,
+  collapsed_size: PhysicalSize<u32>,
+  dock_side: DockSide,
+  area: Option<WorkArea>,
+  scale: f64,
+) -> PhysicalPosition<i32> {
+  let collapsed_dock = match dock_side {
+    DockSide::Left => DockSide::Left,
+    DockSide::Right => DockSide::Right,
+    DockSide::Center => preferred_collapsed_dock_side_for_anchor(anchor_pos.x, area),
+  };
+  let offset = mascot_anchor_in_window(collapsed_size, collapsed_dock, PanelSide::Top, 0, scale);
+  let raw = PhysicalPosition::new(anchor_pos.x - offset.x, anchor_pos.y - offset.y);
+  area.map_or(raw, |a| clamp_to_area(raw, collapsed_size, a))
 }
 
 fn choose_orientation(
-  dock_pos: PhysicalPosition<i32>,
+  anchor_pos: PhysicalPosition<i32>,
   collapsed_size: PhysicalSize<u32>,
   probe_size: PhysicalSize<u32>,
   area: Option<WorkArea>,
+  scale: f64,
 ) -> (DockSide, PanelSide) {
   let Some(area) = area else {
-    return (DockSide::Right, PanelSide::Top);
+    return (DockSide::Center, PanelSide::Top);
   };
-  let extra_w = probe_size.width.saturating_sub(collapsed_size.width) as i32;
+  let edge_x = (EDGE_ANCHOR_OFFSET_X * scale).round() as i32;
+  let edge_y = (DOCK_CENTER_OFFSET_Y * scale).round() as i32;
+  let half_probe_w = (probe_size.width as i32 + 1) / 2;
   let extra_h = probe_size.height.saturating_sub(collapsed_size.height) as i32;
-  let room_left = dock_pos.x - area.x;
-  let room_right = (area.x + area.width as i32) - (dock_pos.x + collapsed_size.width as i32);
-  let room_above = dock_pos.y - area.y;
-  let room_below = (area.y + area.height as i32) - (dock_pos.y + collapsed_size.height as i32);
 
-  let dock_side = if room_left >= extra_w {
+  let room_left = anchor_pos.x - area.x;
+  let room_right = (area.x + area.width as i32) - anchor_pos.x;
+  let room_above = (anchor_pos.y - edge_y) - area.y;
+  let room_below = (area.y + area.height as i32) - (anchor_pos.y + edge_y);
+
+  let dock_side = if room_left >= half_probe_w && room_right >= half_probe_w {
+    DockSide::Center
+  } else if room_left >= probe_size.width as i32 - edge_x && room_right >= edge_x {
     DockSide::Right
-  } else if room_right >= extra_w {
+  } else if room_right >= probe_size.width as i32 - edge_x && room_left >= edge_x {
     DockSide::Left
   } else if room_left >= room_right {
     DockSide::Right
@@ -397,7 +454,18 @@ fn preferred_collapsed_dock_side(
   }
 }
 
-/// Plans a dynamic resize while locking the mascot dock corner on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DynamicResizePlan {
+  window_pos: PhysicalPosition<i32>,
+  dock_side: DockSide,
+  panel_side: PanelSide,
+  expanded: bool,
+  anchor_pos: PhysicalPosition<i32>,
+  collapsed_pos: PhysicalPosition<i32>,
+}
+
+/// Plans a dynamic resize while locking the mascot avatar center on screen.
+#[allow(clippy::too_many_arguments)]
 fn plan_dynamic_resize(
   current_pos: PhysicalPosition<i32>,
   current_size: PhysicalSize<u32>,
@@ -407,38 +475,67 @@ fn plan_dynamic_resize(
   was_expanded: bool,
   cur_dock: DockSide,
   cur_panel: PanelSide,
+  cur_composer_h_phys: i32,
+  next_composer_h_phys: i32,
+  saved_anchor: Option<PhysicalPosition<i32>>,
+  expected_pos: Option<PhysicalPosition<i32>>,
   area: Option<WorkArea>,
-) -> (PhysicalPosition<i32>, DockSide, PanelSide, bool, PhysicalPosition<i32>) {
-  let dock_pos = dock_origin_from_window(current_pos, current_size, collapsed_size, cur_dock, cur_panel);
-  let dock_clamped = area.map_or(dock_pos, |a| clamp_to_area(dock_pos, collapsed_size, a));
+  scale: f64,
+) -> DynamicResizePlan {
+  let raw_anchor = if !moved_externally(current_pos, expected_pos) {
+    saved_anchor.unwrap_or_else(|| {
+      let offset = mascot_anchor_in_window(current_size, cur_dock, cur_panel, cur_composer_h_phys, scale);
+      PhysicalPosition::new(current_pos.x + offset.x, current_pos.y + offset.y)
+    })
+  } else {
+    let offset = mascot_anchor_in_window(current_size, cur_dock, cur_panel, cur_composer_h_phys, scale);
+    PhysicalPosition::new(current_pos.x + offset.x, current_pos.y + offset.y)
+  };
+
+  let collapsed_dock = preferred_collapsed_dock_side_for_anchor(raw_anchor.x, area);
+  let collapsed_pos = collapsed_pos_from_anchor(raw_anchor, collapsed_size, collapsed_dock, area, scale);
+  let collapsed_offset = mascot_anchor_in_window(collapsed_size, collapsed_dock, PanelSide::Top, 0, scale);
+  let anchor_clamped = PhysicalPosition::new(
+    collapsed_pos.x + collapsed_offset.x,
+    collapsed_pos.y + collapsed_offset.y,
+  );
+
   let next_expanded = target_size.width > collapsed_size.width + 2
     || target_size.height > collapsed_size.height + 2;
 
   let (next_dock, next_panel) = if !next_expanded {
-    (
-      preferred_collapsed_dock_side(dock_clamped, collapsed_size, area),
-      PanelSide::Top,
-    )
+    (collapsed_dock, PanelSide::Top)
   } else if !was_expanded {
-    choose_orientation(dock_clamped, collapsed_size, probe_size, area)
+    choose_orientation(anchor_clamped, collapsed_size, probe_size, area, scale)
   } else {
     (cur_dock, cur_panel)
   };
 
   let next_pos = if !next_expanded {
-    dock_clamped
+    collapsed_pos
   } else {
-    window_pos_from_dock(
-      dock_clamped,
-      collapsed_size,
+    let next_offset = mascot_anchor_in_window(
       target_size,
       next_dock,
       next_panel,
-      area,
-    )
+      next_composer_h_phys,
+      scale,
+    );
+    let raw = PhysicalPosition::new(
+      anchor_clamped.x - next_offset.x,
+      anchor_clamped.y - next_offset.y,
+    );
+    area.map_or(raw, |a| clamp_to_area(raw, target_size, a))
   };
 
-  (next_pos, next_dock, next_panel, next_expanded, dock_clamped)
+  DynamicResizePlan {
+    window_pos: next_pos,
+    dock_side: next_dock,
+    panel_side: next_panel,
+    expanded: next_expanded,
+    anchor_pos: anchor_clamped,
+    collapsed_pos,
+  }
 }
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -698,6 +795,8 @@ fn apply_layout(
     area,
   );
   let (logical_w, logical_h) = sanitize_logical_size(request.width, request.height);
+  let composer_h_logical = sanitize_composer_height(request.composer_height, logical_h);
+  let next_composer_h_phys = (composer_h_logical * scale).round() as i32;
   let target_size = cap_size(
     LogicalSize::new(logical_w, logical_h).to_physical::<u32>(scale),
     area,
@@ -715,14 +814,15 @@ fn apply_layout(
   let old_position = window.outer_position().ok();
   let was_expanded = pet.expanded.load(Ordering::Acquire);
 
-  let (next_pos, next_dock, next_panel, next_expanded, size_changed) = {
+  let (plan, size_changed, pos_changed) = {
     let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
     geo.composited = composited;
     geo.hit_rects = request.hit_rects.clone();
     let cur_pos = old_position
       .or(geo.last_collapsed_pos)
       .unwrap_or_else(|| PhysicalPosition::new(0, 0));
-    let (next_pos, next_dock, next_panel, next_expanded, dock_pos) = plan_dynamic_resize(
+    let cur_composer_h_phys = (geo.current_composer_height * scale).round() as i32;
+    let plan = plan_dynamic_resize(
       cur_pos,
       current_size,
       collapsed_size,
@@ -731,20 +831,29 @@ fn apply_layout(
       was_expanded,
       geo.dock_side,
       geo.panel_side,
+      cur_composer_h_phys,
+      next_composer_h_phys,
+      geo.anchor_pos,
+      geo.expected_window_pos,
       area,
+      scale,
     );
     let size_changed = current_size.width.abs_diff(target_size.width) > 1
       || current_size.height.abs_diff(target_size.height) > 1
-      || next_dock != geo.dock_side
-      || next_panel != geo.panel_side;
-    geo.dock_side = next_dock;
-    geo.panel_side = next_panel;
-    geo.last_collapsed_pos = Some(dock_pos);
+      || plan.dock_side != geo.dock_side
+      || plan.panel_side != geo.panel_side;
+    let pos_changed = old_position != Some(plan.window_pos);
+    geo.dock_side = plan.dock_side;
+    geo.panel_side = plan.panel_side;
+    geo.anchor_pos = Some(plan.anchor_pos);
+    geo.last_collapsed_pos = Some(plan.collapsed_pos);
+    geo.expected_window_pos = Some(plan.window_pos);
     geo.current_logical_size = (logical_w, logical_h);
-    (next_pos, next_dock, next_panel, next_expanded, size_changed)
+    geo.current_composer_height = composer_h_logical;
+    (plan, size_changed, pos_changed)
   };
 
-  pet.expanded.store(next_expanded, Ordering::Release);
+  pet.expanded.store(plan.expanded, Ordering::Release);
 
   if size_changed {
     // Clear previous region before changing window dimensions so no frames clip against stale bounds.
@@ -753,21 +862,22 @@ fn apply_layout(
 
     let growing = target_size.width > current_size.width || target_size.height > current_size.height;
     apply_linux_size_lock(window, None);
-    if growing && old_position != Some(next_pos) {
-      let _ = window.set_position(next_pos);
+    if growing && pos_changed {
+      let _ = window.set_position(plan.window_pos);
     }
     window
       .set_size(target_size)
       .map_err(|_| native_error("Could not resize desktop pet"))?;
     apply_linux_size_lock(window, Some(target_size));
-    if !growing && old_position != Some(next_pos) {
-      let _ = window.set_position(next_pos);
-    } else if growing && window.outer_position().ok() != Some(next_pos) {
-      let _ = window.set_position(next_pos);
+    if !growing && pos_changed {
+      let _ = window.set_position(plan.window_pos);
+    } else if growing && window.outer_position().ok() != Some(plan.window_pos) {
+      let _ = window.set_position(plan.window_pos);
     }
+  } else if pos_changed {
+    let _ = window.set_position(plan.window_pos);
   }
 
-  let _ = (next_dock, next_panel);
   apply_window_region(window, &request.hit_rects, composited);
   if request.focus {
     let _ = window.set_focus();
@@ -813,6 +923,7 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
 
   let composited = detect_composited(&window);
   let mut initial_pos = saved_pos;
+  let mut initial_anchor = None;
   let mut initial_dock = DockSide::Right;
   if let Some(monitor) = monitor {
     let area = monitor.work_area();
@@ -832,6 +943,8 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     let clamped = clamp_position(target, size, &monitor);
     initial_pos = Some(clamped);
     initial_dock = preferred_collapsed_dock_side(clamped, size, Some(work));
+    let offset = mascot_anchor_in_window(size, initial_dock, PanelSide::Top, 0, scale);
+    initial_anchor = Some(PhysicalPosition::new(clamped.x + offset.x, clamped.y + offset.y));
     apply_linux_size_lock(&window, None);
     let _ = window.set_size(size);
     apply_linux_size_lock(&window, Some(size));
@@ -844,11 +957,15 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
     geo.panel_side = PanelSide::Top;
     geo.composited = composited;
     geo.current_logical_size = COLLAPSED_SIZE;
+    geo.current_composer_height = 0.0;
+    geo.anchor_pos = initial_anchor;
+    geo.expected_window_pos = initial_pos;
     geo.hit_rects.clear();
     if let Some(pos) = initial_pos {
       geo.last_collapsed_pos = Some(pos);
     }
   }
+  pet.focused.store(false, Ordering::Release);
   apply_window_region(&window, &[], composited);
   Ok(window)
 }
@@ -864,12 +981,26 @@ fn snapshot_collapsed_pos_before_hide(app: &AppHandle, window: &WebviewWindow) {
     area,
   );
   let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
-  let dock_pos = dock_origin_from_window(pos, cur_size, collapsed_size, geo.dock_side, geo.panel_side);
-  let saved = area.map_or(dock_pos, |a| clamp_to_area(dock_pos, collapsed_size, a));
+  let anchor = if !moved_externally(pos, geo.expected_window_pos) {
+    geo.anchor_pos.unwrap_or_else(|| {
+      let composer_h_phys = (geo.current_composer_height * scale).round() as i32;
+      let offset = mascot_anchor_in_window(cur_size, geo.dock_side, geo.panel_side, composer_h_phys, scale);
+      PhysicalPosition::new(pos.x + offset.x, pos.y + offset.y)
+    })
+  } else {
+    let composer_h_phys = (geo.current_composer_height * scale).round() as i32;
+    let offset = mascot_anchor_in_window(cur_size, geo.dock_side, geo.panel_side, composer_h_phys, scale);
+    PhysicalPosition::new(pos.x + offset.x, pos.y + offset.y)
+  };
+  let collapsed_dock = preferred_collapsed_dock_side_for_anchor(anchor.x, area);
+  let saved = collapsed_pos_from_anchor(anchor, collapsed_size, collapsed_dock, area, scale);
   geo.last_collapsed_pos = Some(saved);
-  geo.dock_side = preferred_collapsed_dock_side(saved, collapsed_size, area);
+  geo.anchor_pos = None;
+  geo.expected_window_pos = None;
+  geo.dock_side = collapsed_dock;
   geo.panel_side = PanelSide::Top;
   geo.current_logical_size = COLLAPSED_SIZE;
+  geo.current_composer_height = 0.0;
   geo.hit_rects.clear();
 }
 
@@ -950,6 +1081,7 @@ pub async fn control_with_layout(
       };
       apply_window_region(&window, &hit_rects, composited);
       pet.visible.store(true, Ordering::Release);
+      pet.focused.store(window.is_focused().unwrap_or(false), Ordering::Release);
       save_current_preference(app, true);
     }
     "hide" => {
@@ -967,6 +1099,7 @@ pub async fn control_with_layout(
       }
       pet.visible.store(false, Ordering::Release);
       pet.expanded.store(false, Ordering::Release);
+      pet.focused.store(false, Ordering::Release);
       save_current_preference(app, false);
     }
     "set-expanded" => {
@@ -981,6 +1114,7 @@ pub async fn control_with_layout(
           PetWindowLayoutRequest {
             width,
             height,
+            composer_height: 0.0,
             focus: expanded,
             hit_rects: Vec::new(),
           },
@@ -1009,6 +1143,7 @@ pub async fn control_with_layout(
         let composited = detect_composited(&window);
         let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
         geo.composited = composited;
+        pet.focused.store(window.is_focused().unwrap_or(false), Ordering::Release);
       }
       return Ok(state(app));
     }
@@ -1051,6 +1186,13 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         let _ = control(&app, "hide", None).await;
       });
     }
+    WindowEvent::Focused(focused) => {
+      let app = window.app_handle();
+      let pet = app.state::<DesktopPet>();
+      if pet.focused.swap(*focused, Ordering::AcqRel) != *focused {
+        publish(app);
+      }
+    }
     WindowEvent::Moved(_) => {
       let app = window.app_handle().clone();
       let seq = {
@@ -1079,23 +1221,36 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
           LogicalSize::new(COLLAPSED_SIZE.0, COLLAPSED_SIZE.1).to_physical::<u32>(scale),
           Some(work),
         );
-        let dock_changed = {
+        let (dock_changed, moved_by_user) = {
           let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
-          let dock_pos = dock_origin_from_window(clamped, size, collapsed_size, geo.dock_side, geo.panel_side);
-          geo.last_collapsed_pos = Some(clamp_to_area(dock_pos, collapsed_size, work));
-          if !pet.expanded.load(Ordering::Acquire) {
-            let preferred = preferred_collapsed_dock_side(clamped, collapsed_size, Some(work));
-            let changed = preferred != geo.dock_side;
-            geo.dock_side = preferred;
-            changed
+          if !moved_externally(clamped, geo.expected_window_pos) {
+            (false, false)
           } else {
-            false
+            geo.expected_window_pos = Some(clamped);
+            if !pet.expanded.load(Ordering::Acquire) {
+              let preferred = preferred_collapsed_dock_side(clamped, collapsed_size, Some(work));
+              let changed = preferred != geo.dock_side;
+              geo.dock_side = preferred;
+              geo.last_collapsed_pos = Some(clamped);
+              let offset = mascot_anchor_in_window(collapsed_size, preferred, PanelSide::Top, 0, scale);
+              geo.anchor_pos = Some(PhysicalPosition::new(clamped.x + offset.x, clamped.y + offset.y));
+              (changed, true)
+            } else {
+              let composer_h_phys = (geo.current_composer_height * scale).round() as i32;
+              let offset = mascot_anchor_in_window(size, geo.dock_side, geo.panel_side, composer_h_phys, scale);
+              let anchor = PhysicalPosition::new(clamped.x + offset.x, clamped.y + offset.y);
+              let collapsed_dock = preferred_collapsed_dock_side_for_anchor(anchor.x, Some(work));
+              let collapsed_pos = collapsed_pos_from_anchor(anchor, collapsed_size, collapsed_dock, Some(work), scale);
+              geo.anchor_pos = Some(anchor);
+              geo.last_collapsed_pos = Some(collapsed_pos);
+              (false, true)
+            }
           }
         };
         if dock_changed {
           publish(&app);
         }
-        if pet.visible.load(Ordering::Acquire) {
+        if moved_by_user && pet.visible.load(Ordering::Acquire) {
           save_current_preference(&app, true);
         }
       });
@@ -1117,11 +1272,15 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
       let pet = app.state::<DesktopPet>();
       pet.visible.store(false, Ordering::Release);
       pet.expanded.store(false, Ordering::Release);
+      pet.focused.store(false, Ordering::Release);
       {
         let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
         geo.dock_side = DockSide::Right;
         geo.panel_side = PanelSide::Top;
+        geo.anchor_pos = None;
+        geo.expected_window_pos = None;
         geo.current_logical_size = COLLAPSED_SIZE;
+        geo.current_composer_height = 0.0;
         geo.hit_rects.clear();
       }
       publish(app);
@@ -1137,67 +1296,225 @@ mod tests {
 
   const WORK_1080: WorkArea = WorkArea { x: 0, y: 0, width: 1920, height: 1040 };
   const COLLAPSED_1X: PhysicalSize<u32> = PhysicalSize::new(164, 128);
-  const PROBE_1X: PhysicalSize<u32> = PhysicalSize::new(448, 480);
+  const PROBE_1X: PhysicalSize<u32> = PhysicalSize::new(380, 480);
 
   #[test]
   fn dynamic_resize_locks_dock_across_all_four_corners_and_returns_cleanly() {
     let bubble_1x = PhysicalSize::new(370, 320);
     let cases = [
-      (PhysicalPosition::new(1740, 896), DockSide::Right, PanelSide::Top),
-      (PhysicalPosition::new(20, 896), DockSide::Left, PanelSide::Top),
-      (PhysicalPosition::new(1740, 20), DockSide::Right, PanelSide::Bottom),
-      (PhysicalPosition::new(20, 20), DockSide::Left, PanelSide::Bottom),
+      (PhysicalPosition::new(1740, 896), DockSide::Right, DockSide::Right, PanelSide::Top),
+      (PhysicalPosition::new(20, 896), DockSide::Left, DockSide::Left, PanelSide::Top),
+      (PhysicalPosition::new(1740, 20), DockSide::Right, DockSide::Right, PanelSide::Bottom),
+      (PhysicalPosition::new(20, 20), DockSide::Left, DockSide::Left, PanelSide::Bottom),
     ];
-    for (start, expected_dock, expected_panel) in cases {
-      let (pos1, dock1, panel1, exp1, dock_anchor) = plan_dynamic_resize(
+    for (start, initial_dock, expected_dock, expected_panel) in cases {
+      let p1 = plan_dynamic_resize(
         start,
         COLLAPSED_1X,
         COLLAPSED_1X,
         bubble_1x,
         PROBE_1X,
         false,
-        DockSide::Right,
+        initial_dock,
         PanelSide::Top,
+        0,
+        0,
+        None,
+        None,
         Some(WORK_1080),
+        1.0,
       );
-      assert_eq!((dock1, panel1, exp1, dock_anchor), (expected_dock, expected_panel, true, start));
+      assert_eq!((p1.dock_side, p1.panel_side, p1.expanded, p1.collapsed_pos), (expected_dock, expected_panel, true, start));
 
-      // Grow taller while already expanded -> orientation stays locked and dock stays pinned!
-      let taller = PhysicalSize::new(430, 480);
-      let (pos2, dock2, panel2, exp2, dock_anchor2) = plan_dynamic_resize(
-        pos1,
+      // Grow taller while already expanded -> orientation stays locked and mascot stays pinned!
+      let taller = PhysicalSize::new(380, 480);
+      let p2 = plan_dynamic_resize(
+        p1.window_pos,
         bubble_1x,
         COLLAPSED_1X,
         taller,
         PROBE_1X,
         true,
-        dock1,
-        panel1,
+        p1.dock_side,
+        p1.panel_side,
+        0,
+        0,
+        Some(p1.anchor_pos),
+        Some(p1.window_pos),
         Some(WORK_1080),
+        1.0,
       );
-      assert_eq!((dock2, panel2, exp2, dock_anchor2), (expected_dock, expected_panel, true, start));
+      assert_eq!((p2.dock_side, p2.panel_side, p2.expanded, p2.collapsed_pos), (expected_dock, expected_panel, true, start));
 
       // Collapse back -> exact original dock position!
-      let (back, _, _, exp3, _) = plan_dynamic_resize(
-        pos2,
+      let p3 = plan_dynamic_resize(
+        p2.window_pos,
         taller,
         COLLAPSED_1X,
         COLLAPSED_1X,
         PROBE_1X,
         true,
-        dock2,
-        panel2,
+        p2.dock_side,
+        p2.panel_side,
+        0,
+        0,
+        Some(p2.anchor_pos),
+        Some(p2.window_pos),
         Some(WORK_1080),
+        1.0,
       );
-      assert_eq!((back, exp3), (start, false));
+      assert_eq!((p3.window_pos, p3.expanded), (start, false));
     }
+  }
+
+  #[test]
+  fn composer_below_centers_under_mascot_in_open_space_without_moving_mascot() {
+    let start = PhysicalPosition::new(880, 456);
+    let initial_dock = DockSide::Left; // center X = 940 (< 960)
+    let expected_mascot_center = PhysicalPosition::new(880 + 60, 456 + 64); // (940, 520)
+
+    // Open composer directly below mascot (width 320, height 180, composer_h 52)
+    let composer_only = PhysicalSize::new(320, 180);
+    let p1 = plan_dynamic_resize(
+      start,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      composer_only,
+      PROBE_1X,
+      false,
+      initial_dock,
+      PanelSide::Top,
+      0,
+      52,
+      None,
+      None,
+      Some(WORK_1080),
+      1.0,
+    );
+    assert_eq!(p1.dock_side, DockSide::Center);
+    assert_eq!(p1.panel_side, PanelSide::Top);
+    assert_eq!(p1.window_pos, PhysicalPosition::new(940 - 160, 520 - 64));
+
+    // Grow composer textarea +30px -> mascot stays frozen at (940, 520)
+    let taller_composer = PhysicalSize::new(320, 210);
+    let p2 = plan_dynamic_resize(
+      p1.window_pos,
+      composer_only,
+      COLLAPSED_1X,
+      taller_composer,
+      PROBE_1X,
+      true,
+      p1.dock_side,
+      p1.panel_side,
+      52,
+      82,
+      Some(p1.anchor_pos),
+      Some(p1.window_pos),
+      Some(WORK_1080),
+      1.0,
+    );
+    assert_eq!(p2.window_pos, p1.window_pos);
+    let mascot_after_grow = {
+      let off = mascot_anchor_in_window(taller_composer, p2.dock_side, p2.panel_side, 82, 1.0);
+      PhysicalPosition::new(p2.window_pos.x + off.x, p2.window_pos.y + off.y)
+    };
+    assert_eq!(mascot_after_grow, expected_mascot_center);
+
+    // Bubble opens above mascot while composer stays open below -> mascot STILL frozen!
+    let with_bubble = PhysicalSize::new(356, 404);
+    let p3 = plan_dynamic_resize(
+      p2.window_pos,
+      taller_composer,
+      COLLAPSED_1X,
+      with_bubble,
+      PROBE_1X,
+      true,
+      p2.dock_side,
+      p2.panel_side,
+      82,
+      82,
+      Some(p2.anchor_pos),
+      Some(p2.window_pos),
+      Some(WORK_1080),
+      1.0,
+    );
+    let mascot_with_bubble = {
+      let off = mascot_anchor_in_window(with_bubble, p3.dock_side, p3.panel_side, 82, 1.0);
+      PhysicalPosition::new(p3.window_pos.x + off.x, p3.window_pos.y + off.y)
+    };
+    assert_eq!(mascot_with_bubble, expected_mascot_center);
+
+    // Collapse back -> exact original collapsed window pos
+    let p4 = plan_dynamic_resize(
+      p3.window_pos,
+      with_bubble,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      PROBE_1X,
+      true,
+      p3.dock_side,
+      p3.panel_side,
+      82,
+      0,
+      Some(p3.anchor_pos),
+      Some(p3.window_pos),
+      Some(WORK_1080),
+      1.0,
+    );
+    assert_eq!((p4.window_pos, p4.expanded), (start, false));
+  }
+
+  #[test]
+  fn composer_below_clamps_upward_near_bottom_edge_and_restores_corner_on_close() {
+    let start = PhysicalPosition::new(1740, 896); // default bottom-right corner
+    let composer_only = PhysicalSize::new(320, 180);
+
+    let p1 = plan_dynamic_resize(
+      start,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      composer_only,
+      PROBE_1X,
+      false,
+      DockSide::Right,
+      PanelSide::Top,
+      0,
+      52,
+      None,
+      None,
+      Some(WORK_1080),
+      1.0,
+    );
+    assert_eq!(p1.dock_side, DockSide::Right);
+    assert_eq!(p1.panel_side, PanelSide::Top);
+    // Clamped up so bottom edge stays at 1040 (860 + 180 = 1040), x stays aligned with mascot right edge
+    assert_eq!(p1.window_pos, PhysicalPosition::new(1584, 860));
+
+    // Close composer -> mascot smoothly returns to exact original corner (1740, 896)
+    let p2 = plan_dynamic_resize(
+      p1.window_pos,
+      composer_only,
+      COLLAPSED_1X,
+      COLLAPSED_1X,
+      PROBE_1X,
+      true,
+      p1.dock_side,
+      p1.panel_side,
+      52,
+      0,
+      Some(p1.anchor_pos),
+      Some(p1.window_pos),
+      Some(WORK_1080),
+      1.0,
+    );
+    assert_eq!((p2.window_pos, p2.expanded), (start, false));
   }
 
   #[test]
   fn dynamic_resize_preserves_drag_delta_when_collapsing() {
     let start = PhysicalPosition::new(40, 40);
     let expanded = PhysicalSize::new(380, 360);
-    let (pos1, dock, panel, _, _) = plan_dynamic_resize(
+    let p1 = plan_dynamic_resize(
       start,
       COLLAPSED_1X,
       COLLAPSED_1X,
@@ -1206,22 +1523,32 @@ mod tests {
       false,
       DockSide::Left,
       PanelSide::Top,
+      0,
+      52,
+      None,
+      None,
       Some(WORK_1080),
+      1.0,
     );
-    let dragged = PhysicalPosition::new(pos1.x + 120, pos1.y + 80);
-    let (collapsed, _, _, exp, _) = plan_dynamic_resize(
+    let dragged = PhysicalPosition::new(p1.window_pos.x + 120, p1.window_pos.y + 80);
+    let p2 = plan_dynamic_resize(
       dragged,
       expanded,
       COLLAPSED_1X,
       COLLAPSED_1X,
       PROBE_1X,
       true,
-      dock,
-      panel,
+      p1.dock_side,
+      p1.panel_side,
+      52,
+      0,
+      Some(p1.anchor_pos),
+      Some(p1.window_pos),
       Some(WORK_1080),
+      1.0,
     );
-    assert_eq!(exp, false);
-    assert_eq!(collapsed, PhysicalPosition::new(160, 120));
+    assert_eq!(p2.expanded, false);
+    assert_eq!(p2.window_pos, PhysicalPosition::new(160, 120));
   }
 
   #[test]
