@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -233,11 +234,29 @@ export function PetApp() {
   const openReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openIpcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeRafRef = useRef<number | null>(null);
+  const avatarPressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showComposer = shouldRenderComposer(composerPhase, settingsOpen);
   const composerRequested = composerPhase === 'opening' || composerPhase === 'open';
   const dockCompact = composerPhase === 'open' || composerPhase === 'closing';
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
+
+  const clearAvatarPressResetTimer = useCallback(() => {
+    if (avatarPressResetTimerRef.current !== null) {
+      clearTimeout(avatarPressResetTimerRef.current);
+      avatarPressResetTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleAvatarPressReset = useCallback(() => {
+    clearAvatarPressResetTimer();
+    avatarPressResetTimerRef.current = setTimeout(() => {
+      avatarPressResetTimerRef.current = null;
+      if (!pointerRef.current) {
+        avatarPressValidRef.current = false;
+      }
+    }, 0);
+  }, [clearAvatarPressResetTimer]);
 
   const updateComposerState = useCallback((next: ComposerState) => {
     const prev = composerStateRef.current;
@@ -377,11 +396,13 @@ export function PetApp() {
     clearComposerTimers();
     const domFocused = typeof document !== 'undefined' ? document.hasFocus() : false;
     const { state: nextState, orientation } = commitComposerOpen(current, Date.now(), domFocused);
-    if (orientation) {
-      setLayout((prev) => mergePetOrientation(prev, orientation));
-    }
+    flushSync(() => {
+      if (orientation) {
+        setLayout((prev) => mergePetOrientation(prev, orientation));
+      }
+      updateComposerState(nextState);
+    });
     resetStageScroll();
-    updateComposerState(nextState);
     return true;
   }, [clearComposerTimers, readViewportSize, resetStageScroll, updateComposerState]);
 
@@ -708,8 +729,9 @@ export function PetApp() {
 
   useEffect(() => () => {
     clearComposerTimers();
+    clearAvatarPressResetTimer();
     voice.dispose();
-  }, [clearComposerTimers, voice]);
+  }, [clearAvatarPressResetTimer, clearComposerTimers, voice]);
 
   // Theme & page visibility sync
   useEffect(() => {
@@ -1363,6 +1385,7 @@ export function PetApp() {
                       if (composerStateRef.current.phase === 'open' || composerStateRef.current.phase === 'opening') {
                         requestCloseComposer();
                       } else {
+                        setSettingsOpen(false);
                         requestOpenComposer({ ignoreCurrentBubble: true });
                       }
                     }}
@@ -1867,6 +1890,7 @@ export function PetApp() {
             onPointerDown={(event) => {
               if (event.button !== 0) return;
               setCtxMenuOpen(false);
+              clearAvatarPressResetTimer();
               avatarPressValidRef.current = true;
               pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
               event.currentTarget.setPointerCapture(event.pointerId);
@@ -1875,6 +1899,7 @@ export function PetApp() {
               const pointer = pointerRef.current;
               if (!pointer || pointer.id !== event.pointerId) return;
               if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
+              clearAvatarPressResetTimer();
               pointerRef.current = null;
               avatarPressValidRef.current = false;
               if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -1882,11 +1907,22 @@ export function PetApp() {
               }
               void petWindow('drag').catch(report);
             }}
-            onPointerUp={() => { pointerRef.current = null; }}
-            onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
-            onLostPointerCapture={() => { pointerRef.current = null; }}
+            onPointerUp={() => {
+              pointerRef.current = null;
+              scheduleAvatarPressReset();
+            }}
+            onPointerCancel={() => {
+              clearAvatarPressResetTimer();
+              pointerRef.current = null;
+              avatarPressValidRef.current = false;
+            }}
+            onLostPointerCapture={() => {
+              pointerRef.current = null;
+              scheduleAvatarPressReset();
+            }}
             onClick={(event) => {
               if (event.detail > 0 && !avatarPressValidRef.current) return;
+              clearAvatarPressResetTimer();
               avatarPressValidRef.current = false;
               if (settingsOpen) {
                 setSettingsOpen(false);
