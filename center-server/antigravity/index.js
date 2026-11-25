@@ -476,6 +476,18 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			priorNative = current;
 			const cachedReply = current?.reply;
 			if (cachedReply?.end === requestEnd && cachedReply.prefixHash === accepted.ack.prefixHash) {
+				if (cachedReply.reason === "toolUse") {
+					const calls = cachedReply.message.content.filter((part) => part.type === "toolCall");
+					const pending = new Set(slot.roundTrips.pendingIds);
+					// A receipt can replay an answer, but cannot recreate a lost MCP waiter.
+					if (current.phase !== "parked" || !slot.driver.reentry() ||
+						!slot.turnAbort || slot.turnAbort.signal.aborted || !slot.mcpRegistration ||
+						slot.driver.snapshot().conversationId !== current.conversationId ||
+						slot.nativeConfig?.modelId !== modelId || slot.nativeConfig.reasoning !== normalizedReasoning ||
+						calls.length === 0 || calls.some((call) => !pending.has(call.id))) {
+						throw historyChanged("The cached tool call has lost its live native continuation");
+					}
+				}
 				emitStoredReply(cachedReply);
 				return;
 			}
