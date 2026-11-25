@@ -30,6 +30,7 @@ import type {
 	DriverState,
 	DriverTurnRequest,
 	TurnDriver,
+	ToolResultImage,
 	TurnHandle,
 	TurnOutcome,
 	UsageEstimate,
@@ -41,12 +42,14 @@ export interface AcpDriverOptions {
 	/** agy CLI binary. Tests may substitute node with a fake-server script. */
 	bin: string | (() => string);
 	/** Extra argv (production: ["acp"]; tests: fake-server script). */
-	binArgs?: string[] | (() => string[]);
+	binArgs?: string[] | ((request: DriverTurnRequest) => string[]);
 	/** Isolated Gemini profile directory forwarded via `--gemini-dir`. */
 	geminiDir?: string;
 	extraEnv?: Record<string, string>;
 	/** Enable the private PreInvocation listener for actual ACP sessions. */
 	enableTurnRecall?: boolean;
+	/** Tool image delivery remains active when automatic recall is disabled. */
+	enableToolImages?: boolean;
 	/** Select a native effort using the just-selected model's session options. */
 	resolveEffort?: (requested: string, configOptions: unknown) => string | undefined;
 	/** Bridge registration for session/new AND session/load. */
@@ -107,6 +110,7 @@ interface ActiveTurn {
 	 *  future cancel-capable server stranding the turn in the safety-net
 	 *  wait, so the driver tears down instead. */
 	promptStarted: boolean;
+	promptTerminal: boolean;
 	aborted: boolean;
 	abortedBy: "signal" | "timer" | null;
 	parks: number;
@@ -147,6 +151,7 @@ export class AcpDriver implements TurnDriver {
 		kills: 0,
 	};
 	#serverVersion: string | undefined;
+	#systemHash: string | undefined;
 	#lastSessionId: string | undefined;
 	#agentInfo: { name?: string; title?: string } | undefined;
 
@@ -166,6 +171,14 @@ export class AcpDriver implements TurnDriver {
 
 	set onTurnEnd(fn: ((outcome: TurnOutcome) => void) | undefined) {
 		this.#onTurnEnd = fn;
+	}
+
+	queueToolResultImages(toolCallId: string, images: readonly ToolResultImage[]): void {
+		const turn = this.#active;
+		if (!turn || turn.closed || turn.aborted || !turn.promptStarted || !this.#conn) {
+			throw new Error("Tool image delivery requires an active native prompt");
+		}
+		this.#conn.queueToolResultImages(turn.sessionId, toolCallId, images);
 	}
 
 	/** Inject a synthetic activity into the live turn (bridge inbox). Parks the
@@ -360,7 +373,10 @@ export class AcpDriver implements TurnDriver {
 
 		// Prompt. Updates stream through the connection's onUpdate callback.
 		try {
-			// Nothing to cancel before the prompt RPC exists; see promptStarted.
+			if (turn.closed || turn.aborted || request.signal?.aborted) return;
+			await request.beforePrompt?.({ conversationId: turn.sessionId });
+			if (turn.closed || turn.aborted || request.signal?.aborted) return;
+			// Conservative boundary: setup/intent failures remain unattempted.
 			turn.promptStarted = true;
 			const result = await conn.prompt(
 				turn.sessionId,
@@ -368,6 +384,7 @@ export class AcpDriver implements TurnDriver {
 				request.images,
 				request.contextBlock,
 				request.turnRecall,
+				{ onTerminal: () => { turn.promptTerminal = true; } },
 			);
 			if (turn.closed) return;
 			turn.sawResult = true;
@@ -550,12 +567,14 @@ export class AcpDriver implements TurnDriver {
 	#ensureConnection(request: DriverTurnRequest): Promise<AcpConnection> {
 		const previous = this.#conn;
 		if (previous?.alive) {
-			if (!request.turnRecall || !previous.turnRecallUnavailable) return Promise.resolve(previous);
-			// AGY inherits its hook capability at spawn. Reconnect to recover
-			// the listener before dispatching a new recall-bearing prompt.
+			if (request.systemHash === this.#systemHash &&
+				(!request.turnRecall || !previous.turnRecallUnavailable) && !previous.toolImagesUnavailable) {
+				return Promise.resolve(previous);
+			}
+			// Custom agents and hook capabilities are fixed when the process starts.
 			this.#conn = undefined;
-			this.#log("recycle-recall-listener");
-			previous.abortAll("turn recall listener unavailable");
+			this.#log("recycle-native-profile");
+			previous.abortAll("native agent configuration or turn hook changed");
 			previous.kill();
 		}
 		this.#generation += 1;
@@ -563,10 +582,11 @@ export class AcpDriver implements TurnDriver {
 		this.#stats.spawns += 1;
 		const conn = new AcpConnection({
 			bin: typeof this.#opts.bin === "function" ? this.#opts.bin() : this.#opts.bin,
-			binArgs: typeof this.#opts.binArgs === "function" ? this.#opts.binArgs() : this.#opts.binArgs,
+			binArgs: typeof this.#opts.binArgs === "function" ? this.#opts.binArgs(request) : this.#opts.binArgs,
 			geminiDir: this.#opts.geminiDir,
 			extraEnv: this.#opts.extraEnv,
 			enableTurnRecall: this.#opts.enableTurnRecall,
+			enableToolImages: this.#opts.enableToolImages,
 			cwd: request.cwd,
 			mcpServers: this.#opts.mcpServers,
 			log: (msg, data) => this.#log(msg, data),
@@ -585,6 +605,7 @@ export class AcpDriver implements TurnDriver {
 			onExit: (info) => this.#onConnectionExit(conn, info),
 		});
 		this.#conn = conn;
+		this.#systemHash = request.systemHash;
 		this.#log("spawn", { bin: typeof this.#opts.bin === "function" ? this.#opts.bin() : this.#opts.bin });
 		const started = conn.start();
 		const exitWait = conn.waitForExit().finally(() => {
@@ -683,6 +704,7 @@ export class AcpDriver implements TurnDriver {
 			contextUsed: undefined,
 			sawResult: false,
 			promptStarted: false,
+			promptTerminal: false,
 			aborted: false,
 			abortedBy: null,
 			parks: 0,
@@ -794,6 +816,8 @@ export class AcpDriver implements TurnDriver {
 			this.#emit(turn, { type: "text", delta: flushed });
 		}
 		outcome.response = turn.response.text;
+		outcome.promptAttempted = turn.promptStarted;
+		outcome.promptTerminal = turn.promptTerminal;
 		// Gate B stopgap: synthesize usage on clean turns while the server sends
 		// none. Runs BEFORE close so the usage activity drains through the
 		// normal #nextActivity loop (provider maps it onto partial.usage).

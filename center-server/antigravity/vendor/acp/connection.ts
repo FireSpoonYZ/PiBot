@@ -16,14 +16,12 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { frameCarriesUsage } from "./events.ts";
-import type { AgyUsage } from "../driver-types.ts";
+import type { AgyUsage, ToolResultImage } from "../driver-types.ts";
 import { redactText } from "../redact.ts";
 import { JsonRpcResponseError, JsonRpcSession } from "./jsonrpc.ts";
 import {
 	ACP_RECALL_DISABLED_ENV,
-	ACP_RESOURCE_DISCOVERY_TOOL,
 	createAcpRecallHook,
-	MAX_RESOURCE_DISCOVERY_CALLS,
 	type AcpRecallHook,
 	type AcpTurnHookBinding,
 } from "./recall-hook.ts";
@@ -60,8 +58,9 @@ export interface AcpConnectionOptions {
 	/** Isolated Gemini profile directory forwarded via `--gemini-dir`. */
 	geminiDir?: string;
 	extraEnv?: Record<string, string>;
-	/** Own a private PreInvocation and PreToolUse listener for this ACP process. */
+	/** Automatic recall is independent of tool-result image delivery. */
 	enableTurnRecall?: boolean;
+	enableToolImages?: boolean;
 	log: (msg: string, data?: unknown) => void;
 	/** Verified `session/update` payloads (post-suppression). */
 	onUpdate: (sessionId: string | null, update: unknown) => void;	/** Process exit. Fires exactly once. */
@@ -85,13 +84,10 @@ export interface AcpConnectionOptions {
 
 const INIT_TIMEOUT_MS = 30_000;
 const SESSION_OP_TIMEOUT_MS = 20_000;
-const UNCONFIRMED_RESOURCE_DENIAL = "Disallowed tool execution: Antigravity did not confirm that native list_resources was blocked.";
 
 interface PromptHooks {
 	sessionId: string;
 	binding: AcpTurnHookBinding;
-	resourceCalls: Map<string, "pending" | "denied">;
-	resourceViolation: boolean;
 	cancelled: boolean;
 }
 
@@ -168,6 +164,19 @@ export class AcpConnection {
 		return Boolean(this.#opts.enableTurnRecall && !this.#recallHook?.listening);
 	}
 
+	get toolImagesUnavailable(): boolean {
+		return Boolean(this.#opts.enableToolImages && !this.#recallHook?.listening);
+	}
+
+	queueToolResultImages(sessionId: string, toolCallId: string, images: readonly ToolResultImage[]): void {
+		const hooks = this.#promptHooks;
+		if (!this.#opts.enableToolImages || !this.#recallHook?.listening ||
+			!hooks || hooks.sessionId !== sessionId || hooks.cancelled) {
+			throw new Error("Tool image delivery is unavailable for this native prompt");
+		}
+		hooks.binding.queueToolResultImages(toolCallId, images);
+	}
+
 	get pid(): number | undefined {
 		return this.#child?.pid;
 	}
@@ -220,13 +229,13 @@ export class AcpConnection {
 		this.#exitPromise = new Promise<void>((resolve) => {
 			this.#resolveExit = resolve;
 		});
-		if (this.#opts.enableTurnRecall) {
+		if (this.#opts.enableTurnRecall || this.#opts.enableToolImages) {
 			try {
 				this.#recallHook = await createAcpRecallHook({
 					onOversize: (bytes, limitBytes) => this.#opts.log("recall-oversize", { bytes, limitBytes }),
 				});
 			} catch {
-				this.#opts.log("turn-recall-unavailable");
+				this.#opts.log("turn-hook-unavailable");
 			}
 			// Shutdown may have happened while the listener was opening.
 			if (this.#killed) throw new Error("ACP connection closed before startup");
@@ -367,7 +376,9 @@ export class AcpConnection {
 		images: Array<{ data: string; mimeType: string }> = [],
 		contextBlock?: { uri: string; text: string },
 		turnRecall?: string,
+		lifecycle?: { onTerminal?: () => void },
 	): Promise<{ stopReason: string; usage?: AgyUsage }> {
+		turnRecall = this.#opts.enableTurnRecall ? turnRecall : undefined;
 		if (turnRecall && !this.#recallHook?.listening) {
 			throw new Error("ACP turn recall is unavailable because the private hook listener is down");
 		}
@@ -391,23 +402,19 @@ export class AcpConnection {
 		blocks.push({ type: "text", text });
 		const binding = this.#recallHook?.listening ? this.#recallHook.bind(sessionId, turnRecall) : undefined;
 		const hooks: PromptHooks | undefined = binding
-			? { sessionId, binding, resourceCalls: new Map(), resourceViolation: false, cancelled: false }
+			? { sessionId, binding, cancelled: false }
 			: undefined;
 		this.#promptHooks = hooks;
 		try {
 			const result = (await this.request("session/prompt", { sessionId, prompt: blocks })) as
 				Record<string, unknown> | undefined;
-			if (hooks?.resourceViolation) throw new Error(UNCONFIRMED_RESOURCE_DENIAL);
-			if (hooks?.cancelled) return { stopReason: "cancelled" };
 			const stopReason = result?.stopReason;
 			if (typeof stopReason !== "string") {
 				throw new Error("ACP session/prompt returned no stopReason");
 			}
-			if (hooks && stopReason !== "cancelled" &&
-				[...hooks.resourceCalls.values()].includes("pending")) {
-				this.kill();
-				throw new Error(UNCONFIRMED_RESOURCE_DENIAL);
-			}
+			lifecycle?.onTerminal?.();
+			if (hooks?.cancelled) return { stopReason: "cancelled" };
+			if (stopReason !== "cancelled") hooks?.binding.assertImagesDelivered();
 			// Exact PromptResponse.usage is distinct from context-window occupancy
 			// updates; never infer token counts from {used,size}.
 			const usage = parseAcpTurnUsage(result?.usage);
@@ -538,7 +545,7 @@ export class AcpConnection {
 			if (this.#suppressUpdates || this.#killed || this.#exited) return;
 			const p = typeof params === "object" && params !== null ? (params as Record<string, unknown>) : {};
 			const hooks = this.#promptHooks;
-			if (hooks && p.sessionId === hooks.sessionId && (hooks.cancelled || this.#consumeResourceDiscoveryUpdate(hooks, p.update))) {
+			if (hooks && p.sessionId === hooks.sessionId && hooks.cancelled) {
 				return;
 			}
 			const sessionId = typeof p.sessionId === "string" ? p.sessionId : this.#updateSessionId;
@@ -550,45 +557,6 @@ export class AcpConnection {
 			return;
 		}
 		this.#opts.log("notification", { method });
-	}
-
-	#consumeResourceDiscoveryUpdate(hooks: PromptHooks, update: unknown): boolean {
-		if (!update || typeof update !== "object") return false;
-		const { sessionUpdate, toolCallId, name, status, _meta } = update as {
-			sessionUpdate?: string; toolCallId?: string; name?: string; status?: string; _meta?: { mcp?: unknown };
-		};
-		if (sessionUpdate !== "tool_call" && sessionUpdate !== "tool_call_update") return false;
-		if (typeof toolCallId !== "string" || toolCallId.length === 0 || toolCallId.length > 256) return false;
-		const prior = hooks.resourceCalls.get(toolCallId);
-		const native = _meta?.mcp === undefined;
-		const inProgress = status === undefined || status === "pending" || status === "in_progress";
-
-		if (sessionUpdate === "tool_call") {
-			// AGY announces this tool before the native PreToolUse hook executes.
-			// Defer only exact native discovery starts until the terminal update.
-			if (!prior && (name !== ACP_RESOURCE_DISCOVERY_TOOL || !native)) return false;
-			if (name === ACP_RESOURCE_DISCOVERY_TOOL && native && inProgress &&
-				(prior === "pending" || (!prior && hooks.resourceCalls.size < MAX_RESOURCE_DISCOVERY_CALLS))) {
-				hooks.resourceCalls.set(toolCallId, "pending");
-				return true;
-			}
-		} else {
-			if (!prior) return false;
-			if (native && (name === undefined || name === ACP_RESOURCE_DISCOVERY_TOOL)) {
-				if (inProgress && prior === "pending") return true;
-				if (status === "failed" && (prior === "denied" || hooks.binding.takeResourceDenial(toolCallId))) {
-					hooks.resourceCalls.set(toolCallId, "denied");
-					return true;
-				}
-			}
-		}
-
-		// Success, a failed frame without the authenticated receipt, or a
-		// contradictory update cannot be turned into a successful reply.
-		hooks.resourceViolation = true;
-		this.abortAll(UNCONFIRMED_RESOURCE_DENIAL);
-		this.kill();
-		return true;
 	}
 
 	/** Wrap a request: -32000 family becomes AcpAuthError with the remediation

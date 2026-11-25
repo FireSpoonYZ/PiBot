@@ -5,12 +5,10 @@ const { createConnection } = require("node:net");
 // Match MAX_FRAME_BYTES in the TypeScript bridge without loading TypeScript.
 const MAX_HOOK_INPUT_BYTES = 32 * 1024 * 1024;
 const MAX_REPLY_BYTES = MAX_HOOK_INPUT_BYTES + 65;
-const HOOK_DEADLINE_MS = 1_500;
+const HOOK_DEADLINE_MS = 5_000;
+const denyNativeTools = process.argv[2] === "--deny-native-tools";
+// Persisted older sessions may still call this flag. No denial receipt is needed.
 const denyResourceDiscovery = process.argv[2] === "--deny-list-resources";
-const nativeResourceDenial = JSON.stringify({
-	decision: "deny",
-	reason: "Native resource discovery is unavailable in PiBot Center. Continue the reply using the conversation and available pibot-bridge tools.",
-});
 
 async function readBounded(stream, maxBytes) {
 	const chunks = [];
@@ -41,23 +39,14 @@ async function requestTurnHook() {
 		const conversationId = event?.conversationId;
 		if (typeof conversationId !== "string" || !conversationId || conversationId.length > 256) return;
 
-		let deniedToolCallId;
-		if (denyResourceDiscovery) {
-			if (event.hookEventName !== "PreToolUse" || event.toolCall?.name !== "list_resources") return;
-			deniedToolCallId = event.toolCall.id;
-			if (typeof deniedToolCallId !== "string" || deniedToolCallId.length === 0 || deniedToolCallId.length > 256) return;
-		}
-		// Send only the correlation identifiers. Prompt, tool arguments and
-		// workspace data never cross the hook transport.
+		// Only the native session identifier crosses this private transport.
+		// The Center owns the current prompt's queue and image provenance.
 		const nonce = randomBytes(16).toString("hex");
-		const subject = denyResourceDiscovery ? JSON.stringify([conversationId, deniedToolCallId]) : conversationId;
-		const proof = createHmac("sha256", key).update(denyResourceDiscovery ? "deny:" : "read:").update(nonce).update(subject).digest("hex");
-		const request = JSON.stringify({ conversationId, nonce, proof, deniedToolCallId });
+		const proof = createHmac("sha256", key).update("read:").update(nonce).update(conversationId).digest("hex");
+		const request = JSON.stringify({ conversationId, nonce, proof });
 		socket = createConnection({ host: "127.0.0.1", port }, () => socket.end(request));
 		const reply = await readBounded(socket, MAX_REPLY_BYTES);
 		if (!reply || reply[64] !== 10) return;
-
-		// Authenticate the reply too, in case another process later takes the port.
 		const signature = reply.subarray(0, 64).toString("utf8");
 		if (!/^[a-f0-9]{64}$/.test(signature)) return;
 		const body = reply.subarray(65);
@@ -71,12 +60,13 @@ async function requestTurnHook() {
 
 process.stdout.on("error", () => {});
 
-if (denyResourceDiscovery) {
-	// Flush the deny decision before reporting it to Center. AGY waits for
-	// the hook to exit, so its failed update follows the receipt.
-	process.stdout.write(`${nativeResourceDenial}\n`, (error) => {
-		if (!error) void requestTurnHook().catch(() => {});
-	});
+if (denyNativeTools || denyResourceDiscovery) {
+	// The dedicated agent's exact PreToolUse matcher selects business tools.
+	// Deny this call only; internal progress and the rest of the turn continue.
+	process.stdout.write(JSON.stringify({
+		decision: "deny",
+		reason: "This action is provided by PiBot host tools. Continue using pibot-bridge codemode, or a directly offered model-only tool. Do not run the native CLI business tool.",
+	}) + "\n");
 } else {
-	requestTurnHook().catch(() => undefined).then((body) => process.stdout.write(`${body ?? "{}"}\n`));
+	requestTurnHook().catch(() => undefined).then((body) => process.stdout.write((body ?? "{}") + "\n"));
 }
