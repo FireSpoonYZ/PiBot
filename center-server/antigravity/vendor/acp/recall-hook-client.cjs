@@ -51,11 +51,38 @@ async function requestTurnHook() {
 		if (!/^[a-f0-9]{64}$/.test(signature)) return;
 		const body = reply.subarray(65);
 		const expected = createHmac("sha256", key).update("reply:").update(nonce).update(body).digest();
-		if (timingSafeEqual(Buffer.from(signature, "hex"), expected)) return body.toString("utf8");
+		if (!timingSafeEqual(Buffer.from(signature, "hex"), expected)) return;
+		const text = body.toString("utf8");
+		const parsed = JSON.parse(text);
+		if (!parsed || !Array.isArray(parsed.injectSteps)) return;
+		const deliveryProof = createHmac("sha256", key).update("delivered:")
+			.update(nonce).update(conversationId).update(body).digest("hex");
+		return { text, port, receipt: JSON.stringify({ conversationId, nonce, delivered: true, proof: deliveryProof }) };
 	} finally {
 		clearTimeout(timeout);
 		socket?.destroy();
 	}
+}
+
+// This acknowledges only local helper delivery, not native history persistence.
+async function confirmDelivery({ port, receipt }) {
+	let socket;
+	const timeout = setTimeout(() => socket?.destroy(), HOOK_DEADLINE_MS);
+	try {
+		socket = createConnection({ host: "127.0.0.1", port }, () => socket.end(receipt));
+		// The listener applies the receipt before closing. Keep the helper alive
+		// until then, so normal hook completion cannot race ahead of local ACK.
+		await readBounded(socket, 64);
+	} finally {
+		clearTimeout(timeout);
+		socket?.destroy();
+	}
+}
+
+function writeOutput(text) {
+	return new Promise((resolve, reject) => {
+		process.stdout.write(text + "\n", (error) => error ? reject(error) : resolve());
+	});
 }
 
 process.stdout.on("error", () => {});
@@ -68,5 +95,9 @@ if (denyNativeTools || denyResourceDiscovery) {
 		reason: "This action is provided by PiBot host tools. Continue using pibot-bridge codemode, or a directly offered model-only tool. Do not run the native CLI business tool.",
 	}) + "\n");
 } else {
-	requestTurnHook().catch(() => undefined).then((body) => process.stdout.write((body ?? "{}") + "\n"));
+	void (async () => {
+		const reply = await requestTurnHook().catch(() => undefined);
+		await writeOutput(reply?.text ?? "{}");
+		if (reply) await confirmDelivery(reply);
+	})().catch(() => { process.exitCode = 1; });
 }

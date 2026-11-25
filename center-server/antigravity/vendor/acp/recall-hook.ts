@@ -47,7 +47,8 @@ interface ActiveBinding {
 	recall?: InjectStep;
 	pending: InjectStep[];
 	imageHashes: Map<string, string>;
-	inFlight: number;
+	/** A read stays outstanding until the helper confirms its stdout write. */
+	inFlight: Map<string, Buffer>;
 	deliveryError?: Error;
 }
 
@@ -144,27 +145,26 @@ export async function createAcpRecallHook({ onOversize }: AcpRecallHookOptions =
 			if (socket.destroyed) return;
 			if (binding !== active) return socket.end();
 			try {
-				const { conversationId, nonce, proof } = JSON.parse(Buffer.concat(chunks, size).toString("utf8")) ?? {};
+				const { conversationId, nonce, proof, delivered } = JSON.parse(Buffer.concat(chunks, size).toString("utf8")) ?? {};
 				if (conversationId !== binding.sessionId || typeof nonce !== "string" || !/^[a-f0-9]{32}$/.test(nonce) ||
 					typeof proof !== "string" || !/^[a-f0-9]{64}$/.test(proof)) return socket.end();
+				if (delivered === true) {
+					const expected = binding.inFlight.get(nonce);
+					if (expected && timingSafeEqual(Buffer.from(proof, "hex"), expected)) binding.inFlight.delete(nonce);
+					return socket.end();
+				}
+				if (delivered !== undefined || binding.inFlight.has(nonce)) return socket.end();
 				const expected = createHmac("sha256", key).update("read:").update(nonce).update(conversationId).digest();
 				if (!timingSafeEqual(Buffer.from(proof, "hex"), expected)) return socket.end();
 
 				const images = binding.pending.splice(0);
 				const reply = replyFor(binding, images);
 				if (!reply) return socket.end();
-				// Claim once before writing so overlapping hook reads cannot duplicate images.
+				// Claim once; socket finish only means the private reply was sent. The
+				// helper separately confirms validation and a successful stdout write.
 				if (images.length) {
-					binding.inFlight += images.length;
-					let settled = false;
-					const settle = (flushed: boolean) => {
-						if (settled) return;
-						settled = true;
-						binding.inFlight -= images.length;
-						if (!flushed) binding.deliveryError = new Error("Tool image hook delivery was interrupted");
-					};
-					socket.once("finish", () => settle(true));
-					socket.once("close", () => settle(false));
+					binding.inFlight.set(nonce, createHmac("sha256", key).update("delivered:")
+						.update(nonce).update(conversationId).update(reply).digest());
 				}
 				const signature = createHmac("sha256", key).update("reply:").update(nonce).update(reply).digest("hex");
 				socket.write(signature + "\n");
@@ -178,10 +178,11 @@ export async function createAcpRecallHook({ onOversize }: AcpRecallHookOptions =
 
 	function clearBinding(): void {
 		if (active) {
-			if (active.pending.length || active.inFlight) {
+			if (active.pending.length || active.inFlight.size) {
 				active.deliveryError ??= new Error("Tool images were not delivered before the native prompt ended");
 			}
 			active.pending.length = 0;
+			active.inFlight.clear();
 			active.imageHashes.clear();
 		}
 		active = undefined;
@@ -220,7 +221,7 @@ export async function createAcpRecallHook({ onOversize }: AcpRecallHookOptions =
 				recall: text?.trim() ? recallStep(text, onOversize) : undefined,
 				pending: [],
 				imageHashes: new Map(),
-				inFlight: 0,
+				inFlight: new Map(),
 			};
 			if (!closed) active = binding;
 			return {
@@ -246,8 +247,8 @@ export async function createAcpRecallHook({ onOversize }: AcpRecallHookOptions =
 				},
 				assertImagesDelivered() {
 					if (binding.deliveryError) throw binding.deliveryError;
-					if (binding.pending.length || binding.inFlight) {
-						throw new Error("Antigravity finished before consuming the tool image hook");
+					if (binding.pending.length || binding.inFlight.size) {
+						throw new Error("Antigravity finished before consuming the tool image hook; local helper delivery was not confirmed");
 					}
 				},
 				release() { if (active === binding) clearBinding(); },
