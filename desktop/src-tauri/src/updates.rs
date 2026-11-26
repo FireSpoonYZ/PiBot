@@ -11,7 +11,7 @@ use std::{
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State, Webview};
+use tauri::{AppHandle, Emitter, Manager, State, Webview};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::oneshot;
 
@@ -25,11 +25,15 @@ const AUTO_CHECK_UPDATES_PAGE_COOLDOWN_MS: u64 = 30_000;
 const AUTO_CHECK_STARTUP_COOLDOWN_MS: u64 = 120_000;
 const AUTO_CHECK_FOREGROUND_COOLDOWN_MS: u64 = 600_000;
 const AUTO_CHECK_PERIODIC_COOLDOWN_MS: u64 = 4 * 60 * 60 * 1000;
-const UPDATER_TIMEOUT: Duration = Duration::from_secs(600);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 const CENTER_CREDENTIALS_FILE: &str = "center-credentials.json";
+const CLIENT_UPDATE_CHANGED_EVENT: &str = "desktop-client-update-changed";
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
+const HTTP_CLIENT_CACHE_CAPACITY: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -153,9 +157,128 @@ struct UpdateInner {
   cancel_tx: Option<oneshot::Sender<()>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HttpClientKey {
+  origin: String,
+  ca_pem: Option<String>,
+  timeout: Duration,
+}
+
+impl HttpClientKey {
+  fn new(origin: impl Into<String>, ca_pem: Option<&str>, timeout: Duration) -> Self {
+    let normalized_ca = ca_pem
+      .map(str::trim)
+      .filter(|pem| !pem.is_empty())
+      .map(str::to_string);
+    Self {
+      origin: origin.into(),
+      ca_pem: normalized_ca,
+      timeout,
+    }
+  }
+}
+
+struct HttpClientCache<C> {
+  entries: Vec<(HttpClientKey, C)>,
+  capacity: usize,
+}
+
+impl<C> Default for HttpClientCache<C> {
+  fn default() -> Self {
+    Self::with_capacity(HTTP_CLIENT_CACHE_CAPACITY)
+  }
+}
+
+impl<C> HttpClientCache<C> {
+  fn with_capacity(capacity: usize) -> Self {
+    Self {
+      entries: Vec::new(),
+      capacity: capacity.max(1),
+    }
+  }
+
+  #[cfg(test)]
+  fn len(&self) -> usize {
+    self.entries.len()
+  }
+
+  #[cfg(test)]
+  fn contains_key(&self, key: &HttpClientKey) -> bool {
+    self.entries.iter().any(|(existing, _)| existing == key)
+  }
+
+  fn get_or_try_insert<E, F>(&mut self, key: HttpClientKey, build: F) -> Result<C, E>
+  where
+    C: Clone,
+    F: FnOnce(&HttpClientKey) -> Result<C, E>,
+  {
+    if let Some(index) = self.entries.iter().position(|(existing, _)| existing == &key) {
+      let entry = self.entries.remove(index);
+      let client = entry.1.clone();
+      self.entries.push(entry);
+      return Ok(client);
+    }
+    let client = build(&key)?;
+    if self.entries.len() >= self.capacity {
+      self.entries.remove(0);
+    }
+    self.entries.push((key, client.clone()));
+    Ok(client)
+  }
+}
+
+#[derive(Debug, Clone)]
+struct ProgressThrottle {
+  min_interval: Duration,
+  last_emit_at: Instant,
+  last_percent: u8,
+  last_downloaded: u64,
+}
+
+impl ProgressThrottle {
+  fn new(min_interval: Duration, started_at: Instant) -> Self {
+    Self {
+      min_interval,
+      last_emit_at: started_at,
+      last_percent: 0,
+      last_downloaded: 0,
+    }
+  }
+
+  fn percent_of(downloaded: u64, total: u64) -> Option<u8> {
+    if total == 0 {
+      return None;
+    }
+    let pct = ((downloaded as u128).saturating_mul(100) / (total as u128)).min(100) as u8;
+    Some(pct)
+  }
+
+  fn should_emit(&mut self, downloaded: u64, total: u64, now: Instant) -> bool {
+    if downloaded <= self.last_downloaded {
+      return false;
+    }
+    let percent = Self::percent_of(downloaded, total);
+    let completed = total > 0 && downloaded >= total;
+    let percent_advanced = percent.is_some_and(|pct| pct > self.last_percent);
+    let interval_elapsed = now.saturating_duration_since(self.last_emit_at) >= self.min_interval;
+
+    if completed || percent_advanced || interval_elapsed {
+      self.last_emit_at = now;
+      if let Some(pct) = percent {
+        self.last_percent = pct;
+      }
+      self.last_downloaded = downloaded;
+      true
+    } else {
+      false
+    }
+  }
+}
+
 #[derive(Clone, Default)]
 pub struct UpdateState {
   inner: Arc<Mutex<UpdateInner>>,
+  http_clients: Arc<Mutex<HttpClientCache<reqwest::Client>>>,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -303,6 +426,35 @@ fn restore_auto_recovery_locked(
   inner.message = None;
 }
 
+fn finish_auto_recovery_with_settled(
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  fence: Option<&str>,
+  recovery_phase: Phase,
+) -> (Value, bool) {
+  let mut inner = state.inner.lock().unwrap();
+  if inner.operation != operation {
+    return (snapshot_locked(&inner, current), false);
+  }
+  let should_emit = if inner.invalidated {
+    clear_update_fields(&mut inner);
+    clear_auto_cooldown(&mut inner);
+    inner.phase = Phase::Idle;
+    inner.message = Some("center changed or disconnected; update state was reset".to_string());
+    true
+  } else {
+    let changed = inner.phase != recovery_phase || inner.message.is_some();
+    restore_auto_recovery_locked(&mut inner, fence, recovery_phase);
+    changed
+  };
+  inner.busy = false;
+  inner.in_flight_auto_check = false;
+  inner.cancel_tx = None;
+  (snapshot_locked(&inner, current), should_emit)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn finish_auto_recovery(
   state: &UpdateState,
   current: &str,
@@ -310,22 +462,22 @@ fn finish_auto_recovery(
   fence: Option<&str>,
   recovery_phase: Phase,
 ) -> Value {
-  let mut inner = state.inner.lock().unwrap();
-  if inner.operation != operation {
-    return snapshot_locked(&inner, current);
+  finish_auto_recovery_with_settled(state, current, operation, fence, recovery_phase).0
+}
+
+fn finish_auto_recovery_and_emit(
+  app: &AppHandle,
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  fence: Option<&str>,
+  recovery_phase: Phase,
+) -> Value {
+  let (payload, should_emit) = finish_auto_recovery_with_settled(state, current, operation, fence, recovery_phase);
+  if should_emit {
+    emit_update_status(app, &payload);
   }
-  if inner.invalidated {
-    clear_update_fields(&mut inner);
-    clear_auto_cooldown(&mut inner);
-    inner.phase = Phase::Idle;
-    inner.message = Some("center changed or disconnected; update state was reset".to_string());
-  } else {
-    restore_auto_recovery_locked(&mut inner, fence, recovery_phase);
-  }
-  inner.busy = false;
-  inner.in_flight_auto_check = false;
-  inner.cancel_tx = None;
-  snapshot_locked(&inner, current)
+  payload
 }
 
 enum CheckResult {
@@ -339,7 +491,7 @@ enum CheckResult {
   },
 }
 
-fn apply_check_outcome(
+fn apply_check_outcome_with_emit(
   state: &UpdateState,
   current: &str,
   operation: u64,
@@ -348,10 +500,10 @@ fn apply_check_outcome(
   recovery_phase: Phase,
   now: u64,
   outcome: CheckResult,
-) -> Value {
+) -> (Value, bool) {
   let mut inner = state.inner.lock().unwrap();
   if inner.operation != operation {
-    return snapshot_locked(&inner, current);
+    return (snapshot_locked(&inner, current), false);
   }
   if inner.invalidated {
     clear_update_fields(&mut inner);
@@ -361,23 +513,27 @@ fn apply_check_outcome(
     inner.busy = false;
     inner.in_flight_auto_check = false;
     inner.cancel_tx = None;
-    return snapshot_locked(&inner, current);
+    return (snapshot_locked(&inner, current), true);
   }
-  match outcome {
+  let should_emit = match outcome {
     CheckResult::Cancelled => {
       clear_update_fields(&mut inner);
       inner.fence = Some(fence.to_string());
       inner.phase = Phase::Cancelled;
       inner.message = None;
+      true
     }
     CheckResult::Error(message) => {
       if automatic {
+        let changed = inner.phase != recovery_phase || inner.message.is_some();
         restore_auto_recovery_locked(&mut inner, Some(fence), recovery_phase);
+        changed
       } else {
         clear_update_fields(&mut inner);
         inner.fence = Some(fence.to_string());
         inner.phase = Phase::Error;
         inner.message = Some(message);
+        true
       }
     }
     CheckResult::UpToDate => {
@@ -387,6 +543,7 @@ fn apply_check_outcome(
       inner.last_auto_at = now;
       inner.phase = Phase::UpToDate;
       inner.message = None;
+      true
     }
     CheckResult::Available { update, size, release } => {
       inner.update = update;
@@ -399,12 +556,46 @@ fn apply_check_outcome(
       inner.last_auto_at = now;
       inner.phase = Phase::Available;
       inner.message = None;
+      true
     }
-  }
+  };
   inner.busy = false;
   inner.in_flight_auto_check = false;
   inner.cancel_tx = None;
-  snapshot_locked(&inner, current)
+  (snapshot_locked(&inner, current), should_emit)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn apply_check_outcome(
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  fence: &str,
+  automatic: bool,
+  recovery_phase: Phase,
+  now: u64,
+  outcome: CheckResult,
+) -> Value {
+  apply_check_outcome_with_emit(state, current, operation, fence, automatic, recovery_phase, now, outcome).0
+}
+
+fn apply_check_outcome_and_emit(
+  app: &AppHandle,
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  fence: &str,
+  automatic: bool,
+  recovery_phase: Phase,
+  now: u64,
+  outcome: CheckResult,
+) -> Value {
+  let (payload, should_emit) =
+    apply_check_outcome_with_emit(state, current, operation, fence, automatic, recovery_phase, now, outcome);
+  if should_emit {
+    emit_update_status(app, &payload);
+  }
+  payload
 }
 
 fn begin(inner: &mut UpdateInner, phase: Phase, cancellable: bool) -> Result<(u64, Option<oneshot::Receiver<()>>), BridgeError> {
@@ -428,23 +619,55 @@ fn begin(inner: &mut UpdateInner, phase: Phase, cancellable: bool) -> Result<(u6
   Ok((inner.operation, receiver))
 }
 
-fn finish(state: &UpdateState, current: &str, operation: u64, phase: Phase, message: Option<String>) -> Value {
-  let mut inner = state.inner.lock().unwrap();
-  if inner.operation == operation {
-    if inner.invalidated && !(inner.prepared && matches!(phase, Phase::Error)) {
-      clear_update_fields(&mut inner);
-      clear_auto_cooldown(&mut inner);
-      inner.phase = Phase::Idle;
-      inner.message = Some("center changed or disconnected; update state was reset".to_string());
-    } else {
-      inner.phase = phase;
-      inner.message = message;
+fn emit_update_status(app: &AppHandle, payload: &Value) {
+  let _ = app.emit_to("main", CLIENT_UPDATE_CHANGED_EVENT, payload);
+}
+
+fn finish_with_emit(
+  app: &AppHandle,
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  phase: Phase,
+  message: Option<String>,
+  emit_on_normal: bool,
+) -> Value {
+  let (payload, should_emit) = {
+    let mut inner = state.inner.lock().unwrap();
+    let settled = inner.operation == operation;
+    let mut invalidated_reset = false;
+    if settled {
+      if inner.invalidated && !(inner.prepared && matches!(phase, Phase::Error)) {
+        clear_update_fields(&mut inner);
+        clear_auto_cooldown(&mut inner);
+        inner.phase = Phase::Idle;
+        inner.message = Some("center changed or disconnected; update state was reset".to_string());
+        invalidated_reset = true;
+      } else {
+        inner.phase = phase;
+        inner.message = message;
+      }
+      inner.busy = false;
+      inner.in_flight_auto_check = false;
+      inner.cancel_tx = None;
     }
-    inner.busy = false;
-    inner.in_flight_auto_check = false;
-    inner.cancel_tx = None;
+    (snapshot_locked(&inner, current), settled && (emit_on_normal || invalidated_reset))
+  };
+  if should_emit {
+    emit_update_status(app, &payload);
   }
-  snapshot_locked(&inner, current)
+  payload
+}
+
+fn finish(
+  app: &AppHandle,
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  phase: Phase,
+  message: Option<String>,
+) -> Value {
+  finish_with_emit(app, state, current, operation, phase, message, true)
 }
 
 pub(crate) struct CenterAuth {
@@ -585,20 +808,45 @@ fn with_note(message: String, note: Option<String>) -> String {
   }
 }
 
-fn center_certificate(center: &CenterAuth) -> Result<Option<reqwest::Certificate>, BridgeError> {
-  center.ca_pem.as_ref()
-    .map(|pem| reqwest::Certificate::from_pem(pem.as_bytes()))
-    .transpose().map_err(|_| invalid("center CA certificate could not be parsed"))
+fn parse_certificates(ca_pem: Option<&str>) -> Result<Vec<reqwest::Certificate>, BridgeError> {
+  use rustls::pki_types::{pem::PemObject, CertificateDer};
+
+  let Some(pem) = ca_pem.map(str::trim).filter(|pem| !pem.is_empty()) else {
+    return Ok(Vec::new());
+  };
+  let mut store = rustls::RootCertStore::empty();
+  let mut certs = Vec::new();
+  for item in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+    let der = item.map_err(|_| invalid("center CA certificate could not be parsed"))?;
+    let cert = reqwest::Certificate::from_der(der.as_ref())
+      .map_err(|_| invalid("center CA certificate could not be parsed"))?;
+    store
+      .add(der)
+      .map_err(|_| invalid("center CA certificate could not be parsed"))?;
+    certs.push(cert);
+  }
+  if certs.is_empty() {
+    return Err(invalid("center CA certificate could not be parsed"));
+  }
+  Ok(certs)
+}
+
+fn center_certificates(center: &CenterAuth) -> Result<Vec<reqwest::Certificate>, BridgeError> {
+  parse_certificates(center.ca_pem.as_deref())
 }
 
 fn configure_client(
-  client: reqwest::ClientBuilder, origin: String, certificate: Option<reqwest::Certificate>,
+  client: reqwest::ClientBuilder,
+  origin: String,
+  certificates: Vec<reqwest::Certificate>,
+  timeout: Duration,
 ) -> reqwest::ClientBuilder {
-  let client = match certificate {
-    Some(certificate) => client.tls_certs_merge([certificate]),
-    None => client,
+  let client = if certificates.is_empty() {
+    client
+  } else {
+    client.tls_certs_merge(certificates)
   };
-  client.timeout(UPDATER_TIMEOUT).redirect(reqwest::redirect::Policy::custom(move |attempt| {
+  client.timeout(timeout).redirect(reqwest::redirect::Policy::custom(move |attempt| {
     let url = attempt.url();
     if attempt.previous().len() < 10 && url.scheme() == "https"
       && url.origin().ascii_serialization() == origin
@@ -611,12 +859,31 @@ fn configure_client(
   }))
 }
 
+fn build_http_client(key: &HttpClientKey) -> Result<reqwest::Client, String> {
+  // reqwest uses rustls-no-provider; retain an existing provider or install ring.
+  let _ = rustls::crypto::ring::default_provider().install_default();
+  let certificates = parse_certificates(key.ca_pem.as_deref()).map_err(|err| err.message)?;
+  configure_client(reqwest::Client::builder(), key.origin.clone(), certificates, key.timeout)
+    .build()
+    .map_err(|err| err.to_string())
+}
+
+fn cached_http_client(
+  state: &UpdateState,
+  center: &CenterAuth,
+  timeout: Duration,
+) -> Result<reqwest::Client, String> {
+  let key = HttpClientKey::new(center.origin.clone(), center.ca_pem.as_deref(), timeout);
+  let mut cache = state.http_clients.lock().unwrap_or_else(|e| e.into_inner());
+  cache.get_or_try_insert(key, build_http_client)
+}
+
 fn build_updater(app: &AppHandle, center: &CenterAuth) -> Result<tauri_plugin_updater::Updater, BridgeError> {
   let (platform, arch, format) = update_target()?;
   let endpoint = tauri::Url::parse(&format!(
     "{}/api/client-updates/{platform}/{arch}/{format}/{{{{current_version}}}}", center.origin
   )).map_err(|_| invalid("failed to build update endpoint"))?;
-  let certificate = center_certificate(center)?;
+  let certificates = center_certificates(center)?;
   let origin = center.origin.clone();
   app.updater_builder()
     .endpoints(vec![endpoint]).map_err(|err| BridgeError::new("UPDATE_ERROR", err.to_string(), "not-sent"))?
@@ -624,9 +891,9 @@ fn build_updater(app: &AppHandle, center: &CenterAuth) -> Result<tauri_plugin_up
       .map_err(|err| BridgeError::new("UPDATE_ERROR", err.to_string(), "not-sent"))?
     .header("X-Device-Id", center.device_id.clone())
       .map_err(|err| BridgeError::new("UPDATE_ERROR", err.to_string(), "not-sent"))?
-    .timeout(UPDATER_TIMEOUT)
+    .timeout(CHECK_TIMEOUT)
     .restart_after_install(false)
-    .configure_client(move |client| configure_client(client, origin.clone(), certificate.clone()))
+    .configure_client(move |client| configure_client(client, origin.clone(), certificates.clone(), CHECK_TIMEOUT))
     .build().map_err(|err| BridgeError::new("UPDATE_ERROR", err.to_string(), "not-sent"))
 }
 
@@ -677,21 +944,23 @@ fn is_current_operation(state: &UpdateState, operation: u64) -> bool {
 }
 
 /// Called only while the updater operation is reserved.
-async fn release_prepare(state: &UpdateState) -> Result<(), String> {
+/// Returns `Ok(true)` when `host_cli("cancel-update")` actually ran, or `Ok(false)` when no
+/// preparation was active.
+async fn release_prepare(state: &UpdateState) -> Result<bool, String> {
   if !state.inner.lock().unwrap().prepared {
-    return Ok(());
+    return Ok(false);
   }
   host_service::host_cli(vec!["cancel-update".to_string()], CANCEL_TIMEOUT).await
     .map_err(|err| format!("could not release Host update preparation: {}", err.message))?;
   state.inner.lock().unwrap().prepared = false;
-  Ok(())
+  Ok(true)
 }
 
-async fn release_prepare_if_current(state: &UpdateState, operation: u64) -> Result<(), String> {
+async fn release_prepare_if_current(state: &UpdateState, operation: u64) -> Result<bool, String> {
   {
     let inner = state.inner.lock().unwrap();
     if inner.operation != operation || !inner.prepared {
-      return Ok(());
+      return Ok(false);
     }
   }
   host_service::host_cli(vec!["cancel-update".to_string()], CANCEL_TIMEOUT).await
@@ -700,7 +969,7 @@ async fn release_prepare_if_current(state: &UpdateState, operation: u64) -> Resu
   if inner.operation == operation {
     inner.prepared = false;
   }
-  Ok(())
+  Ok(true)
 }
 
 async fn fence_matches(app: &AppHandle, state: &UpdateState, operation: u64, expected: &str) -> bool {
@@ -717,38 +986,43 @@ async fn fence_matches(app: &AppHandle, state: &UpdateState, operation: u64, exp
   matches
 }
 
-async fn finish_stale(state: &UpdateState, current: &str, operation: u64) -> Value {
+async fn finish_stale_with_io(app: &AppHandle, state: &UpdateState, current: &str, operation: u64) -> (Value, bool) {
   match release_prepare(state).await {
-    Ok(()) => finish(state, current, operation, Phase::Idle, None),
-    Err(message) => finish(state, current, operation, Phase::Error, Some(message)),
+    Ok(did_release) => (finish(app, state, current, operation, Phase::Idle, None), did_release),
+    Err(message) => (finish(app, state, current, operation, Phase::Error, Some(message)), true),
   }
 }
 
-async fn finish_stale_check(state: &UpdateState, current: &str, operation: u64, automatic: bool) -> Value {
+async fn finish_stale(app: &AppHandle, state: &UpdateState, current: &str, operation: u64) -> Value {
+  finish_stale_with_io(app, state, current, operation).await.0
+}
+
+async fn finish_stale_check(app: &AppHandle, state: &UpdateState, current: &str, operation: u64, automatic: bool) -> Value {
   if !is_current_operation(state, operation) {
     return snapshot(state, current);
   }
   match release_prepare_if_current(state, operation).await {
-    Ok(()) => finish(state, current, operation, Phase::Idle, None),
-    Err(_) if automatic => finish(state, current, operation, Phase::Idle, None),
-    Err(message) => finish(state, current, operation, Phase::Error, Some(message)),
+    Ok(_) => finish(app, state, current, operation, Phase::Idle, None),
+    Err(_) if automatic => finish(app, state, current, operation, Phase::Idle, None),
+    Err(message) => finish(app, state, current, operation, Phase::Error, Some(message)),
   }
 }
 
-async fn reconcile_center_state(app: &AppHandle, state: &UpdateState) {
-  let (operation, fence) = {
-    let inner = state.inner.lock().unwrap();
-    (inner.operation, inner.fence.clone())
-  };
-  let Some(fence) = fence else { return };
-  let valid = matches!(resolve_center_auth(app).await, Ok(Some(center)) if center.fence == fence);
-  if valid {
-    return;
+async fn reconcile_with_resolved(
+  app: &AppHandle,
+  state: &UpdateState,
+  operation: u64,
+  fence: String,
+  resolved_fence: Option<&str>,
+) -> bool {
+  if resolved_fence == Some(fence.as_str()) {
+    return false;
   }
-  let cleanup = {
+  let current = app.package_info().version.to_string();
+  let (cleanup, reset_snapshot) = {
     let mut inner = state.inner.lock().unwrap();
     if inner.operation != operation || inner.fence.as_deref() != Some(fence.as_str()) {
-      return;
+      return false;
     }
     inner.invalidated = true;
     clear_update_fields(&mut inner);
@@ -759,16 +1033,58 @@ async fn reconcile_center_state(app: &AppHandle, state: &UpdateState) {
       let _ = tx.send(());
     }
     if inner.busy {
-      false
+      (false, Some(snapshot_locked(&inner, &current)))
     } else {
       inner.busy = true;
-      true
+      (true, None)
     }
   };
   if cleanup {
-    let current = app.package_info().version.to_string();
-    let _ = finish_stale(state, &current, operation).await;
+    let (_, did_io) = finish_stale_with_io(app, state, &current, operation).await;
+    did_io
+  } else {
+    if let Some(payload) = reset_snapshot {
+      emit_update_status(app, &payload);
+    }
+    false
   }
+}
+
+async fn resolve_and_reconcile_center_auth(
+  app: &AppHandle,
+  state: &UpdateState,
+) -> (Result<Option<CenterAuth>, BridgeError>, bool) {
+  let (operation, fence) = {
+    let inner = state.inner.lock().unwrap();
+    (inner.operation, inner.fence.clone())
+  };
+  let auth = resolve_center_auth(app).await;
+  let did_io = if let Some(fence) = fence {
+    let resolved_fence = auth
+      .as_ref()
+      .ok()
+      .and_then(|center| center.as_ref())
+      .map(|center| center.fence.as_str());
+    reconcile_with_resolved(app, state, operation, fence, resolved_fence).await
+  } else {
+    false
+  };
+  (auth, did_io)
+}
+
+async fn reconcile_center_state(app: &AppHandle, state: &UpdateState) {
+  let (operation, fence) = {
+    let inner = state.inner.lock().unwrap();
+    (inner.operation, inner.fence.clone())
+  };
+  let Some(fence) = fence else { return };
+  let auth = resolve_center_auth(app).await;
+  let resolved_fence = auth
+    .as_ref()
+    .ok()
+    .and_then(|center| center.as_ref())
+    .map(|center| center.fence.as_str());
+  let _ = reconcile_with_resolved(app, state, operation, fence, resolved_fence).await;
 }
 
 #[tauri::command]
@@ -788,9 +1104,9 @@ pub async fn desktop_update_check(
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
   let (automatic, effective_reason) = validate_check_args(automatic, reason.as_deref())?;
-  reconcile_center_state(&app, &state).await;
+  let (auth, reconciled_io) = resolve_and_reconcile_center_auth(&app, &state).await;
   let current = app.package_info().version.to_string();
-  let (operation, mut cancel, mut pre_phase, mut pre_message, mut recovery_phase) = {
+  let (operation, mut cancel, mut pre_phase, mut pre_message, mut recovery_phase, start_snapshot) = {
     let mut inner = state.inner.lock().unwrap();
     match begin_check(&mut inner, automatic)? {
       CheckStart::SkippedActive => return Ok(snapshot_locked(&inner, &current)),
@@ -800,10 +1116,21 @@ pub async fn desktop_update_check(
         pre_phase,
         pre_message,
         recovery_phase,
-      } => (operation, cancel, pre_phase, pre_message, recovery_phase),
+      } => {
+        let start_snapshot = (!automatic).then(|| snapshot_locked(&inner, &current));
+        (operation, cancel, pre_phase, pre_message, recovery_phase, start_snapshot)
+      }
     }
   };
-  let center = match resolve_center_auth(&app).await {
+  if let Some(payload) = start_snapshot {
+    emit_update_status(&app, &payload);
+  }
+  let auth = if reconciled_io {
+    resolve_center_auth(&app).await
+  } else {
+    auth
+  };
+  let center = match auth {
     Ok(Some(center)) => center,
     Ok(None) => {
       {
@@ -815,11 +1142,11 @@ pub async fn desktop_update_check(
         clear_update_fields(&mut inner);
         clear_auto_cooldown(&mut inner);
       }
-      return Ok(finish_stale_check(&state, &current, operation, automatic).await);
+      return Ok(finish_stale_check(&app, &state, &current, operation, automatic).await);
     }
     Err(err) => {
       if automatic {
-        return Ok(finish_auto_recovery(&state, &current, operation, None, recovery_phase));
+        return Ok(finish_auto_recovery_and_emit(&app, &state, &current, operation, None, recovery_phase));
       }
       {
         let mut inner = state.inner.lock().unwrap();
@@ -829,7 +1156,7 @@ pub async fn desktop_update_check(
         clear_update_fields(&mut inner);
       }
       let cleanup = release_prepare_if_current(&state, operation).await;
-      return Ok(finish(&state, &current, operation, Phase::Error, Some(cleanup.err().unwrap_or(err.message))));
+      return Ok(finish(&app, &state, &current, operation, Phase::Error, Some(cleanup.err().unwrap_or(err.message))));
     }
   };
   let (invalidated, replaced) = {
@@ -851,38 +1178,39 @@ pub async fn desktop_update_check(
     (inner.invalidated, replaced)
   };
   if invalidated {
-    return Ok(finish_stale_check(&state, &current, operation, automatic).await);
+    return Ok(finish_stale_check(&app, &state, &current, operation, automatic).await);
   }
   let mut cancelled = cancel.try_recv().is_ok();
   if replaced || cancelled {
     let cleanup = release_prepare_if_current(&state, operation).await;
-    if !fence_matches(&app, &state, operation, &center.fence).await {
+    if (replaced || !matches!(cleanup, Ok(false))) && !fence_matches(&app, &state, operation, &center.fence).await {
       if !is_current_operation(&state, operation) {
         return Ok(snapshot(&state, &current));
       }
       return Ok(match cleanup {
-        Ok(()) => finish_stale_check(&state, &current, operation, automatic).await,
+        Ok(_) => finish_stale_check(&app, &state, &current, operation, automatic).await,
         Err(message) => {
           if automatic {
-            finish(&state, &current, operation, Phase::Idle, None)
+            finish(&app, &state, &current, operation, Phase::Idle, None)
           } else {
-            finish(&state, &current, operation, Phase::Error, Some(message))
+            finish(&app, &state, &current, operation, Phase::Error, Some(message))
           }
         }
       });
     }
     if let Err(message) = cleanup {
       return Ok(if automatic {
-        finish_auto_recovery(&state, &current, operation, Some(&center.fence), recovery_phase)
+        finish_auto_recovery_and_emit(&app, &state, &current, operation, Some(&center.fence), recovery_phase)
       } else {
-        finish(&state, &current, operation, Phase::Error, Some(message))
+        finish(&app, &state, &current, operation, Phase::Error, Some(message))
       });
     }
     if !cancelled {
       cancelled = cancel.try_recv().is_ok();
     }
     if cancelled {
-      return Ok(apply_check_outcome(
+      return Ok(apply_check_outcome_and_emit(
+        &app,
         &state,
         &current,
         operation,
@@ -904,25 +1232,20 @@ pub async fn desktop_update_check(
       is_check_throttled(&inner, &center.fence, automatic, effective_reason, now)
     };
     if throttled {
-      if !fence_matches(&app, &state, operation, &center.fence).await {
-        if !is_current_operation(&state, operation) {
-          return Ok(snapshot(&state, &current));
-        }
-        return Ok(finish_stale_check(&state, &current, operation, true).await);
-      }
       if cancel.try_recv().is_ok() {
         let cleanup = release_prepare_if_current(&state, operation).await;
-        if !fence_matches(&app, &state, operation, &center.fence).await {
+        if !matches!(cleanup, Ok(false)) && !fence_matches(&app, &state, operation, &center.fence).await {
           if !is_current_operation(&state, operation) {
             return Ok(snapshot(&state, &current));
           }
           return Ok(match cleanup {
-            Ok(()) => finish_stale_check(&state, &current, operation, true).await,
-            Err(_) => finish(&state, &current, operation, Phase::Idle, None),
+            Ok(_) => finish_stale_check(&app, &state, &current, operation, true).await,
+            Err(_) => finish(&app, &state, &current, operation, Phase::Idle, None),
           });
         }
         return Ok(match cleanup {
-          Ok(()) => apply_check_outcome(
+          Ok(_) => apply_check_outcome_and_emit(
+            &app,
             &state,
             &current,
             operation,
@@ -932,10 +1255,11 @@ pub async fn desktop_update_check(
             now_ms(),
             CheckResult::Cancelled,
           ),
-          Err(_) => finish_auto_recovery(&state, &current, operation, Some(&center.fence), recovery_phase),
+          Err(_) => finish_auto_recovery_and_emit(&app, &state, &current, operation, Some(&center.fence), recovery_phase),
         });
       }
-      return Ok(finish(&state, &current, operation, pre_phase, pre_message));
+      // 静默节流恢复原稳态，不推送伪造检查完成事件（但若期间已失效则仍推送重置态）。
+      return Ok(finish_with_emit(&app, &state, &current, operation, pre_phase, pre_message, false));
     }
   }
   {
@@ -945,26 +1269,26 @@ pub async fn desktop_update_check(
     }
   }
   let cleanup = release_prepare_if_current(&state, operation).await;
-  if !fence_matches(&app, &state, operation, &center.fence).await {
+  if !matches!(cleanup, Ok(false)) && !fence_matches(&app, &state, operation, &center.fence).await {
     if !is_current_operation(&state, operation) {
       return Ok(snapshot(&state, &current));
     }
     return Ok(match cleanup {
-      Ok(()) => finish_stale_check(&state, &current, operation, automatic).await,
+      Ok(_) => finish_stale_check(&app, &state, &current, operation, automatic).await,
       Err(message) => {
         if automatic {
-          finish(&state, &current, operation, Phase::Idle, None)
+          finish(&app, &state, &current, operation, Phase::Idle, None)
         } else {
-          finish(&state, &current, operation, Phase::Error, Some(message))
+          finish(&app, &state, &current, operation, Phase::Error, Some(message))
         }
       }
     });
   }
   if let Err(message) = cleanup {
     return Ok(if automatic {
-      finish_auto_recovery(&state, &current, operation, Some(&center.fence), recovery_phase)
+      finish_auto_recovery_and_emit(&app, &state, &current, operation, Some(&center.fence), recovery_phase)
     } else {
-      finish(&state, &current, operation, Phase::Error, Some(message))
+      finish(&app, &state, &current, operation, Phase::Error, Some(message))
     });
   }
   let outcome = match build_updater(&app, &center) {
@@ -990,9 +1314,10 @@ pub async fn desktop_update_check(
     if !is_current_operation(&state, operation) {
       return Ok(snapshot(&state, &current));
     }
-    return Ok(finish_stale_check(&state, &current, operation, automatic).await);
+    return Ok(finish_stale_check(&app, &state, &current, operation, automatic).await);
   }
-  Ok(apply_check_outcome(
+  Ok(apply_check_outcome_and_emit(
+    &app,
     &state,
     &current,
     operation,
@@ -1005,11 +1330,16 @@ pub async fn desktop_update_check(
 }
 
 async fn download_bounded(
-  center: &CenterAuth, update: &Update, state: &UpdateState, operation: u64, size: u64, sha: &str,
+  app: &AppHandle,
+  center: &CenterAuth,
+  update: &Update,
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  size: u64,
+  sha: &str,
 ) -> Result<Vec<u8>, String> {
-  let certificate = center_certificate(center).map_err(|err| err.message)?;
-  let client = configure_client(reqwest::Client::builder(), center.origin.clone(), certificate)
-    .build().map_err(|err| err.to_string())?;
+  let client = cached_http_client(state, center, DOWNLOAD_TIMEOUT)?;
   let mut response = client.get(update.download_url.clone()).headers(update.headers.clone())
     .send().await.map_err(|err| err.to_string())?
     .error_for_status().map_err(|err| err.to_string())?;
@@ -1017,14 +1347,25 @@ async fn download_bounded(
     return Err("update package size does not match the center metadata".to_string());
   }
   let mut bytes = Vec::new();
+  let mut throttle = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL, Instant::now());
   while let Some(chunk) = response.chunk().await.map_err(|err| err.to_string())? {
     if (bytes.len() as u64).saturating_add(chunk.len() as u64) > size {
       return Err("update package exceeds its declared size".to_string());
     }
     bytes.extend_from_slice(&chunk);
-    let mut inner = state.inner.lock().unwrap();
-    if inner.operation == operation && !inner.invalidated {
-      inner.downloaded = bytes.len() as u64;
+    let downloaded = bytes.len() as u64;
+    let should_emit = throttle.should_emit(downloaded, size, Instant::now());
+    let progress_snapshot = {
+      let mut inner = state.inner.lock().unwrap();
+      if inner.operation == operation && !inner.invalidated {
+        inner.downloaded = downloaded;
+        should_emit.then(|| snapshot_locked(&inner, current))
+      } else {
+        None
+      }
+    };
+    if let Some(payload) = progress_snapshot {
+      emit_update_status(app, &payload);
     }
   }
   if bytes.len() as u64 != size || !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(sha) {
@@ -1037,9 +1378,9 @@ async fn download_bounded(
 #[tauri::command]
 pub async fn desktop_update_download(app: AppHandle, webview: Webview, state: State<'_, UpdateState>) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
-  reconcile_center_state(&app, &state).await;
+  let (auth, reconciled_io) = resolve_and_reconcile_center_auth(&app, &state).await;
   let current = app.package_info().version.to_string();
-  let (operation, mut cancel, update, fence) = {
+  let (operation, mut cancel, update, fence, start_snapshot) = {
     let mut inner = state.inner.lock().unwrap();
     if inner.busy && !inner.in_flight_auto_check { return Err(busy()); }
     if inner.bytes.is_some() { return Ok(snapshot_locked(&inner, &current)); }
@@ -1048,33 +1389,43 @@ pub async fn desktop_update_download(app: AppHandle, webview: Webview, state: St
     preempt_in_flight_auto_check(&mut inner)?;
     let (operation, cancel) = begin(&mut inner, Phase::Downloading, true)?;
     inner.downloaded = 0;
-    (operation, cancel.unwrap(), update, fence)
+    let start_snapshot = snapshot_locked(&inner, &current);
+    (operation, cancel.unwrap(), update, fence, start_snapshot)
   };
-  let center = match resolve_center_auth(&app).await {
+  emit_update_status(&app, &start_snapshot);
+  let auth = if reconciled_io {
+    resolve_center_auth(&app).await
+  } else {
+    auth
+  };
+  let center = match auth {
     Ok(Some(center)) if center.fence == fence => center,
     _ => {
-      state.inner.lock().unwrap().invalidated = true;
-      return Ok(finish_stale(&state, &current, operation).await);
+      {
+        let mut inner = state.inner.lock().unwrap();
+        if inner.operation == operation {
+          inner.invalidated = true;
+          clear_update_fields(&mut inner);
+        }
+      }
+      return Ok(finish_stale(&app, &state, &current, operation).await);
     }
   };
-  if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
-  }
   let (size, sha, _) = match validate_release(&update, &center) {
     Ok(metadata) => metadata,
-    Err(message) => return Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
+    Err(message) => return Ok(finish(&app, &state, &current, operation, Phase::Error, Some(message))),
   };
   let outcome = tokio::select! {
     biased;
     _ = &mut cancel => None,
-    result = download_bounded(&center, &update, &state, operation, size, &sha) => Some(result),
+    result = download_bounded(&app, &center, &update, &state, &current, operation, size, &sha) => Some(result),
   };
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   match outcome {
-    None => Ok(finish(&state, &current, operation, Phase::Cancelled, None)),
-    Some(Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
+    None => Ok(finish(&app, &state, &current, operation, Phase::Cancelled, None)),
+    Some(Err(message)) => Ok(finish(&app, &state, &current, operation, Phase::Error, Some(message))),
     Some(Ok(bytes)) => {
       {
         let mut inner = state.inner.lock().unwrap();
@@ -1083,7 +1434,7 @@ pub async fn desktop_update_download(app: AppHandle, webview: Webview, state: St
           inner.bytes = Some(Arc::new(bytes));
         }
       }
-      Ok(finish(&state, &current, operation, Phase::Downloaded, None))
+      Ok(finish(&app, &state, &current, operation, Phase::Downloaded, None))
     }
   }
 }
@@ -1095,7 +1446,7 @@ pub async fn desktop_update_install(
   ensure_main_webview(&webview)?;
   reconcile_center_state(&app, &state).await;
   let current = app.package_info().version.to_string();
-  let (operation, update, bytes, fence) = {
+  let (operation, update, bytes, fence, start_snapshot) = {
     let mut inner = state.inner.lock().unwrap();
     if inner.busy && !inner.in_flight_auto_check { return Err(busy()); }
     let update = inner.update.clone().ok_or_else(|| invalid("no downloaded update is ready"))?;
@@ -1103,10 +1454,12 @@ pub async fn desktop_update_install(
     let fence = inner.fence.clone().ok_or_else(|| invalid("update center is unavailable"))?;
     preempt_in_flight_auto_check(&mut inner)?;
     let (operation, _) = begin(&mut inner, Phase::Installing, false)?;
-    (operation, update, bytes, fence)
+    let start_snapshot = snapshot_locked(&inner, &current);
+    (operation, update, bytes, fence, start_snapshot)
   };
+  emit_update_status(&app, &start_snapshot);
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   let previously_prepared = {
     let mut inner = state.inner.lock().unwrap();
@@ -1117,7 +1470,7 @@ pub async fn desktop_update_install(
     previous
   };
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   let mut args = vec!["prepare-update".to_string()];
   if stop_active.unwrap_or(false) {
@@ -1128,13 +1481,13 @@ pub async fn desktop_update_install(
     state.inner.lock().unwrap().prepared = false;
   }
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   match prepared {
     Ok(value) if value.get("ready").and_then(Value::as_bool) == Some(false)
       && value.get("activeCount").and_then(Value::as_u64).is_some() => {
       let active = value.get("activeCount").and_then(Value::as_u64).unwrap();
-      return Ok(finish(&state, &current, operation, Phase::WaitingTasks, Some(format!("{active} host task(s) still active"))));
+      return Ok(finish(&app, &state, &current, operation, Phase::WaitingTasks, Some(format!("{active} host task(s) still active"))));
     }
     Ok(value) if value.get("ready").and_then(Value::as_bool) == Some(true)
       && value.get("activeCount").and_then(Value::as_u64).is_some() => {}
@@ -1144,38 +1497,38 @@ pub async fn desktop_update_install(
         _ => "launcher returned an invalid update preparation result".to_string(),
       };
       let cleanup = release_prepare(&state).await;
-      if !fence_matches(&app, &state, operation, &fence).await {
+      if !matches!(cleanup, Ok(false)) && !fence_matches(&app, &state, operation, &fence).await {
         return Ok(match cleanup {
-          Ok(()) => finish_stale(&state, &current, operation).await,
-          Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+          Ok(_) => finish_stale(&app, &state, &current, operation).await,
+          Err(message) => finish(&app, &state, &current, operation, Phase::Error, Some(message)),
         });
       }
       let message = cleanup.err().unwrap_or(message);
-      return Ok(finish(&state, &current, operation, Phase::Error, Some(message)));
+      return Ok(finish(&app, &state, &current, operation, Phase::Error, Some(message)));
     }
   }
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   let Installed { result, note, host_cycled } = install_package(update, bytes).await;
   if host_cycled {
     state.inner.lock().unwrap().prepared = false;
   }
   if !fence_matches(&app, &state, operation, &fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale(&app, &state, &current, operation).await);
   }
   let cleanup = release_prepare(&state).await;
-  if !fence_matches(&app, &state, operation, &fence).await {
+  if !matches!(cleanup, Ok(false)) && !fence_matches(&app, &state, operation, &fence).await {
     return Ok(match cleanup {
-      Ok(()) => finish_stale(&state, &current, operation).await,
-      Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+      Ok(_) => finish_stale(&app, &state, &current, operation).await,
+      Err(message) => finish(&app, &state, &current, operation, Phase::Error, Some(message)),
     });
   }
   match (result, cleanup) {
     // Keep the install failure (e.g. a blocked swap) visible next to a cleanup failure.
-    (Err(failed), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(format!("{failed}; {message}"), note)))),
-    (Ok(()), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
-    (Ok(()), Ok(())) => {
+    (Err(failed), Err(message)) => Ok(finish(&app, &state, &current, operation, Phase::Error, Some(with_note(format!("{failed}; {message}"), note)))),
+    (Ok(()), Err(message)) => Ok(finish(&app, &state, &current, operation, Phase::Error, Some(with_note(message, note)))),
+    (Ok(()), Ok(_)) => {
       {
         let mut inner = state.inner.lock().unwrap();
         if !inner.invalidated {
@@ -1183,11 +1536,11 @@ pub async fn desktop_update_install(
           inner.fence = Some(fence.clone());
         }
       }
-      Ok(finish(&state, &current, operation, Phase::Complete, Some(with_note(
+      Ok(finish(&app, &state, &current, operation, Phase::Complete, Some(with_note(
         "update installed; restart the app to run the new version".to_string(), note,
       ))))
     }
-    (Err(message), Ok(())) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
+    (Err(message), Ok(_)) => Ok(finish(&app, &state, &current, operation, Phase::Error, Some(with_note(message, note)))),
   }
 }
 
@@ -1196,7 +1549,7 @@ pub async fn desktop_update_cancel(app: AppHandle, webview: Webview, state: Stat
   ensure_main_webview(&webview)?;
   reconcile_center_state(&app, &state).await;
   let current = app.package_info().version.to_string();
-  let (operation, fence) = {
+  let (operation, fence, start_snapshot) = {
     let mut inner = state.inner.lock().unwrap();
     if inner.busy {
       if let Some(tx) = inner.cancel_tx.take() {
@@ -1207,20 +1560,24 @@ pub async fn desktop_update_cancel(app: AppHandle, webview: Webview, state: Stat
     }
     let fence = inner.fence.clone();
     let (operation, _) = begin(&mut inner, Phase::Cancelled, false)?;
-    (operation, fence)
+    let start_snapshot = snapshot_locked(&inner, &current);
+    (operation, fence, start_snapshot)
   };
+  emit_update_status(&app, &start_snapshot);
   let cleanup = release_prepare(&state).await;
-  if let Some(fence) = &fence {
-    if !fence_matches(&app, &state, operation, fence).await {
-      return Ok(match cleanup {
-        Ok(()) => finish_stale(&state, &current, operation).await,
-        Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
-      });
+  if !matches!(cleanup, Ok(false)) {
+    if let Some(fence) = &fence {
+      if !fence_matches(&app, &state, operation, fence).await {
+        return Ok(match cleanup {
+          Ok(_) => finish_stale(&app, &state, &current, operation).await,
+          Err(message) => finish(&app, &state, &current, operation, Phase::Error, Some(message)),
+        });
+      }
     }
   }
   match cleanup {
-    Err(message) => Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
-    Ok(()) => {
+    Err(message) => Ok(finish(&app, &state, &current, operation, Phase::Error, Some(message))),
+    Ok(_) => {
       {
         let mut inner = state.inner.lock().unwrap();
         if !inner.invalidated {
@@ -1228,7 +1585,7 @@ pub async fn desktop_update_cancel(app: AppHandle, webview: Webview, state: Stat
           inner.fence = fence;
         }
       }
-      Ok(finish(&state, &current, operation, Phase::Cancelled, None))
+      Ok(finish(&app, &state, &current, operation, Phase::Cancelled, None))
     }
   }
 }
@@ -1236,6 +1593,234 @@ pub async fn desktop_update_cancel(app: AppHandle, webview: Webview, state: Stat
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn sample_center(origin: &str, ca_pem: Option<&str>) -> CenterAuth {
+    CenterAuth {
+      fence: format!("1:1:{origin}|device-1"),
+      origin: origin.to_string(),
+      device_id: "device-1".to_string(),
+      device_token: "token-1".to_string(),
+      ca_pem: ca_pem.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn check_and_download_timeouts_are_separated() {
+    assert_eq!(CHECK_TIMEOUT, Duration::from_secs(15));
+    assert_eq!(DOWNLOAD_TIMEOUT, Duration::from_secs(600));
+    assert!(CHECK_TIMEOUT < DOWNLOAD_TIMEOUT);
+    assert_eq!(AUTO_CHECK_PUSH_COOLDOWN_MS, 0);
+    assert_eq!(AUTO_CHECK_UPDATES_PAGE_COOLDOWN_MS, 30_000);
+    assert_eq!(AUTO_CHECK_STARTUP_COOLDOWN_MS, 120_000);
+    assert_eq!(AUTO_CHECK_FOREGROUND_COOLDOWN_MS, 600_000);
+    assert_eq!(AUTO_CHECK_PERIODIC_COOLDOWN_MS, 4 * 60 * 60 * 1000);
+  }
+
+  #[test]
+  fn progress_throttle_skips_rapid_small_chunks_and_emits_on_percent_or_interval() {
+    let t0 = Instant::now();
+    let mut throttle = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL, t0);
+    let total = 10_000_000u64;
+
+    // Rapid small chunks (<1% and <120ms) do not emit.
+    assert!(!throttle.should_emit(65_536, total, t0 + Duration::from_millis(20)));
+    assert!(!throttle.should_emit(90_000, total, t0 + Duration::from_millis(119)));
+
+    // Crossing >=1% triggers immediately even before 120ms.
+    assert!(throttle.should_emit(100_000, total, t0 + Duration::from_millis(119)));
+
+    // Subsequent chunk still at 1% and <120ms since last emit is skipped.
+    assert!(!throttle.should_emit(150_000, total, t0 + Duration::from_millis(200)));
+
+    // Elapsed >=120ms since last emit (119ms + 120ms = 239ms) triggers even within 1%.
+    assert!(throttle.should_emit(151_000, total, t0 + Duration::from_millis(239)));
+
+    // Duplicate byte count never re-emits.
+    assert!(!throttle.should_emit(151_000, total, t0 + Duration::from_millis(500)));
+  }
+
+  #[test]
+  fn progress_throttle_handles_completion_and_zero_total_edge_cases() {
+    let t0 = Instant::now();
+    let mut throttle = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL, t0);
+
+    assert!(throttle.should_emit(990, 1000, t0 + Duration::from_millis(5)));
+    assert!(!throttle.should_emit(995, 1000, t0 + Duration::from_millis(10)));
+    // Completion always emits even <120ms after the prior progress event.
+    assert!(throttle.should_emit(1000, 1000, t0 + Duration::from_millis(12)));
+    assert!(!throttle.should_emit(1000, 1000, t0 + Duration::from_millis(500)));
+
+    // Tiny single-chunk completion emits immediately.
+    let mut tiny = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL, t0);
+    assert!(tiny.should_emit(16, 16, t0 + Duration::from_millis(1)));
+
+    // Unknown/zero total falls back cleanly to time-based throttling.
+    let mut unknown = ProgressThrottle::new(PROGRESS_EMIT_INTERVAL, t0);
+    assert!(!unknown.should_emit(0, 0, t0 + Duration::from_millis(200)));
+    assert!(!unknown.should_emit(4096, 0, t0 + Duration::from_millis(50)));
+    assert!(unknown.should_emit(8192, 0, t0 + Duration::from_millis(120)));
+    assert!(!unknown.should_emit(12_288, 0, t0 + Duration::from_millis(200)));
+    assert!(unknown.should_emit(16_384, 0, t0 + Duration::from_millis(240)));
+  }
+
+  #[test]
+  fn http_client_cache_reuses_matching_key_and_evicts_lru_on_origin_ca_or_timeout_change() {
+    fn insert_or_get(cache: &mut HttpClientCache<usize>, builds: &mut usize, key: HttpClientKey) -> usize {
+      cache
+        .get_or_try_insert(key, |_| -> Result<usize, &'static str> {
+          *builds += 1;
+          Ok(*builds)
+        })
+        .unwrap()
+    }
+
+    let mut cache = HttpClientCache::<usize>::with_capacity(HTTP_CLIENT_CACHE_CAPACITY);
+    let mut builds = 0usize;
+
+    let key_a = HttpClientKey::new("https://center-a.example", None, DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_a.clone()), 1);
+    // Blank/whitespace CA normalizes to None and reuses the same cached client.
+    let key_a_blank_ca = HttpClientKey::new("https://center-a.example", Some("   "), DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_a_blank_ca), 1);
+    assert_eq!(builds, 1);
+    assert_eq!(cache.len(), 1);
+
+    // Adding a custom CA creates a distinct client; trimmed CA reuses it.
+    let key_b = HttpClientKey::new("https://center-a.example", Some("  CA-PEM-A  "), DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_b.clone()), 2);
+    let key_b_trimmed = HttpClientKey::new("https://center-a.example", Some("CA-PEM-A"), DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_b_trimmed), 2);
+    assert_eq!(builds, 2);
+
+    // Different CA PEM and different origin each get distinct entries.
+    let key_c = HttpClientKey::new("https://center-a.example", Some("CA-PEM-B"), DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_c.clone()), 3);
+    let key_d = HttpClientKey::new("https://center-b.example", None, DOWNLOAD_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_d.clone()), 4);
+    assert_eq!(cache.len(), 4);
+
+    // Refresh key_a recency so key_b becomes the least-recently-used entry.
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_a.clone()), 1);
+    assert_eq!(builds, 4);
+
+    // Different timeout inserts a 5th key and evicts LRU (key_b), keeping capacity bounded at 4.
+    let key_e = HttpClientKey::new("https://center-a.example", None, CHECK_TIMEOUT);
+    assert_eq!(insert_or_get(&mut cache, &mut builds, key_e.clone()), 5);
+    assert_eq!(cache.len(), 4);
+    assert!(!cache.contains_key(&key_b));
+    assert!(cache.contains_key(&key_a));
+    assert!(cache.contains_key(&key_c));
+    assert!(cache.contains_key(&key_d));
+    assert!(cache.contains_key(&key_e));
+
+    // A failed client build must not insert or evict existing cached entries.
+    let bad_key = HttpClientKey::new("https://center-c.example", Some("bad"), DOWNLOAD_TIMEOUT);
+    let err = cache.get_or_try_insert(bad_key.clone(), |_| Err("invalid ca"));
+    assert!(err.is_err());
+    assert_eq!(cache.len(), 4);
+    assert!(!cache.contains_key(&bad_key));
+    assert!(cache.contains_key(&key_a));
+  }
+
+  const TEST_CA_PEM_1: &str = concat!(
+    "-----BEGIN CERTIFICATE-----\n",
+    "MIIBtjCCAVugAwIBAgITBmyf1XSXNmY/Owua2eiedgPySjAKBggqhkjOPQQDAjA5\n",
+    "MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6b24g\n",
+    "Um9vdCBDQSAzMB4XDTE1MDUyNjAwMDAwMFoXDTQwMDUyNjAwMDAwMFowOTELMAkG\n",
+    "A1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJvb3Qg\n",
+    "Q0EgMzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABCmXp8ZBf8ANm+gBG1bG8lKl\n",
+    "ui2yEujSLtf6ycXYqm0fc4E7O5hrOXwzpcVOho6AF2hiRVd9RFgdszflZwjrZt6j\n",
+    "QjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGGMB0GA1UdDgQWBBSr\n",
+    "ttvXBp43rDCGB5Fwx5zEGbF4wDAKBggqhkjOPQQDAgNJADBGAiEA4IWSoxe3jfkr\n",
+    "BqWTrBqYaGFy+uGh0PsceGCmQ5nFuMQCIQCcAu/xlJyzlvnrxir4tiz+OpAUFteM\n",
+    "YyRIHN8wfdVoOw==\n",
+    "-----END CERTIFICATE-----\n",
+  );
+
+  const TEST_CA_PEM_2: &str = concat!(
+    "-----BEGIN CERTIFICATE-----\n",
+    "MIIB8jCCAXigAwIBAgITBmyf18G7EEwpQ+Vxe3ssyBrBDjAKBggqhkjOPQQDAzA5\n",
+    "MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6b24g\n",
+    "Um9vdCBDQSA0MB4XDTE1MDUyNjAwMDAwMFoXDTQwMDUyNjAwMDAwMFowOTELMAkG\n",
+    "A1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJvb3Qg\n",
+    "Q0EgNDB2MBAGByqGSM49AgEGBSuBBAAiA2IABNKrijdPo1MN/sGKe0uoe0ZLY7Bi\n",
+    "9i0b2whxIdIA6GO9mif78DluXeo9pcmBqqNbIJhFXRbb/egQbeOc4OO9X4Ri83Bk\n",
+    "M6DLJC9wuoihKqB1+IGuYgbEgds5bimwHvouXKNCMEAwDwYDVR0TAQH/BAUwAwEB\n",
+    "/zAOBgNVHQ8BAf8EBAMCAYYwHQYDVR0OBBYEFNPsxzplbszh2naaVvuc84ZtV+WB\n",
+    "MAoGCCqGSM49BAMDA2gAMGUCMDqLIfG9fhGt0O9Yli/W651+kI0rz2ZVwyzjKKlw\n",
+    "CkcO8DdZEv8tmZQoTipPNU0zWgIxAOp1AE47xDqUEpHJWEadIRNyp4iciuRMStuW\n",
+    "1KyLa2tJElMzrdfkviT8tQp21KW8EA==\n",
+    "-----END CERTIFICATE-----\n",
+  );
+
+  #[test]
+  fn parse_certificates_accepts_empty_single_and_bundle_and_rejects_invalid_pem() {
+    assert!(parse_certificates(None).unwrap().is_empty());
+    assert!(parse_certificates(Some("   \n\t  ")).unwrap().is_empty());
+
+    assert_eq!(parse_certificates(Some(TEST_CA_PEM_1)).unwrap().len(), 1);
+    let bundle = format!("{TEST_CA_PEM_1}\n{TEST_CA_PEM_2}");
+    assert_eq!(parse_certificates(Some(&bundle)).unwrap().len(), 2);
+
+    let trailing_bad = format!(
+      "{TEST_CA_PEM_1}\n-----BEGIN CERTIFICATE-----\n!!!not-base64!!!\n-----END CERTIFICATE-----\n"
+    );
+    for invalid_pem in [
+      "not-a-pem",
+      "-----BEGIN CERTIFICATE-----\n!!!not-base64!!!\n-----END CERTIFICATE-----\n",
+      "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+      "-----BEGIN CERTIFICATE-----\nMIIBtjCCAVugAwIBAgIT\n",
+      "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+      trailing_bad.as_str(),
+    ] {
+      let err = parse_certificates(Some(invalid_pem)).unwrap_err();
+      assert_eq!(err.code, "INVALID_ARGUMENT", "unexpected code for {invalid_pem:?}");
+      assert!(err.message.contains("CA certificate"), "unexpected message for {invalid_pem:?}: {}", err.message);
+    }
+  }
+
+  #[test]
+  fn cached_http_client_reuses_reqwest_client_and_rejects_invalid_ca() {
+    let state = UpdateState::default();
+    let center = sample_center("https://center.example", None);
+
+    assert!(cached_http_client(&state, &center, DOWNLOAD_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 1);
+
+    // Same origin/CA/timeout hits the cache without growing it.
+    assert!(cached_http_client(&state, &center, DOWNLOAD_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 1);
+
+    // Distinct timeout adds a new pooled client entry.
+    assert!(cached_http_client(&state, &center, CHECK_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 2);
+
+    // Valid custom CA PEM (single and whitespace-padded) builds once and reuses the pooled client.
+    let single_ca = sample_center("https://center.example", Some(TEST_CA_PEM_1));
+    assert!(cached_http_client(&state, &single_ca, DOWNLOAD_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 3);
+    let padded_single_ca = sample_center("https://center.example", Some(&format!("\n  {TEST_CA_PEM_1}  \n")));
+    assert!(cached_http_client(&state, &padded_single_ca, DOWNLOAD_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 3);
+
+    // Valid multi-cert PEM bundle also builds and caches cleanly.
+    let bundle = format!("{TEST_CA_PEM_1}\n{TEST_CA_PEM_2}");
+    let bundle_ca = sample_center("https://center.example", Some(&bundle));
+    assert!(cached_http_client(&state, &bundle_ca, DOWNLOAD_TIMEOUT).is_ok());
+    assert_eq!(state.http_clients.lock().unwrap().len(), 4);
+
+    // Invalid CA PEM fails cleanly and never inserts into or evicts from the cache.
+    for bad in [
+      "not-a-pem",
+      "-----BEGIN CERTIFICATE-----\n!!!bad!!!\n-----END CERTIFICATE-----\n",
+      "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+    ] {
+      let invalid_ca = sample_center("https://center.example", Some(bad));
+      let err = cached_http_client(&state, &invalid_ca, DOWNLOAD_TIMEOUT).unwrap_err();
+      assert!(err.contains("CA certificate"), "unexpected error for {bad:?}: {err}");
+      assert_eq!(state.http_clients.lock().unwrap().len(), 4);
+    }
+  }
 
   const TEST_FENCE_A: &str = "1:1:https://center-a.example.com|device-1";
   const TEST_FENCE_B: &str = "1:2:https://center-a.example.com|device-1";

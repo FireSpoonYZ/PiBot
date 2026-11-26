@@ -1,4 +1,4 @@
-// 共享客户端更新 provider：统一编排桌面与 Android 全生命周期自动检查与原生状态同步。
+// 共享客户端更新 provider：统一编排桌面与 Android 全生命周期自动检查、原生推送与零闪烁状态同步。
 import {
   createContext,
   useContext,
@@ -26,6 +26,7 @@ export interface ClientUpdateContextValue {
   ready: boolean;
   centerKey: string;
   actionError: string;
+  lastCheckedAt: number | null;
   dismissError(): void;
   check(): void;
   triggerAutoCheck(reason: ClientUpdateCheckReason): void;
@@ -71,7 +72,7 @@ export function ClientUpdateProvider(props: {
     return () => controller.stop();
   }, [ready, centerKey, nativeCheck, controller]);
 
-  const { status, pending, actionError } = snapshot;
+  const { status, pending, actionError, lastCheckedAt } = snapshot;
   const live =
     (status !== undefined && CLIENT_UPDATE_LIVE_PHASES.has(status.phase)) ||
     pending === 'check' ||
@@ -79,7 +80,7 @@ export function ClientUpdateProvider(props: {
     pending === 'install';
   useEffect(() => {
     if (!live || !ready) return;
-    const timer = setInterval(() => void controller.refresh(), CLIENT_UPDATE_POLL_MS);
+    const timer = setInterval(() => void controller.refresh(true, false), CLIENT_UPDATE_POLL_MS);
     return () => clearInterval(timer);
   }, [live, ready, controller]);
 
@@ -90,6 +91,7 @@ export function ClientUpdateProvider(props: {
       ready: ready && Boolean(centerKey),
       centerKey,
       actionError,
+      lastCheckedAt,
       dismissError: controller.dismissError,
       check: controller.check,
       triggerAutoCheck: controller.triggerAutoCheck,
@@ -97,7 +99,7 @@ export function ClientUpdateProvider(props: {
       install: controller.install,
       cancel: controller.cancel,
     }),
-    [status, pending, ready, centerKey, actionError, controller],
+    [status, pending, ready, centerKey, actionError, lastCheckedAt, controller],
   );
 
   return <ClientUpdateContext.Provider value={value}>{props.children}</ClientUpdateContext.Provider>;
