@@ -15,8 +15,8 @@ pub mod pet_voice;
 pub mod updates;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::{AppHandle, Manager, RunEvent, State, Webview, WindowEvent, ipc::Channel, webview::PageLoadEvent};
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Webview, WindowEvent, ipc::Channel, webview::PageLoadEvent};
 use tauri_plugin_dialog::DialogExt;
 
 pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
@@ -162,11 +162,14 @@ async fn close_browser_window(app: &AppHandle, guest_ids: Vec<String>) {
   bridge.notify_browser_window_close().await;
 }
 
+const DESKTOP_MAIN_WINDOW_SHOWN_EVENT: &str = "desktop-main-window-shown";
+
 fn show_main_window(app: &AppHandle) {
   if let Some(window) = app.get_webview_window("main") {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    let _ = app.emit_to("main", DESKTOP_MAIN_WINDOW_SHOWN_EVENT, json!({}));
   }
 }
 

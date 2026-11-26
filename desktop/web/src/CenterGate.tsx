@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ChevronRight, Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
@@ -7,13 +8,26 @@ import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
 import { hostAdopt, hostConnectLocal, hostControl, hostErrorCode, hostErrorText, hostPair, hostPairCode, hostStatus, hostWarningText, rawMessage, type HostPairResult, type HostStatus } from './hostService';
 import { readPaste } from '../../../web/src/pairingCode';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
-import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
+import {
+  CLIENT_UPDATE_FOREGROUND_EVENT,
+  CLIENT_UPDATE_RELEASE_PUBLISHED_EVENT,
+  type ClientUpdateOp,
+  type ClientUpdateParams,
+  type ClientUpdateStatus,
+} from '../../../web/src/ClientUpdate';
 import './CenterGate.css';
 
 /** 桌面更新命令适配：语义操作 → desktop_update_* Tauri 命令（原生侧负责节流/验签/安装）。 */
 const desktopUpdateRequest = (op: ClientUpdateOp, params?: ClientUpdateParams): Promise<ClientUpdateStatus> => {
   const command = 'desktop_update_' + op;
-  if (op === 'check') return invoke<ClientUpdateStatus>(command, { automatic: Boolean(params?.automatic) });
+  if (op === 'check') {
+    return invoke<ClientUpdateStatus>(
+      command,
+      params?.reason !== undefined
+        ? { automatic: Boolean(params?.automatic), reason: params.reason }
+        : { automatic: Boolean(params?.automatic) },
+    );
+  }
   if (op === 'install') return invoke<ClientUpdateStatus>(command, { stopActive: Boolean(params?.stopActive) });
   return invoke<ClientUpdateStatus>(command);
 };
@@ -433,6 +447,33 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
       window.removeEventListener('focus', onVisible);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 监听桌面原生事件：中心发布新版本推送、主窗口从托盘/单实例唤起显示。
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const subscribe = (tauriEvent: string, domEvent: string) => {
+      void listen(tauriEvent, () => {
+        if (!disposed) window.dispatchEvent(new Event(domEvent));
+      })
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        })
+        .catch(() => {});
+    };
+    subscribe('desktop-client-release-published', CLIENT_UPDATE_RELEASE_PUBLISHED_EVENT);
+    subscribe('desktop-main-window-shown', CLIENT_UPDATE_FOREGROUND_EVENT);
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners.splice(0)) {
+        unlisten();
+      }
+    };
   }, []);
 
   // 配对完成后清理步骤，显式更换连接时显示当前表单。

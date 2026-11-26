@@ -21,7 +21,7 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tauri::{AppHandle, Manager, ipc::Channel, utils::platform};
+use tauri::{AppHandle, Emitter, Manager, ipc::Channel, utils::platform};
 use tokio::sync::oneshot;
 
 const MAX_LINE_BYTES: usize = 40 * 1024 * 1024;
@@ -49,6 +49,8 @@ const MEMORY_METHODS: &[&str] = &[
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 80 * 1024 * 1024;
 const OBSERVE_ACK_OP: &str = "observe_ack";
+const CENTER_EVENT_CLIENT_RELEASE_PUBLISHED: &str = "client-release-published";
+const DESKTOP_CLIENT_RELEASE_PUBLISHED_EVENT: &str = "desktop-client-release-published";
 const SIDECAR_NAME: &str = "pibot-node";
 const CLIENT_SCRIPT_NAME: &str = "desktop-client.mjs";
 
@@ -1033,6 +1035,7 @@ fn spawn_supervised_session(
   );
   spawn_reader_thread(
     Arc::clone(&bridge_inner),
+    app.clone(),
     Arc::clone(&session),
     stdout,
   );
@@ -1106,6 +1109,7 @@ fn spawn_writer_thread(
 
 fn spawn_reader_thread(
   bridge_inner: Arc<BridgeInner>,
+  app: AppHandle,
   session: Arc<Mutex<SessionState>>,
   stdout: ChildStdout,
 ) {
@@ -1148,7 +1152,7 @@ fn spawn_reader_thread(
             );
             break;
           };
-          if let Err(err) = handle_stdout_frame(&bridge_inner, &session, frame) {
+          if let Err(err) = handle_stdout_frame(&bridge_inner, &app, &session, frame) {
             teardown_session(&bridge_inner, &session, err);
             break;
           }
@@ -1206,8 +1210,13 @@ fn read_bounded_line<R: BufRead>(
   }
 }
 
+fn is_client_release_published_event(obj: &Map<String, Value>) -> bool {
+  obj.get("event").and_then(Value::as_str) == Some(CENTER_EVENT_CLIENT_RELEASE_PUBLISHED)
+}
+
 fn handle_stdout_frame(
   bridge_inner: &Arc<BridgeInner>,
+  app: &AppHandle,
   session: &Arc<Mutex<SessionState>>,
   frame: Value,
 ) -> Result<(), BridgeError> {
@@ -1330,6 +1339,12 @@ fn handle_stdout_frame(
       }
       if pump_observation_channel(session, &observation_id).is_err() {
         drop_failed_observer(bridge_inner, session, &observation_id, None);
+      }
+      Ok(())
+    }
+    "center_event" => {
+      if is_client_release_published_event(obj) && is_session_current(bridge_inner, session) {
+        let _ = app.emit_to("main", DESKTOP_CLIENT_RELEASE_PUBLISHED_EVENT, json!({}));
       }
       Ok(())
     }
@@ -1586,4 +1601,53 @@ fn path_to_utf8_string(path: &Path) -> Result<String, BridgeError> {
     ));
   }
   Ok(s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn dummy_session(generation: u64) -> Arc<Mutex<SessionState>> {
+    Arc::new(Mutex::new(SessionState {
+      generation,
+      ready: true,
+      closing: false,
+      failed: None,
+      child: Arc::new(Mutex::new(None)),
+      writer_tx: None,
+      pending: HashMap::new(),
+      observers: HashMap::new(),
+    }))
+  }
+
+  #[test]
+  fn center_event_filter_matches_only_client_release_published() {
+    let valid = json!({ "type": "center_event", "event": "client-release-published" });
+    assert!(is_client_release_published_event(valid.as_object().unwrap()));
+
+    for raw in [
+      json!({ "type": "center_event", "event": "config-changed" }),
+      json!({ "type": "center_event", "event": "CLIENT-RELEASE-PUBLISHED" }),
+      json!({ "type": "center_event", "event": "" }),
+      json!({ "type": "center_event", "event": 123 }),
+      json!({ "type": "center_event" }),
+    ] {
+      assert!(!is_client_release_published_event(raw.as_object().unwrap()));
+    }
+  }
+
+  #[test]
+  fn is_session_current_rejects_stale_session_generations() {
+    let bridge = DesktopBridge::new();
+    let gen1 = bridge.inner.next_generation.fetch_add(1, Ordering::SeqCst);
+    let session1 = dummy_session(gen1);
+    *bridge.inner.session.lock().unwrap() = Some(Arc::clone(&session1));
+    assert!(is_session_current(&bridge.inner, &session1));
+
+    let gen2 = bridge.inner.next_generation.fetch_add(1, Ordering::SeqCst);
+    let session2 = dummy_session(gen2);
+    *bridge.inner.session.lock().unwrap() = Some(Arc::clone(&session2));
+    assert!(!is_session_current(&bridge.inner, &session1));
+    assert!(is_session_current(&bridge.inner, &session2));
+  }
 }

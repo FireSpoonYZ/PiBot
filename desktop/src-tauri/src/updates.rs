@@ -20,14 +20,18 @@ use crate::{
   ensure_main_webview, host_service,
 };
 
-const AUTO_CHECK_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
+const AUTO_CHECK_PUSH_COOLDOWN_MS: u64 = 0;
+const AUTO_CHECK_UPDATES_PAGE_COOLDOWN_MS: u64 = 30_000;
+const AUTO_CHECK_STARTUP_COOLDOWN_MS: u64 = 120_000;
+const AUTO_CHECK_FOREGROUND_COOLDOWN_MS: u64 = 600_000;
+const AUTO_CHECK_PERIODIC_COOLDOWN_MS: u64 = 4 * 60 * 60 * 1000;
 const UPDATER_TIMEOUT: Duration = Duration::from_secs(600);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 const CENTER_CREDENTIALS_FILE: &str = "center-credentials.json";
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
   #[default]
@@ -42,6 +46,90 @@ enum Phase {
   Cancelled,
   Error,
   WaitingTasks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckReason {
+  Startup,
+  Foreground,
+  UpdatesPage,
+  Push,
+  Periodic,
+}
+
+impl CheckReason {
+  fn parse(raw: Option<&str>) -> Result<Option<Self>, BridgeError> {
+    match raw {
+      None => Ok(None),
+      Some("startup") => Ok(Some(Self::Startup)),
+      Some("foreground") => Ok(Some(Self::Foreground)),
+      Some("updates-page") => Ok(Some(Self::UpdatesPage)),
+      Some("push") => Ok(Some(Self::Push)),
+      Some("periodic") => Ok(Some(Self::Periodic)),
+      Some(_) => Err(invalid("invalid update check reason")),
+    }
+  }
+
+  const fn cooldown_ms(self) -> u64 {
+    match self {
+      Self::Push => AUTO_CHECK_PUSH_COOLDOWN_MS,
+      Self::UpdatesPage => AUTO_CHECK_UPDATES_PAGE_COOLDOWN_MS,
+      Self::Startup => AUTO_CHECK_STARTUP_COOLDOWN_MS,
+      Self::Foreground => AUTO_CHECK_FOREGROUND_COOLDOWN_MS,
+      Self::Periodic => AUTO_CHECK_PERIODIC_COOLDOWN_MS,
+    }
+  }
+}
+
+fn validate_check_args(
+  automatic: Option<bool>,
+  reason: Option<&str>,
+) -> Result<(bool, Option<CheckReason>), BridgeError> {
+  let parsed_reason = CheckReason::parse(reason)?;
+  let automatic = automatic.unwrap_or(false);
+  let effective_reason = if automatic {
+    Some(parsed_reason.unwrap_or(CheckReason::Periodic))
+  } else {
+    None
+  };
+  Ok((automatic, effective_reason))
+}
+
+fn is_active_update_phase(phase: Phase) -> bool {
+  matches!(
+    phase,
+    Phase::Downloading
+      | Phase::Downloaded
+      | Phase::Installing
+      | Phase::Complete
+      | Phase::WaitingTasks
+  )
+}
+
+fn stable_auto_recovery_phase(phase: Phase) -> Phase {
+  match phase {
+    Phase::Available => Phase::Available,
+    Phase::UpToDate => Phase::UpToDate,
+    _ => Phase::Idle,
+  }
+}
+
+fn is_check_throttled(
+  inner: &UpdateInner,
+  fence: &str,
+  automatic: bool,
+  reason: Option<CheckReason>,
+  now: u64,
+) -> bool {
+  if !automatic {
+    return false;
+  }
+  let cooldown_ms = reason.unwrap_or(CheckReason::Periodic).cooldown_ms();
+  if cooldown_ms == 0 {
+    return false;
+  }
+  inner.last_auto_fence.as_deref() == Some(fence)
+    && now.saturating_sub(inner.last_auto_at) < cooldown_ms
 }
 
 #[derive(Default)]
@@ -129,6 +217,135 @@ fn clear_update_fields(inner: &mut UpdateInner) {
   inner.total = None;
 }
 
+fn clear_auto_cooldown(inner: &mut UpdateInner) {
+  inner.last_auto_fence = None;
+  inner.last_auto_at = 0;
+}
+
+enum CheckStart {
+  SkippedActive,
+  Started {
+    operation: u64,
+    cancel: oneshot::Receiver<()>,
+    pre_phase: Phase,
+    pre_message: Option<String>,
+    recovery_phase: Phase,
+  },
+}
+
+fn begin_check(inner: &mut UpdateInner, automatic: bool) -> Result<CheckStart, BridgeError> {
+  if automatic && is_active_update_phase(inner.phase) {
+    return Ok(CheckStart::SkippedActive);
+  }
+  let pre_phase = inner.phase;
+  let pre_message = inner.message.clone();
+  let recovery_phase = stable_auto_recovery_phase(pre_phase);
+  let in_flight_phase = if automatic && matches!(pre_phase, Phase::Available | Phase::UpToDate | Phase::Idle) {
+    pre_phase
+  } else {
+    Phase::Checking
+  };
+  let (operation, cancel) = begin(inner, in_flight_phase, true)?;
+  Ok(CheckStart::Started {
+    operation,
+    cancel: cancel.unwrap(),
+    pre_phase,
+    pre_message,
+    recovery_phase,
+  })
+}
+
+fn prepare_check_before_fetch(inner: &mut UpdateInner, fence: &str, automatic: bool) {
+  if !inner.invalidated {
+    if !automatic {
+      clear_update_fields(inner);
+    }
+    inner.fence = Some(fence.to_string());
+  }
+}
+
+enum CheckResult {
+  Cancelled,
+  Error(String),
+  UpToDate,
+  Available {
+    update: Option<Update>,
+    size: u64,
+    release: Value,
+  },
+}
+
+fn apply_check_outcome(
+  state: &UpdateState,
+  current: &str,
+  operation: u64,
+  fence: &str,
+  automatic: bool,
+  recovery_phase: Phase,
+  now: u64,
+  outcome: CheckResult,
+) -> Value {
+  let mut inner = state.inner.lock().unwrap();
+  if inner.operation != operation {
+    return snapshot_locked(&inner, current);
+  }
+  if inner.invalidated {
+    clear_update_fields(&mut inner);
+    clear_auto_cooldown(&mut inner);
+    inner.phase = Phase::Idle;
+    inner.message = Some("center changed or disconnected; update state was reset".to_string());
+    inner.busy = false;
+    inner.cancel_tx = None;
+    return snapshot_locked(&inner, current);
+  }
+  match outcome {
+    CheckResult::Cancelled => {
+      clear_update_fields(&mut inner);
+      inner.fence = Some(fence.to_string());
+      inner.phase = Phase::Cancelled;
+      inner.message = None;
+    }
+    CheckResult::Error(message) => {
+      if automatic {
+        if !matches!(recovery_phase, Phase::Available) {
+          clear_update_fields(&mut inner);
+          inner.fence = Some(fence.to_string());
+        }
+        inner.phase = recovery_phase;
+        inner.message = None;
+      } else {
+        clear_update_fields(&mut inner);
+        inner.fence = Some(fence.to_string());
+        inner.phase = Phase::Error;
+        inner.message = Some(message);
+      }
+    }
+    CheckResult::UpToDate => {
+      clear_update_fields(&mut inner);
+      inner.fence = Some(fence.to_string());
+      inner.last_auto_fence = Some(fence.to_string());
+      inner.last_auto_at = now;
+      inner.phase = Phase::UpToDate;
+      inner.message = None;
+    }
+    CheckResult::Available { update, size, release } => {
+      inner.update = update;
+      inner.bytes = None;
+      inner.downloaded = 0;
+      inner.fence = Some(fence.to_string());
+      inner.release = Some(release);
+      inner.total = Some(size);
+      inner.last_auto_fence = Some(fence.to_string());
+      inner.last_auto_at = now;
+      inner.phase = Phase::Available;
+      inner.message = None;
+    }
+  }
+  inner.busy = false;
+  inner.cancel_tx = None;
+  snapshot_locked(&inner, current)
+}
+
 fn begin(inner: &mut UpdateInner, phase: Phase, cancellable: bool) -> Result<(u64, Option<oneshot::Receiver<()>>), BridgeError> {
   if inner.busy {
     return Err(busy());
@@ -154,6 +371,7 @@ fn finish(state: &UpdateState, current: &str, operation: u64, phase: Phase, mess
   if inner.operation == operation {
     if inner.invalidated && !(inner.prepared && matches!(phase, Phase::Error)) {
       clear_update_fields(&mut inner);
+      clear_auto_cooldown(&mut inner);
       inner.phase = Phase::Idle;
       inner.message = Some("center changed or disconnected; update state was reset".to_string());
     } else {
@@ -410,6 +628,7 @@ async fn fence_matches(app: &AppHandle, state: &UpdateState, operation: u64, exp
   if !matches {
     inner.invalidated = true;
     clear_update_fields(&mut inner);
+    clear_auto_cooldown(&mut inner);
   }
   matches
 }
@@ -417,6 +636,14 @@ async fn fence_matches(app: &AppHandle, state: &UpdateState, operation: u64, exp
 async fn finish_stale(state: &UpdateState, current: &str, operation: u64) -> Value {
   match release_prepare(state).await {
     Ok(()) => finish(state, current, operation, Phase::Idle, None),
+    Err(message) => finish(state, current, operation, Phase::Error, Some(message)),
+  }
+}
+
+async fn finish_stale_check(state: &UpdateState, current: &str, operation: u64, automatic: bool) -> Value {
+  match release_prepare(state).await {
+    Ok(()) => finish(state, current, operation, Phase::Idle, None),
+    Err(_) if automatic => finish(state, current, operation, Phase::Idle, None),
     Err(message) => finish(state, current, operation, Phase::Error, Some(message)),
   }
 }
@@ -438,6 +665,7 @@ async fn reconcile_center_state(app: &AppHandle, state: &UpdateState) {
     }
     inner.invalidated = true;
     clear_update_fields(&mut inner);
+    clear_auto_cooldown(&mut inner);
     inner.phase = Phase::Idle;
     inner.message = Some("center changed or disconnected; update state was reset".to_string());
     if let Some(tx) = inner.cancel_tx.take() {
@@ -465,16 +693,28 @@ pub async fn desktop_update_status(app: AppHandle, webview: Webview, state: Stat
 
 #[tauri::command]
 pub async fn desktop_update_check(
-  app: AppHandle, webview: Webview, state: State<'_, UpdateState>, automatic: Option<bool>,
+  app: AppHandle,
+  webview: Webview,
+  state: State<'_, UpdateState>,
+  automatic: Option<bool>,
+  reason: Option<String>,
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
+  let (automatic, effective_reason) = validate_check_args(automatic, reason.as_deref())?;
   reconcile_center_state(&app, &state).await;
   let current = app.package_info().version.to_string();
-  let (operation, mut cancel, mut previous) = {
+  let (operation, mut cancel, mut pre_phase, mut pre_message, mut recovery_phase) = {
     let mut inner = state.inner.lock().unwrap();
-    let previous = inner.phase;
-    let (operation, cancel) = begin(&mut inner, Phase::Checking, true)?;
-    (operation, cancel.unwrap(), previous)
+    match begin_check(&mut inner, automatic)? {
+      CheckStart::SkippedActive => return Ok(snapshot_locked(&inner, &current)),
+      CheckStart::Started {
+        operation,
+        cancel,
+        pre_phase,
+        pre_message,
+        recovery_phase,
+      } => (operation, cancel, pre_phase, pre_message, recovery_phase),
+    }
   };
   let center = match resolve_center_auth(&app).await {
     Ok(Some(center)) => center,
@@ -483,10 +723,14 @@ pub async fn desktop_update_check(
         let mut inner = state.inner.lock().unwrap();
         inner.invalidated = true;
         clear_update_fields(&mut inner);
+        clear_auto_cooldown(&mut inner);
       }
-      return Ok(finish_stale(&state, &current, operation).await);
+      return Ok(finish_stale_check(&state, &current, operation, automatic).await);
     }
     Err(err) => {
+      if automatic {
+        return Ok(finish(&state, &current, operation, recovery_phase, None));
+      }
       {
         let mut inner = state.inner.lock().unwrap();
         clear_update_fields(&mut inner);
@@ -500,7 +744,10 @@ pub async fn desktop_update_check(
     let replaced = inner.fence.as_ref().is_some_and(|fence| fence != &center.fence);
     if replaced {
       clear_update_fields(&mut inner);
-      previous = Phase::Idle;
+      clear_auto_cooldown(&mut inner);
+      pre_phase = Phase::Idle;
+      pre_message = None;
+      recovery_phase = Phase::Idle;
     }
     if !inner.invalidated {
       inner.fence = Some(center.fence.clone());
@@ -508,108 +755,137 @@ pub async fn desktop_update_check(
     (inner.invalidated, replaced)
   };
   if invalidated {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale_check(&state, &current, operation, automatic).await);
   }
   let mut cancelled = cancel.try_recv().is_ok();
   if replaced || cancelled {
     let cleanup = release_prepare(&state).await;
     if !fence_matches(&app, &state, operation, &center.fence).await {
       return Ok(match cleanup {
-        Ok(()) => finish_stale(&state, &current, operation).await,
-        Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+        Ok(()) => finish_stale_check(&state, &current, operation, automatic).await,
+        Err(message) => {
+          if automatic {
+            finish(&state, &current, operation, Phase::Idle, None)
+          } else {
+            finish(&state, &current, operation, Phase::Error, Some(message))
+          }
+        }
       });
     }
     if let Err(message) = cleanup {
-      return Ok(finish(&state, &current, operation, Phase::Error, Some(message)));
+      return Ok(if automatic {
+        finish(&state, &current, operation, recovery_phase, None)
+      } else {
+        finish(&state, &current, operation, Phase::Error, Some(message))
+      });
     }
     if !cancelled {
       cancelled = cancel.try_recv().is_ok();
     }
     if cancelled {
-      return Ok(finish(&state, &current, operation, Phase::Cancelled, None));
+      return Ok(apply_check_outcome(
+        &state,
+        &current,
+        operation,
+        &center.fence,
+        automatic,
+        recovery_phase,
+        now_ms(),
+        CheckResult::Cancelled,
+      ));
     }
   }
-  if automatic.unwrap_or(false) {
+  if automatic {
     let now = now_ms();
     let throttled = {
       let inner = state.inner.lock().unwrap();
-      inner.last_auto_fence.as_deref() == Some(center.fence.as_str())
-        && now.saturating_sub(inner.last_auto_at) < AUTO_CHECK_INTERVAL_MS
+      is_check_throttled(&inner, &center.fence, automatic, effective_reason, now)
     };
     if throttled {
       if !fence_matches(&app, &state, operation, &center.fence).await {
-        return Ok(finish_stale(&state, &current, operation).await);
+        return Ok(finish_stale_check(&state, &current, operation, true).await);
       }
       if cancel.try_recv().is_ok() {
         let cleanup = release_prepare(&state).await;
         if !fence_matches(&app, &state, operation, &center.fence).await {
           return Ok(match cleanup {
-            Ok(()) => finish_stale(&state, &current, operation).await,
-            Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+            Ok(()) => finish_stale_check(&state, &current, operation, true).await,
+            Err(_) => finish(&state, &current, operation, Phase::Idle, None),
           });
         }
         return Ok(match cleanup {
-          Ok(()) => finish(&state, &current, operation, Phase::Cancelled, None),
-          Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+          Ok(()) => apply_check_outcome(
+            &state,
+            &current,
+            operation,
+            &center.fence,
+            true,
+            recovery_phase,
+            now_ms(),
+            CheckResult::Cancelled,
+          ),
+          Err(_) => finish(&state, &current, operation, recovery_phase, None),
         });
       }
-      return Ok(finish(&state, &current, operation, previous, None));
+      return Ok(finish(&state, &current, operation, pre_phase, pre_message));
     }
   }
   {
     let mut inner = state.inner.lock().unwrap();
-    if !inner.invalidated {
-      clear_update_fields(&mut inner);
-      inner.fence = Some(center.fence.clone());
-    }
+    prepare_check_before_fetch(&mut inner, &center.fence, automatic);
   }
   let cleanup = release_prepare(&state).await;
   if !fence_matches(&app, &state, operation, &center.fence).await {
     return Ok(match cleanup {
-      Ok(()) => finish_stale(&state, &current, operation).await,
-      Err(message) => finish(&state, &current, operation, Phase::Error, Some(message)),
+      Ok(()) => finish_stale_check(&state, &current, operation, automatic).await,
+      Err(message) => {
+        if automatic {
+          finish(&state, &current, operation, Phase::Idle, None)
+        } else {
+          finish(&state, &current, operation, Phase::Error, Some(message))
+        }
+      }
     });
   }
   if let Err(message) = cleanup {
-    return Ok(finish(&state, &current, operation, Phase::Error, Some(message)));
-  }
-  if automatic.unwrap_or(false) {
-    let mut inner = state.inner.lock().unwrap();
-    if !inner.invalidated {
-      inner.last_auto_fence = Some(center.fence.clone());
-      inner.last_auto_at = now_ms();
-    }
+    return Ok(if automatic {
+      finish(&state, &current, operation, recovery_phase, None)
+    } else {
+      finish(&state, &current, operation, Phase::Error, Some(message))
+    });
   }
   let outcome = match build_updater(&app, &center) {
     Ok(updater) => tokio::select! {
       biased;
-      _ = &mut cancel => None,
-      result = updater.check() => Some(result.map_err(|err| err.to_string())),
+      _ = &mut cancel => CheckResult::Cancelled,
+      result = updater.check() => match result {
+        Err(err) => CheckResult::Error(err.to_string()),
+        Ok(None) => CheckResult::UpToDate,
+        Ok(Some(update)) => match validate_release(&update, &center) {
+          Err(message) => CheckResult::Error(message),
+          Ok((size, _, release)) => CheckResult::Available {
+            update: Some(update),
+            size,
+            release,
+          },
+        },
+      },
     },
-    Err(err) => Some(Err(err.message)),
+    Err(err) => CheckResult::Error(err.message),
   };
   if !fence_matches(&app, &state, operation, &center.fence).await {
-    return Ok(finish_stale(&state, &current, operation).await);
+    return Ok(finish_stale_check(&state, &current, operation, automatic).await);
   }
-  match outcome {
-    None => Ok(finish(&state, &current, operation, Phase::Cancelled, None)),
-    Some(Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
-    Some(Ok(None)) => Ok(finish(&state, &current, operation, Phase::UpToDate, None)),
-    Some(Ok(Some(update))) => match validate_release(&update, &center) {
-      Err(message) => Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
-      Ok((size, _, release)) => {
-        {
-          let mut inner = state.inner.lock().unwrap();
-          if !inner.invalidated {
-            inner.update = Some(update);
-            inner.release = Some(release);
-            inner.total = Some(size);
-          }
-        }
-        Ok(finish(&state, &current, operation, Phase::Available, None))
-      }
-    },
-  }
+  Ok(apply_check_outcome(
+    &state,
+    &current,
+    operation,
+    &center.fence,
+    automatic,
+    recovery_phase,
+    now_ms(),
+    outcome,
+  ))
 }
 
 async fn download_bounded(
@@ -835,6 +1111,297 @@ pub async fn desktop_update_cancel(app: AppHandle, webview: Webview, state: Stat
         }
       }
       Ok(finish(&state, &current, operation, Phase::Cancelled, None))
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const TEST_FENCE_A: &str = "1:1:https://center-a.example.com|device-1";
+  const TEST_FENCE_B: &str = "1:2:https://center-a.example.com|device-1";
+  const TEST_FENCE_OTHER: &str = "1:1:https://center-b.example.com|device-1";
+
+  fn sample_release(id: &str, version: &str) -> Value {
+    json!({
+      "id": id,
+      "version": version,
+      "notes": "release notes",
+      "size": 1024,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "sourceCommit": "0123456789abcdef0123456789abcdef01234567"
+    })
+  }
+
+  #[test]
+  fn check_reason_whitelist_rejects_invalid_values_regardless_of_automatic() {
+    assert_eq!(validate_check_args(Some(true), None).unwrap(), (true, Some(CheckReason::Periodic)));
+    assert_eq!(validate_check_args(Some(false), None).unwrap(), (false, None));
+    assert_eq!(validate_check_args(None, None).unwrap(), (false, None));
+
+    for (raw, expected) in [
+      ("startup", CheckReason::Startup),
+      ("foreground", CheckReason::Foreground),
+      ("updates-page", CheckReason::UpdatesPage),
+      ("push", CheckReason::Push),
+      ("periodic", CheckReason::Periodic),
+    ] {
+      assert_eq!(validate_check_args(Some(true), Some(raw)).unwrap(), (true, Some(expected)));
+      assert_eq!(validate_check_args(Some(false), Some(raw)).unwrap(), (false, None));
+    }
+
+    for invalid_raw in ["", " ", "STARTUP", "Push", "Updates-Page", "startup ", " startup", "manual", "invalid"] {
+      for automatic in [Some(true), Some(false), None] {
+        let err = validate_check_args(automatic, Some(invalid_raw)).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT", "reason={invalid_raw:?} automatic={automatic:?}");
+        assert_eq!(err.outcome, "not-sent");
+      }
+    }
+  }
+
+  #[test]
+  fn tiered_cooldown_thresholds_and_bypass_behave_as_specified() {
+    let mut inner = UpdateInner::default();
+    let base: u64 = 1_000_000;
+    inner.last_auto_fence = Some(TEST_FENCE_A.to_string());
+    inner.last_auto_at = base;
+
+    // push: 0ms always bypasses
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Push), base));
+
+    // updates-page: 30_000ms
+    assert!(is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::UpdatesPage), base + 29_999));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::UpdatesPage), base + 30_000));
+
+    // startup: 120_000ms
+    assert!(is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Startup), base + 119_999));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Startup), base + 120_000));
+
+    // foreground: 600_000ms
+    assert!(is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Foreground), base + 599_999));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Foreground), base + 600_000));
+
+    // periodic (and None default): 4h
+    let four_hours = 4 * 60 * 60 * 1000;
+    assert!(is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Periodic), base + four_hours - 1));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Periodic), base + four_hours));
+    assert!(is_check_throttled(&inner, TEST_FENCE_A, true, None, base + four_hours - 1));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, None, base + four_hours));
+
+    // Manual checks unconditionally bypass regardless of elapsed time or reason
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, false, None, base));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_A, false, Some(CheckReason::Periodic), base));
+
+    // Generation change / center switch bypasses cooldown immediately
+    assert!(!is_check_throttled(&inner, TEST_FENCE_B, true, Some(CheckReason::Periodic), base));
+    assert!(!is_check_throttled(&inner, TEST_FENCE_OTHER, true, Some(CheckReason::Periodic), base));
+  }
+
+  #[test]
+  fn manual_check_completion_refreshes_cooldown_while_failure_does_not() {
+    let state = UpdateState::default();
+    let (op1, recovery1) = {
+      let mut inner = state.inner.lock().unwrap();
+      match begin_check(&mut inner, false).unwrap() {
+        CheckStart::Started { operation, recovery_phase, .. } => {
+          prepare_check_before_fetch(&mut inner, TEST_FENCE_A, false);
+          (operation, recovery_phase)
+        }
+        CheckStart::SkippedActive => panic!("manual check should not skip idle"),
+      }
+    };
+    let snap = apply_check_outcome(
+      &state, "0.0.32", op1, TEST_FENCE_A, false, recovery1, 5_000_000, CheckResult::UpToDate,
+    );
+    assert_eq!(snap["phase"], "up-to-date");
+    {
+      let inner = state.inner.lock().unwrap();
+      assert_eq!(inner.last_auto_fence.as_deref(), Some(TEST_FENCE_A));
+      assert_eq!(inner.last_auto_at, 5_000_000);
+      assert!(is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::UpdatesPage), 5_010_000));
+      assert!(!is_check_throttled(&inner, TEST_FENCE_A, true, Some(CheckReason::Push), 5_010_000));
+    }
+
+    // A failing manual check must not advance last_auto_at
+    let (op2, recovery2) = {
+      let mut inner = state.inner.lock().unwrap();
+      match begin_check(&mut inner, false).unwrap() {
+        CheckStart::Started { operation, recovery_phase, .. } => {
+          prepare_check_before_fetch(&mut inner, TEST_FENCE_A, false);
+          (operation, recovery_phase)
+        }
+        CheckStart::SkippedActive => panic!("manual check should start"),
+      }
+    };
+    let err_snap = apply_check_outcome(
+      &state, "0.0.32", op2, TEST_FENCE_A, false, recovery2, 6_000_000, CheckResult::Error("network error".into()),
+    );
+    assert_eq!(err_snap["phase"], "error");
+    assert_eq!(err_snap["message"], "network error");
+    assert_eq!(state.inner.lock().unwrap().last_auto_at, 5_000_000);
+  }
+
+  #[test]
+  fn automatic_check_skips_active_phases_and_preserves_snapshot() {
+    for phase in [
+      Phase::Downloading,
+      Phase::Downloaded,
+      Phase::Installing,
+      Phase::Complete,
+      Phase::WaitingTasks,
+    ] {
+      let mut inner = UpdateInner::default();
+      inner.phase = phase;
+      inner.busy = matches!(phase, Phase::Downloading | Phase::Installing);
+      inner.operation = 7;
+      inner.fence = Some(TEST_FENCE_A.to_string());
+      inner.release = Some(sample_release("rel-33", "0.0.33"));
+      inner.downloaded = 512;
+      inner.total = Some(1024);
+
+      assert!(matches!(begin_check(&mut inner, true), Ok(CheckStart::SkippedActive)));
+      assert_eq!(inner.phase, phase);
+      assert_eq!(inner.operation, 7);
+      assert_eq!(inner.downloaded, 512);
+      assert_eq!(inner.total, Some(1024));
+      assert_eq!(inner.release.as_ref().unwrap()["version"], "0.0.33");
+    }
+  }
+
+  #[test]
+  fn available_phase_does_not_collapse_during_auto_check_and_transitions_cleanly() {
+    let state = UpdateState::default();
+    let rel_33 = sample_release("rel-33", "0.0.33");
+    let rel_34 = sample_release("rel-34", "0.0.34");
+    {
+      let mut inner = state.inner.lock().unwrap();
+      inner.phase = Phase::Available;
+      inner.fence = Some(TEST_FENCE_A.to_string());
+      inner.release = Some(rel_33.clone());
+      inner.total = Some(1024);
+      inner.last_auto_fence = Some(TEST_FENCE_A.to_string());
+      inner.last_auto_at = 1_000;
+    }
+
+    // Begin automatic check while Available: must stay Available and keep existing release
+    let (op1, recovery1) = {
+      let mut inner = state.inner.lock().unwrap();
+      match begin_check(&mut inner, true).unwrap() {
+        CheckStart::Started { operation, recovery_phase, .. } => {
+          prepare_check_before_fetch(&mut inner, TEST_FENCE_A, true);
+          (operation, recovery_phase)
+        }
+        CheckStart::SkippedActive => panic!("Available should allow auto check"),
+      }
+    };
+    let inflight = snapshot(&state, "0.0.32");
+    assert_eq!(inflight["phase"], "available");
+    assert_eq!(inflight["release"]["version"], "0.0.33");
+    assert_eq!(inflight["totalBytes"], 1024);
+
+    // Newer release replaces old release
+    let updated = apply_check_outcome(
+      &state,
+      "0.0.32",
+      op1,
+      TEST_FENCE_A,
+      true,
+      recovery1,
+      200_000,
+      CheckResult::Available { update: None, size: 2048, release: rel_34 },
+    );
+    assert_eq!(updated["phase"], "available");
+    assert_eq!(updated["release"]["version"], "0.0.34");
+    assert_eq!(updated["totalBytes"], 2048);
+    assert_eq!(state.inner.lock().unwrap().last_auto_at, 200_000);
+
+    // 204 / up-to-date clears release and transitions back to UpToDate
+    let (op2, recovery2) = {
+      let mut inner = state.inner.lock().unwrap();
+      match begin_check(&mut inner, true).unwrap() {
+        CheckStart::Started { operation, recovery_phase, .. } => {
+          prepare_check_before_fetch(&mut inner, TEST_FENCE_A, true);
+          (operation, recovery_phase)
+        }
+        CheckStart::SkippedActive => panic!("Available should allow auto check"),
+      }
+    };
+    let cleared = apply_check_outcome(
+      &state, "0.0.32", op2, TEST_FENCE_A, true, recovery2, 300_000, CheckResult::UpToDate,
+    );
+    assert_eq!(cleared["phase"], "up-to-date");
+    assert!(cleared.get("release").is_none());
+    assert!(cleared.get("totalBytes").is_none());
+    assert_eq!(state.inner.lock().unwrap().last_auto_at, 300_000);
+  }
+
+  #[test]
+  fn automatic_check_error_silently_restores_previous_stable_phase() {
+    // 1. Available preserves existing release and never enters Error
+    let state = UpdateState::default();
+    let rel_33 = sample_release("rel-33", "0.0.33");
+    {
+      let mut inner = state.inner.lock().unwrap();
+      inner.phase = Phase::Available;
+      inner.fence = Some(TEST_FENCE_A.to_string());
+      inner.release = Some(rel_33.clone());
+      inner.total = Some(1024);
+      inner.last_auto_fence = Some(TEST_FENCE_A.to_string());
+      inner.last_auto_at = 1_000;
+    }
+    let (op, recovery) = {
+      let mut inner = state.inner.lock().unwrap();
+      match begin_check(&mut inner, true).unwrap() {
+        CheckStart::Started { operation, recovery_phase, .. } => {
+          prepare_check_before_fetch(&mut inner, TEST_FENCE_A, true);
+          (operation, recovery_phase)
+        }
+        CheckStart::SkippedActive => panic!("expected Started"),
+      }
+    };
+    let snap = apply_check_outcome(
+      &state, "0.0.32", op, TEST_FENCE_A, true, recovery, 500_000, CheckResult::Error("503 unavailable".into()),
+    );
+    assert_eq!(snap["phase"], "available");
+    assert_eq!(snap["release"], rel_33);
+    assert_eq!(snap["totalBytes"], 1024);
+    assert!(snap.get("message").is_none());
+    assert_eq!(state.inner.lock().unwrap().last_auto_at, 1_000);
+
+    // 2. UpToDate, Idle, and prior Error/Cancelled all recover silently without Phase::Error
+    for (initial, expected_phase, expected_str) in [
+      (Phase::UpToDate, Phase::UpToDate, "up-to-date"),
+      (Phase::Idle, Phase::Idle, "idle"),
+      (Phase::Error, Phase::Idle, "idle"),
+      (Phase::Cancelled, Phase::Idle, "idle"),
+    ] {
+      let st = UpdateState::default();
+      {
+        let mut inner = st.inner.lock().unwrap();
+        inner.phase = initial;
+        inner.fence = Some(TEST_FENCE_A.to_string());
+        if initial == Phase::Error {
+          inner.message = Some("previous manual failure".into());
+        }
+      }
+      let (op, recovery) = {
+        let mut inner = st.inner.lock().unwrap();
+        match begin_check(&mut inner, true).unwrap() {
+          CheckStart::Started { operation, recovery_phase, .. } => {
+            prepare_check_before_fetch(&mut inner, TEST_FENCE_A, true);
+            (operation, recovery_phase)
+          }
+          CheckStart::SkippedActive => panic!("expected Started"),
+        }
+      };
+      let recovered = apply_check_outcome(
+        &st, "0.0.32", op, TEST_FENCE_A, true, recovery, 900_000, CheckResult::Error("timed out".into()),
+      );
+      assert_eq!(recovered["phase"], expected_str);
+      assert!(recovered.get("message").is_none());
+      assert_eq!(st.inner.lock().unwrap().phase, expected_phase);
+      assert!(!st.inner.lock().unwrap().busy);
     }
   }
 }
