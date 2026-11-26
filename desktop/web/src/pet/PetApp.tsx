@@ -24,7 +24,11 @@ import {
   X,
 } from 'lucide-react';
 import type { QuestionnairePresentation } from '../../../../host-core/index.js';
-import { GrokBotAnimatedMark, resolveBotAvatarPreset } from '../../../../web/src/GrokBotAvatar';
+import {
+  GrokBotAnimatedMark,
+  getDefaultBotAvatarPreset,
+  resolveBotAvatarPreset,
+} from '../../../../web/src/GrokBotAvatar';
 import { botActivityText, isBotActivityBusy } from '../../../../web/src/botActivity';
 import { classifyMarkdownLink } from '../../../../web/src/markdownLink';
 import {
@@ -65,6 +69,11 @@ import {
   type PetOrientation,
   type ViewportSize,
 } from './composerLayout';
+import {
+  INITIAL_RESOLVED_PET_AVATAR_STATE,
+  resolvePetAvatarState,
+  type ResolvedPetAvatarState,
+} from './avatarReady';
 import { resolvePetTheme } from './theme';
 import { createPetVoice, voiceError, type PetVoiceStatus } from './voice';
 import { VoiceSettings } from './VoiceSettings';
@@ -103,6 +112,11 @@ function writeLocal(key: string, text: string): void {
 }
 
 const postAction = (action: DesktopPetAction) => emitTo('main', PET_EVENTS.action, action);
+
+const PET_AVATAR_RESOLVER = {
+  resolvePreset: resolveBotAvatarPreset,
+  getDefaultPreset: getDefaultBotAvatarPreset,
+};
 
 type SendFlight = { id: string; key: string; text: string; assistantIds: Set<string> };
 type Recording = { key: string; start: Promise<void>; released: boolean };
@@ -178,6 +192,11 @@ export function PetApp() {
   const t = useText();
   const [snapshot, setSnapshot] = useState(INITIAL_PET_SNAPSHOT);
   const snapshotRef = useRef(snapshot);
+  const [avatarState, setAvatarState] = useState<ResolvedPetAvatarState>(INITIAL_RESOLVED_PET_AVATAR_STATE);
+  const avatarStateRef = useRef<ResolvedPetAvatarState>(INITIAL_RESOLVED_PET_AVATAR_STATE);
+  const windowRevealedRef = useRef(false);
+  const resolvedAvatar = avatarState.avatar;
+  const hasResolvedAvatar = resolvedAvatar !== null;
   const [layout, setLayout] = useState<PetOrientation>({
     dockSide: 'right',
     panelSide: 'top',
@@ -632,6 +651,11 @@ export function PetApp() {
           sendFlightRef.current = null;
           setSendFlight(null);
         }
+        const nextAvatarState = resolvePetAvatarState(payload, avatarStateRef.current, PET_AVATAR_RESOLVER);
+        if (nextAvatarState !== avatarStateRef.current) {
+          avatarStateRef.current = nextAvatarState;
+          setAvatarState(nextAvatarState);
+        }
         setSnapshot(payload);
       });
       if (disposed) { stateListener(); return; }
@@ -694,6 +718,7 @@ export function PetApp() {
           }
         }
         if (!payload.visible) {
+          windowRevealedRef.current = false;
           cancelRecording();
           stopReading();
           requestCloseComposer({ immediate: true });
@@ -993,6 +1018,9 @@ export function PetApp() {
 
   // Polymorphic bubble priority arbitration (single clean bubble at a time)
   const activeBubble = useMemo<BubbleDescriptor | null>(() => {
+    if (!hasResolvedAvatar) {
+      return null;
+    }
     if (ctxMenuOpen) {
       return { kind: 'menu', id: 'menu' };
     }
@@ -1149,6 +1177,7 @@ export function PetApp() {
     dismissedIds,
     dndMode,
     forcedReplyId,
+    hasResolvedAvatar,
     latestReply,
     latestUserText,
     matchingSettledQuestion,
@@ -1206,6 +1235,7 @@ export function PetApp() {
   // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
   const syncNativeLayoutRef = useRef<() => void>(() => {});
   const syncNativeLayout = useCallback(() => {
+    if (!avatarStateRef.current.avatar) return;
     if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
     const env = envelopeRef.current;
     const stage = stageRef.current;
@@ -1285,9 +1315,30 @@ export function PetApp() {
   syncNativeLayoutRef.current = syncNativeLayout;
 
   useLayoutEffect(() => {
+    if (!hasResolvedAvatar) return;
     if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
     syncNativeLayout();
-  }, [syncNativeLayout, hoveringDock, activeBubble, composerPhase, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
+  }, [syncNativeLayout, hasResolvedAvatar, hoveringDock, activeBubble, composerPhase, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
+
+  // Keep the native pet window hidden until the real avatar has been resolved
+  // and mounted into the DOM (child GrokBotAnimatedMark useEffect runs first).
+  useEffect(() => {
+    if (!hasResolvedAvatar || windowRevealedRef.current) return;
+    let cancelled = false;
+    void petWindow('reveal')
+      .then((nextState) => {
+        if (cancelled) return;
+        windowRevealedRef.current = true;
+        applyWindowState(nextState);
+        setPageVisible(!document.hidden);
+        lastLayoutKeyRef.current = '';
+        syncNativeLayoutRef.current();
+      })
+      .catch(() => { /* Window may be closing */ });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyWindowState, hasResolvedAvatar]);
 
   useEffect(() => {
     const env = envelopeRef.current;
@@ -1314,7 +1365,6 @@ export function PetApp() {
     };
   }, [tryCommitComposerOpen]);
 
-  const avatar = snapshot.avatar ?? resolveBotAvatarPreset(targetKey(snapshot), snapshot.botName, true);
   const mascotState = recording ? 'listening' : transcribing ? 'thinking' : speaking ? 'dictating' : snapshot.mascotState;
   const petMood = recording
     ? 'listening'
@@ -1326,11 +1376,13 @@ export function PetApp() {
           ? 'thinking'
           : 'idle';
   const showDotBadge =
-    snapshot.connection !== 'ready' ||
-    recording ||
-    Boolean(snapshot.questionnaire?.interactive) ||
-    Boolean(snapshot.handoff) ||
-    Boolean(snapshot.proactiveAlert);
+    hasResolvedAvatar && (
+      snapshot.connection !== 'ready' ||
+      recording ||
+      Boolean(snapshot.questionnaire?.interactive) ||
+      Boolean(snapshot.handoff) ||
+      Boolean(snapshot.proactiveAlert)
+    );
   const dotTone = recording || snapshot.connection === 'offline'
     ? 'danger'
     : snapshot.questionnaire?.interactive
@@ -1344,6 +1396,7 @@ export function PetApp() {
     <main
       ref={stageRef}
       className="pet-stage"
+      data-avatar-ready={hasResolvedAvatar ? 'true' : 'false'}
       data-dock-side={layout.dockSide}
       data-panel-side={layout.panelSide}
       data-composer-open={showComposer ? 'true' : 'false'}
@@ -1962,16 +2015,18 @@ export function PetApp() {
               }
             }}
           >
-            <GrokBotAnimatedMark
-              seedId={targetKey(snapshot) || 'desktop-pet'}
-              shape={avatar.shape}
-              color={avatar.color}
-              state={mascotState}
-              size={88}
-              maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
-              isPlaying={pageVisible}
-              isStatic={false}
-            />
+            {resolvedAvatar ? (
+              <GrokBotAnimatedMark
+                seedId={avatarState.seedKey || targetKey(snapshot) || 'desktop-pet'}
+                shape={resolvedAvatar.shape}
+                color={resolvedAvatar.color}
+                state={mascotState}
+                size={88}
+                maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
+                isPlaying={pageVisible}
+                isStatic={false}
+              />
+            ) : null}
             {showDotBadge ? <span className={`pet-badge-dot is-${dotTone}`} aria-hidden="true" /> : null}
           </button>
         </div>

@@ -74,6 +74,8 @@ export interface DesktopPetSnapshot {
   botId: string | null;
   botName: string;
   avatar: BotAvatar | null;
+  avatarReady: boolean;
+  avatarRevision?: number;
   activity: BotActivity;
   mascotState: GrokMascotState;
   messages: PetMessage[];
@@ -147,7 +149,7 @@ export interface DesktopPetWindowState {
 }
 
 export type DesktopPetWindowAction =
-  | 'show' | 'hide' | 'toggle' | 'set-expanded' | 'set-layout' | 'show-main' | 'drag' | 'status';
+  | 'show' | 'reveal' | 'hide' | 'toggle' | 'set-expanded' | 'set-layout' | 'show-main' | 'drag' | 'status';
 
 export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   hostSessionId: '',
@@ -157,6 +159,7 @@ export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   botId: null,
   botName: 'PiBot',
   avatar: null,
+  avatarReady: false,
   activity: { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null },
   mascotState: 'idle',
   messages: [],

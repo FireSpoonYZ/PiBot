@@ -72,6 +72,11 @@ button svg { flex: none; }
   overflow: clip;
   pointer-events: none;
 }
+.pet-stage[data-avatar-ready="false"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
 .pet-stage[data-dock-side="left"] { align-items: flex-start; }
 .pet-stage[data-dock-side="center"] { align-items: center; }
 .pet-stage[data-panel-side="bottom"] { justify-content: flex-start; }

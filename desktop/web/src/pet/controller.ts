@@ -422,7 +422,7 @@ export function createDesktopPetController(
     bot = null;
     publish({
       connection: 'connecting',
-      botId: null, botName: 'PiBot', avatar: null, messages: [],
+      botId: null, botName: 'PiBot', avatar: null, avatarReady: false, avatarRevision: undefined, messages: [],
       activity: resolveBotActivity(null), mascotState: 'idle',
       streamingText: '', generationId: null, canStop: false,
       activeToolName: null, questionnaire: null, settledQuestionnaire: null, handoff: null,
@@ -695,7 +695,12 @@ export function createDesktopPetController(
       if (!current()) return;
       if (!host.configured || !host.deviceId) {
         clearTarget();
-        publish({ connection: 'unconfigured', deviceId: null, error: '请先在主界面配置本机 Host。' });
+        publish({
+          connection: 'unconfigured',
+          deviceId: null,
+          avatarReady: true,
+          error: '请先在主界面配置本机 Host。',
+        });
         if (api.identity && api.transportConnected) {
           await checkProactiveAlert();
         }
@@ -721,8 +726,10 @@ export function createDesktopPetController(
         clearTarget();
         const failure = directory.errors.find((item) => item.deviceId === host.deviceId);
         const offline = directory.devices.find((item) => item.deviceId === host.deviceId)?.online === false;
+        const unconfigured = !(failure || offline);
         publish({
-          connection: failure || offline ? 'offline' : 'unconfigured',
+          connection: unconfigured ? 'unconfigured' : 'offline',
+          avatarReady: unconfigured,
           error: failure?.message ?? (failure || offline ? '本机 Host 暂不可用。' : '本机还没有 main bot，请在主界面创建或指定。'),
         });
         await checkProactiveAlert();
@@ -734,7 +741,7 @@ export function createDesktopPetController(
       identity = target;
       publish({
         deviceId: primary.deviceId, botId: primary.botId, botName: primary.role,
-        avatar: primary.avatar ?? null, error: null,
+        avatar: primary.avatar ?? null, avatarReady: true, avatarRevision: primary.avatarRevision, error: null,
       });
       if (!primary.online) {
         markOffline('本机 Host 离线，连接恢复后可继续对话。');
@@ -795,6 +802,7 @@ export function createDesktopPetController(
     value = {
       ...value,
       connection: 'connecting',
+      avatarReady: false,
       messages: [],
       activity: resolveBotActivity(null),
       mascotState: 'idle',

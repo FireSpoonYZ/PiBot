@@ -750,3 +750,178 @@ test('live stream end marks controller offline while keeping questionnaire read-
   assert.equal(offline.task, null);
   h.controller.stop();
 });
+
+test('startup keeps avatarReady false while disconnected/connecting until primary avatar loads, and resets on stop', async () => {
+  const customAvatar = {
+    id: 'pink-pebble',
+    shape: 'pebble',
+    color: '#DF4191',
+    rotation: -14,
+    expressionIndex: 1,
+    labelZh: '粉红胶囊',
+    labelEn: 'Pink Pebble',
+  };
+  let releaseDirectory = null;
+  let holdDirectory = false;
+  let listener = () => {};
+  const bots = [
+    {
+      deviceId: 'local-device',
+      botId: 'local-main',
+      role: 'Luna',
+      isPrimary: true,
+      online: true,
+      avatar: customAvatar,
+      avatarRevision: 3,
+    },
+  ];
+  const api = {
+    identity: null,
+    transportConnected: false,
+    subscribe(fn) { listener = fn; return () => { listener = () => {}; }; },
+    identityForTarget(targetDeviceId) { return { ...this.identity, targetDeviceId }; },
+    async broker(_identity, op) {
+      assert.equal(op, 'bot_directory');
+      if (holdDirectory) {
+        await new Promise((resolve) => { releaseDirectory = resolve; });
+      }
+      return { bots, devices: [{ deviceId: 'local-device', online: true }], errors: [] };
+    },
+    observe(_identity, target, callback) {
+      queueMicrotask(() => callback({ frame: { type: 'snapshot', botId: target.botId, state: idle() } }));
+      return { ready: Promise.resolve(), async close() {} };
+    },
+    async pending() { return { id: 'p-1', state: 'accepted' }; },
+    async call() { return {}; },
+  };
+  const snapshots = [];
+  const controller = createDesktopPetController(api, (s) => snapshots.push(s), {
+    hostStatus: async () => ({ configured: true, deviceId: 'local-device' }),
+  });
+
+  // 1. Cold start before CenterGate connects -> offline transitional snapshot must NOT mark avatarReady
+  controller.start();
+  await settle();
+  assert.equal(controller.snapshot().connection, 'offline');
+  assert.equal(controller.snapshot().avatarReady, false);
+  assert.ok(snapshots.every((snap) => snap.avatarReady === false));
+
+  // 2. Client connects -> bot_directory still in flight -> avatarReady stays false
+  holdDirectory = true;
+  api.identity = { profileId: 'center', kind: 'relay', targetDeviceId: '', generation: 1 };
+  api.transportConnected = true;
+  listener();
+  await settle();
+  assert.equal(typeof releaseDirectory, 'function');
+  assert.equal(controller.snapshot().avatarReady, false);
+  assert.ok(snapshots.every((snap) => snap.avatarReady === false));
+
+  // 3. bot_directory resolves -> avatarReady flips true with authoritative avatar & revision
+  const beforeResolve = snapshots.length;
+  releaseDirectory();
+  await settle();
+  assert.equal(controller.snapshot().avatarReady, true);
+  assert.deepEqual(controller.snapshot().avatar, customAvatar);
+  assert.equal(controller.snapshot().avatarRevision, 3);
+  const readyAfterResolve = snapshots.slice(beforeResolve).filter((snap) => snap.avatarReady);
+  assert.ok(readyAfterResolve.length >= 1);
+  assert.ok(readyAfterResolve.every((snap) => snap.botId === 'local-main' && snap.avatar?.id === customAvatar.id));
+
+  // 4. stop() resets avatarReady so reopen waits for fresh directory load instead of stale cache
+  controller.stop();
+  assert.equal(controller.snapshot().avatarReady, false);
+  holdDirectory = true;
+  releaseDirectory = null;
+  const updatedAvatar = { ...customAvatar, id: 'emerald-leaf', shape: 'leaf', color: '#4EBD64' };
+  bots[0] = { ...bots[0], avatar: updatedAvatar, avatarRevision: 4 };
+  const beforeReopen = snapshots.length;
+  controller.start();
+  await controller.handleAction({ id: 'reopen-ready', kind: 'ready' });
+  await settle();
+  assert.ok(snapshots.slice(beforeReopen).every((snap) => snap.avatarReady === false));
+
+  releaseDirectory();
+  await settle();
+  assert.equal(controller.snapshot().avatarReady, true);
+  assert.deepEqual(controller.snapshot().avatar, updatedAvatar);
+  assert.equal(controller.snapshot().avatarRevision, 4);
+  controller.stop();
+});
+
+test('offline primary from Center keeps real avatar ready, unconfigured marks ready, missing offline host waits', async () => {
+  const customAvatar = {
+    id: 'coral-wedge',
+    shape: 'wedge',
+    color: '#EA403C',
+    rotation: 32,
+    expressionIndex: 0,
+    labelZh: '珊瑚三角',
+    labelEn: 'Coral Wedge',
+  };
+  let hostState = { configured: true, deviceId: 'local-device' };
+  let dirResponse = {
+    bots: [
+      {
+        deviceId: 'local-device',
+        botId: 'local-main',
+        role: 'Offline Main',
+        isPrimary: true,
+        online: false,
+        avatar: customAvatar,
+        avatarRevision: 2,
+      },
+    ],
+    devices: [{ deviceId: 'local-device', online: false }],
+    errors: [],
+  };
+  const api = {
+    identity: { profileId: 'center', kind: 'relay', targetDeviceId: 'local-device', generation: 1 },
+    transportConnected: true,
+    subscribe() { return () => {}; },
+    identityForTarget(targetDeviceId) { return { ...this.identity, targetDeviceId }; },
+    async broker(_identity, op) {
+      assert.equal(op, 'bot_directory');
+      return dirResponse;
+    },
+    observe() { return { ready: Promise.resolve(), async close() {} }; },
+    async pending() { return { id: 'p-1', state: 'accepted' }; },
+    async call() { return {}; },
+  };
+  const controller = createDesktopPetController(api, () => {}, {
+    hostStatus: async () => hostState,
+  });
+
+  // Offline local host whose primary bot metadata came from Center -> real avatar IS ready
+  controller.start();
+  await settle();
+  assert.equal(controller.snapshot().connection, 'offline');
+  assert.equal(controller.snapshot().avatarReady, true);
+  assert.deepEqual(controller.snapshot().avatar, customAvatar);
+
+  // Missing primary while local device reports offline/error -> do not fall back to default circle
+  dirResponse = {
+    bots: [],
+    devices: [{ deviceId: 'local-device', online: false }],
+    errors: [],
+  };
+  await controller.handleAction({ id: 'r-offline-missing', kind: 'refresh' });
+  assert.equal(controller.snapshot().connection, 'offline');
+  assert.equal(controller.snapshot().avatarReady, false);
+
+  // Online local device with confirmed no primary bot -> unconfigured is terminal & ready
+  dirResponse = {
+    bots: [],
+    devices: [{ deviceId: 'local-device', online: true }],
+    errors: [],
+  };
+  await controller.handleAction({ id: 'r-no-primary', kind: 'refresh' });
+  assert.equal(controller.snapshot().connection, 'unconfigured');
+  assert.equal(controller.snapshot().avatarReady, true);
+
+  // Unconfigured local host -> terminal & ready
+  hostState = { configured: false, deviceId: '' };
+  await controller.handleAction({ id: 'r-unconfigured', kind: 'refresh' });
+  assert.equal(controller.snapshot().connection, 'unconfigured');
+  assert.equal(controller.snapshot().avatarReady, true);
+  controller.stop();
+});

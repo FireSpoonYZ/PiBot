@@ -171,12 +171,31 @@ impl Default for PetGeometry {
 #[derive(Default)]
 pub struct DesktopPet {
   visible: AtomicBool,
+  revealed: AtomicBool,
   expanded: AtomicBool,
   focused: AtomicBool,
   layout_in_progress: AtomicUsize,
   geometry: Mutex<PetGeometry>,
   operation: tokio::sync::Mutex<()>,
   destroyed: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PetRevealState {
+  visible: bool,
+  revealed: bool,
+}
+
+fn should_show_window_on_show_action(window_existed: bool, revealed: bool) -> bool {
+  window_existed && revealed
+}
+
+fn should_show_window_on_reveal_action(state: PetRevealState) -> bool {
+  state.visible && !state.revealed
+}
+
+fn should_track_native_geometry(state: PetRevealState) -> bool {
+  state.visible && state.revealed
 }
 
 impl DesktopPet {
@@ -1566,6 +1585,7 @@ async fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
       geo.last_collapsed_pos = Some(pos);
     }
   }
+  pet.revealed.store(false, Ordering::Release);
   pet.focused.store(false, Ordering::Release);
   apply_window_region(&window, &[], composited);
   Ok(window)
@@ -1626,11 +1646,17 @@ pub async fn shutdown(app: &AppHandle) {
   let pet = app.state::<DesktopPet>();
   let _operation = pet.operation.lock().await;
   let was_visible = pet.visible.load(Ordering::Acquire);
+  let was_revealed = pet.revealed.load(Ordering::Acquire);
   let destroyed = pet.destroyed.notified();
   tokio::pin!(destroyed);
   destroyed.as_mut().enable();
   if let Some(window) = app.get_webview_window(PET_LABEL) {
-    snapshot_collapsed_pos_before_hide(app, &window);
+    if should_track_native_geometry(PetRevealState {
+      visible: was_visible,
+      revealed: was_revealed,
+    }) {
+      snapshot_collapsed_pos_before_hide(app, &window);
+    }
     if was_visible {
       save_current_preference(app, true);
     }
@@ -1639,6 +1665,7 @@ pub async fn shutdown(app: &AppHandle) {
     }
   }
   pet.visible.store(false, Ordering::Release);
+  pet.revealed.store(false, Ordering::Release);
   pet.expanded.store(false, Ordering::Release);
 }
 
@@ -1668,27 +1695,59 @@ pub async fn control_with_layout(
   let mut focus_override: Option<Option<bool>> = None;
   match action {
     "show" => {
+      let existed = app.get_webview_window(PET_LABEL).is_some();
       let window = match app.get_webview_window(PET_LABEL) {
         Some(window) => window,
         None => create(app).await?,
       };
-      window
-        .show()
-        .map_err(|_| native_error("Could not show desktop pet"))?;
-      let (hit_rects, composited) = {
-        let composited = detect_composited(&window);
-        let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
-        geo.composited = composited;
-        (geo.hit_rects.clone(), composited)
-      };
-      apply_window_region(&window, &hit_rects, composited);
+      if should_show_window_on_show_action(existed, pet.revealed.load(Ordering::Acquire)) {
+        window
+          .show()
+          .map_err(|_| native_error("Could not show desktop pet"))?;
+        let (hit_rects, composited) = {
+          let composited = detect_composited(&window);
+          let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
+          geo.composited = composited;
+          (geo.hit_rects.clone(), composited)
+        };
+        apply_window_region(&window, &hit_rects, composited);
+        let focused = resolve_focus_on_query(
+          pet.focused.load(Ordering::Acquire),
+          query_window_focused(&window),
+        );
+        pet.focused.store(focused, Ordering::Release);
+      }
       pet.visible.store(true, Ordering::Release);
-      let focused = resolve_focus_on_query(
-        pet.focused.load(Ordering::Acquire),
-        query_window_focused(&window),
-      );
-      pet.focused.store(focused, Ordering::Release);
       save_current_preference(app, true);
+    }
+    "reveal" => {
+      let reveal_state = PetRevealState {
+        visible: pet.visible.load(Ordering::Acquire),
+        revealed: pet.revealed.load(Ordering::Acquire),
+      };
+      if !reveal_state.visible {
+        return Ok(state(app));
+      }
+      if let Some(window) = app.get_webview_window(PET_LABEL) {
+        if should_show_window_on_reveal_action(reveal_state) {
+          window
+            .show()
+            .map_err(|_| native_error("Could not show desktop pet"))?;
+          pet.revealed.store(true, Ordering::Release);
+          let (hit_rects, composited) = {
+            let composited = detect_composited(&window);
+            let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
+            geo.composited = composited;
+            (geo.hit_rects.clone(), composited)
+          };
+          apply_window_region(&window, &hit_rects, composited);
+          let focused = resolve_focus_on_query(
+            pet.focused.load(Ordering::Acquire),
+            query_window_focused(&window),
+          );
+          pet.focused.store(focused, Ordering::Release);
+        }
+      }
     }
     "hide" => {
       // destroy() only queues the native operation. Keep show/hide serialized until
@@ -1696,14 +1755,22 @@ pub async fn control_with_layout(
       let destroyed = pet.destroyed.notified();
       tokio::pin!(destroyed);
       destroyed.as_mut().enable();
+      let was_visible = pet.visible.load(Ordering::Acquire);
+      let was_revealed = pet.revealed.load(Ordering::Acquire);
       if let Some(window) = app.get_webview_window(PET_LABEL) {
-        snapshot_collapsed_pos_before_hide(app, &window);
+        if should_track_native_geometry(PetRevealState {
+          visible: was_visible,
+          revealed: was_revealed,
+        }) {
+          snapshot_collapsed_pos_before_hide(app, &window);
+        }
         window
           .destroy()
           .map_err(|_| native_error("Could not close desktop pet"))?;
         destroyed.await;
       }
       pet.visible.store(false, Ordering::Release);
+      pet.revealed.store(false, Ordering::Release);
       pet.expanded.store(false, Ordering::Release);
       pet.focused.store(false, Ordering::Release);
       save_current_preference(app, false);
@@ -1822,7 +1889,12 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         tokio::time::sleep(Duration::from_millis(160)).await;
         let pet = app.state::<DesktopPet>();
         let _operation = pet.operation.lock().await;
-        if pet.is_applying_layout() || !pet.visible.load(Ordering::Acquire) {
+        if pet.is_applying_layout()
+          || !should_track_native_geometry(PetRevealState {
+            visible: pet.visible.load(Ordering::Acquire),
+            revealed: pet.revealed.load(Ordering::Acquire),
+          })
+        {
           return;
         }
         let current_seq = pet.geometry.lock().unwrap_or_else(|e| e.into_inner()).move_seq;
@@ -1920,6 +1992,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
       crate::pet_voice::cancel_window_jobs(app, PET_LABEL);
       let pet = app.state::<DesktopPet>();
       pet.visible.store(false, Ordering::Release);
+      pet.revealed.store(false, Ordering::Release);
       pet.expanded.store(false, Ordering::Release);
       pet.focused.store(false, Ordering::Release);
       {
@@ -2821,5 +2894,48 @@ mod tests {
       effective_logical_size((380.0, 480.0), capped_phys, Some(tiny), 1.5),
       (300.0, 200.0)
     );
+  }
+
+  #[test]
+  fn pet_reveal_guards_defer_native_show_and_protect_saved_geometry_until_avatar_ready() {
+    // Freshly created window stays hidden until frontend sends "reveal"
+    assert!(!should_show_window_on_show_action(false, false));
+    // Re-invoking "show" while still waiting for avatar load must not prematurely reveal
+    assert!(!should_show_window_on_show_action(true, false));
+    // Re-invoking "show" after already revealed remains idempotent
+    assert!(should_show_window_on_show_action(true, true));
+
+    // "reveal" only shows when pet is still enabled (visible) and not yet revealed
+    assert!(should_show_window_on_reveal_action(PetRevealState {
+      visible: true,
+      revealed: false,
+    }));
+    assert!(!should_show_window_on_reveal_action(PetRevealState {
+      visible: true,
+      revealed: true,
+    }));
+    // If user hid the pet before avatar finished loading, a racing "reveal" must stay ignored
+    assert!(!should_show_window_on_reveal_action(PetRevealState {
+      visible: false,
+      revealed: false,
+    }));
+    assert!(!should_show_window_on_reveal_action(PetRevealState {
+      visible: false,
+      revealed: true,
+    }));
+
+    // Do not snapshot native outer position or treat OS move events as user drags before reveal
+    assert!(!should_track_native_geometry(PetRevealState {
+      visible: false,
+      revealed: false,
+    }));
+    assert!(!should_track_native_geometry(PetRevealState {
+      visible: true,
+      revealed: false,
+    }));
+    assert!(should_track_native_geometry(PetRevealState {
+      visible: true,
+      revealed: true,
+    }));
   }
 }
