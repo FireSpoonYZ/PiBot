@@ -908,3 +908,56 @@ test('desktop bot list lets hub-list-scroll own wheel scrolling and avoids scrol
     );
   }
 });
+
+test('center-admin discover models modal pins its save footer and prevents vertical search input inflation', () => {
+  const css = readFileSync(new URL('../src/center-admin/center-admin.css', import.meta.url), 'utf8');
+  const primitives = readFileSync(new URL('../src/center-admin/primitives.tsx', import.meta.url), 'utf8');
+  const providers = readFileSync(new URL('../src/center-admin/ProvidersTab.tsx', import.meta.url), 'utf8');
+
+  const extractRule = (source, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = source.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  assert.match(extractRule(css, '.ca-dialog-header'), /flex-shrink\s*:\s*0\s*;/);
+  assert.match(extractRule(css, '.ca-dialog-footer'), /flex-shrink\s*:\s*0\s*;/);
+  assert.match(extractRule(css, '.ca-discover-list'), /flex\s*:\s*1\s+1\s+auto\s*;/);
+
+  // Extract @container (max-width: 520px) block and verify .ca-discover-bar is not trapped inside it
+  // (a 540px modal's .ca-dialog-body content box is 502px wide, which would always trigger <= 520px on desktop).
+  const container520Start = css.indexOf('@container (max-width: 520px)');
+  assert.notEqual(container520Start, -1, 'Expected @container (max-width: 520px) block');
+  const container420Start = css.indexOf('@container (max-width: 420px)', container520Start);
+  assert.notEqual(container420Start, -1, 'Expected @container (max-width: 420px) block');
+  const container520Block = css.slice(container520Start, container420Start);
+  assert.doesNotMatch(container520Block, /\.ca-discover-bar\b/);
+  assert.doesNotMatch(container520Block, /\.ca-discover-device\b/);
+
+  // Both narrow-container and mobile column layouts must reset flex-basis on stacked discover controls
+  // so .ca-discover-search (flex: 1 1 140px in row mode) never inflates to 140px height.
+  const media1024Start = css.indexOf('@media (max-width: 1024px)', container420Start);
+  assert.notEqual(media1024Start, -1);
+  const container420Block = css.slice(container420Start, media1024Start);
+  assert.match(container420Block, /\.ca-discover-bar\s*>\s*\.ca-discover-search,\s*[\r\n]+\s*\.ca-discover-bar\s*>\s*\.ca-discover-device\s*\{[^}]*flex\s*:\s*0\s+0\s+auto\s*;/);
+
+  const media640Start = css.indexOf('@media (max-width: 640px)');
+  assert.notEqual(media640Start, -1);
+  const coarseStart = css.indexOf('@media (pointer: coarse)', media640Start);
+  assert.notEqual(coarseStart, -1);
+  const media640Block = css.slice(media640Start, coarseStart);
+  assert.match(media640Block, /\.ca-discover-bar\s*>\s*\.ca-discover-search,\s*[\r\n]+\s*\.ca-discover-bar\s*>\s*\.ca-discover-device\s*\{[^}]*flex\s*:\s*0\s+0\s+auto\s*;/);
+
+  // CaModal renders .ca-dialog-footer as a sibling after .ca-dialog-body, not inside the scroll area.
+  assert.match(
+    primitives,
+    /<div className=\{`ca-dialog-body\$\{bodyClassName \? ` \$\{bodyClassName\}` : ''\}`\}>\{children\}<\/div>\s*[\r\n]+\s*\{footer \? <div className="ca-dialog-footer">\{footer\}<\/div> : null\}/,
+  );
+
+  // Discover modal mounts its Save action in the pinned CaModal footer slot.
+  assert.match(
+    providers,
+    /open=\{discoverModalOpen\}[\s\S]*?bodyClassName="ca-dialog-body-flex"[\s\S]*?footer=\{[\s\S]*?confirmBatchModels\(\)/,
+  );
+});
