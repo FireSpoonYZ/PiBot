@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ChevronRight, Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
@@ -7,8 +8,10 @@ import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
 import { hostAdopt, hostConnectLocal, hostControl, hostErrorCode, hostErrorText, hostPair, hostPairCode, hostStatus, hostWarningText, rawMessage, type HostPairResult, type HostStatus } from './hostService';
 import { readPaste } from '../../../web/src/pairingCode';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
-import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
+import { CLIENT_UPDATE_STATUS_EVENT, type ClientUpdateOp, type ClientUpdateParams, type ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import './CenterGate.css';
+
+const DESKTOP_UPDATE_CHANGED_EVENT = 'desktop-client-update-changed';
 
 /** 桌面更新命令适配：语义操作 → desktop_update_* Tauri 命令（原生侧负责节流/验签/安装）。 */
 const desktopUpdateRequest = (op: ClientUpdateOp, params?: ClientUpdateParams): Promise<ClientUpdateStatus> => {
@@ -901,6 +904,29 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     setCa(trimmed);
     applyStatus(next, savedConn.deviceId);
   };
+
+  const workspaceKey = workspace?.key;
+  // 订阅桌面原生更新推送事件并转派给共享 ClientUpdateProvider，卸载或切换 workspace 时安全清理。
+  useEffect(() => {
+    if (!workspaceKey) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<ClientUpdateStatus>(DESKTOP_UPDATE_CHANGED_EVENT, (event) => {
+      if (disposed) return;
+      window.dispatchEvent(new CustomEvent<ClientUpdateStatus>(CLIENT_UPDATE_STATUS_EVENT, { detail: event.payload }));
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten = undefined;
+    };
+  }, [workspaceKey]);
 
   if (workspace) {
     return (

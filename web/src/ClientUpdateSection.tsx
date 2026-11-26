@@ -5,7 +5,18 @@ import { CheckCircle2, ChevronDown, Download, Loader2, RefreshCw, XCircle } from
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useText } from './ui';
 import { Section } from './bot-settings/primitives';
-import { CLIENT_UPDATE_OPEN_EVENT, formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import {
+  CLIENT_UPDATE_CANCEL_DELAY_MS,
+  CLIENT_UPDATE_OPEN_EVENT,
+  formatLastChecked,
+  formatUpdateBytes,
+  nextPreservedRelease,
+  resolveDisplayedRelease,
+  shouldShowCancelUpdateAction,
+  updateProgress,
+  type ClientUpdatePhase,
+  type ClientUpdateRelease,
+} from './ClientUpdate';
 import { Dialog } from './components/ui/dialog';
 import { useClientUpdate, type ClientUpdateContextValue } from './ClientUpdateProvider';
 import { LabelStack, ReservedSlot, SmoothExpand } from './layout';
@@ -156,9 +167,23 @@ function UpdateSectionBody({
 }) {
   const t = useText();
   const notesPanelId = useId();
-  const { status, pending, ready, actionError, dismissError, check, download, install, cancel } = update;
+  const {
+    status,
+    pending,
+    ready,
+    actionError,
+    lastCheckedAt,
+    dismissError,
+    check,
+    download,
+    install,
+    cancel,
+  } = update;
   const [confirmStop, setConfirmStop] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [preservedRelease, setPreservedRelease] = useState<ClientUpdateRelease | undefined>(undefined);
+  const [checkCancelVisible, setCheckCancelVisible] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const isDesktop = variant === 'desktop';
   const primaryBtn = isDesktop ? 'primary-button cu-action-btn' : 'hst-btn is-primary cu-action-btn';
@@ -182,15 +207,22 @@ function UpdateSectionBody({
   const busy = pending !== null || !ready;
   const canCancelAction = ready && (pending === null || pending === 'check' || pending === 'download');
   const progress = updateProgress(status);
-  const release = status?.release;
+
+  // 重查期间保留上一次 available 的 release，避免新版本行与更新说明折叠闪烁。
+  const release = resolveDisplayedRelease(effectivePhase, status?.release, preservedRelease);
   const sizeText = formatUpdateBytes(status?.totalBytes ?? release?.size);
   const taskCount = parseActiveTaskCount(waiting, status?.message);
+
+  useEffect(() => {
+    setPreservedRelease((prev) => nextPreservedRelease(effectivePhase, status?.release, prev));
+  }, [effectivePhase, status?.release]);
 
   const showRelease = Boolean(
     release &&
       (isDesktop
         ? true
-        : effectivePhase === 'available' ||
+        : effectivePhase === 'checking' ||
+          effectivePhase === 'available' ||
           effectivePhase === 'downloading' ||
           effectivePhase === 'downloaded' ||
           effectivePhase === 'waiting-tasks' ||
@@ -198,12 +230,7 @@ function UpdateSectionBody({
           effectivePhase === 'waiting-install' ||
           effectivePhase === 'installing'),
   );
-  const hasNotes = Boolean(
-    release?.notes &&
-      (isDesktop
-        ? true
-        : effectivePhase !== 'up-to-date' && effectivePhase !== 'idle' && effectivePhase !== 'checking'),
-  );
+  const hasNotes = Boolean(showRelease && release?.notes);
 
   useEffect(() => {
     setConfirmStop(false);
@@ -212,6 +239,29 @@ function UpdateSectionBody({
   useEffect(() => {
     if (!hasNotes) setNotesOpen(false);
   }, [hasNotes, release?.id]);
+
+  // 检查阶段延迟 2.5s 才渐显“取消检查”按钮，避免快速检查时按钮行闪烁。
+  useEffect(() => {
+    if (!checking) {
+      setCheckCancelVisible(false);
+      return;
+    }
+    setCheckCancelVisible(false);
+    const timer = setTimeout(() => {
+      setCheckCancelVisible(true);
+    }, CLIENT_UPDATE_CANCEL_DELAY_MS + 1);
+    return () => clearTimeout(timer);
+  }, [checking]);
+
+  // 打开更新面板期间每 30s 刷新一次相对时间（如“刚刚” -> “1 分钟前”）。
+  useEffect(() => {
+    if (lastCheckedAt === null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [lastCheckedAt]);
 
   useClientUpdateErrorNotice({
     actionError,
@@ -265,7 +315,20 @@ function UpdateSectionBody({
       ? 100
       : 0;
 
-  // 固定高度状态槽文案：覆盖未就绪、错误、进度、安装引导与完成提示
+  // 常驻固定高度的单行副说明槽：原地收敛“正在查询中心…”与“上次检查：刚刚 / X 分钟前”，
+  // 确保检查更新全程（idle/up-to-date/available <-> checking）操作区 0px 纵向位移。
+  const lastCheckedText = formatLastChecked(lastCheckedAt, now, t);
+  let captionText = '';
+  let captionKey = 'empty';
+  if (checking) {
+    captionText = status?.message || t('正在查询中心…', 'Querying the center…');
+    captionKey = `checking:${status?.message ?? ''}`;
+  } else if (lastCheckedText) {
+    captionText = t(`上次检查：${lastCheckedText}`, `Last checked: ${lastCheckedText}`);
+    captionKey = `checked:${lastCheckedText}`;
+  }
+
+  // 按需展开的状态明细槽：仅用于未就绪、错误、下载字节进度、安装等待与完成提示，不用于 checking。
   let statusMessageText = '';
   let statusMessageKey = 'empty';
   let statusMessageTone: 'muted' | 'meta' | 'error' = 'muted';
@@ -313,18 +376,16 @@ function UpdateSectionBody({
     const hint = t('请在系统安装器中确认；取消等待不能撤销已打开的系统安装器。', 'Confirm in the system installer; cancelling the wait cannot dismiss an installer already opened.');
     statusMessageText = status?.message ? `${hint} ${status.message}` : hint;
     statusMessageKey = 'waiting-install';
-  } else if (checking) {
-    statusMessageText = status?.message || t('正在查询中心…', 'Querying the center…');
-    statusMessageKey = 'checking';
   } else if (effectivePhase === 'complete') {
     statusMessageText = status?.message || t('重启应用后生效', 'Takes effect after restart');
     statusMessageKey = 'complete';
-  } else if (status?.message) {
+  } else if (!checking && status?.message) {
     statusMessageText = status.message;
     statusMessageKey = `message:${effectivePhase}:${status.message}`;
   }
 
-  // 主操作按钮状态（所有常规阶段共用同一按钮与 LabelStack，宽度与高度零变化）
+  // 主操作按钮状态（所有常规阶段共用同一按钮与 LabelStack，宽度与高度零变化；
+  // 处理中态使用 aria-busy + .is-busy 保持清晰对比度，仅不可用/取消中才使用 HTML disabled）。
   const isWaitingSystemInstall = !isDesktop && !installing && (effectivePhase === 'waiting-permission' || effectivePhase === 'waiting-install');
   const primaryLabels = isWaitingSystemInstall
     ? [labelContinueInstall, labelReopenInstaller, labelInstalling]
@@ -333,6 +394,7 @@ function UpdateSectionBody({
   let primaryActive = labelCheck;
   let primaryClass = secondaryBtn;
   let primaryDisabled = busy;
+  let primaryBusy = false;
   let primaryAction: (() => void) | undefined = check;
   let primaryIcon: ReactNode = <RefreshCw size={13} aria-hidden="true" />;
 
@@ -345,19 +407,22 @@ function UpdateSectionBody({
   } else if (installing) {
     primaryActive = labelInstalling;
     primaryClass = primaryBtn;
-    primaryDisabled = true;
+    primaryBusy = ready && !cancelling;
+    primaryDisabled = !ready || cancelling;
     primaryAction = undefined;
     primaryIcon = <Loader2 size={13} className="cu-spin" aria-hidden="true" />;
   } else if (downloading) {
     primaryActive = labelDownloading;
     primaryClass = primaryBtn;
-    primaryDisabled = true;
+    primaryBusy = ready && !cancelling;
+    primaryDisabled = !ready || cancelling;
     primaryAction = undefined;
     primaryIcon = <Loader2 size={13} className="cu-spin" aria-hidden="true" />;
   } else if (checking) {
     primaryActive = labelChecking;
     primaryClass = secondaryBtn;
-    primaryDisabled = true;
+    primaryBusy = ready && !cancelling;
+    primaryDisabled = !ready || cancelling;
     primaryAction = undefined;
     primaryIcon = <RefreshCw size={13} className="cu-spin" aria-hidden="true" />;
   } else if (effectivePhase === 'available') {
@@ -380,13 +445,13 @@ function UpdateSectionBody({
     primaryIcon = <RefreshCw size={13} aria-hidden="true" />;
   }
 
-  // 次操作按钮（可用时重新检查；检查/下载/等待系统确认时取消）
+  // 次操作按钮（可用时重新检查；下载与移动端等待立即取消；检查仅超过 2.5s 后才出现取消）
   const canRecheck = effectivePhase === 'available' && !downloading && !installing;
-  const canShowCancel = !installing && (
-    checking ||
-    downloading ||
-    (!isDesktop && (effectivePhase === 'waiting-permission' || effectivePhase === 'waiting-install'))
-  );
+  const canShowCancel = shouldShowCancelUpdateAction({
+    phase: effectivePhase,
+    isDesktop,
+    checkingElapsedMs: checkCancelVisible ? CLIENT_UPDATE_CANCEL_DELAY_MS + 1 : 0,
+  });
   const secondaryLabels = isDesktop
     ? [labelCheck, labelCancelCheck, labelCancelDownload, labelCancelling]
     : [labelRecheck, labelCancel, labelCancelWaiting, labelCancelling];
@@ -419,12 +484,28 @@ function UpdateSectionBody({
             <span className="cu-value">{status?.currentVersion || '—'}</span>
           </div>
 
-          <div className="cu-line">
-            <span className="cu-label">{t('状态', 'Status')}</span>
-            <ReservedSlot inline minHeight={22} align="center" className="cu-value-slot" contentKey={effectivePhase}>
-              <span className={'cu-value' + (effectivePhase === 'error' ? ' is-error' : '')} title={statusSummary}>
-                {statusSummary}
-              </span>
+          <div className="cu-status-group">
+            <div className="cu-line">
+              <span className="cu-label">{t('状态', 'Status')}</span>
+              <ReservedSlot inline minHeight={22} align="center" className="cu-value-slot" contentKey={effectivePhase}>
+                <span className={'cu-value' + (effectivePhase === 'error' ? ' is-error' : '')} title={statusSummary}>
+                  {statusSummary}
+                </span>
+              </ReservedSlot>
+            </div>
+            <ReservedSlot
+              minHeight={18}
+              align="center"
+              className="cu-caption-slot"
+              contentKey={captionKey}
+              role="status"
+              aria-live="polite"
+            >
+              {captionText ? (
+                <span className="cu-caption-text" title={captionText}>
+                  {captionText}
+                </span>
+              ) : null}
             </ReservedSlot>
           </div>
         </div>
@@ -531,7 +612,16 @@ function UpdateSectionBody({
             )
           ) : (
             <>
-              <button type="button" className={primaryClass} disabled={primaryDisabled} onClick={primaryAction}>
+              <button
+                type="button"
+                className={primaryClass + (primaryBusy ? ' is-busy' : '')}
+                disabled={primaryDisabled}
+                aria-busy={primaryBusy || undefined}
+                onClick={() => {
+                  if (primaryBusy || primaryDisabled) return;
+                  primaryAction?.();
+                }}
+              >
                 <span className="cu-btn-icon" aria-hidden="true">{primaryIcon}</span>
                 <LabelStack active={primaryActive} labels={primaryLabels} />
               </button>
