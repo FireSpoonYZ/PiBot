@@ -81,17 +81,247 @@ impl Bounds {
     };
     const PARKED: f64 = -20000.0;
 
-    fn apply(self, view: &Webview, visible: bool) -> tauri::Result<()> {
+    #[cfg(any(target_os = "linux", test))]
+    fn resolved_rect(self, visible: bool) -> (i32, i32, i32, i32) {
         let (x, y) = if visible {
-            (self.x, self.y)
+            (self.x.round() as i32, self.y.round() as i32)
         } else {
-            (Self::PARKED, Self::PARKED)
+            (Self::PARKED as i32, Self::PARKED as i32)
         };
-        view.set_bounds(tauri::Rect {
-            position: tauri::LogicalPosition::new(x, y).into(),
-            size: tauri::LogicalSize::new(self.width, self.height).into(),
-        })
+        let width = (self.width.round() as i32).max(1);
+        let height = (self.height.round() as i32).max(1);
+        (x, y, width, height)
     }
+
+    fn apply(self, view: &Webview, visible: bool) -> tauri::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            apply_linux_bounds(view, self, visible)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (x, y) = if visible {
+                (self.x, self.y)
+            } else {
+                (Self::PARKED, Self::PARKED)
+            };
+            view.set_bounds(tauri::Rect {
+                position: tauri::LogicalPosition::new(x, y).into(),
+                size: tauri::LogicalSize::new(self.width, self.height).into(),
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+const LINUX_OVERLAY_NAME: &str = "pibot-browser-overlay";
+#[cfg(target_os = "linux")]
+const LINUX_GUEST_ALLOCATION_KEY: &str = "pibot-browser-guest-allocation";
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn linux_overlay_child_position(
+    _overlay: *mut gtk::ffi::GtkOverlay,
+    widget: *mut gtk::ffi::GtkWidget,
+    allocation: *mut gtk::gdk::ffi::GdkRectangle,
+    _user_data: gtk::glib::ffi::gpointer,
+) -> gtk::glib::ffi::gboolean {
+    use gtk::glib::object::ObjectExt;
+    use gtk::glib::translate::from_glib_borrow;
+
+    if widget.is_null() || allocation.is_null() {
+        return gtk::glib::ffi::GFALSE;
+    }
+    let widget: gtk::glib::translate::Borrowed<gtk::Widget> = from_glib_borrow(widget);
+    let Some(rect) = widget.data::<gtk::Allocation>(LINUX_GUEST_ALLOCATION_KEY) else {
+        return gtk::glib::ffi::GFALSE;
+    };
+    let rect = rect.as_ref();
+    (*allocation).x = rect.x();
+    (*allocation).y = rect.y();
+    (*allocation).width = rect.width();
+    (*allocation).height = rect.height();
+    gtk::glib::ffi::GTRUE
+}
+
+#[cfg(target_os = "linux")]
+fn create_linux_overlay() -> gtk::Overlay {
+    use gtk::glib::object::ObjectType;
+    use gtk::prelude::WidgetExt;
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_widget_name(LINUX_OVERLAY_NAME);
+    unsafe {
+        let callback: unsafe extern "C" fn() = std::mem::transmute(
+            linux_overlay_child_position
+                as unsafe extern "C" fn(
+                    *mut gtk::ffi::GtkOverlay,
+                    *mut gtk::ffi::GtkWidget,
+                    *mut gtk::gdk::ffi::GdkRectangle,
+                    gtk::glib::ffi::gpointer,
+                ) -> gtk::glib::ffi::gboolean,
+        );
+        gtk::glib::gobject_ffi::g_signal_connect_data(
+            overlay.as_ptr() as *mut gtk::glib::gobject_ffi::GObject,
+            b"get-child-position\0".as_ptr().cast(),
+            Some(callback),
+            std::ptr::null_mut(),
+            None,
+            gtk::glib::gobject_ffi::G_CONNECT_DEFAULT,
+        );
+    }
+    overlay
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_overlay(vbox: &gtk::Box) -> Option<gtk::Overlay> {
+    use gtk::prelude::{Cast, ContainerExt, WidgetExt};
+
+    vbox.children().into_iter().find_map(|child| {
+        if child.widget_name().as_str() == LINUX_OVERLAY_NAME {
+            child.downcast::<gtk::Overlay>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_overlay_for_main(main_widget: &gtk::Widget) -> Result<gtk::Overlay, String> {
+    use gtk::prelude::{BoxExt, Cast, ContainerExt, WidgetExt};
+
+    let parent = main_widget
+        .parent()
+        .ok_or_else(|| "Main webview has no GTK parent".to_owned())?;
+    if parent.widget_name().as_str() == LINUX_OVERLAY_NAME {
+        if let Ok(overlay) = parent.clone().downcast::<gtk::Overlay>() {
+            return Ok(overlay);
+        }
+    }
+    let vbox = parent
+        .downcast::<gtk::Box>()
+        .map_err(|_| "Main webview parent is not a GTK box".to_owned())?;
+    if let Some(overlay) = find_linux_overlay(&vbox) {
+        return Ok(overlay);
+    }
+    let overlay = create_linux_overlay();
+    let keep = main_widget.clone();
+    vbox.remove(&keep);
+    overlay.add(&keep);
+    vbox.pack_start(&overlay, true, true, 0);
+    overlay.show();
+    keep.show();
+    Ok(overlay)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_guest_widget_bounds(widget: &gtk::Widget, bounds: Bounds, visible: bool) {
+    use gtk::glib::object::ObjectExt;
+    use gtk::prelude::{Cast, OverlayExt, WidgetExt};
+
+    let (x, y, width, height) = bounds.resolved_rect(visible);
+    let alloc = gtk::Allocation::new(x, y, width, height);
+    unsafe {
+        widget.set_data(LINUX_GUEST_ALLOCATION_KEY, alloc);
+    }
+    if let Some(overlay) = widget
+        .parent()
+        .and_then(|parent| parent.downcast::<gtk::Overlay>().ok())
+    {
+        overlay.set_overlay_pass_through(widget, !visible);
+        if visible {
+            overlay.reorder_overlay(widget, -1);
+        }
+        widget.set_can_focus(visible);
+        widget.set_opacity(if visible { 1.0 } else { 0.0 });
+        widget.show();
+        overlay.queue_resize();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_bounds(view: &Webview, bounds: Bounds, visible: bool) -> tauri::Result<()> {
+    view.with_webview(move |platform| {
+        use gtk::prelude::Cast;
+
+        let widget: gtk::Widget = platform.inner().upcast();
+        apply_linux_guest_widget_bounds(&widget, bounds, visible);
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn attach_linux_guest(view: &Webview, bounds: Bounds) -> Result<(), BridgeError> {
+    let (send, receive) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    view.with_webview(move |platform| {
+        use gtk::glib::object::ObjectExt;
+        use gtk::prelude::{Cast, ContainerExt, OverlayExt, WidgetExt};
+
+        let guest_widget: gtk::Widget = platform.inner().upcast();
+        let result = (|| {
+            let parent = guest_widget
+                .parent()
+                .ok_or_else(|| "Guest webview has no GTK parent".to_owned())?;
+            if parent.widget_name().as_str() == LINUX_OVERLAY_NAME {
+                parent
+                    .downcast::<gtk::Overlay>()
+                    .map_err(|_| "Guest overlay container is invalid".to_owned())?;
+            } else {
+                let vbox = parent
+                    .downcast::<gtk::Box>()
+                    .map_err(|_| "Guest webview parent is not a GTK box".to_owned())?;
+                let overlay = match find_linux_overlay(&vbox) {
+                    Some(overlay) => overlay,
+                    None => {
+                        let main_widget = vbox
+                            .children()
+                            .into_iter()
+                            .find(|child| {
+                                child != &guest_widget && child.is::<webkit2gtk::WebView>()
+                            })
+                            .ok_or_else(|| "Main webview not found in GTK box".to_owned())?;
+                        ensure_linux_overlay_for_main(&main_widget)?
+                    }
+                };
+                let (x, y, width, height) = bounds.resolved_rect(false);
+                unsafe {
+                    guest_widget.set_data(
+                        LINUX_GUEST_ALLOCATION_KEY,
+                        gtk::Allocation::new(x, y, width, height),
+                    );
+                }
+                guest_widget.set_can_focus(false);
+                guest_widget.set_opacity(0.0);
+                vbox.remove(&guest_widget);
+                overlay.add_overlay(&guest_widget);
+            }
+            apply_linux_guest_widget_bounds(&guest_widget, bounds, false);
+            Ok(())
+        })();
+        let _ = send.send(result);
+    })
+    .map_err(|e| error(e.to_string()))?;
+    tokio::time::timeout(Duration::from_secs(5), receive)
+        .await
+        .map_err(|_| error("Guest initialization timed out"))?
+        .map_err(|_| error("Guest closed"))?
+        .map_err(error)
+}
+
+/// On Linux, Tauri packs child webviews into the window's vertical default_vbox
+/// and Wry's set_bounds is a no-op inside GtkBox. Wrapping the main webview in a
+/// GtkOverlay lets browser guests be positioned over the main view or parked
+/// off-screen without resizing the main document.
+pub fn prepare_main_window(app: &AppHandle) {
+    #[cfg(target_os = "linux")]
+    if let Some(main) = app.get_webview("main") {
+        let _ = main.with_webview(|platform| {
+            use gtk::prelude::Cast;
+
+            let widget: gtk::Widget = platform.inner().upcast();
+            let _ = ensure_linux_overlay_for_main(&widget);
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
 }
 fn error(message: impl Into<String>) -> BridgeError {
     BridgeError::new("BROWSER_GUEST", message, "not-sent")
@@ -176,6 +406,33 @@ fn validate_google_client_draft(
 
 #[cfg(test)]
 #[test]
+fn resolved_bounds_parks_offscreen_and_clamps_minimum_size() {
+    let bounds = Bounds {
+        x: 120.4,
+        y: 84.6,
+        width: 800.4,
+        height: 600.6,
+    };
+    assert_eq!(bounds.resolved_rect(true), (120, 85, 800, 601));
+    assert_eq!(
+        bounds.resolved_rect(false),
+        (Bounds::PARKED as i32, Bounds::PARKED as i32, 800, 601)
+    );
+    let tiny = Bounds {
+        x: 0.0,
+        y: 0.0,
+        width: 0.2,
+        height: 0.0,
+    };
+    assert_eq!(tiny.resolved_rect(true), (0, 0, 1, 1));
+    assert_eq!(
+        tiny.resolved_rect(false),
+        (Bounds::PARKED as i32, Bounds::PARKED as i32, 1, 1)
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn google_client_draft_requires_a_cloud_project_and_the_public_center_callback() {
     let console = tauri::Url::parse(
         "https://console.cloud.google.com/auth/clients/create?project=test-project",
@@ -236,7 +493,7 @@ async fn provision_google_client(
         return Err(error("Expected one Google account for setup"));
     }
     let label = google_client_window_label(run_id).ok_or_else(|| error("Invalid Google setup run"))?;
-    let main = app.get_webview_window("main").ok_or_else(|| error("Main window unavailable"))?;
+    let main = app.get_window("main").ok_or_else(|| error("Main window unavailable"))?;
     let attempts = app.path().app_local_data_dir()
         .map_err(|_| error("Google setup storage is unavailable"))?
         .join("google-client-attempts");
@@ -260,7 +517,6 @@ async fn provision_google_client(
     let google_origin = console.origin();
     // This window is outside Bot Browser control. Only its one Google credential download can leave it.
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(console))
-        .parent(&main).map_err(|_| error("Could not attach the private setup window"))?
         .title("Google Cloud — Web OAuth client")
         .inner_size(1060.0, 780.0)
         .data_directory(directory)
@@ -293,6 +549,27 @@ async fn provision_google_client(
             }
         })
         .initialization_script(script);
+    #[cfg(windows)]
+    {
+        builder = builder.owner_raw(
+            main.hwnd()
+                .map_err(|_| error("Could not attach the private setup window"))?,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let gtk_main = main
+            .gtk_window()
+            .map_err(|_| error("Could not attach the private setup window"))?;
+        builder = builder.transient_for_raw(&gtk_main);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.parent_raw(
+            main.ns_window()
+                .map_err(|_| error("Could not attach the private setup window"))?,
+        );
+    }
     if let Some(proxy) = proxy {
         #[cfg(windows)]
         {
@@ -563,6 +840,14 @@ pub async fn desktop_browser_guest(
         if app.state::<BrowserGuests>().1.load(Ordering::Acquire) {
             let _ = view.close();
             return Err(error("Browser window is closing"));
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(failure) = attach_linux_guest(&view, Bounds::INITIAL).await {
+            let _ = view.close();
+            if let Ok(mut entries) = app.state::<BrowserGuests>().0.lock() {
+                entries.remove(&id);
+            }
+            return Err(failure);
         }
         if let Err(failure) = view.navigate(url) {
             let _ = view.close();

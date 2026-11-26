@@ -112,7 +112,7 @@ async fn desktop_pick_file(
   ensure_main_webview(&webview)?;
   let picked = tauri::async_runtime::spawn_blocking(move || {
     let mut dialog = app.dialog().file();
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
       dialog = dialog.set_parent(&window);
     }
     dialog.blocking_pick_file()
@@ -165,7 +165,7 @@ async fn close_browser_window(app: &AppHandle, guest_ids: Vec<String>) {
 const DESKTOP_MAIN_WINDOW_SHOWN_EVENT: &str = "desktop-main-window-shown";
 
 fn show_main_window(app: &AppHandle) {
-  if let Some(window) = app.get_webview_window("main") {
+  if let Some(window) = app.get_window("main") {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
@@ -250,9 +250,10 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
+      browser_guest::prepare_main_window(app.handle());
       browser_guest::start_watchdog(app.handle().clone());
       host_service::start_configured_host(app.handle());
-      if let Some(window) = app.get_webview_window("main") {
+      if let Some(window) = app.get_window("main") {
         let _ = window.set_title("Pi Bot");
         window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
         #[cfg(windows)]

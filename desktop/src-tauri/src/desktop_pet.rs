@@ -410,6 +410,14 @@ fn window_monitor(window: &WebviewWindow) -> Option<Monitor> {
     .or_else(|| window.primary_monitor().ok().flatten())
 }
 
+fn monitor_of_window(window: &tauri::Window) -> Option<Monitor> {
+  window
+    .current_monitor()
+    .ok()
+    .flatten()
+    .or_else(|| window.primary_monitor().ok().flatten())
+}
+
 fn monitor_for_position(window: &WebviewWindow, pos: PhysicalPosition<i32>) -> Option<Monitor> {
   window
     .available_monitors()
@@ -711,7 +719,7 @@ fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
   let saved_pos = pet.geometry.lock().unwrap_or_else(|e| e.into_inner()).last_collapsed_pos;
   let monitor = saved_pos
     .and_then(|pos| monitor_for_position(&window, pos))
-    .or_else(|| app.get_webview_window("main").and_then(|main| window_monitor(&main)))
+    .or_else(|| app.get_window("main").and_then(|main| monitor_of_window(&main)))
     .or_else(|| window_monitor(&window));
 
   let composited = detect_composited(&window);
