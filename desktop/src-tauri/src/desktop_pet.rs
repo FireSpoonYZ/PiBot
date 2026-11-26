@@ -1359,6 +1359,17 @@ fn release_linux_webview_pointer_press(window: &WebviewWindow) {
 fn release_linux_webview_pointer_press(_window: &WebviewWindow) {}
 
 #[cfg(target_os = "linux")]
+fn reapply_linux_window_hints(window: &WebviewWindow) {
+  // Re-assert X11/EWMH hints after map so WMs that drop pre-map hints on hidden windows
+  // still keep the pet above other windows and out of the taskbar/pager.
+  let _ = window.set_always_on_top(true);
+  let _ = window.set_skip_taskbar(true);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reapply_linux_window_hints(_window: &WebviewWindow) {}
+
+#[cfg(target_os = "linux")]
 fn apply_linux_size_lock(window: &WebviewWindow, size: Option<PhysicalSize<u32>>) {
   let _ = window.set_min_size(size);
   let _ = window.set_max_size(size);
@@ -1495,6 +1506,9 @@ async fn apply_layout(
 }
 
 async fn create(app: &AppHandle) -> Result<WebviewWindow, BridgeError> {
+  // Ensure KDE Plasma has the KWin window rule loaded before creating the pet window so
+  // native Wayland (and KDE X11) apply keep-above and skip-taskbar immediately on map.
+  crate::kde_window_rule::ensure_auto_configured(app).await;
   let window = WebviewWindowBuilder::new(app, PET_LABEL, WebviewUrl::App("index.html?view=pet".into()))
     // desktop-pet.kwinrule matches "PiBot" exactly; the main window is "Pi Bot".
     .title("PiBot")
@@ -1704,6 +1718,7 @@ pub async fn control_with_layout(
         window
           .show()
           .map_err(|_| native_error("Could not show desktop pet"))?;
+        reapply_linux_window_hints(&window);
         let (hit_rects, composited) = {
           let composited = detect_composited(&window);
           let mut geo = pet.geometry.lock().unwrap_or_else(|e| e.into_inner());
@@ -1733,6 +1748,7 @@ pub async fn control_with_layout(
           window
             .show()
             .map_err(|_| native_error("Could not show desktop pet"))?;
+          reapply_linux_window_hints(&window);
           pet.revealed.store(true, Ordering::Release);
           let (hit_rects, composited) = {
             let composited = detect_composited(&window);

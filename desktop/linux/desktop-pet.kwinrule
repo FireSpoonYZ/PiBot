@@ -8,3 +8,7 @@ above=true
 aboverule=2
 skiptaskbar=true
 skiptaskbarrule=2
+skippager=true
+skippagerrule=2
+skipswitcher=true
+skipswitcherrule=2

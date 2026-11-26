@@ -26,6 +26,7 @@
     "allow-desktop-update-cancel",
     "allow-desktop-clipboard-sync",
     "allow-desktop-pet",
+    "allow-desktop-pet-kde-rule",
     "allow-desktop-pet-voice",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

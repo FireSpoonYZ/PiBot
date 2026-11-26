@@ -40,9 +40,11 @@ Windows 和 Linux 在系统托盘可用时显示 PiBot 托盘。关闭主窗口�
 
 ### Kubuntu / KDE Plasma：桌宠置顶与任务栏
 
-X11（含 XWayland）下，PiBot 已向窗口管理器请求让桌宠置顶并跳过任务栏。原生 Wayland 下，GTK 3 的普通窗口不会向 KWin 传递这两个提示。**临时置顶**：点击桌宠使它获得焦点，按 `Alt+F3`，在「更多操作」中选「保持在其他窗口之上」。隐藏桌宠会销毁窗口，这项临时设置不会随新窗口恢复。
+X11（含 XWayland）下，PiBot 已向窗口管理器请求让桌宠置顶并跳过任务栏/分页器，并在窗口显示后补设提示以兼容不同窗口管理器的映射时序。原生 Wayland 下，GTK 3 的普通窗口不会向 KWin 传递这些提示，需要通过 KWin 窗口规则生效。
 
-**每次打开都置顶并跳过任务栏**：在 KDE「系统设置 → 窗口管理 → 窗口规则」中导入（或重新导入）[`desktop-pet.kwinrule`](linux/desktop-pet.kwinrule)，点击「应用」。Linux 安装包中的文件位于 `/usr/share/pibot/desktop-pet.kwinrule`。规则精确匹配应用 `pibot` 和桌宠标题 `PiBot`，不影响标题为 `Pi Bot` 的主窗口。若规则未命中，可用「检测窗口属性」核对桌宠的应用标识和标题。无需切换到 XWayland；要恢复默认行为，删除这条规则即可。
+**自动配置与设置入口**：在 KDE Plasma（同时覆盖原生 Wayland 与 KDE X11，兼容 Plasma 5.27 与 Plasma 6）中，PiBot 启动及首次创建桌宠前会自动把桌宠规则幂等写入 `$XDG_CONFIG_HOME/kwinrulesrc`（默认 `~/.config/kwinrulesrc`），并通过 D-Bus 通知 KWin 重载配置（使用应用内更新升级并重启客户端后同样自动生效，不会重复覆盖此前手动导入的规则）。规则精确匹配应用 `pibot` 和桌宠标题 `PiBot`，保持置顶并从任务栏、分页器与窗口切换器隐藏，不影响标题为 `Pi Bot` 的主窗口。无需切换到 XWayland。
+
+如果你在 KDE「系统设置 → 窗口管理 → 窗口规则」或 PiBot「设置 → 外观与对话 → 悬浮桌宠 → KDE 窗口规则」中移除了该规则，后续启动和更新会尊重选择、不再强行写回；随时可在上述设置项中一键「应用规则 / 重新应用」或「移除规则」。若 `~/.config/kwinrulesrc` 为外部管理的符号链接（如 Nix / dotfiles），PiBot 会跳过自动改写，安装包中仍保留 `/usr/share/pibot/desktop-pet.kwinrule`（源码 [`desktop-pet.kwinrule`](linux/desktop-pet.kwinrule)）供手动导入或声明式引用。
 
 ### 语音
 

@@ -10,6 +10,7 @@ mod clipboard_windows;
 mod desktop_tray;
 pub mod host_service;
 pub mod image_picker;
+pub mod kde_window_rule;
 pub mod pairing_code;
 pub mod pet_voice;
 pub mod updates;
@@ -195,6 +196,7 @@ pub fn run() {
     .manage(clipboard_runtime::ClipboardRuntime::new())
     .manage(host_service::HostStartup::default())
     .manage(desktop_pet::DesktopPet::default())
+    .manage(kde_window_rule::KdeWindowRuleManager::default())
     .manage(pet_voice::PetVoiceState::default())
     .on_window_event(|window, event| {
       if window.label() == desktop_pet::PET_LABEL {
@@ -269,6 +271,7 @@ pub fn run() {
       if let Err(error) = desktop_tray::install(app.handle()) {
         eprintln!("Failed to create the PiBot system tray: {error}");
       }
+      kde_window_rule::ensure_auto_configured_in_background(app.handle());
       desktop_pet::restore_if_enabled(app.handle());
       Ok(())
     });
@@ -277,6 +280,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       desktop_request,
       desktop_pet::desktop_pet,
+      kde_window_rule::desktop_pet_kde_rule,
       pet_voice::desktop_pet_voice,
       browser_guest::desktop_browser_guest,
       desktop_open_center,

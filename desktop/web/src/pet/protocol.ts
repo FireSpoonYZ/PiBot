@@ -151,6 +151,19 @@ export interface DesktopPetWindowState {
 export type DesktopPetWindowAction =
   | 'show' | 'reveal' | 'hide' | 'toggle' | 'set-expanded' | 'set-layout' | 'show-main' | 'drag' | 'status';
 
+export type DesktopPetKdeRuleAction = 'status' | 'apply' | 'remove';
+
+export interface DesktopPetKdeRuleStatus {
+  supported: boolean;
+  sessionType: 'wayland' | 'x11' | 'unknown';
+  installed: boolean;
+  managedByPibot: boolean;
+  upToDate: boolean;
+  externallyManaged: boolean;
+  reconfigured?: boolean;
+  configPath?: string;
+}
+
 export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   hostSessionId: '',
   revision: 0,
