@@ -168,7 +168,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     app.get('/api/setup', () => ({ required: false }));
     app.get('/api/health', () => ({ status: 'ready' }));
     await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
-    const { listReleases, setReleasePublished } = registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl });
+    const { listReleases, setReleasePublished } = registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl, onReleasePublished: () => routes?.notifyAll('client-release-published') });
     const turns = openTurnAdmission({ store, packages });
     // New services are constructed after packages (publish/mutation backend)
     // and before routes; notify is delegated lazily until routes exists.

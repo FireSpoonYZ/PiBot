@@ -5,7 +5,17 @@ import { CheckCircle2, ChevronDown, Download, Loader2, RefreshCw, XCircle } from
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { useText } from './ui';
 import { Section } from './bot-settings/primitives';
-import { CLIENT_UPDATE_OPEN_EVENT, formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import {
+  CLIENT_UPDATE_OPEN_EVENT,
+  createMobileUpdatePromptState,
+  dismissMobileUpdatePromptRelease,
+  formatUpdateBytes,
+  reopenMobileUpdatePrompt,
+  shouldShowMobileUpdatePrompt,
+  syncMobileUpdatePromptCenter,
+  updateProgress,
+  type ClientUpdatePhase,
+} from './ClientUpdate';
 import { Dialog } from './components/ui/dialog';
 import { useClientUpdate, type ClientUpdateContextValue } from './ClientUpdateProvider';
 import { LabelStack, ReservedSlot, SmoothExpand } from './layout';
@@ -53,16 +63,31 @@ export function useClientUpdateSummary(): string | undefined {
 export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: boolean; onOpenUpdates(): void }) {
   const t = useText();
   const update = useClientUpdate();
+  const centerKey = update?.centerKey ?? '';
+  const centerKeyRef = useRef(centerKey);
+  centerKeyRef.current = centerKey;
   const [visible, setVisible] = useState(() => !document.hidden);
-  const [dismissedRelease, setDismissedRelease] = useState('');
-  const release = update?.ready && !update.pending && update.status?.phase === 'available' ? update.status.release : undefined;
-  const releaseKey = release ? `${release.id}:${release.versionCode ?? release.version}` : '';
-  const open = active && visible && Boolean(releaseKey) && releaseKey !== dismissedRelease;
-  const dismiss = () => setDismissedRelease(releaseKey);
+  const [dismissState, setDismissState] = useState(() => createMobileUpdatePromptState(centerKey));
+  const { open, release, releaseKey } = shouldShowMobileUpdatePrompt({
+    active,
+    visible,
+    ready: Boolean(update?.ready),
+    pending: update?.pending ?? null,
+    status: update?.status,
+    centerKey,
+    dismissState,
+  });
+  const dismiss = () => {
+    setDismissState(prev => dismissMobileUpdatePromptRelease(prev, centerKeyRef.current, releaseKey));
+  };
+
+  useEffect(() => {
+    setDismissState(prev => syncMobileUpdatePromptCenter(prev, centerKey));
+  }, [centerKey]);
 
   useEffect(() => {
     const syncVisibility = () => setVisible(!document.hidden);
-    const reopen = () => setDismissedRelease('');
+    const reopen = () => setDismissState(prev => reopenMobileUpdatePrompt(prev, centerKeyRef.current));
     document.addEventListener('visibilitychange', syncVisibility);
     window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, reopen);
     return () => {
@@ -156,9 +181,16 @@ function UpdateSectionBody({
 }) {
   const t = useText();
   const notesPanelId = useId();
-  const { status, pending, ready, actionError, dismissError, check, download, install, cancel } = update;
+  const { status, pending, ready, centerKey, actionError, dismissError, check, triggerAutoCheck, download, install, cancel } = update;
+  const triggerAutoCheckRef = useRef(triggerAutoCheck);
+  triggerAutoCheckRef.current = triggerAutoCheck;
   const [confirmStop, setConfirmStop] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+
+  useEffect(() => {
+    if (!ready) return;
+    triggerAutoCheckRef.current('updates-page');
+  }, [ready, centerKey]);
 
   const isDesktop = variant === 'desktop';
   const primaryBtn = isDesktop ? 'primary-button cu-action-btn' : 'hst-btn is-primary cu-action-btn';
