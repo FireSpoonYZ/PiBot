@@ -125,6 +125,10 @@ final class ClientUpdater {
                 throws Exception;
     }
 
+    interface DownloadRunner {
+        void run(Active me, JSONObject rel);
+    }
+
     private final Context context;
     private final SharedPreferences prefs;
     private final Object lock = new Object();
@@ -135,6 +139,7 @@ final class ClientUpdater {
     private final BooleanSupplier serviceActive;
     private final CredentialsProvider credentialsProvider;
     private final CheckFetcher checkFetcher;
+    private final DownloadRunner downloadRunner;
     private final Supplier<AppIdentity> identityProvider;
 
     // 以下状态字段均由 lock 保护；downloadedBytes/totalBytes 供 IO 线程写进度，故 volatile。
@@ -165,15 +170,19 @@ final class ClientUpdater {
         final long generation;
         final boolean restoring;
         final boolean installing;
+        final boolean automaticCheck;
         volatile boolean cancelled;
+        volatile boolean preempted;
         boolean userCancelled;
         volatile Call call;
+        volatile CompletableFuture<JSONObject> confirmation;
 
-        Active(long epoch, long generation, boolean restoring, boolean installing) {
+        Active(long epoch, long generation, boolean restoring, boolean installing, boolean automaticCheck) {
             this.epoch = epoch;
             this.generation = generation;
             this.restoring = restoring;
             this.installing = installing;
+            this.automaticCheck = automaticCheck;
         }
     }
 
@@ -186,6 +195,7 @@ final class ClientUpdater {
                 () -> ThreadLocalRandom.current().nextLong(PUSH_JITTER_MAX_MS + 1L),
                 BotClientService::isActive,
                 defaultCredentialsProvider(context.getApplicationContext()),
+                null,
                 null,
                 defaultIdentityProvider(context.getApplicationContext()));
     }
@@ -200,6 +210,30 @@ final class ClientUpdater {
             CredentialsProvider credentialsProvider,
             CheckFetcher checkFetcher,
             Supplier<AppIdentity> identityProvider) {
+        this(
+                context,
+                io,
+                pushScheduler,
+                elapsedClock,
+                pushJitterSupplier,
+                serviceActive,
+                credentialsProvider,
+                checkFetcher,
+                null,
+                identityProvider);
+    }
+
+    ClientUpdater(
+            Context context,
+            ExecutorService io,
+            ScheduledExecutorService pushScheduler,
+            LongSupplier elapsedClock,
+            LongSupplier pushJitterSupplier,
+            BooleanSupplier serviceActive,
+            CredentialsProvider credentialsProvider,
+            CheckFetcher checkFetcher,
+            DownloadRunner downloadRunner,
+            Supplier<AppIdentity> identityProvider) {
         this.context = context.getApplicationContext();
         this.prefs = this.context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         this.io = io;
@@ -209,6 +243,7 @@ final class ClientUpdater {
         this.serviceActive = serviceActive;
         this.credentialsProvider = credentialsProvider;
         this.checkFetcher = checkFetcher != null ? checkFetcher : this::defaultFetchCheck;
+        this.downloadRunner = downloadRunner != null ? downloadRunner : this::runDownload;
         this.identityProvider = identityProvider != null ? identityProvider : defaultIdentityProvider(this.context);
     }
 
@@ -408,6 +443,8 @@ final class ClientUpdater {
         if (active != null) {
             active.cancelled = true;
             if (active.call != null) active.call.cancel();
+            CompletableFuture<JSONObject> confirmation = active.confirmation;
+            if (confirmation != null) confirmation.cancel(true);
         }
         phase = "idle";
         release = null;
@@ -457,6 +494,8 @@ final class ClientUpdater {
         CompletableFuture<JSONObject> confirmation = null;
         try {
             confirmation = credentialsProvider.confirm();
+            me.confirmation = confirmation;
+            if (me.cancelled) confirmation.cancel(true);
             JSONObject confirmed = confirmation.get(6, TimeUnit.SECONDS);
             synchronized (lock) {
                 JSONObject snapshot = currentCredentialsLocked();
@@ -478,10 +517,26 @@ final class ClientUpdater {
                 if (currentLocked(me)) resetLocked();
             }
             throw failure;
+        } finally {
+            me.confirmation = null;
         }
     }
 
-    private void finish(Active me) {
+    /** 调用方持 lock：取消并解绑被显式用户操作抢占的在途任务（静默自动检查或缓存恢复）。 */
+    private void preemptActiveLocked(Active target) {
+        target.cancelled = true;
+        target.preempted = true;
+        Call call = target.call;
+        if (call != null) call.cancel();
+        CompletableFuture<JSONObject> confirmation = target.confirmation;
+        if (confirmation != null) confirmation.cancel(true);
+        pendingAutomaticReason = null;
+        if (active == target) {
+            active = null;
+        }
+    }
+
+    void finish(Active me) {
         String retryReason = null;
         synchronized (lock) {
             if (active == me) {
@@ -719,7 +774,8 @@ final class ClientUpdater {
                     return CompletableFuture.completedFuture(statusSnapshotLocked());
                 }
             }
-            if (active != null && (automatic || !active.restoring)) {
+            boolean canPreempt = !automatic && active != null && (active.restoring || active.automaticCheck);
+            if (active != null && !canPreempt) {
                 if (automatic && (active.cancelled || active.restoring || REASON_PUSH.equals(effectiveReason))) {
                     pendingAutomaticReason = moreUrgentReason(pendingAutomaticReason, effectiveReason);
                 }
@@ -744,21 +800,24 @@ final class ClientUpdater {
                 }
             }
             if (active != null) {
-                // 新检查取代尚未完成的缓存恢复；最多只排一个后继任务。
-                active.cancelled = true;
-                active = null;
-                restored = false;
+                // 手动检查取代尚未完成的缓存恢复或静默自动检查；最多只排一个后继任务。
+                if (active.restoring) {
+                    restored = false;
+                }
+                preemptActiveLocked(active);
             }
             String prevPhase = phase;
             JSONObject prevRelease = release;
+            String prevMessage = message;
             long prevTotalBytes = totalBytes;
-            boolean preserveAvailable = automatic && "available".equals(prevPhase) && prevRelease != null;
             installerInvalidated = true;
-            if (!preserveAvailable) {
+            // 自动检查全程静默：idle / up-to-date / available 等前态均不切 "checking"，避免 UI 闪烁与误启轮询；
+            // 检查完成时通过 statusChanged 广播同步最终状态。
+            if (!automatic) {
                 phase = "checking";
+                message = null;
             }
-            message = null;
-            Active me = new Active(++epoch, creds.getLong("generation"), false, false);
+            Active me = new Active(++epoch, creds.getLong("generation"), false, false, automatic);
             active = me;
             try {
                 io.execute(() -> runCheck(me, automatic, prevPhase, prevRelease, prevTotalBytes));
@@ -766,6 +825,7 @@ final class ClientUpdater {
                 active = null;
                 phase = prevPhase;
                 release = prevRelease;
+                message = prevMessage;
                 totalBytes = prevTotalBytes;
                 if (automatic) return CompletableFuture.completedFuture(statusSnapshotLocked());
                 return failed(new BridgeException("BUSY", "not-sent", "更新操作繁忙"));
@@ -844,7 +904,7 @@ final class ClientUpdater {
         } finally {
             me.call = null;
             finish(me);
-            if (automatic) ClientUpdateNotifications.statusChanged(context);
+            if (automatic && !me.preempted) ClientUpdateNotifications.statusChanged(context);
         }
     }
 
@@ -890,19 +950,38 @@ final class ClientUpdater {
             JSONObject creds = currentCredentialsLocked();
             if (creds == null) return failed(new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪"));
             ensureRestoredLocked(creds);
-            if (active != null) return failed(new BridgeException("BUSY", "not-sent", "更新操作进行中"));
+            if (active != null && !active.automaticCheck) {
+                return failed(new BridgeException("BUSY", "not-sent", "更新操作进行中"));
+            }
             if ("downloaded".equals(phase)) return CompletableFuture.completedFuture(statusSnapshotLocked());
             if (!"available".equals(phase) || release == null) {
                 return failed(new BridgeException("INVALID_STATE", "not-sent", "没有可下载的更新"));
             }
+            if (active != null) {
+                // 显式下载抢占在途静默自动检查，保留既有 release 直接进入下载。
+                preemptActiveLocked(active);
+            }
             JSONObject rel = release;
+            String prevPhase = phase;
+            String prevMessage = message;
+            long prevDownloaded = downloadedBytes;
+            long prevTotal = totalBytes;
             phase = "downloading";
             message = null;
             downloadedBytes = 0;
             totalBytes = rel.getLong("size");
-            Active me = new Active(++epoch, creds.getLong("generation"), false, false);
+            Active me = new Active(++epoch, creds.getLong("generation"), false, false, false);
             active = me;
-            io.execute(() -> runDownload(me, rel));
+            try {
+                io.execute(() -> downloadRunner.run(me, rel));
+            } catch (RejectedExecutionException busy) {
+                active = null;
+                phase = prevPhase;
+                message = prevMessage;
+                downloadedBytes = prevDownloaded;
+                totalBytes = prevTotal;
+                return failed(new BridgeException("BUSY", "not-sent", "更新操作繁忙"));
+            }
             return CompletableFuture.completedFuture(statusSnapshotLocked());
         }
     }
@@ -1018,7 +1097,7 @@ final class ClientUpdater {
                 return failed(new BridgeException("INVALID_STATE", "not-sent", "没有已下载的更新"));
             }
             JSONObject rel = release;
-            Active me = new Active(++epoch, creds.getLong("generation"), false, true);
+            Active me = new Active(++epoch, creds.getLong("generation"), false, true, false);
             active = me;
             phase = "installing";
             message = null;
@@ -1134,6 +1213,8 @@ final class ClientUpdater {
                 active.userCancelled = true;
                 epoch++;
                 if (active.call != null) active.call.cancel();
+                CompletableFuture<JSONObject> confirmation = active.confirmation;
+                if (confirmation != null) confirmation.cancel(true);
                 if (!preparingInstall && current) {
                     phase = "cancelled";
                     message = null;
@@ -1371,7 +1452,7 @@ final class ClientUpdater {
         File dir = updateDir();
         deleteQuietly(new File(dir, PART_NAME));
         if (!new File(dir, APK_NAME).isFile()) return;
-        Active me = new Active(++epoch, creds.getLong("generation"), true, false);
+        Active me = new Active(++epoch, creds.getLong("generation"), true, false, false);
         active = me;
         io.execute(() -> restore(me, creds));
     }

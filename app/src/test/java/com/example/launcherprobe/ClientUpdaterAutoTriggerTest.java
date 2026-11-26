@@ -64,6 +64,7 @@ public class ClientUpdaterAutoTriggerTest {
     private AtomicReference<JSONObject> credsRef;
     private AtomicReference<ClientUpdater.AppIdentity> identityRef;
     private AtomicReference<ClientUpdater.CheckFetcher> fetcherRef;
+    private AtomicReference<ClientUpdater.DownloadRunner> downloadRunnerRef;
     private AtomicInteger fetchCount;
 
     private static final class ScheduledEntry implements ScheduledFuture<Object> {
@@ -214,6 +215,7 @@ public class ClientUpdaterAutoTriggerTest {
             fetchCount.incrementAndGet();
             return null; // 204 up-to-date by default
         });
+        downloadRunnerRef = new AtomicReference<>(null);
     }
 
     @After
@@ -259,6 +261,7 @@ public class ClientUpdaterAutoTriggerTest {
                 provider,
                 (me, creds, endpoint, arch, currentVersionCode) ->
                         fetcherRef.get().fetch(me, creds, endpoint, arch, currentVersionCode),
+                downloadRunnerRef.get(),
                 identityRef::get);
     }
 
@@ -292,10 +295,10 @@ public class ClientUpdaterAutoTriggerTest {
                 .put("url", "/api/client-updates/android/aarch64/apk/rel-" + versionCode);
     }
 
-    private static BridgeException expectInvalidArg(ThrowingAction action) {
+    private static BridgeException expectBridgeError(String expectedCode, ThrowingAction action) {
         try {
             action.run();
-            fail("expected INVALID_ARGUMENT BridgeException");
+            fail("expected " + expectedCode + " BridgeException");
             return null;
         } catch (AssertionError assertion) {
             throw assertion;
@@ -307,10 +310,15 @@ public class ClientUpdaterAutoTriggerTest {
             }
             assertTrue("expected BridgeException, got " + cause, cause instanceof BridgeException);
             BridgeException bridge = (BridgeException) cause;
-            assertEquals("INVALID_ARGUMENT", bridge.code);
-            assertEquals("not-sent", bridge.outcome);
+            assertEquals(expectedCode, bridge.code);
             return bridge;
         }
+    }
+
+    private static BridgeException expectInvalidArg(ThrowingAction action) {
+        BridgeException bridge = expectBridgeError("INVALID_ARGUMENT", action);
+        assertEquals("not-sent", bridge.outcome);
+        return bridge;
     }
 
     private static String sha256Hex(String text) throws Exception {
@@ -922,5 +930,236 @@ public class ClientUpdaterAutoTriggerTest {
         JSONObject afterManualErr = status(idleUpdater);
         assertEquals("error", afterManualErr.getString("phase"));
         assertNotNull(afterManualErr.optString("message", null));
+    }
+
+    // ---------- 6. 全程静默不闪 checking 与显式 download/手动 check 抢占静默自动检查 ----------
+
+    @Test
+    public void automaticCheckStaysSilentWithoutCheckingFlickerForIdleAndUpToDate() throws Exception {
+        ClientUpdater updater = newUpdater();
+
+        // 1) idle + automatic startup check -> remains "idle" (NOT "checking") while in flight.
+        CountDownLatch idleStarted = new CountDownLatch(1);
+        CountDownLatch idleProceed = new CountDownLatch(1);
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            idleStarted.countDown();
+            assertTrue(idleProceed.await(2, TimeUnit.SECONDS));
+            return null;
+        });
+        shadowOf(app).clearBroadcastIntents();
+        JSONObject idleImmediate = updater.request(
+                "updateCheck",
+                new JSONObject().put("automatic", true).put("reason", "startup"))
+                .get(2, TimeUnit.SECONDS);
+        assertTrue(idleStarted.await(2, TimeUnit.SECONDS));
+        assertEquals("idle", idleImmediate.getString("phase"));
+        assertEquals("idle", status(updater).getString("phase"));
+
+        idleProceed.countDown();
+        drainIo();
+        assertEquals("up-to-date", status(updater).getString("phase"));
+        boolean sawBroadcastAfterIdle = false;
+        for (Intent intent : shadowOf(app).getBroadcastIntents()) {
+            if (ClientUpdateNotifications.ACTION_STATUS_CHANGED.equals(intent.getAction())) {
+                sawBroadcastAfterIdle = true;
+                break;
+            }
+        }
+        assertTrue("expected statusChanged broadcast when silent check completes", sawBroadcastAfterIdle);
+
+        // 2) up-to-date + automatic updates-page check -> remains "up-to-date" (NOT "checking") while in flight.
+        CountDownLatch upToDateStarted = new CountDownLatch(1);
+        CountDownLatch upToDateProceed = new CountDownLatch(1);
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            upToDateStarted.countDown();
+            assertTrue(upToDateProceed.await(2, TimeUnit.SECONDS));
+            return release(2L);
+        });
+        clockMs.addAndGet(ClientUpdater.COOLDOWN_UPDATES_PAGE_MS);
+        JSONObject upToDateImmediate = updater.request(
+                "updateCheck",
+                new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        assertTrue(upToDateStarted.await(2, TimeUnit.SECONDS));
+        assertEquals("up-to-date", upToDateImmediate.getString("phase"));
+        assertEquals("up-to-date", status(updater).getString("phase"));
+
+        upToDateProceed.countDown();
+        drainIo();
+        JSONObject discovered = status(updater);
+        assertEquals("available", discovered.getString("phase"));
+        assertEquals(2L, discovered.getJSONObject("release").getLong("versionCode"));
+    }
+
+    @Test
+    public void explicitDownloadPreemptsInFlightSilentAutoCheckWithoutBusyOrClobber() throws Exception {
+        CountDownLatch downloadStarted = new CountDownLatch(1);
+        CountDownLatch downloadProceed = new CountDownLatch(1);
+        AtomicReference<ClientUpdater> updaterRef = new AtomicReference<>();
+        downloadRunnerRef.set((me, rel) -> {
+            downloadStarted.countDown();
+            try {
+                downloadProceed.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                updaterRef.get().finish(me);
+            }
+        });
+        ClientUpdater updater = newUpdater();
+        updaterRef.set(updater);
+
+        // Seed phase=available with v2 at t=1_000_000.
+        clockMs.set(1_000_000L);
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            return release(2L);
+        });
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "startup"))
+                .get(2, TimeUnit.SECONDS);
+        drainIo();
+        assertEquals("available", status(updater).getString("phase"));
+
+        // Start a silent automatic updates-page check at t=1_030_000 and hold it in flight.
+        CountDownLatch autoStarted = new CountDownLatch(1);
+        CountDownLatch autoProceed = new CountDownLatch(1);
+        AtomicReference<ClientUpdater.Active> autoActiveRef = new AtomicReference<>();
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            autoActiveRef.set(me);
+            fetchCount.incrementAndGet();
+            autoStarted.countDown();
+            assertTrue(autoProceed.await(2, TimeUnit.SECONDS));
+            return null; // late 204 must be ignored after preemption
+        });
+        clockMs.set(1_030_000L);
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        assertTrue(autoStarted.await(2, TimeUnit.SECONDS));
+        assertEquals("available", status(updater).getString("phase"));
+
+        // User explicitly clicks "Download & Install" while silent auto-check is in flight:
+        // must preempt cleanly (NO BUSY), preserve v2 release, and enter downloading!
+        shadowOf(app).clearBroadcastIntents();
+        clockMs.set(1_035_000L);
+        JSONObject dlSnap = updater.request("updateDownload", new JSONObject()).get(2, TimeUnit.SECONDS);
+        assertEquals("downloading", dlSnap.getString("phase"));
+        assertEquals(2L, dlSnap.getJSONObject("release").getLong("versionCode"));
+        assertTrue(autoActiveRef.get().cancelled);
+        assertTrue(autoActiveRef.get().preempted);
+
+        // Let the preempted auto-check complete with late 204, then verify download starts and owns active!
+        autoProceed.countDown();
+        assertTrue("download must start on IO after preempted auto-check exits",
+                downloadStarted.await(2, TimeUnit.SECONDS));
+
+        JSONObject duringDownload = status(updater);
+        assertEquals("downloading", duringDownload.getString("phase"));
+        assertEquals(2L, duringDownload.getJSONObject("release").getLong("versionCode"));
+
+        // Preempted auto-check must NOT emit a spurious statusChanged broadcast or clear active!
+        for (Intent intent : shadowOf(app).getBroadcastIntents()) {
+            assertFalse("preempted auto-check must not broadcast stale statusChanged",
+                    ClientUpdateNotifications.ACTION_STATUS_CHANGED.equals(intent.getAction()));
+        }
+        expectBridgeError("BUSY", () -> updater.request("updateDownload", new JSONObject()).get(2, TimeUnit.SECONDS));
+
+        // Release download and verify preempted auto-check did NOT refresh lastCheckAtElapsed to 1_035_000!
+        downloadProceed.countDown();
+        drainIo();
+        updater.setStateForTest("idle", null);
+        int beforeRetry = fetchCount.get();
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            return null;
+        });
+        // Still at t=1_035_000 (35s since t=1_000_000, 0ms since preempted auto-check exited):
+        // updates-page (30s) MUST run because preempted auto-check did not refresh lastCheckAtElapsed.
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        drainIo();
+        assertEquals(beforeRetry + 1, fetchCount.get());
+    }
+
+    @Test
+    public void manualCheckPreemptsInFlightSilentAutoCheckAndTakesOverCleanly() throws Exception {
+        ClientUpdater updater = newUpdater();
+
+        // Seed phase=available with v2 at t=1_000_000.
+        clockMs.set(1_000_000L);
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            return release(2L);
+        });
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "startup"))
+                .get(2, TimeUnit.SECONDS);
+        drainIo();
+        assertEquals("available", status(updater).getString("phase"));
+
+        // Launch silent automatic check at t=1_030_000 and hold it in flight.
+        CountDownLatch autoStarted = new CountDownLatch(1);
+        CountDownLatch autoProceed = new CountDownLatch(1);
+        CountDownLatch manualStarted = new CountDownLatch(1);
+        CountDownLatch manualProceed = new CountDownLatch(1);
+        AtomicReference<ClientUpdater.Active> autoActiveRef = new AtomicReference<>();
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            if (me.automaticCheck) {
+                autoActiveRef.set(me);
+                autoStarted.countDown();
+                assertTrue(autoProceed.await(2, TimeUnit.SECONDS));
+                return null; // late 204 must be ignored
+            }
+            manualStarted.countDown();
+            assertTrue(manualProceed.await(2, TimeUnit.SECONDS));
+            clockMs.set(1_040_000L);
+            return release(3L);
+        });
+
+        clockMs.set(1_030_000L);
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        assertTrue(autoStarted.await(2, TimeUnit.SECONDS));
+
+        // User explicitly taps "Check for Updates" -> preempts silent auto-check, enters "checking", NO BUSY!
+        clockMs.set(1_035_000L);
+        JSONObject manualImmediate = updater.request(
+                "updateCheck",
+                new JSONObject().put("automatic", false))
+                .get(2, TimeUnit.SECONDS);
+        assertEquals("checking", manualImmediate.getString("phase"));
+        assertTrue(autoActiveRef.get().cancelled);
+        assertTrue(autoActiveRef.get().preempted);
+
+        // Unblock stale auto-check; manual check runs next and holds active (download while manual checking -> BUSY).
+        autoProceed.countDown();
+        assertTrue(manualStarted.await(2, TimeUnit.SECONDS));
+        expectBridgeError("BUSY", () -> updater.request("updateDownload", new JSONObject()).get(2, TimeUnit.SECONDS));
+
+        // Finish manual check -> v3 applied, and lastCheckAtElapsed refreshed to 1_040_000!
+        manualProceed.countDown();
+        drainIo();
+        JSONObject finalSnap = status(updater);
+        assertEquals("available", finalSnap.getString("phase"));
+        assertEquals(3L, finalSnap.getJSONObject("release").getLong("versionCode"));
+
+        int fetchesAfterManual = fetchCount.get();
+        fetcherRef.set((me, creds, endpoint, arch, currentVersionCode) -> {
+            fetchCount.incrementAndGet();
+            return release(4L);
+        });
+        clockMs.set(1_069_999L); // 29_999ms after manual completion -> throttled
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        drainIo();
+        assertEquals(fetchesAfterManual, fetchCount.get());
+
+        clockMs.set(1_070_000L); // 30_000ms after manual completion -> runs
+        updater.request("updateCheck", new JSONObject().put("automatic", true).put("reason", "updates-page"))
+                .get(2, TimeUnit.SECONDS);
+        drainIo();
+        assertEquals(fetchesAfterManual + 1, fetchCount.get());
+        assertEquals(4L, status(updater).getJSONObject("release").getLong("versionCode"));
     }
 }
