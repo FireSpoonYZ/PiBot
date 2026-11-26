@@ -564,8 +564,8 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     return {
       tone: 'warning',
       title: t('请开启新的 Antigravity 会话', 'Start a New Antigravity Session'),
-      description: t('请先输入 /clear，再切换模型或继续使用变更后的人设和工具。Antigravity 会话不支持编辑历史或手动压缩。',
-        'Use /clear before switching models or continuing after instructions or tools change. Antigravity history cannot be edited or manually compacted.'),
+      description: t('跨服务商切换模型、旧会话升级或原生会话失效时，请先输入 /clear 开启新会话。Antigravity 会话不支持编辑历史或手动压缩。',
+        'Use /clear to start a new session when switching across providers, upgrading a legacy session, or when the native session is no longer available. Antigravity sessions do not support editing history or manual compaction.'),
       detail,
     };
   }

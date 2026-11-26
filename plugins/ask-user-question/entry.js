@@ -158,6 +158,7 @@ export function createPlugin({ installationId, host }) {
                 answers: [], cancelled: true, error: validation.error,
               });
             }
+            const isAgy = host.isAntigravityBot?.(botId) === true;
             const phase = await api.memo('ask-user-question.phase', context);
             const deferredIdentity = { installationId, conversationId, requestId };
 
@@ -187,7 +188,7 @@ export function createPlugin({ installationId, host }) {
               if (existingWait) {
                 return finishDeferredQuestionnaire(typed, existingWait, api, context, true);
               }
-              if (await canTerminateSafely(api, context)) {
+              if (await canTerminateSafely(api, context, isAgy)) {
                 preparedDetails = requestDetails(installationId, conversationId, requestId, typed.questions);
                 if (preparedDetails === null) {
                   return buildToolResult(
@@ -205,6 +206,24 @@ export function createPlugin({ installationId, host }) {
                   return finishDeferredQuestionnaire(typed, record, api, context, true);
                 }
               }
+            }
+
+            if (isAgy && !hasLegacyRequest) {
+              const details = preparedDetails !== undefined
+                ? preparedDetails
+                : requestDetails(installationId, conversationId, requestId, typed.questions);
+              if (details === null) {
+                return buildToolResult(
+                  'Error: questionnaire exceeds the presentation size budget',
+                  { answers: [], cancelled: true, error: 'invalid_params' },
+                );
+              }
+              await api.details(details, context);
+              return {
+                output: [{ type: 'text', text: 'The questionnaire has been shown to the user. End this turn now; the user will answer in the next turn.' }],
+                details,
+                control: { terminate: true },
+              };
             }
 
             let params;
@@ -281,12 +300,16 @@ export function createPlugin({ installationId, host }) {
         });
       }
 
-      async function canTerminateSafely(api, context) {
-        if (!host.sdk?.LiveDoc || typeof api.getTask !== 'function' || typeof api.snapshot !== 'function') {
+      async function canTerminateSafely(api, context, isAgy = false) {
+        if (typeof api.getTask !== 'function') {
           return false;
         }
         const task = await api.getTask(api.taskId, context);
         if (task?.kind !== TOOL_TASK_KIND || task.input?.kind !== 'model') return false;
+        if (isAgy) return true;
+        if (!host.sdk?.LiveDoc || typeof api.snapshot !== 'function') {
+          return false;
+        }
         const live = await api.snapshot(host.sdk.LiveDoc, api.conversationId, context);
         const slots = live?.tools ?? [];
         // terminate is honored only when every result in the model round asks

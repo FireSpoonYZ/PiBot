@@ -1132,7 +1132,7 @@ function collectHostRuntimeSources() {
   const pluginsDir = path.join(ROOT, 'plugins');
   const contractDir = path.join(ROOT, 'center-contract');
   const operationsDir = path.join(contractDir, 'operations');
-  const antigravityContracts = new Set(['antigravity.js', 'antigravity-delta.js'].map((name) => path.join(contractDir, name)));
+  const antigravityContracts = new Set(['antigravity.js'].map((name) => path.join(contractDir, name)));
   const pluginRoots = new Set();
   while (queue.length > 0) {
     const file = queue.pop();

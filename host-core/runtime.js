@@ -37,9 +37,6 @@ import {
   computePreflightTargetTokens,
   computeOverflowRecoveryBudget,
   createTurnProvenanceStore,
-  createTurnProvenanceFromCutoff,
-  advanceTurnProvenance,
-  resolveAntigravityTurnContext,
 } from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
@@ -60,7 +57,7 @@ import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { canDetachPrimaryWait, createRuntimeWaits } from './runtime-waits.js';
 import { TurnQueue } from './runtime-turns-docs.js';
-import { createBotSessionRuntime, applySessionResetState, TURN_ROUTING_POLICY } from './runtime-bot-session.js';
+import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
 import {
   BotSessionState,
   GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
@@ -1051,8 +1048,6 @@ export async function openRuntime(options) {
       return rawPlugins.close();
     },
   };
-  // 短生命周期每任务 Antigravity 回合归属态（仅内存，绝不写进持久历史或 RequestContext）。
-  const antigravityTurnProvenance = createTurnProvenanceStore();
   // 短生命周期每任务非 AGY 同轮预压/溢出恢复态（仅内存，随任务结束或 abort 自动清理）。
   const requestRecoveryState = createTurnProvenanceStore();
   registry.install(defineExtension({
@@ -1121,12 +1116,9 @@ export async function openRuntime(options) {
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
           const baselineTokens = estimateContextTokensHost(baselineView);
           const preparedTokens = budgetRequestTokens(baselineView.messages, baselineTokens, requestView.messages);
-          let turnProvenance = null;
           if (isAntigravity) {
-            turnProvenance = createTurnProvenanceFromCutoff(cutoffView.messages, baselineMessages, requestView, checkpoint.cutoff);
             requestRecoveryState.delete(api.taskId);
           } else {
-            antigravityTurnProvenance.delete(api.taskId);
             const bcProvider = plugins.getBillionContextBinding(requestView);
             if (bcProvider) {
               requestRecoveryState.set(api.taskId, {
@@ -1161,18 +1153,10 @@ export async function openRuntime(options) {
           const finalMessages = routingMessages.length > 0
             ? [...routingMessages, ...(finalView?.messages ?? [])]
             : (finalView?.messages ?? []);
-          if (isAntigravity) {
-            turnProvenance = advanceTurnProvenance(turnProvenance, finalView?.messages, { allowAppendAuxiliaryUsers: true });
-            if (routingMessages.length > 0) {
-              turnProvenance = advanceTurnProvenance(turnProvenance, finalMessages, { allowAppendAuxiliaryUsers: false });
-            }
-            antigravityTurnProvenance.set(api.taskId, turnProvenance, context.abortSignal);
-          }
           return routingMessages.length > 0
             ? { ...finalView, messages: finalMessages }
             : finalView;
         } catch (err) {
-          antigravityTurnProvenance.delete(api.taskId);
           requestRecoveryState.delete(api.taskId);
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
@@ -1238,14 +1222,6 @@ export async function openRuntime(options) {
         if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
-        const provenance = antigravityTurnProvenance.get(api.taskId);
-        if (provenance) {
-          antigravityTurnProvenance.set(
-            api.taskId,
-            advanceTurnProvenance(provenance, request.messages, { allowAppendAuxiliaryUsers: true }),
-            context.abortSignal,
-          );
-        }
         const recovery = requestRecoveryState.get(api.taskId);
         const eligible = Boolean(recovery && recovery.cutoff === prepared.cutoff);
         let compacted;
@@ -1263,7 +1239,6 @@ export async function openRuntime(options) {
         await decisions.checkPreparedRequest(api, context);
         if (nextRequest !== request) return nextRequest;
       } catch (err) {
-        antigravityTurnProvenance.delete(api.taskId);
         requestRecoveryState.delete(api.taskId);
         if (!context.abortSignal?.aborted) {
           await recordGenerationFailure(api, err, context);
@@ -1302,31 +1277,7 @@ export async function openRuntime(options) {
         throw err;
       }
     },
-    async beforeProviderRequest({ model, payload }, api, context) {
-      if (!model || (model.provider !== ANTIGRAVITY_PROVIDER_ID && model.api !== ANTIGRAVITY_API)) {
-        return undefined;
-      }
-      try {
-        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-          throw errWithCode('Antigravity provider payload must be an object', 'INVALID_STATE');
-        }
-        const turnContext = resolveAntigravityTurnContext(antigravityTurnProvenance.get(api.taskId), payload.messages);
-        return { payload: { ...payload, turnContext: { ...turnContext, routingPolicy: TURN_ROUTING_POLICY } } };
-      } catch (err) {
-        antigravityTurnProvenance.delete(api.taskId);
-        if (!context.abortSignal?.aborted) {
-          await recordGenerationFailure(api, err, context);
-          try {
-            await harness.abortTask(api.taskId, context);
-          } catch (abortErr) {
-            if (!context.abortSignal?.aborted) throw abortErr;
-          }
-        }
-        throw err;
-      }
-    },
     afterResponse(_message, api) {
-      antigravityTurnProvenance.delete(api.taskId);
       requestRecoveryState.delete(api.taskId);
     },
   })] });
@@ -2517,12 +2468,32 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return updated;
   }
 
+  async function isBotCurrentlyAntigravity(bot) {
+    const currentModelRef = getBotModels()[bot.botId]?.modelRef ?? null;
+    if (currentModelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) return true;
+    const primary = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (!primary) return false;
+    const [agentState, sessionState] = await Promise.all([
+      harness.snapshot(durable.AgentDoc, primary.id, CTX),
+      harness.snapshot(BotSessionState, primary.id, CTX),
+    ]);
+    return agentState?.model?.provider === ANTIGRAVITY_PROVIDER_ID
+      || sessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID;
+  }
+
   async function assertModelSelectionAllowed(bot, selection) {
     if (!selection?.modelRef) return;
     const model = parseModelRef(selection.modelRef);
-    if (model.provider !== ANTIGRAVITY_PROVIDER_ID) return;
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (primary) await assertAntigravityModelSelection(harness, primary.id, model, CTX);
+    if (!primary) return;
+    const sessionState = await harness.snapshot(BotSessionState, primary.id, CTX);
+    if (model.provider !== ANTIGRAVITY_PROVIDER_ID && sessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID) {
+      throw errWithCode(
+        'Cannot switch between Antigravity and another provider in a non-empty session. Use /clear first.',
+        'AGY_HISTORY_CHANGED',
+      );
+    }
+    await assertAntigravityModelSelection(harness, primary.id, model, CTX);
   }
 
   async function assertHistoryCanBeRewritten(bot) {
@@ -2563,7 +2534,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const meta = await harness.snapshot(WorkContextState, binding.nativeId, CTX);
       if (!meta?.scopeId || !meta.kind) continue;
       const profile = profileFor(bot.botId, { botId: bot.botId, scopeId: meta.scopeId, kind: meta.kind });
-      if (profile.antigravity) {
+      if (profile.model) {
         try { await assertAntigravityModelSelection(harness, binding.nativeId, profile.model, CTX); }
         catch (err) {
           // Historical work conversations stay untouched; resuming one applies the same guard at its own boundary.
@@ -2988,6 +2959,21 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 模型注册表只在执行字段变化时重建；Bot 选择不在此处发布。
       const nextRegistryKey = centerRegistryKey(snapshot);
       if (nextRegistryKey !== registryKey) {
+        const requireAntigravity = () => {
+          const active = centerRuntime.getClient();
+          if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+          if (!active.antigravity) throw errWithCode('antigravity client is unavailable', 'INVALID_STATE');
+          return active.antigravity;
+        };
+        const antigravityClient = {
+          run: (...args) => requireAntigravity().run(...args),
+          toolResult: (...args) => requireAntigravity().toolResult(...args),
+          steer: (...args) => requireAntigravity().steer(...args),
+          cancel: (...args) => {
+            const active = centerRuntime.getClient();
+            return active?.antigravity?.cancel ? active.antigravity.cancel(...args) : Promise.resolve();
+          },
+        };
         applyCenterModels(
           snapshot,
           models,
@@ -2996,11 +2982,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
             return active.providerAuth(providerId, signal);
           },
-          (payload, streamOptions) => {
-            const active = centerRuntime.getClient();
-            if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-            return active.streamAntigravity(payload, streamOptions);
-          },
+          antigravityClient,
         );
         learningModelRefs = new Set(snapshot.providers
           .filter((provider) => provider.enabled && (provider.id === ANTIGRAVITY_PROVIDER_ID || provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
@@ -3148,11 +3130,15 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getBot: (botId) => requireBot(botId),
     assertModelSelectionAllowed: (botId, modelRef) => admitBot(botId, async () => {
       const bot = await requireBot(botId);
-      if (modelRef != null && parseModelRef(modelRef).provider === ANTIGRAVITY_PROVIDER_ID) {
+      if (modelRef == null) return { botId, allowed: true };
+      const nextModel = parseModelRef(modelRef);
+      const nextIsAgy = nextModel.provider === ANTIGRAVITY_PROVIDER_ID;
+      const currentIsAgy = await isBotCurrentlyAntigravity(bot);
+      if (currentIsAgy !== nextIsAgy) {
         await assertBotIdle(bot);
         if ((await turns.queuedCount(bot)) > 0) throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        await assertModelSelectionAllowed(bot, { modelRef });
       }
-      await assertModelSelectionAllowed(bot, { modelRef });
       return { botId, allowed: true };
     }),
     updateBotProfile: (input) => admitBot(input?.botId, async () => {

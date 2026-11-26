@@ -413,6 +413,17 @@ export async function openHostService(options) {
       },
     });
     const bootPlans = await applyPlans(current);
+    const requireAntigravity = () => {
+      if (!client) throw offlineError();
+      if (!client.antigravity) throw Object.assign(new Error('antigravity client is unavailable'), { code: 'INVALID_STATE' });
+      return client.antigravity;
+    };
+    const antigravityClient = {
+      run: (...args) => requireAntigravity().run(...args),
+      toolResult: (...args) => requireAntigravity().toolResult(...args),
+      steer: (...args) => requireAntigravity().steer(...args),
+      cancel: (...args) => (client?.antigravity?.cancel ? client.antigravity.cancel(...args) : Promise.resolve()),
+    };
     const { models } = applyCenterModels(
       snapshot,
       undefined,
@@ -420,10 +431,7 @@ export async function openHostService(options) {
         if (!client) throw offlineError();
         return client.providerAuth(providerId, signal);
       },
-      (payload, streamOptions) => {
-        if (!client) throw offlineError();
-        return client.streamAntigravity(payload, streamOptions);
-      },
+      antigravityClient,
     );
     const execution = parseExecutionOptions(settings.settings.runtime);
     control = await openControlServer({

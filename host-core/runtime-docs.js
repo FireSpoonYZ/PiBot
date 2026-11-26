@@ -228,15 +228,18 @@ export function agentProfileChange(state, profile) {
 }
 
 async function assertNativeModelChange(current, model, readPage) {
-  if (model?.provider !== ANTIGRAVITY_PROVIDER_ID
-    || (current?.provider === model.provider && current?.modelId === model.modelId)) return;
+  if (!model || current?.provider === model.provider) return;
+  if (current?.provider !== ANTIGRAVITY_PROVIDER_ID && model.provider !== ANTIGRAVITY_PROVIDER_ID) return;
   let cursor;
   for (;;) {
     const page = await readPage(cursor);
     for (const entry of page.items) {
       if (entry.kind === ResetEntry.kind) return;
       if ((entry.model ?? []).some((message) => message.role !== 'system')) {
-        throw errWithCode('Antigravity can only be selected for an empty session. Use /clear before changing models.', 'AGY_HISTORY_CHANGED');
+        throw errWithCode(
+          'Cannot switch between Antigravity and another provider in a non-empty session. Use /clear first.',
+          'AGY_HISTORY_CHANGED',
+        );
       }
     }
     if (!page.next) return;
@@ -246,8 +249,9 @@ async function assertNativeModelChange(current, model, readPage) {
 
 /** Read-only preflight shared by Center configuration and turn admission. */
 export async function assertAntigravityModelSelection(harness, conversationId, model, context) {
-  if (model?.provider !== ANTIGRAVITY_PROVIDER_ID) return;
   const state = await harness.snapshot(AgentDoc, conversationId, context);
+  if (state?.model?.provider !== ANTIGRAVITY_PROVIDER_ID && model?.provider !== ANTIGRAVITY_PROVIDER_ID) return;
+  if (!model || state?.model?.provider === model.provider) return;
   const conversation = await harness.conversation(conversationId, context);
   await assertNativeModelChange(state?.model, model, (cursor) =>
     conversation.entries({ order: 'descending' }, 200, cursor, context));
