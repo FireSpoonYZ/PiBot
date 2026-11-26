@@ -466,6 +466,11 @@ function clientUpdateErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/** 仅当检查返回明确成功终态时才视为完成一次有效检查并刷新桌面前端本地冷却。 */
+function isSuccessfulCheckTerminalPhase(phase: ClientUpdatePhase): boolean {
+  return phase === 'available' || phase === 'up-to-date';
+}
+
 /**
  * 客户端更新全生命周期状态与触发编排控制器（桌面与 Android 共用）：
  * - 统一编排 startup / foreground(300ms防抖) / updates-page / push(0~3s抖动) / periodic(4h保底)；
@@ -501,7 +506,9 @@ export function createClientUpdateController(
 
   let epoch = 0;
   let connected = false;
+  let nativeCheckSession = false;
   let lastCheckAt = 0;
+  let lastPeriodicAt = 0;
   let opSequence = 0;
   let opInFlight: { id: number; op: ClientUpdateOp; automatic: boolean } | null = null;
   let autoInstallArmed = false;
@@ -630,16 +637,21 @@ export function createClientUpdateController(
           // 自动检查返回 error 态时静默丢弃，不覆盖既有稳定态，也不刷新冷却戳。
           if (next.phase !== 'error') {
             statusRevision += 1;
-            lastCheckAt = now();
-            const preserveAvailable = status?.phase === 'available' && next.phase === 'checking';
-            if (!preserveAvailable && (lastPolledOp !== id || next.phase !== 'checking')) {
+            if (!nativeCheckSession && isSuccessfulCheckTerminalPhase(next.phase)) {
+              lastCheckAt = now();
+            }
+            const preserveStable =
+              next.phase === 'checking' &&
+              status !== undefined &&
+              !CLIENT_UPDATE_LIVE_PHASES.has(status.phase);
+            if (!preserveStable && (lastPolledOp !== id || next.phase !== 'checking')) {
               status = next;
               emit();
             }
           }
         } else {
           statusRevision += 1;
-          if (op === 'check' && next.phase !== 'error') {
+          if (op === 'check' && !nativeCheckSession && isSuccessfulCheckTerminalPhase(next.phase)) {
             lastCheckAt = now();
           }
           if (
@@ -694,7 +706,17 @@ export function createClientUpdateController(
     if (!connected) return;
     if (opInFlight) return;
     if (shouldSkipAutoUpdateCheck(status?.phase)) return;
-    if (!shouldRunAutoUpdateCheck(reason, lastCheckAt, now())) return;
+    const currentNow = now();
+    if (nativeCheckSession) {
+      // Android 端 updateCheck 异步立即返回，5 级冷却由原生 ClientUpdater 单调时钟权威裁决；
+      // 前端仅对 60s 节拍的 periodic 兜底独立维持 4h 门控，避免每分钟空刷 IPC。
+      if (reason === 'periodic') {
+        if (!shouldRunAutoUpdateCheck('periodic', lastPeriodicAt, currentNow)) return;
+        lastPeriodicAt = currentNow;
+      }
+    } else if (!shouldRunAutoUpdateCheck(reason, lastCheckAt, currentNow)) {
+      return;
+    }
     void runOp('check', { automatic: true, reason }, true);
   };
 
@@ -714,7 +736,9 @@ export function createClientUpdateController(
   const start = (config: ClientUpdateSessionConfig): void => {
     stop();
     const isNativeCheck = Boolean(config.nativeCheck);
+    nativeCheckSession = isNativeCheck;
     lastCheckAt = 0;
+    lastPeriodicAt = 0;
     status = undefined;
     pending = null;
     actionError = '';
@@ -722,6 +746,9 @@ export function createClientUpdateController(
 
     if (!config.ready || !config.centerKey) return;
     connected = true;
+    if (isNativeCheck) {
+      lastPeriodicAt = now();
+    }
     const sessionEpoch = epoch;
 
     const isHidden = () => Boolean(doc?.hidden);

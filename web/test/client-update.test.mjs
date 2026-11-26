@@ -418,16 +418,16 @@ test('controller orchestrates startup, debounced foreground, updates-page, jitte
   assert.equal(clock.pendingCount(), 0);
 });
 
-test('controller supports unified Android nativeCheck with native sync events and lifecycle triggers', async () => {
+test('controller supports unified Android nativeCheck with native cooldown authority and 4h periodic cadence', async () => {
   const clock = createFakeClock(2_000_000);
   const win = createFakeEventTarget();
   const doc = createFakeEventTarget({ hidden: false });
   const calls = [];
-  let nativeStatus = { phase: 'up-to-date', currentVersion: '0.0.32' };
+  let nativeStatus = { phase: 'idle', currentVersion: '0.0.32' };
 
   const controller = createClientUpdateController({
     request: async (op, params) => {
-      calls.push({ op, params });
+      calls.push({ op, params, at: clock.now() });
       return nativeStatus;
     },
     now: clock.now,
@@ -440,10 +440,19 @@ test('controller supports unified Android nativeCheck with native sync events an
 
   controller.start({ ready: true, centerKey: 'https://center-a.example|android-1', nativeCheck: true });
   await settle();
-  assert.deepEqual(calls, [
-    { op: 'status', params: undefined },
-    { op: 'check', params: { automatic: true, reason: 'startup' } },
-  ]);
+  assert.deepEqual(
+    calls.map(c => ({ op: c.op, params: c.params })),
+    [
+      { op: 'status', params: undefined },
+      { op: 'check', params: { automatic: true, reason: 'startup' } },
+    ],
+  );
+
+  // Android updateCheck returns immediately before async IO completes; if IO fails natively,
+  // Web must NOT lock out subsequent updates-page or foreground checks with a premature lastCheckAt.
+  controller.triggerAutoCheck('updates-page');
+  await settle();
+  assert.deepEqual(calls.at(-1).params, { automatic: true, reason: 'updates-page' });
 
   // Native status broadcast refreshes status when visible, ignored when hidden.
   nativeStatus = { phase: 'available', currentVersion: '0.0.32', release: makeRelease('apk-1', '0.0.33', 101) };
@@ -452,24 +461,44 @@ test('controller supports unified Android nativeCheck with native sync events an
   assert.equal(controller.getSnapshot().status?.phase, 'available');
   assert.equal(calls.at(-1).op, 'status');
 
+  const countBeforeHiddenOpen = calls.length;
   doc.hidden = true;
   win.dispatch(CLIENT_UPDATE_OPEN_EVENT);
   await settle();
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, countBeforeHiddenOpen);
 
-  // Returning visible runs syncNative immediately and debounced foreground auto-check after cooldown.
-  await clock.advanceByAndSettle(CLIENT_UPDATE_COOLDOWN_MS.foreground);
+  // Returning visible runs syncNative immediately and debounced foreground auto-check without Web 10m lockout.
   doc.hidden = false;
   doc.dispatch('visibilitychange');
   await settle();
   assert.equal(calls.at(-1).op, 'status');
   await clock.advanceByAndSettle(CLIENT_UPDATE_FOREGROUND_DEBOUNCE_MS);
-  assert.deepEqual(calls.at(-1), { op: 'check', params: { automatic: true, reason: 'foreground' } });
+  assert.deepEqual(calls.at(-1).params, { automatic: true, reason: 'foreground' });
 
   // SSE push also works on Android with jitter=0.
   win.dispatch(CLIENT_UPDATE_RELEASE_PUBLISHED_EVENT);
   await clock.advanceByAndSettle(0);
-  assert.deepEqual(calls.at(-1), { op: 'check', params: { automatic: true, reason: 'push' } });
+  assert.deepEqual(calls.at(-1).params, { automatic: true, reason: 'push' });
+
+  // Periodic fallback fires strictly on 4h cadence (NOT every 60s tick!).
+  const periodicCalls = () => calls.filter(c => c.op === 'check' && c.params?.reason === 'periodic');
+  assert.equal(periodicCalls().length, 0);
+
+  const elapsedToJustBefore4h = 2_000_000 + CLIENT_UPDATE_COOLDOWN_MS.periodic - 1 - clock.now();
+  clock.advanceBy(elapsedToJustBefore4h);
+  await settle();
+  assert.equal(periodicCalls().length, 0);
+
+  await clock.advanceByAndSettle(1);
+  assert.equal(periodicCalls().length, 1);
+
+  // Next 239 minute ticks stay quiet until the next 4h window.
+  clock.advanceBy(CLIENT_UPDATE_COOLDOWN_MS.periodic - 1);
+  await settle();
+  assert.equal(periodicCalls().length, 1);
+
+  await clock.advanceByAndSettle(1);
+  assert.equal(periodicCalls().length, 2);
 
   controller.stop();
   assert.equal(win.listenerCount(), 0);
@@ -477,7 +506,7 @@ test('controller supports unified Android nativeCheck with native sync events an
   assert.equal(clock.pendingCount(), 0);
 });
 
-test('controller skips active phases, preserves available without collapse, stays silent on auto errors, and lets user actions preempt auto check', async () => {
+test('controller enforces terminal-only cooldown refresh, skips active phases, protects available, stays silent on auto errors, and supports preemption', async () => {
   const clock = createFakeClock(3_000_000);
   const win = createFakeEventTarget();
   const doc = createFakeEventTarget({ hidden: false });
@@ -514,14 +543,13 @@ test('controller skips active phases, preserves available without collapse, stay
   assert.equal(controller.getSnapshot().status?.phase, 'available');
   assert.equal(controller.getSnapshot().status?.release?.id, 'r1');
 
-  // Even if async native returns 'checking' for an auto check, existing 'available' does not collapse.
+  // Non-terminal 'checking' returned from an auto check neither collapses 'available' nor refreshes cooldown.
   resolveDeferred({ phase: 'checking', currentVersion: '0.0.32' });
   await settle();
   assert.equal(controller.getSnapshot().status?.phase, 'available');
   assert.equal(controller.getSnapshot().status?.release?.id, 'r1');
 
-  // 2. Auto check rejection stays silent (no actionError, available preserved) and does not lock out cooldown.
-  await clock.advanceByAndSettle(CLIENT_UPDATE_COOLDOWN_MS['updates-page']);
+  // 2. Non-terminal/failure outcomes (reject, error, cancelled, idle) do NOT refresh lastCheckAt or set actionError.
   handler = async () => {
     throw new Error('network timeout');
   };
@@ -533,7 +561,6 @@ test('controller skips active phases, preserves available without collapse, stay
   assert.equal(controller.getSnapshot().status?.phase, 'available');
   assert.equal(controller.getSnapshot().status?.release?.id, 'r1');
 
-  // Auto check returning phase='error' is also ignored silently without locking cooldown.
   handler = async () => ({ phase: 'error', currentVersion: '0.0.32', message: 'HTTP 502' });
   controller.triggerAutoCheck('updates-page');
   await settle();
@@ -542,14 +569,38 @@ test('controller skips active phases, preserves available without collapse, stay
   assert.equal(controller.getSnapshot().status?.phase, 'available');
   assert.equal(controller.getSnapshot().status?.release?.id, 'r1');
 
-  // Succeeding right after failures still runs immediately because failures did not update cooldown.
-  handler = async () => ({ phase: 'available', currentVersion: '0.0.32', release: makeRelease('r2', '0.0.34', 34) });
+  // Cancelled or stale-reset idle outcomes also must NOT lock out cooldown.
+  handler = async () => ({ phase: 'cancelled', currentVersion: '0.0.32' });
   controller.triggerAutoCheck('updates-page');
   await settle();
   assert.equal(calls.length, countBeforeFail + 3);
-  assert.equal(controller.getSnapshot().status?.release?.id, 'r2');
 
-  // 3. Manual check refreshes cooldown (suppresses immediate updates-page even after prior cooldown elapsed), while push still penetrates.
+  handler = async () => ({ phase: 'idle', currentVersion: '0.0.32' });
+  controller.triggerAutoCheck('updates-page');
+  await settle();
+  assert.equal(calls.length, countBeforeFail + 4);
+
+  // Returning terminal 'available' succeeds right away and refreshes cooldown.
+  handler = async () => ({ phase: 'available', currentVersion: '0.0.32', release: makeRelease('r2', '0.0.34', 34) });
+  controller.triggerAutoCheck('updates-page');
+  await settle();
+  assert.equal(calls.length, countBeforeFail + 5);
+  assert.equal(controller.getSnapshot().status?.release?.id, 'r2');
+  controller.triggerAutoCheck('updates-page');
+  await settle();
+  assert.equal(calls.length, countBeforeFail + 5);
+
+  // 3. Manual check refreshes cooldown only on terminal available/up-to-date (not cancelled/idle/error).
+  await clock.advanceByAndSettle(CLIENT_UPDATE_COOLDOWN_MS['updates-page']);
+  handler = async () => ({ phase: 'cancelled', currentVersion: '0.0.32' });
+  controller.check();
+  await settle();
+  const countAfterCancelledManual = calls.length;
+  handler = async () => ({ phase: 'up-to-date', currentVersion: '0.0.32' });
+  controller.triggerAutoCheck('updates-page');
+  await settle();
+  assert.equal(calls.length, countAfterCancelledManual + 1);
+
   await clock.advanceByAndSettle(CLIENT_UPDATE_COOLDOWN_MS['updates-page']);
   handler = async () => ({ phase: 'available', currentVersion: '0.0.32', release: makeRelease('r2', '0.0.34', 34) });
   controller.check();
@@ -585,23 +636,56 @@ test('controller skips active phases, preserves available without collapse, stay
     assert.equal(calls.length, before, `auto check skipped during ${activePhase}`);
   }
 
-  // 5. User clicking download() preempts an in-flight silent auto check instead of dropping the click.
+  // 5a. Manual check() preempts an in-flight silent auto check and ignores its late response (both mid-flight and post-completion).
   handler = async () => ({ phase: 'available', currentVersion: '0.0.32', release: makeRelease('r2', '0.0.34', 34) });
   await controller.refresh(false);
-  let resolveAutoCheck;
+  let resolveAutoForManual;
+  let resolveManual;
+  handler = (op, params) => {
+    if (op === 'check' && params?.automatic) {
+      return new Promise(resolve => {
+        resolveAutoForManual = resolve;
+      });
+    }
+    return new Promise(resolve => {
+      resolveManual = resolve;
+    });
+  };
+  controller.triggerAutoCheck('push');
+  assert.equal(controller.getSnapshot().pending, null);
+  controller.check();
+  assert.equal(controller.getSnapshot().pending, 'check');
+  assert.equal(controller.getSnapshot().status?.phase, 'checking');
+  // Late stale auto-check settling while manual check is in flight is ignored.
+  resolveAutoForManual({ phase: 'up-to-date', currentVersion: '0.0.32' });
+  await settle();
+  assert.equal(controller.getSnapshot().pending, 'check');
+  assert.equal(controller.getSnapshot().status?.phase, 'checking');
+  resolveManual({ phase: 'available', currentVersion: '0.0.32', release: makeRelease('r3', '0.0.35', 35) });
+  await settle();
+  assert.equal(controller.getSnapshot().pending, null);
+  assert.equal(controller.getSnapshot().status?.phase, 'available');
+  assert.equal(controller.getSnapshot().status?.release?.id, 'r3');
+
+  // 5b. User clicking download() preempts an in-flight silent auto check and ignores its late response even after download resolves.
+  let resolveAutoForDownload;
   handler = op => {
     if (op === 'check') {
       return new Promise(resolve => {
-        resolveAutoCheck = resolve;
+        resolveAutoForDownload = resolve;
       });
     }
-    return Promise.resolve({ phase: 'downloading', currentVersion: '0.0.32', release: makeRelease('r2', '0.0.34', 34) });
+    return Promise.resolve({ phase: 'downloading', currentVersion: '0.0.32', release: makeRelease('r3', '0.0.35', 35) });
   };
   controller.triggerAutoCheck('push');
   assert.equal(controller.getSnapshot().pending, null);
   controller.download();
   assert.equal(controller.getSnapshot().pending, 'download');
-  resolveAutoCheck({ phase: 'up-to-date', currentVersion: '0.0.32' });
+  await settle();
+  assert.equal(controller.getSnapshot().pending, null);
+  assert.equal(controller.getSnapshot().status?.phase, 'downloading');
+  // Stale auto-check resolving AFTER download settled must not clobber 'downloading'.
+  resolveAutoForDownload({ phase: 'up-to-date', currentVersion: '0.0.32' });
   await settle();
   assert.equal(controller.getSnapshot().status?.phase, 'downloading');
 
