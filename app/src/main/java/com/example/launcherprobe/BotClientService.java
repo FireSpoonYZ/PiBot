@@ -36,7 +36,7 @@ public final class BotClientService extends Service {
     static final String ACTION_CLOSE_UI = "com.example.launcherprobe.action.CLIENT_CLOSE_UI";
     private static final String CHANNEL = "bot-client-connection";
     private static final int NOTIFICATION_ID = 3160;
-    private static final long UPDATE_POLL_MS = 60_000;
+    private static final long UPDATE_PERIODIC_MS = ClientUpdater.COOLDOWN_PERIODIC_MS;
     private static volatile BotClientService activeService;
     private static final Map<String, String> visibleChats = new HashMap<>();
     private static final AtomicBoolean localPolling = new AtomicBoolean();
@@ -93,11 +93,11 @@ public final class BotClientService extends Service {
         }
     };
 
-    private final Runnable checkUpdates = new Runnable() {
+    private final Runnable checkUpdatesPeriodic = new Runnable() {
         @Override public void run() {
             if (!alive) return;
-            ClientUpdater.get(BotClientService.this).checkAutomatically();
-            main.postDelayed(this, UPDATE_POLL_MS);
+            ClientUpdater.get(BotClientService.this).checkAutomatically(ClientUpdater.REASON_PERIODIC);
+            main.postDelayed(this, UPDATE_PERIODIC_MS);
         }
     };
 
@@ -168,9 +168,12 @@ public final class BotClientService extends Service {
     static void checkUpdatesSoon() {
         BotClientService service = activeService;
         if (service == null || !service.alive) return;
+        int epoch = service.lifecycle.get();
         service.main.post(() -> {
-            service.main.removeCallbacks(service.checkUpdates);
-            service.checkUpdates.run();
+            if (!service.alive || service.lifecycle.get() != epoch) return;
+            ClientUpdater.get(service).checkAutomatically(ClientUpdater.REASON_STARTUP);
+            service.main.removeCallbacks(service.checkUpdatesPeriodic);
+            service.main.postDelayed(service.checkUpdatesPeriodic, UPDATE_PERIODIC_MS);
         });
     }
 
@@ -307,7 +310,7 @@ public final class BotClientService extends Service {
             attachHostListener();
             ClipboardSyncController.get(this).onLifecycleStarted();
             main.post(check);
-            main.post(checkUpdates);
+            checkUpdatesSoon();
         }
         if (hostExitListener != null) BotHostService.startForClient(this);
         return START_STICKY;
@@ -319,7 +322,8 @@ public final class BotClientService extends Service {
         Log.i("BotClientService", "Client exit requested");
         detachHostListener();
         main.removeCallbacks(check);
-        main.removeCallbacks(checkUpdates);
+        main.removeCallbacks(checkUpdatesPeriodic);
+        ClientUpdater.cancelPendingPushIfInitialized();
         CompletableFuture<Void> clipboardClosed = ClipboardSyncController.get(this).shutdown();
         CompletableFuture<Void> clientClosed = BotHostClient.get(this).shutdown();
         BotHostUiBridgeService.closeClientSessions();
@@ -372,7 +376,8 @@ public final class BotClientService extends Service {
             stopService(new Intent(this, BotHostService.class));
         }
         main.removeCallbacks(check);
-        main.removeCallbacks(checkUpdates);
+        main.removeCallbacks(checkUpdatesPeriodic);
+        ClientUpdater.cancelPendingPushIfInitialized();
         connectivity.unregisterNetworkCallback(network);
         super.onDestroy();
     }

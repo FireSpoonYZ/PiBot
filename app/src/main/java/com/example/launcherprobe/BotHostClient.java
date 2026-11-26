@@ -44,6 +44,8 @@ final class BotHostClient {
     private final Context context;
     private final Object lock = new Object();
     private final CenterClientCredentials credentials;
+    private final BooleanSupplier serviceActive;
+    private final Runnable releasePublishedAction;
     private long centerRevision;
     // 更新代次也随 broker 断线/重连变化，不改变 center_connect 的在途修订号。
     private long updateGeneration;
@@ -105,8 +107,16 @@ final class BotHostClient {
     }
 
     private BotHostClient(Context context) {
+        this(context.getApplicationContext(),
+                BotClientService::isActive,
+                () -> ClientUpdater.get(context.getApplicationContext()).onReleasePublished());
+    }
+
+    BotHostClient(Context context, BooleanSupplier serviceActive, Runnable releasePublishedAction) {
         this.context = context.getApplicationContext();
         this.credentials = new CenterClientCredentials(this.context);
+        this.serviceActive = serviceActive;
+        this.releasePublishedAction = releasePublishedAction;
         this.control = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(CONTROL_QUEUE_CAPACITY),
                 runnable -> {
@@ -944,6 +954,10 @@ final class BotHostClient {
             // client 模式不派发 native 工具调用：意外帧一律忽略。
         }
 
+        @Override public void onCenterEvent(BotHostProcess process, String event) {
+            handleCenterEvent(process, event);
+        }
+
         /** 唯一解除占有的地方：BotHostProcess 保证真实退出（或回收结果未知时推迟）后通知一次。 */
         @Override public void onExit(BotHostProcess process, int exitCode, boolean graceful) {
             Generation exited = null;
@@ -968,6 +982,46 @@ final class BotHostClient {
             if (exited != null) exited.closeDone.complete(null);
         }
     };
+
+    void handleCenterEvent(BotHostProcess process, String event) {
+        if (process == null || !BotHostProcess.CENTER_EVENT_RELEASE_PUBLISHED.equals(event)) return;
+        if (!serviceActive.getAsBoolean()) return;
+        boolean valid;
+        synchronized (lock) {
+            Generation current = generation;
+            valid = current != null && current.process == process
+                    && current.current && !current.closing
+                    && !centerBlocked && !centerPending
+                    && centerReadyObserved && pendingCredentials == null;
+        }
+        if (valid && releasePublishedAction != null) {
+            releasePublishedAction.run();
+        }
+    }
+
+    BotHostProcess.Listener processListenerForTest() {
+        return listener;
+    }
+
+    void setSessionStateForTest(BotHostProcess process, boolean current, boolean closing,
+                                boolean centerReady, boolean blocked, boolean pending,
+                                boolean hasPendingCredentials) {
+        synchronized (lock) {
+            if (process == null) {
+                this.generation = null;
+            } else {
+                Generation gen = new Generation("test-owner");
+                gen.process = process;
+                gen.current = current;
+                gen.closing = closing;
+                this.generation = gen;
+            }
+            this.centerReadyObserved = centerReady;
+            this.centerBlocked = blocked;
+            this.centerPending = pending;
+            this.pendingCredentials = hasPendingCredentials ? new JSONObject() : null;
+        }
+    }
 
     // ---------- 串行控制执行器 ----------
 

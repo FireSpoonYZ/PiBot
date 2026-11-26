@@ -45,6 +45,8 @@ import java.util.function.Consumer;
  */
 final class BotHostProcess {
 
+    static final String CENTER_EVENT_RELEASE_PUBLISHED = "client-release-published";
+
     interface Listener {
         /** 同步于 launch 调用 start() 之前；为 Manager 提供尚未 ready 的对象。 */
         default void onStarting(BotHostProcess process) {
@@ -53,6 +55,10 @@ final class BotHostProcess {
         void onReady(BotHostProcess process, JSONObject ready);
 
         void onNativeFrame(BotHostProcess process, JSONObject frame);
+
+        /** 客户端模式中心轻量事件（仅白名单事件名，无凭据/URL 负载）。 */
+        default void onCenterEvent(BotHostProcess process, String event) {
+        }
 
         void onExit(BotHostProcess process, int exitCode, boolean graceful);
     }
@@ -142,6 +148,18 @@ final class BotHostProcess {
         if ((context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             Log.d("BotHostProcess", "mode=" + initMode + " " + stage);
         }
+    }
+
+    static BotHostProcess createForTest(Context context, JSONObject init, Listener listener) throws BridgeException {
+        return new BotHostProcess(context, init, listener);
+    }
+
+    void handleMessageForTest(JSONObject message) {
+        handleMessage(message);
+    }
+
+    boolean isClosedForTest() {
+        return finished || closeRequested;
     }
 
     static CompletableFuture<BotHostProcess> launch(Context context, JSONObject init, Listener listener) {
@@ -717,6 +735,9 @@ final class BotHostProcess {
             case "frame":
                 handleFrame(message);
                 break;
+            case "center_event":
+                handleCenterEvent(message);
+                break;
             case "closed":
                 handleClosed(message);
                 break;
@@ -779,6 +800,23 @@ final class BotHostProcess {
     private void notifyNative(JSONObject message) {
         try {
             listener.onNativeFrame(this, message);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void handleCenterEvent(JSONObject message) {
+        if (finished || !"client".equals(initMode) || ready == null) return;
+        Object rawEvent = message.opt("event");
+        if (!(rawEvent instanceof String)) return;
+        String event = (String) rawEvent;
+        if (!CENTER_EVENT_RELEASE_PUBLISHED.equals(event)) return;
+        notifyCenterEvent(event);
+    }
+
+    private void notifyCenterEvent(String event) {
+        if (listener == null) return;
+        try {
+            listener.onCenterEvent(this, event);
         } catch (Throwable ignored) {
         }
     }
