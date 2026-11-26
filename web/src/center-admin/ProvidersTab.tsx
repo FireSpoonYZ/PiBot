@@ -188,11 +188,13 @@ export function ProvidersTab({
   active = true,
   cacheKey = 'default',
   onOpenExternalUrl,
+  onRegisterBackHandler,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
+  onRegisterBackHandler?: (handler: () => boolean) => () => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
@@ -428,12 +430,24 @@ export function ProvidersTab({
     setEdit(null);
   }, [stopFlowPoll]);
 
+  const closeProviderDetailRef = useRef(closeProviderDetail);
+  closeProviderDetailRef.current = closeProviderDetail;
+
   useEffect(() => {
     if (!active || !inDetailView) return;
-    return registerOverlayBackHandler(() => {
-      closeProviderDetail();
+    const handleBack = () => {
+      closeProviderDetailRef.current();
+      return true;
+    };
+    const unregisterOverlay = registerOverlayBackHandler(() => {
+      handleBack();
     });
-  }, [active, closeProviderDetail, inDetailView]);
+    const unregisterPanel = onRegisterBackHandler?.(handleBack);
+    return () => {
+      unregisterPanel?.();
+      unregisterOverlay();
+    };
+  }, [active, inDetailView, onRegisterBackHandler]);
 
   const loadProviderDetails = useCallback(
     async (provider: Provider) => {

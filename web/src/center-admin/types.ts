@@ -189,6 +189,7 @@ export interface CenterAdminPanelProps {
   onConfigureBot?: (deviceId: string, botId: string) => void;
   onStartGoogleSetupWizard?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
+  backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
 }
 
 export interface ResolvedModelSummary {

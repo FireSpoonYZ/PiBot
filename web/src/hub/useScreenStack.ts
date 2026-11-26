@@ -7,6 +7,7 @@ import {
   pushNavEntry,
   replaceTopNavEntry,
   resetNavStack,
+  resetNavStackChain,
   syncLocationHash,
   type NavEntry,
 } from './navigationLogic';
@@ -15,6 +16,7 @@ export {
   ROOT_SCREENS,
   createNavStack,
   currentNavEntry,
+  isExitRootScreen,
   isRootScreen,
   navEntryToHash,
   parseHashToRootEntry,
@@ -23,6 +25,7 @@ export {
   pushNavEntry,
   replaceTopNavEntry,
   resetNavStack,
+  resetNavStackChain,
   syncLocationHash,
   type NavEntry,
   type RootScreen,
@@ -83,12 +86,15 @@ export function useScreenStack<S extends string>(
     return result.current;
   }, []);
 
-  const resetTo = useCallback((root: NavEntry<S>) => {
-    const updated = resetNavStack(root.screen, {
-      ...(root.botKey !== undefined ? { botKey: root.botKey } : {}),
-      ...(root.settingsPage !== undefined ? { settingsPage: root.settingsPage } : {}),
-      ...(root.taskId !== undefined ? { taskId: root.taskId } : {}),
-    });
+  const resetTo = useCallback((root: NavEntry<S>, ...rest: NavEntry<S>[]) => {
+    const updated =
+      rest.length > 0
+        ? resetNavStackChain(root, ...rest)
+        : resetNavStack(root.screen, {
+            ...(root.botKey !== undefined ? { botKey: root.botKey } : {}),
+            ...(root.settingsPage !== undefined ? { settingsPage: root.settingsPage } : {}),
+            ...(root.taskId !== undefined ? { taskId: root.taskId } : {}),
+          });
     stackRef.current = updated;
     setStack(updated);
   }, []);

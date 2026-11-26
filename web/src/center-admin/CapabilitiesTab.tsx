@@ -151,12 +151,14 @@ export function CapabilitiesTab({
   cacheKey = 'default',
   onOpenExternal,
   onOpenExternalUrl,
+  onRegisterBackHandler,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
   onOpenExternal?: () => void;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
+  onRegisterBackHandler?: (handler: () => boolean) => () => void;
 }): React.JSX.Element {
   const t = useText();
   const idPrefix = useId();
@@ -590,10 +592,19 @@ export function CapabilitiesTab({
   const hasDetail = selectedId !== null;
   useEffect(() => {
     if (!active || !hasDetail) return;
-    return registerOverlayBackHandler(() => {
+    const handleBack = () => {
       closeDetailViewRef.current();
+      return true;
+    };
+    const unregisterOverlay = registerOverlayBackHandler(() => {
+      handleBack();
     });
-  }, [active, hasDetail]);
+    const unregisterPanel = onRegisterBackHandler?.(handleBack);
+    return () => {
+      unregisterPanel?.();
+      unregisterOverlay();
+    };
+  }, [active, hasDetail, onRegisterBackHandler]);
 
   const watchOperation = useCallback(
     (operationId: string, onDone?: () => void) => {

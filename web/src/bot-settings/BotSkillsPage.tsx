@@ -1,6 +1,6 @@
 // 单 Bot 完整技能闭环页：自动反思设置 + 立即复盘 + 新建技能（含 YAML frontmatter 自动补齐）
 // + 聚合技能列表（支持自动全局启用）+ 内置多文件编辑器（只读包一键转为可编辑副本）+ 可用范围切换。
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import { ArrowLeft, Copy, Edit3, Lock, Pin, Plus, RefreshCw, Sparkles, Trash2, Unlock } from 'lucide-react';
 import type {
   BotLearningSettings,
@@ -38,6 +38,8 @@ export interface BotSkillsPageProps {
   deviceId: string;
   botId: string;
   botName?: string;
+  backHandlerRef?: MutableRefObject<(() => boolean) | null>;
+  hideInlineBack?: boolean;
 }
 
 interface LearnedSkillItem {
@@ -153,6 +155,8 @@ export function BotSkillsPage({
   deviceId,
   botId,
   botName,
+  backHandlerRef,
+  hideInlineBack = false,
 }: BotSkillsPageProps) {
   const t = useText();
   const { notify } = useNotice();
@@ -882,12 +886,13 @@ export function BotSkillsPage({
   }, []);
 
   const handleBackFromCreate = useCallback(() => {
+    if (busyKey === 'create') return;
     if (hasCreateDraft) {
       setConfirmAction({ kind: 'discard-create' });
       return;
     }
     exitCreate();
-  }, [hasCreateDraft, exitCreate]);
+  }, [busyKey, hasCreateDraft, exitCreate]);
 
   const exitDetail = useCallback(() => {
     setDetailTarget(null);
@@ -895,14 +900,6 @@ export function BotSkillsPage({
     setEditNewFileName('');
     setError('');
   }, []);
-
-  const handleBackFromDetail = useCallback(() => {
-    if (hasDetailUnsavedChanges) {
-      setConfirmAction({ kind: 'discard-detail', exitToList: true });
-      return;
-    }
-    exitDetail();
-  }, [hasDetailUnsavedChanges, exitDetail]);
 
   const revertDetailFiles = useCallback(() => {
     setDetailTarget(prev => {
@@ -918,18 +915,43 @@ export function BotSkillsPage({
   }, [detailTarget, selectedFile]);
 
   const handleCancelEditFiles = useCallback(() => {
+    if (busyKey === 'save-files') return;
     if (hasDetailUnsavedChanges) {
       setConfirmAction({ kind: 'discard-detail', exitToList: false });
       return;
     }
     revertDetailFiles();
-  }, [hasDetailUnsavedChanges, revertDetailFiles]);
+  }, [busyKey, hasDetailUnsavedChanges, revertDetailFiles]);
+
+  const handleBackFromDetail = useCallback(() => {
+    if (editingFiles) {
+      handleCancelEditFiles();
+      return;
+    }
+    if (busyKey === 'convert-copy' || busyKey === 'scope' || busyKey?.startsWith('learned-')) {
+      return;
+    }
+    exitDetail();
+  }, [editingFiles, handleCancelEditFiles, busyKey, exitDetail]);
 
   const subviewBackHandler = creating ? handleBackFromCreate : detailTarget ? handleBackFromDetail : null;
   const inSheet = useSettingsSheetBack(subviewBackHandler);
   const subviewBackRef = useRef(subviewBackHandler);
   subviewBackRef.current = subviewBackHandler;
   const inSubview = Boolean(subviewBackHandler);
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => {
+      const handler = subviewBackRef.current;
+      if (!handler) return false;
+      handler();
+      return true;
+    };
+    return () => {
+      backHandlerRef.current = null;
+    };
+  }, [backHandlerRef]);
 
   useEffect(() => {
     if (inSheet || !inSubview) return;
@@ -963,10 +985,11 @@ export function BotSkillsPage({
     view = (
       <div className="bs-inline-panel bs-skills">
         <div className="bs-skills-detail-head">
-          {!inSheet ? (
+          {!inSheet && !hideInlineBack ? (
             <button
               type="button"
               className="bs-btn is-ghost is-small"
+              disabled={busyKey === 'create'}
               onClick={handleBackFromCreate}
             >
               <ArrowLeft aria-hidden="true" />
@@ -1111,14 +1134,15 @@ export function BotSkillsPage({
       <div className="bs-inline-panel bs-skills">
         <div className="bs-skills-detail">
           <div className="bs-skills-detail-head">
-            {!inSheet ? (
+            {!inSheet && !hideInlineBack ? (
               <button
                 type="button"
                 className="bs-btn is-ghost is-small"
+                disabled={busyKey === 'save-files'}
                 onClick={handleBackFromDetail}
               >
                 <ArrowLeft aria-hidden="true" />
-                {t('返回列表', 'Back')}
+                {editingFiles ? t('退出编辑', 'Exit editing') : t('返回列表', 'Back')}
               </button>
             ) : null}
 

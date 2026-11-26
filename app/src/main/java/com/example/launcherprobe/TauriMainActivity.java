@@ -188,14 +188,12 @@ public class TauriMainActivity extends TauriActivity {
         }
         String js = "(function(){"
                 + "try{"
-                + "if(!window.dispatchEvent(new Event('composer-back',{cancelable:true})))return true;"
                 + "var req=new Event('app-back',{cancelable:true});"
                 + "if(!window.dispatchEvent(req))return true;"
                 + "if(document.querySelector('[role=\"dialog\"]:not([aria-hidden=\"true\"])')){"
                 + "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
                 + "return true;"
                 + "}"
-                + "if((window.history.state&&window.history.state.idx)>0){window.history.back();return true;}"
                 + "return false;"
                 + "}catch(e){return false;}"
                 + "})()";

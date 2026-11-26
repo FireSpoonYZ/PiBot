@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -51,7 +51,7 @@ import { uuid } from '../hub/shared';
 import { Badge, Disclosure, Row, Section } from '../bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from '../ClientUpdateSection';
 import { ClipboardSyncSection } from '../ClipboardSyncSection';
-import { ConfirmDialog, ListRow, Switch, type ListRowStatusTone } from '../components/ui';
+import { ConfirmDialog, ListRow, Switch, registerOverlayBackHandler, type ListRowStatusTone } from '../components/ui';
 import type { CenterAdminTab, HubSettingsPage } from './types';
 
 export interface SettingsCenterAdminScreenProps {
@@ -74,6 +74,12 @@ export function SettingsCenterAdminScreen({
   const t = useText();
   const centerConn = useCenterConnection();
   const [everMountedAdmin, setEverMountedAdmin] = useState(() => centerConn.ready || centerConn.displayReady);
+  const centerAdminBackRef = useRef<(() => boolean) | null>(null);
+
+  const handleHeaderBack = useCallback(() => {
+    if (centerAdminBackRef.current?.()) return;
+    onBack();
+  }, [onBack]);
 
   useEffect(() => {
     if (centerConn.ready || centerConn.displayReady) {
@@ -96,7 +102,7 @@ export function SettingsCenterAdminScreen({
         <button
           type="button"
           className="grok-floating-circle-btn"
-          onClick={onBack}
+          onClick={handleHeaderBack}
           aria-label={t('返回', 'Back')}
         >
           <ArrowLeft size={20} />
@@ -154,6 +160,7 @@ export function SettingsCenterAdminScreen({
                 onOpenExternalUrl={url => openCenterUrl(url)}
                 onConfigureBot={onConfigureBot}
                 onStartGoogleSetupWizard={onStartGoogleSetupWizard}
+                backHandlerRef={centerAdminBackRef}
               />
             </div>
           )}
@@ -229,6 +236,7 @@ export function HubSettingsView({
   const previousPage = useRef<HubSettingsPage | null>(null);
   const pendingScrollRestoreRef = useRef<{ page: HubSettingsPage; targetTop: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
+  const clipboardBackRef = useRef<(() => boolean) | null>(null);
 
   const [editingCenter, setEditingCenter] = useState(false);
   const [settingsConfirm, setSettingsConfirm] = useState<
@@ -275,9 +283,12 @@ export function HubSettingsView({
     const previous = previousPage.current;
     if (previous === page) return;
     previousPage.current = page;
-    if (previous === 'connection') {
+    if (previous === 'connection' || page !== 'connection') {
+      if (previous === 'connection') centerConn.setToken('');
       setEditingCenter(false);
-      centerConn.setToken('');
+    }
+    if (previous === 'manual' || page !== 'manual') {
+      setAddingRemote(false);
     }
     setSettingsConfirm(null);
     const targetTop = scrollByPage.current[page] ?? 0;
@@ -432,6 +443,51 @@ export function HubSettingsView({
   const hasCenterConfigured = centerConn.hasSavedCenter || centerConn.displayReady;
   const showCenterForm = !hasCenterConfigured || editingCenter;
   const showCenterActions = hasCenterConfigured && !editingCenter;
+
+  useEffect(() => {
+    if (!hasCenterConfigured && editingCenter) {
+      setEditingCenter(false);
+    }
+  }, [hasCenterConfigured, editingCenter]);
+
+  const isEditingCenterSub = page === 'connection' && editingCenter && hasCenterConfigured;
+  const isAddingRemoteSub = page === 'manual' && addingRemote;
+
+  const handleSettingsSubStateBack = useCallback((): boolean => {
+    if (isEditingCenterSub) {
+      if (!centerConn.busy) {
+        setEditingCenter(false);
+        centerConn.setToken('');
+      }
+      return true;
+    }
+    if (isAddingRemoteSub) {
+      if (!action.busy) {
+        setAddingRemote(false);
+      }
+      return true;
+    }
+    if (page === 'clipboard' && clipboardBackRef.current?.()) {
+      return true;
+    }
+    return false;
+  }, [isEditingCenterSub, centerConn.busy, centerConn.setToken, isAddingRemoteSub, action.busy, page]);
+
+  const handleSettingsSubStateBackRef = useRef(handleSettingsSubStateBack);
+  handleSettingsSubStateBackRef.current = handleSettingsSubStateBack;
+
+  const hasSettingsInlineSubState = isEditingCenterSub || isAddingRemoteSub;
+  useEffect(() => {
+    if (!hasSettingsInlineSubState) return;
+    return registerOverlayBackHandler(() => {
+      handleSettingsSubStateBackRef.current();
+    });
+  }, [hasSettingsInlineSubState]);
+
+  const handleHeaderBack = useCallback(() => {
+    if (handleSettingsSubStateBackRef.current()) return;
+    onBack();
+  }, [onBack]);
   const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url || (hasCenterConfigured ? centerConn.url : '');
   const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready || centerConn.displayReady ? centerConn.deviceId : '');
   const centerClientId = centerConn.status?.clientId;
@@ -561,7 +617,7 @@ export function HubSettingsView({
           <button
             type="button"
             className="grok-floating-circle-btn"
-            onClick={onBack}
+            onClick={handleHeaderBack}
             aria-label={t('返回', 'Back')}
           >
             <ArrowLeft size={20} />
@@ -589,7 +645,7 @@ export function HubSettingsView({
           scrollByPage.current[page] = top;
         }}
       >
-        {page === 'clipboard' && <ClipboardSyncSection variant="mobile" />}
+        {page === 'clipboard' && <ClipboardSyncSection variant="mobile" backHandlerRef={clipboardBackRef} />}
         {page === 'connection' && (
           <>
             <Section>

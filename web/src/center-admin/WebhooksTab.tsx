@@ -83,12 +83,14 @@ export function WebhooksTab({
   cacheKey = 'default',
   onRegisterNavGuard,
   onNavigateTab,
+  onRegisterBackHandler,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
   onRegisterNavGuard?: (guard: ((nextTab: CenterAdminTab) => boolean) | null) => void;
   onNavigateTab?: (tab: CenterAdminTab) => void;
+  onRegisterBackHandler?: (handler: () => boolean) => () => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
@@ -363,10 +365,19 @@ export function WebhooksTab({
   // Intercept app/hardware Back while editor is open (blocks during busy, prompts if token uncopied)
   useEffect(() => {
     if (!active || !editorOpen) return;
-    return registerOverlayBackHandler(() => {
+    const handleBack = () => {
       requestCloseEditorRef.current();
+      return true;
+    };
+    const unregisterOverlay = registerOverlayBackHandler(() => {
+      handleBack();
     });
-  }, [active, editorOpen]);
+    const unregisterPanel = onRegisterBackHandler?.(handleBack);
+    return () => {
+      unregisterPanel?.();
+      unregisterOverlay();
+    };
+  }, [active, editorOpen, onRegisterBackHandler]);
 
   const openCreateWebhook = () => {
     setEditingRoute(null);

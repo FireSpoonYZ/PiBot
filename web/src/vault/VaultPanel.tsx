@@ -1,5 +1,5 @@
 // 单 Bot 密码库面板：零闪烁乐观授权、主密码解锁/创建、+ 新增凭据并授权、全局操作收纳于底部。
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, Lock, Plus, RefreshCw } from 'lucide-react';
 import type {
   ExternalVaultControlInput,
@@ -10,8 +10,9 @@ import type {
   VaultItemMeta,
   VaultStatus,
 } from '../../../host-core/index.js';
-import { Badge, Disclosure, Switch } from '../bot-settings/primitives';
+import { Badge, Disclosure, Switch, useSettingsSheetBack } from '../bot-settings/primitives';
 import { ActionBar, ConfirmDialog } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { useNotice } from '../notice';
 import { ErrorNotice, useText } from '../ui';
 import './VaultPanel.css';
@@ -84,10 +85,10 @@ function VaultSession({
   revisionRef.current = revision;
   extRevisionRef.current = extRevision;
 
-  function clearForms() {
+  const clearForms = useCallback(() => {
     if (!root.current) return;
     for (const form of root.current.querySelectorAll('form')) form.reset();
-  }
+  }, []);
 
   useEffect(() => {
     active.current = true;
@@ -95,7 +96,7 @@ function VaultSession({
       active.current = false;
       clearForms();
     };
-  }, []);
+  }, [clearForms]);
 
   function failureMessage(err: unknown): string {
     const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
@@ -373,6 +374,61 @@ function VaultSession({
   const localReady = !external && Boolean(status?.initialized && !status.locked);
   const extReady = external && Boolean(ext?.configured && ext.authenticated && !ext.locked);
 
+  const isLogoutConfirmOpen = confirmLogout && Boolean(external && ext?.authenticated);
+  const isEditorOpen = Boolean(localReady && editor);
+  const isConfiguringOpen = Boolean(configuring && status?.source);
+  const isChangingPasswordOpen = Boolean(changingPassword && localReady);
+  const hasBackSubState = Boolean(
+    deletingTarget ||
+    isLogoutConfirmOpen ||
+    isEditorOpen ||
+    isConfiguringOpen ||
+    isChangingPasswordOpen ||
+    busy,
+  );
+
+  const handleSubStateBack = useCallback(() => {
+    if (busy) return;
+    if (deletingTarget) {
+      setDeletingTarget(null);
+      return;
+    }
+    if (isLogoutConfirmOpen) {
+      setConfirmLogout(false);
+      return;
+    }
+    if (isEditorOpen) {
+      clearForms();
+      setDeletingTarget(null);
+      setEditor(null);
+      return;
+    }
+    if (isChangingPasswordOpen) {
+      clearForms();
+      setChangingPassword(false);
+      return;
+    }
+    if (isConfiguringOpen) {
+      clearForms();
+      setConfiguring(false);
+      return;
+    }
+  }, [busy, deletingTarget, isLogoutConfirmOpen, isEditorOpen, isChangingPasswordOpen, isConfiguringOpen, clearForms]);
+
+  const inSheet = useSettingsSheetBack(hasBackSubState ? handleSubStateBack : null);
+  const subStateBackRef = useRef(handleSubStateBack);
+  subStateBackRef.current = handleSubStateBack;
+
+  const hasFallbackOverlayBack = Boolean(
+    isEditorOpen || isConfiguringOpen || isChangingPasswordOpen || busy,
+  );
+  useEffect(() => {
+    if (inSheet || !hasFallbackOverlayBack) return;
+    return registerOverlayBackHandler(() => {
+      subStateBackRef.current();
+    });
+  }, [inSheet, hasFallbackOverlayBack]);
+
   const statusBadgeText = (() => {
     if (!connected) return t('未连接 Host', 'Host disconnected');
     if (!status) return busy ? t('读取中…', 'Loading…') : t('状态未知', 'Unknown');
@@ -486,7 +542,16 @@ function VaultSession({
               </>
             ) : null}
             <ActionBar align="end" className="vault-actions">
-              <button className="bs-btn is-ghost is-small" type="button" onClick={() => setConfiguring(false)}>{t('取消', 'Cancel')}</button>
+              <button
+                className="bs-btn is-ghost is-small"
+                type="button"
+                onClick={() => {
+                  clearForms();
+                  setConfiguring(false);
+                }}
+              >
+                {t('取消', 'Cancel')}
+              </button>
               <button className="bs-btn is-primary is-small" type="submit">{t('保存来源设置', 'Save source')}</button>
             </ActionBar>
           </fieldset>
@@ -516,7 +581,16 @@ function VaultSession({
             <label>{t('新主密码', 'New master password')}<input className="bs-input" name="newMasterPassword" type="password" autoComplete="off" required aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} onChange={() => { if (error) setError(''); }} /></label>
             <label>{t('确认新主密码', 'Confirm new master password')}<input className="bs-input" name="confirmation" type="password" autoComplete="off" required aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} onChange={() => { if (error) setError(''); }} /></label>
             <ActionBar align="end" className="vault-actions">
-              <button className="bs-btn is-ghost is-small" type="button" onClick={() => setChangingPassword(false)}>{t('取消', 'Cancel')}</button>
+              <button
+                className="bs-btn is-ghost is-small"
+                type="button"
+                onClick={() => {
+                  clearForms();
+                  setChangingPassword(false);
+                }}
+              >
+                {t('取消', 'Cancel')}
+              </button>
               <button className="bs-btn is-primary is-small" type="submit">{t('更新主密码', 'Update password')}</button>
             </ActionBar>
           </fieldset>
@@ -779,6 +853,7 @@ function VaultSession({
                 className="bs-btn is-ghost is-small"
                 type="button"
                 onClick={() => {
+                  clearForms();
                   setDeletingTarget(null);
                   setEditor(null);
                 }}

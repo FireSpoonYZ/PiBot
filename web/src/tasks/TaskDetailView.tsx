@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft, CheckCircle2, ChevronRight, HelpCircle, Loader2, Pencil, Trash2, X } from 'lucide-react';
-import { Button, InlineBanner } from '../components/ui';
+import { Button, ConfirmDialog, InlineBanner } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { mobileHaptic } from '../native/tauri-host';
 import { useText } from '../ui';
@@ -185,6 +186,28 @@ function createEditDraft(task: GlobalTask): EditDraftState {
   };
 }
 
+function isEditDraftDirty(draft: EditDraftState, baseline: EditDraftState): boolean {
+  if (draft.title !== baseline.title) return true;
+  if (draft.requirement !== baseline.requirement) return true;
+  if (draft.newStepText.trim().length > 0) return true;
+  if (draft.newStepBotValue !== baseline.newStepBotValue) return true;
+  if (draft.steps.length !== baseline.steps.length) return true;
+  for (let i = 0; i < draft.steps.length; i += 1) {
+    const a = draft.steps[i];
+    const b = baseline.steps[i];
+    if (
+      a.id !== b.id ||
+      a.parentStepId !== b.parentStepId ||
+      a.text !== b.text ||
+      a.status !== b.status ||
+      a.botValue !== b.botValue
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function renderTaskStatusBadge(task: GlobalTask, t: (zh: string, en: string) => string) {
   const info = getTaskStatusInfo(task, t);
   return (
@@ -216,6 +239,8 @@ export function TaskDetailView({
 
   const [editMode, setEditMode] = useState(initialEditMode);
   const [editDraft, setEditDraft] = useState<EditDraftState>(() => createEditDraft(task));
+  const [editBaseline, setEditBaseline] = useState<EditDraftState>(() => createEditDraft(task));
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reloadingEdit, setReloadingEdit] = useState(false);
@@ -228,10 +253,13 @@ export function TaskDetailView({
   const [stepErrors, setStepErrors] = useState<Record<number, string>>({});
 
   useEffect(() => {
+    const freshDraft = createEditDraft(task);
     setEditMode(initialEditMode);
-    setEditDraft(createEditDraft(task));
+    setEditDraft(freshDraft);
+    setEditBaseline(freshDraft);
     setEditConflict(false);
     setDeleteArmed(false);
+    setDiscardConfirmOpen(false);
     setActionError(null);
     setTitleError(null);
     setStepErrors({});
@@ -279,10 +307,19 @@ export function TaskDetailView({
     return list;
   }, [task.botRefs, task.pendingPrompt, task.coordinatorDeviceId, task.coordinatorBotId, bots]);
 
+  const isBusy = saving || deleting || adoptionBusy || reloadingEdit;
+  const isEditDirty = useMemo(
+    () => editMode && isEditDraftDirty(editDraft, editBaseline),
+    [editMode, editDraft, editBaseline],
+  );
+
   const openEditMode = () => {
-    setEditDraft(createEditDraft(task));
+    const freshDraft = createEditDraft(task);
+    setEditDraft(freshDraft);
+    setEditBaseline(freshDraft);
     setEditConflict(false);
     setDeleteArmed(false);
+    setDiscardConfirmOpen(false);
     setActionError(null);
     setTitleError(null);
     setStepErrors({});
@@ -290,14 +327,48 @@ export function TaskDetailView({
   };
 
   const exitEditMode = () => {
-    if (saving || deleting || reloadingEdit) return;
+    if (saving || deleting || reloadingEdit || adoptionBusy) return;
     setEditMode(false);
     setEditConflict(false);
     setDeleteArmed(false);
+    setDiscardConfirmOpen(false);
     setActionError(null);
     setTitleError(null);
     setStepErrors({});
   };
+
+  const requestExitEditMode = () => {
+    if (isBusy) return;
+    if (isEditDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    exitEditMode();
+  };
+
+  const handleStepBack = () => {
+    if (isBusy) return;
+    if (deleteArmed) {
+      setDeleteArmed(false);
+      return;
+    }
+    if (editMode) {
+      requestExitEditMode();
+      return;
+    }
+    onBack();
+  };
+
+  const hasBackIntercept = editMode || deleteArmed || isBusy;
+  const stepBackRef = useRef<() => void>(() => {});
+  stepBackRef.current = handleStepBack;
+
+  useEffect(() => {
+    if (!hasBackIntercept) return;
+    return registerOverlayBackHandler(() => {
+      stepBackRef.current();
+    });
+  }, [hasBackIntercept]);
 
   const handleReloadLatestForEdit = async () => {
     if (reloadingEdit || saving || deleting) return;
@@ -305,8 +376,11 @@ export function TaskDetailView({
     setActionError(null);
     try {
       const latest = (await controller.getTask(task.id)) ?? task;
-      setEditDraft(createEditDraft(latest));
+      const freshDraft = createEditDraft(latest);
+      setEditDraft(freshDraft);
+      setEditBaseline(freshDraft);
       setEditConflict(false);
+      setDiscardConfirmOpen(false);
       setTitleError(null);
       setStepErrors({});
     } catch (err) {
@@ -441,6 +515,8 @@ export function TaskDetailView({
       });
       mobileHaptic('confirm');
       setEditConflict(false);
+      setDeleteArmed(false);
+      setDiscardConfirmOpen(false);
       setEditMode(false);
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
@@ -466,7 +542,12 @@ export function TaskDetailView({
     }
     if (event.key === 'Escape') {
       event.preventDefault();
-      exitEditMode();
+      if (isBusy) return;
+      if (deleteArmed) {
+        setDeleteArmed(false);
+        return;
+      }
+      requestExitEditMode();
     }
   };
 
@@ -611,9 +692,9 @@ export function TaskDetailView({
     <div className="tasks-scroll">
       <div className="tasks-container page-enter">
         <header className="detail-topbar">
-          <button type="button" className="back-btn" onClick={onBack}>
+          <button type="button" className="back-btn" onClick={handleStepBack} disabled={isBusy}>
             <ArrowLeft size={19} aria-hidden="true" />
-            <span>{t('任务', 'Tasks')}</span>
+            <span>{editMode ? t('返回', 'Back') : t('任务', 'Tasks')}</span>
           </button>
           {!editMode ? (
             <button type="button" className="tb-secondary-btn" onClick={openEditMode}>
@@ -673,8 +754,8 @@ export function TaskDetailView({
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={saving || deleting || reloadingEdit}
-                    onClick={exitEditMode}
+                    disabled={isBusy}
+                    onClick={requestExitEditMode}
                   >
                     {t('退出编辑核对详情', 'Exit edit to review')}
                   </Button>
@@ -890,8 +971,8 @@ export function TaskDetailView({
                   <button
                     type="button"
                     className="tb-secondary-btn"
-                    disabled={saving || deleting || reloadingEdit}
-                    onClick={exitEditMode}
+                    disabled={isBusy}
+                    onClick={requestExitEditMode}
                   >
                     {t('取消', 'Cancel')}
                   </button>
@@ -1097,6 +1178,21 @@ export function TaskDetailView({
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={discardConfirmOpen && editMode}
+        title={t('放弃修改？', 'Discard changes?')}
+        description={t('当前有未保存的任务修改，返回将丢失这些更改。确认放弃吗？', 'You have unsaved task changes. Going back will discard them. Continue?')}
+        danger
+        busy={isBusy}
+        confirmLabel={t('放弃修改', 'Discard changes')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => setDiscardConfirmOpen(false)}
+        onConfirm={() => {
+          if (isBusy) return;
+          setDiscardConfirmOpen(false);
+          exitEditMode();
+        }}
+      />
     </div>
   );
 }

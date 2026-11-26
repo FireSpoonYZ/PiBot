@@ -1226,6 +1226,8 @@ function ScopeDetail({
             key={scope.scope.scopeId}
             api={api}
             variant={variant}
+            open={showSettings}
+            active={pageActive}
             membersApi={membersApi}
             scope={scope}
             bots={bots}

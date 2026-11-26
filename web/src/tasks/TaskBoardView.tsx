@@ -179,6 +179,7 @@ export function TaskBoardView({
       return (
         <div className={scopeClass}>
           <TaskDetailView
+            key={activeTask.id}
             task={activeTask}
             controller={controller}
             bots={bots}

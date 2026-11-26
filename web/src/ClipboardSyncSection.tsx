@@ -2,9 +2,10 @@
 // 通过原生命令管理同步组和扫码，不读取剪贴板明文，不记录邀请码或回显原始错误。
 import { invoke } from '@tauri-apps/api/core';
 import { CircleAlert, ClipboardCheck, KeyRound, Lock, Plus, QrCode, RefreshCw, ScanLine, ShieldAlert, Upload } from 'lucide-react';
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type MutableRefObject } from 'react';
 import { Badge, Row, Section, Switch, type BadgeTone } from './bot-settings/primitives';
 import { ActionBar, ConfirmDialog } from './components/ui';
+import { registerOverlayBackHandler } from './components/ui/overlayStack';
 import { QrSvg } from './center-admin/qrSvg';
 import { MobileHostError, scanClipboardGroupCode } from './native/tauri-host';
 import { useNotice } from './notice';
@@ -189,7 +190,12 @@ function modeText(status: SyncStatus | null, variant: 'desktop' | 'mobile', t: T
   return t('不支持', 'Unsupported');
 }
 
-export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile' }) {
+export interface ClipboardSyncSectionProps {
+  variant: 'desktop' | 'mobile';
+  backHandlerRef?: MutableRefObject<(() => boolean) | null>;
+}
+
+export function ClipboardSyncSection({ variant, backHandlerRef }: ClipboardSyncSectionProps) {
   const t = useText();
   const { notify } = useNotice();
   const joinInputId = useId();
@@ -408,6 +414,51 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   const errorNotice = actionError ?? statusError;
   const presentation = describeStatus(status, loading, statusError, t);
   const busy = busyAction !== null;
+
+  const handleSubStateBack = useCallback((): boolean => {
+    if (confirmNewGroup) {
+      if (busyAction !== 'newGroup') setConfirmNewGroup(false);
+      return true;
+    }
+    if (bgPromptOpen) {
+      if (!busy) {
+        setBgConsent(false);
+        setBgPromptOpen(false);
+      }
+      return true;
+    }
+    if (joinOpen) {
+      if (!busy) {
+        clearSecretDraft();
+        setJoinOpen(false);
+      }
+      return true;
+    }
+    if (revealedCode !== null) {
+      hideCode();
+      return true;
+    }
+    return false;
+  }, [confirmNewGroup, busyAction, bgPromptOpen, joinOpen, revealedCode, busy, clearSecretDraft, hideCode]);
+
+  const handleSubStateBackRef = useRef(handleSubStateBack);
+  handleSubStateBackRef.current = handleSubStateBack;
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => handleSubStateBackRef.current();
+    return () => {
+      backHandlerRef.current = null;
+    };
+  }, [backHandlerRef]);
+
+  const hasInlineSubState = bgPromptOpen || joinOpen || revealedCode !== null;
+  useEffect(() => {
+    if (!hasInlineSubState) return;
+    return registerOverlayBackHandler(() => {
+      handleSubStateBackRef.current();
+    });
+  }, [hasInlineSubState]);
   const unsupported = status?.mode === 'unsupported';
   const toggleDisabled = busy || loading || status === null || (unsupported && !status.enabled);
   const syncHint = t('验证码和密码也可能同步到同组在线设备。请只将可信设备加入同组。', 'Verification codes and passwords may sync to online devices in this group. Only add devices you trust.');

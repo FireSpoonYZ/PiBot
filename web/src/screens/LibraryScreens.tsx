@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Archive, ArrowLeft, Globe } from 'lucide-react';
 import { Scopes, type ScopeBotInfo } from '../../../desktop/web/src/Scopes';
 import type { RoomApiResolver, ScopeReadApi } from '../../../desktop/web/src/scope-api';
@@ -80,6 +81,16 @@ export function ScopesSubpageScreen({
   onOpenCenterSettings,
 }: ScopesSubpageScreenProps) {
   const t = useText();
+  const dmSource =
+    mode === 'dm' && dmTarget
+      ? scopeConversationSources.find(source => {
+          if (dmTarget.bot.hostKind === 'local') return source.api === localScopeApi;
+          return source.identity?.targetDeviceId === dmTarget.bot.hostId;
+        })
+      : undefined;
+  const showConversationFallbackHeader = mode === 'conversation' && !scopeConversationTarget;
+  const showDmFallbackHeader = mode === 'dm' && (!dmTarget || !dmSource);
+  const useScrollBody = mode === 'pending' || showConversationFallbackHeader || showDmFallbackHeader;
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -97,9 +108,39 @@ export function ScopesSubpageScreen({
           <span className="shell-topbar-spacer" />
         </header>
       )}
+      {showConversationFallbackHeader && (
+        <header className="grok-subpage-topbar">
+          <button
+            type="button"
+            className="grok-floating-circle-btn"
+            onClick={onBackFromConversation}
+            aria-label={t('返回', 'Back')}
+          >
+            <ArrowLeft size={20} aria-hidden="true" />
+          </button>
+          <h2 className="grok-subpage-header-title">{t('群聊', 'Group chat')}</h2>
+          <span className="grok-topbar-spacer" aria-hidden="true" />
+        </header>
+      )}
+      {showDmFallbackHeader && (
+        <header className="grok-subpage-topbar">
+          <button
+            type="button"
+            className="grok-floating-circle-btn"
+            onClick={onBackFromDm}
+            aria-label={t('返回', 'Back')}
+          >
+            <ArrowLeft size={20} aria-hidden="true" />
+          </button>
+          <h2 className="grok-subpage-header-title">
+            {dmTarget ? t(`${dmTarget.bot.role} · 私聊`, `${dmTarget.bot.role} · DMs`) : t('私聊', 'Private chats')}
+          </h2>
+          <span className="grok-topbar-spacer" aria-hidden="true" />
+        </header>
+      )}
       {/* conversation/dm 页面头由 Scopes 会话头承担：宿主不再叠一层标题栏，
           容器占满高、消息区独立滚动、底部输入不随页面滚动离开。 */}
-      <div className={mode === 'pending' ? 'grok-subpage-scroll' : 'grok-subpage-fill'}>
+      <div className={useScrollBody ? 'grok-subpage-scroll' : 'grok-subpage-fill'}>
         {mode === 'conversation' ? (
           scopeConversationTarget ? (
             // 打开时捕获的 api 可能带旧 targetOnline/失效代际；按稳定 profile/kind/device
@@ -138,15 +179,17 @@ export function ScopesSubpageScreen({
                 </div>
               );
             })()
-          ) : null
+          ) : (
+            <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+              <Globe size={28} className="grok-row-icon" aria-hidden="true" />
+              <h4>{t('群聊暂不可用', 'Group chat unavailable')}</h4>
+              <p>{t('当前群聊会话已不可用，请返回后重新打开。', 'This group chat is unavailable. Go back and open it again.')}</p>
+            </section>
+          )
         ) : mode === 'dm' ? (
           dmTarget ? (
             (() => {
               const bot = dmTarget.bot;
-              const dmSource = scopeConversationSources.find(source => {
-                if (bot.hostKind === 'local') return source.api === localScopeApi;
-                return source.identity?.targetDeviceId === bot.hostId;
-              });
               if (!dmSource) {
                 return (
                   <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
@@ -180,7 +223,13 @@ export function ScopesSubpageScreen({
                 </div>
               );
             })()
-          ) : null
+          ) : (
+            <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+              <Globe size={28} className="grok-row-icon" aria-hidden="true" />
+              <h4>{t('私聊暂不可用', 'Private chats unavailable')}</h4>
+              <p>{t('未找到目标 Bot，请返回上一页重新选择。', 'Target Bot not found. Go back and select a Bot again.')}</p>
+            </section>
+          )
         ) : (
           <PendingInbox
             api={remoteApi && remoteIdentity ? remoteApi : null}
@@ -225,7 +274,9 @@ export function BotSkillsScreen({
   onOpenCenterSettings,
 }: BotSkillsScreenProps) {
   const t = useText();
+  const skillsBackRef = useRef<(() => boolean) | null>(null);
   const skillsDeviceId = activeBot.hostKind === 'local' ? localDeviceId : activeBot.hostId;
+  const showCenterSkills = Boolean(remoteConnected && remoteIdentity && remoteApi && skillsDeviceId);
 
   return (
     <main className="grok-subpage grok-page-enter bot-skills-page" aria-label={t(`${activeBot.role} · 技能`, `${activeBot.role} · Skills`)}>
@@ -233,7 +284,10 @@ export function BotSkillsScreen({
         <button
           type="button"
           className="grok-floating-circle-btn"
-          onClick={onBack}
+          onClick={() => {
+            if (showCenterSkills && skillsBackRef.current?.()) return;
+            onBack();
+          }}
           aria-label={t('返回', 'Back')}
         >
           <ArrowLeft size={20} aria-hidden="true" />
@@ -243,7 +297,7 @@ export function BotSkillsScreen({
       </header>
       <div className="grok-subpage-scroll">
         <div className="bot-skills-body">
-          {remoteConnected && remoteIdentity && remoteApi && skillsDeviceId ? (
+          {showCenterSkills && remoteIdentity && remoteApi && skillsDeviceId ? (
             <BotSkillsPage
               key={`${activeCenter}|${activeBot.key}|${remoteIdentity.generation}`}
               api={remoteApi}
@@ -251,6 +305,8 @@ export function BotSkillsScreen({
               deviceId={skillsDeviceId}
               botId={activeBot.botId}
               botName={activeBot.role}
+              backHandlerRef={skillsBackRef}
+              hideInlineBack
             />
           ) : (
             <>

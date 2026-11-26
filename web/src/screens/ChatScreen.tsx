@@ -1138,6 +1138,18 @@ export function ChatScreen({
   const voiceOnlyMessage = t('语音输入仅支持本机 Bot', 'Voice input is only available for local Bots');
   const remoteDisconnectedImageMessage = t('远端服务未连接，暂不可发送图片', 'Remote host disconnected; image upload unavailable');
 
+  const handleTopBarBack = useCallback(() => {
+    if (chatSearchOpen) {
+      onCloseChatSearch();
+      return;
+    }
+    if (activeEditing) {
+      if (!editSubmitting) onCancelEditTurn();
+      return;
+    }
+    onBack();
+  }, [chatSearchOpen, onCloseChatSearch, activeEditing, editSubmitting, onCancelEditTurn, onBack]);
+
   return (
     <main
       className={`bot-chat-view grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}
@@ -1150,7 +1162,7 @@ export function ChatScreen({
           type="button"
           className="grok-floating-circle-btn grok-chat-header-back"
           aria-label={t('返回', 'Back')}
-          onClick={onBack}
+          onClick={handleTopBarBack}
         >
           <ArrowLeft size={20} aria-hidden="true" />
         </button>
@@ -1220,7 +1232,7 @@ export function ChatScreen({
         )}
 
         <PopoverMenu
-          open={chatTopMenuOpen}
+          open={visible && chatTopMenuOpen}
           onOpenChange={next => {
             if (next) {
               if (!chatTopMenuOpen) onToggleChatTopMenu();
@@ -1625,7 +1637,7 @@ export function ChatScreen({
             onSubmitEditTurn={onSubmitEditedTurn}
             online={remoteConnected && activeBot.online !== false}
             onOffline={() => onShowOfflineNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'))}
-            composerMenuOpen={composerMenuOpen}
+            composerMenuOpen={visible && composerMenuOpen}
             onToggleComposerMenu={onToggleComposerMenu}
             onRunCommand={onRunSlashCommand}
             commandBusy={Boolean(slashBusy)}
@@ -1661,7 +1673,7 @@ export function ChatScreen({
         ) : (
           <>
             <ComposerSlashPopover
-              open={slash.open}
+              open={visible && slash.open}
               query={effectiveLocalDraft}
               listboxId={slash.listboxId}
               matches={slash.matches}
@@ -1724,7 +1736,7 @@ export function ChatScreen({
 
             <div ref={localComposerRowRef} className="grok-composer-row">
               <ComposerPlusMenu
-                open={composerMenuOpen}
+                open={visible && composerMenuOpen}
                 onOpenChange={next => {
                   if (next) {
                     if (!composerMenuOpen) onToggleComposerMenu();

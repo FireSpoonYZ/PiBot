@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ChevronRight, PanelLeft, Search, X } from 'lucide-react';
 import type { BotBoardItem } from '../../host-core/index.js';
 import { formatWorkingElapsed, GrokBotAvatar } from './GrokBotAvatar';
 import { botActivityText, isBotActivityBusy, parseBotActivityStartedAt } from './botActivity';
 import { Button, InlineBanner } from './components/ui';
+import { registerOverlayBackHandler } from './components/ui/overlayStack';
 import { useText } from './ui';
 import { botBoardBucket, isBotBoardInterrupted, type BoardBucket, type BotBoardState, type BotBoardTarget } from './useBotBoard';
 import './BotBoard.css';
@@ -60,6 +61,23 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, onOpenMob
   const [filter, setFilter] = useState<BoardBucket | 'all'>('all');
   const desktop = variant === 'desktop';
   const nowMs = Date.now();
+
+  const hasActiveSearchOrFilter = !desktop && (query.trim().length > 0 || filter !== 'all');
+  const backActionRef = useRef<() => void>(() => {});
+  backActionRef.current = () => {
+    if (query.trim().length > 0) {
+      setQuery('');
+    } else if (filter !== 'all') {
+      setFilter('all');
+    }
+  };
+
+  useEffect(() => {
+    if (!hasActiveSearchOrFilter) return;
+    return registerOverlayBackHandler(() => {
+      backActionRef.current();
+    });
+  }, [hasActiveSearchOrFilter]);
 
   const columns: { key: BoardBucket; label: string }[] = [
     { key: 'attention', label: t('需要你', 'Needs you') },

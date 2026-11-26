@@ -217,7 +217,7 @@ import { ShellUpdateBanner, useHasShellUpdate } from './components/ShellUpdateBa
 import './hub/schedules.css';
 import { ActionSheet, Button, ConfirmDialog, Dialog, type ActionSheetItem } from './components/ui';
 import { hasOpenOverlay } from './components/ui/overlayStack';
-import { parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
+import { isExitRootScreen, parseHashToRootEntry, useScreenStack, type RootScreen } from './hub/useScreenStack';
 import { decideChatAutoScroll, hasIncomingChatContent, type ChatScrollMetrics } from './hub/chatScrollLogic';
 import { useConnectionPhase, useConnectionPhaseContext, type ConnectionPhase } from './connection';
 import { useNotice } from './notice';
@@ -371,6 +371,23 @@ function isLocalAndroidBot(
   return Boolean(bot && (bot.hostKind === 'local' || bot.platform?.toLowerCase() === 'android'));
 }
 
+function areScheduleDraftsEqual(a: BotScheduleDraft, b: BotScheduleDraft): boolean {
+  const aWeekdays = a.repeat === 'weekly' ? a.weekdays.slice().sort((x, y) => x - y).join(',') : '';
+  const bWeekdays = b.repeat === 'weekly' ? b.weekdays.slice().sort((x, y) => x - y).join(',') : '';
+  return (
+    a.title === b.title &&
+    a.prompt === b.prompt &&
+    a.repeat === b.repeat &&
+    a.time === b.time &&
+    (a.repeat === 'once' ? (a.date ?? '') : '') === (b.repeat === 'once' ? (b.date ?? '') : '') &&
+    aWeekdays === bWeekdays &&
+    (a.repeat === 'monthly' ? a.monthDay : 0) === (b.repeat === 'monthly' ? b.monthDay : 0) &&
+    a.alarmMode === b.alarmMode &&
+    (a.alarmMode === 'alarmClock' ? a.vibrate : false) === (b.alarmMode === 'alarmClock' ? b.vibrate : false) &&
+    (a.repeat === 'once' ? a.deleteAfterRun : false) === (b.repeat === 'once' ? b.deleteAfterRun : false)
+  );
+}
+
 export interface HostPageProps {
   /** Called when hardware/gesture Back reaches a root screen (e.g. mobileHide() on Android). */
   onBack?(): void;
@@ -478,6 +495,7 @@ export function HostPage({
   // 确认弹窗状态（不使用全局 window.confirm，适配 Android WebView）
   const [botConfirmModal, setBotConfirmModal] = useState<BotConfirmModalState | null>(null);
   const [roomDeleteModal, setRoomDeleteModal] = useState<RoomDeleteModalState | null>(null);
+  const roomDeleteFetchSeqRef = useRef(0);
   const unconfirmedRoomDeletesRef = useRef(new Map<string, RoomDeleteAttempt>());
 
   // Local Host state (managed transparently in background)
@@ -790,6 +808,7 @@ export function HostPage({
     vibrate: true,
     deleteAfterRun: false,
   });
+  const [scheduleDraftBaseline, setScheduleDraftBaseline] = useState<BotScheduleDraft | null>(null);
 
   const [vaultTargetKey, setVaultTargetKey] = useState<string | null>(null);
   const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi; tab: 'model' | 'capabilities' } | null>(null);
@@ -2769,10 +2788,43 @@ export function HostPage({
     applyFetchedHistory, getCutoff, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
-  const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'board' | 'tasks' | 'archived-bots') => {
+  const clearTransientUiForLaunch = () => {
+    chatScrollAnchorsRef.current.clear();
+    pendingChatAnchorRestoreRef.current = null;
+    setLeftDrawerOpen(false);
+    setRoomSettingsOpen(false);
+    setActiveTaskId(null);
+    setCreatingTask(false);
+    setTaskInitialEditMode(false);
+    setChatSearchOpen(false);
+    setChatSearchQuery('');
+    setEditingTurn(null);
+    setHubAddMenuOpen(false);
+    setHubContextMenu(null);
+    setChatTopMenuOpen(false);
+    setComposerMenuOpen(false);
+    setBubbleActionTurn(null);
+    setClearConfirmOpen(false);
+    setModelTarget(null);
+    setVaultTargetKey(null);
+    setDmSelectedScopeId(null);
+    setScheduleEditing(null);
+    setScheduleDraftBaseline(null);
+    setScheduleDeleteTarget(null);
+    if (!action.busy) {
+      action.setError('');
+      setBotConfirmModal(null);
+    }
+    if (roomDeleteModal && !roomDeleteModal.submitting) {
+      roomDeleteFetchSeqRef.current += 1;
+      setRoomDeleteModal(null);
+    }
+  };
+
+  const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'board' | 'tasks' | 'archived-bots' | 'launch') => {
     // 仅在从当前聊天压入另一聊天（原 chat 留在栈内）时保存原聊天锚点；
     // 本次新进入的目标 Bot 清空旧锚点，保证从 Hub/Board/Tasks/通知全新进入始终滚至最新消息。
-    if (screen === 'chat' && nav.stackRef.current.at(-1)?.botKey !== bot.key) {
+    if (fromScreen !== 'launch' && screen === 'chat' && nav.stackRef.current.at(-1)?.botKey !== bot.key) {
       saveCurrentChatAnchor();
     }
     profileLoadGeneration.current += 1;
@@ -2821,6 +2873,7 @@ export function HostPage({
     setChatDraftAttachments(scopeKey ? readChatDraftAttachments(scopeKey) : []);
     setComposerImageError('');
     setHubContextMenu(null);
+    setHubAddMenuOpen(false);
     setComposerMenuOpen(false);
     setChatTopMenuOpen(false);
     setChatSearchOpen(false);
@@ -2832,7 +2885,10 @@ export function HostPage({
       setJumpedTaskQuote(null);
     }
     setChatHasNewContent(false);
-    if (screen === 'bot-edit') {
+    if (fromScreen === 'launch') {
+      clearTransientUiForLaunch();
+      nav.resetTo({ screen: 'hub' }, { screen: 'chat', botKey: bot.key });
+    } else if (screen === 'bot-edit') {
       nav.replaceTop({ screen: 'chat', botKey: bot.key });
     } else {
       nav.push({ screen: 'chat', botKey: bot.key });
@@ -2870,7 +2926,12 @@ export function HostPage({
       (item.hostKind === 'remote' ? item.hostId === launchTarget.deviceId :
         (localBots.find(local => local.botId === item.botId)?.deviceId || localHost?.deviceId) === launchTarget.deviceId));
     if (!bot || (bot.hostKind === 'remote' && (!remoteIdentity || !remoteConnected))) return;
-    if (screen !== 'chat' || activeBotKey !== bot.key) openBotChat(bot);
+    if (screen !== 'chat' || activeBotKey !== bot.key) {
+      openBotChat(bot, 'launch');
+    } else {
+      clearTransientUiForLaunch();
+      nav.resetTo({ screen: 'hub' }, { screen: 'chat', botKey: bot.key });
+    }
     setLaunchTarget(null);
     // The target is consumed once; directory/identity changes only resolve a pending target.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2907,6 +2968,7 @@ export function HostPage({
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
     setScheduleEditing(null);
+    setScheduleDraftBaseline(null);
     setScheduleDeleteTarget(null);
     setScheduleFilter('all');
     nav.push({ screen: 'bot-schedules', botKey: bot.key });
@@ -2954,7 +3016,9 @@ export function HostPage({
     setEditName(bot.role);
     setEditSubtitle(bot.description ?? '');
     editCwdDirtyRef.current = false;
-    setEditCwd(bot.cwd || localHost?.workspace || '');
+    const initialCwd = bot.cwd || localHost?.workspace || '';
+    setEditCwd(initialCwd);
+    setEditCwdBaseline(initialCwd);
     setEditCwdRevision(null);
     setEditCwdError('');
     setEditSaveErrors({});
@@ -3912,19 +3976,27 @@ ${newer}` : draftSnapshot;
             }
           }
           await syncLocalBots(snap);
-          openBotChat({
-            key,
-            deviceId: created.deviceId,
-            botId: created.botId,
-            role: roleName,
-            cwd: created.cwd,
-            modelRef: assignedModelRef,
-            createdAt: created.createdAt,
-            isPrimary: created.isPrimary ?? shouldMakePrimary,
-            hostKind: 'local',
-            hostId: 'local',
-            hostLabel: t('本机', 'Local'),
-          });
+          const localCreateStack = nav.stackRef.current;
+          const localCreatedFromGroupCreate =
+            localCreateStack[localCreateStack.length - 1]?.screen === 'bot-edit' &&
+            localCreateStack[localCreateStack.length - 2]?.screen === 'group-create';
+          if (localCreatedFromGroupCreate) {
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
+          } else {
+            openBotChat({
+              key,
+              deviceId: created.deviceId,
+              botId: created.botId,
+              role: roleName,
+              cwd: created.cwd,
+              modelRef: assignedModelRef,
+              createdAt: created.createdAt,
+              isPrimary: created.isPrimary ?? shouldMakePrimary,
+              hostKind: 'local',
+              hostId: 'local',
+              hostLabel: t('本机', 'Local'),
+            });
+          }
         } else if (remoteIdentity && remoteClientRef.current) {
           const api = remoteClientRef.current.api;
           const targetIdentity = api.identityForTarget(targetHost);
@@ -3964,7 +4036,15 @@ ${newer}` : draftSnapshot;
             }
           }
           await syncRemoteBots();
-          nav.resetTo({ screen: 'hub' });
+          const remoteCreateStack = nav.stackRef.current;
+          const remoteCreatedFromGroupCreate =
+            remoteCreateStack[remoteCreateStack.length - 1]?.screen === 'bot-edit' &&
+            remoteCreateStack[remoteCreateStack.length - 2]?.screen === 'group-create';
+          if (remoteCreatedFromGroupCreate) {
+            if (!popCurrentScreen()) nav.resetTo({ screen: 'hub' });
+          } else {
+            nav.resetTo({ screen: 'hub' });
+          }
         }
       } else if (activeBot) {
         const trimmedCwd = editCwd.trim();
@@ -4209,7 +4289,6 @@ ${newer}` : draftSnapshot;
 
   // 群行直接解散删除：走 authority resolved members API，先读最新 scope 冻结 requestId / expectedRevision，
   // 二次确认后 mutateIntent('deleteScope')；未确认保留原请求可按原 ID 确认，绝不自动以新 ID 重发。
-  const roomDeleteFetchSeqRef = useRef(0);
   const loadLatestRoomForDelete = useCallback(
     async (room: ScopeConversation) => {
       const scopeId = room.scope.scope.scopeId;
@@ -4467,6 +4546,7 @@ ${newer}` : draftSnapshot;
 
   useEffect(() => {
     setModelTarget(null);
+    setVaultTargetKey(null);
   }, [activeBotKey, activeCenter, remoteIdentity?.generation, remoteConnected, screen, localHost?.deviceId]);
 
   // Save Bot Soul (CAS)
@@ -4544,7 +4624,7 @@ ${newer}` : draftSnapshot;
 
   const openScheduleCreate = () => {
     setScheduleCustomWeekdays(false);
-    setScheduleDraft({
+    const initialDraft: BotScheduleDraft = {
       title: '',
       prompt: '',
       repeat: 'daily',
@@ -4554,7 +4634,9 @@ ${newer}` : draftSnapshot;
       alarmMode: 'alarmClock',
       vibrate: true,
       deleteAfterRun: false,
-    });
+    };
+    setScheduleDraft(initialDraft);
+    setScheduleDraftBaseline(initialDraft);
     setScheduleEditing('new');
   };
 
@@ -4566,7 +4648,7 @@ ${newer}` : draftSnapshot;
     const isCustomWeekly =
       task.repeat === 'weekly' && days.join(',') !== '1,2,3,4,5' && days.join(',') !== '6,7';
     setScheduleCustomWeekdays(isCustomWeekly);
-    setScheduleDraft({
+    const initialDraft: BotScheduleDraft = {
       id: task.id,
       revision: task.revision,
       title: task.title || '',
@@ -4579,7 +4661,9 @@ ${newer}` : draftSnapshot;
       alarmMode: task.alarmMode === 'exact' ? 'exact' : 'alarmClock',
       vibrate: Boolean(task.vibrate),
       deleteAfterRun: Boolean(task.deleteAfterRun),
-    });
+    };
+    setScheduleDraft(initialDraft);
+    setScheduleDraftBaseline(initialDraft);
     setScheduleEditing('edit');
   };
 
@@ -4633,6 +4717,7 @@ ${newer}` : draftSnapshot;
       });
       setScheduleDeleteTarget(null);
       setScheduleEditing(null);
+      setScheduleDraftBaseline(null);
     });
 
   const handleSaveSchedule = () =>
@@ -4681,6 +4766,7 @@ ${newer}` : draftSnapshot;
         });
       }
       setScheduleEditing(null);
+      setScheduleDraftBaseline(null);
     });
 
   const handleRequestExactAlarm = () =>
@@ -4699,6 +4785,10 @@ ${newer}` : draftSnapshot;
   const scheduleTasks = botScheduleState.botKey === activeBot?.key ? botScheduleState.tasks : [];
   const scheduleError = botScheduleState.botKey === activeBot?.key ? botScheduleState.schedulingError : '';
   const scheduleOffline = activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false);
+  const scheduleDraftDirty = useMemo(() => {
+    if (!scheduleEditing || !scheduleDraftBaseline) return false;
+    return !areScheduleDraftsEqual(scheduleDraft, scheduleDraftBaseline);
+  }, [scheduleEditing, scheduleDraft, scheduleDraftBaseline]);
 
   const currentClearedAfter = !activeBot
     ? 0
@@ -5560,6 +5650,10 @@ ${newer}` : draftSnapshot;
       setTaskReturnId(restoredTaskId);
       setCreatingTask(false);
       setTaskInitialEditMode(false);
+    } else if (leaving.screen === 'tasks') {
+      setActiveTaskId(null);
+      setCreatingTask(false);
+      setTaskInitialEditMode(false);
     }
     if (leaving.screen === 'settings-center-admin' || leaving.screen === 'bot-skills') {
       refreshDirectoryAfterConfig();
@@ -5567,6 +5661,40 @@ ${newer}` : draftSnapshot;
     return true;
   }, [nav.pop, nav.stackRef, cancelActiveObservation, refreshDirectoryAfterConfig]);
   popScreenRef.current = popScreen;
+
+  const closeActiveTaskDetail = useCallback(() => {
+    setTaskBoardNotice('');
+    setCreatingTask(false);
+    setActiveTaskId(null);
+    setTaskInitialEditMode(false);
+    const currentStack = nav.stackRef.current;
+    const currentNav = currentStack[currentStack.length - 1];
+    const previousNav = currentStack.length > 1 ? currentStack[currentStack.length - 2] : undefined;
+    if (currentStack.length > 1 && previousNav && previousNav.screen !== 'tasks') {
+      popScreen();
+      return;
+    }
+    if (currentNav?.screen === 'tasks' && currentNav.taskId) {
+      nav.replaceTop({ ...currentNav, taskId: null });
+    }
+  }, [nav.stackRef, nav.replaceTop, popScreen]);
+
+  const stepBackChatScreen = useCallback(() => {
+    if (chatSearchOpen) {
+      setChatSearchOpen(false);
+      setChatSearchQuery('');
+      return;
+    }
+    if (editingTurn) {
+      if (!editSubmitting) setEditingTurn(null);
+      return;
+    }
+    if (!popScreen()) {
+      chatScrollAnchorsRef.current.clear();
+      pendingChatAnchorRestoreRef.current = null;
+      nav.resetTo({ screen: 'hub' });
+    }
+  }, [chatSearchOpen, editingTurn, editSubmitting, popScreen, nav.resetTo]);
 
   const openCenterSettings = useCallback(() => {
     saveCurrentChatAnchor();
@@ -5600,46 +5728,16 @@ ${newer}` : draftSnapshot;
   const backFromProfileManage = useCallback(() => {
     restoreProfileManageFocus.current = true;
     if (!popScreen()) {
-      nav.push({ screen: 'bot-profile', botKey: activeBotKey });
+      nav.resetTo({ screen: 'bot-profile', botKey: activeBotKey });
     }
-  }, [popScreen, nav.push, activeBotKey]);
+  }, [popScreen, nav.resetTo, activeBotKey]);
 
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button:
-  // 1. Dismiss topmost overlay/sheet/dialog/popover/menu or in-screen sub-state.
-  // 2. Guard mandatory flows (e.g. first primary Bot creation).
-  // 3. Pop the unified navigation stack; return false at root so native Back takes over.
+  // 1. Modals/drawers/sheets/popovers/confirm dialogs are dismissed in LIFO order by overlayStack before reaching here.
+  // 2. Dismiss in-screen non-overlay sub-states (group settings panel, DM detail, chat search/edit, task create/detail, hub search).
+  // 3. Pop the unified navigation stack; at stack bottom only 'hub' (or mandatory primary-bot setup) returns false to minimize the app,
+  //    while non-'hub' roots ('tasks', 'board', 'settings') return to 'hub'.
   const handleStepBack = useCallback((): boolean => {
-    if (leftDrawerOpen) {
-      setLeftDrawerOpen(false);
-      return true;
-    }
-    if (clearConfirmOpen) {
-      setClearConfirmOpen(false);
-      return true;
-    }
-    if (roomDeleteModal) {
-      if (!roomDeleteModal.submitting) {
-        roomDeleteFetchSeqRef.current += 1;
-        setRoomDeleteModal(null);
-      }
-      return true;
-    }
-    if (botConfirmModal) {
-      if (!action.busy) setBotConfirmModal(null);
-      return true;
-    }
-    if (bubbleActionTurn) {
-      setBubbleActionTurn(null);
-      return true;
-    }
-    if (modelTarget) {
-      closeModelTarget();
-      return true;
-    }
-    if (hubContextMenu) {
-      setHubContextMenu(null);
-      return true;
-    }
     if (screen === 'conversation' && roomSettingsOpen) {
       setRoomSettingsOpen(false);
       return true;
@@ -5648,33 +5746,7 @@ ${newer}` : draftSnapshot;
       setDmSelectedScopeId(null);
       return true;
     }
-    if (screen === 'bot-profile' && vaultTargetKey) {
-      setVaultTargetKey(null);
-      return true;
-    }
-    if (screen === 'bot-schedules') {
-      if (scheduleDeleteTarget) {
-        if (!action.busy) setScheduleDeleteTarget(null);
-        return true;
-      }
-      if (scheduleEditing !== null) {
-        setScheduleEditing(null);
-        return true;
-      }
-    }
-    if (screen === 'hub' && hubAddMenuOpen) {
-      setHubAddMenuOpen(false);
-      return true;
-    }
     if (screen === 'chat') {
-      if (chatTopMenuOpen) {
-        setChatTopMenuOpen(false);
-        return true;
-      }
-      if (composerMenuOpen) {
-        setComposerMenuOpen(false);
-        return true;
-      }
       if (chatSearchOpen) {
         setChatSearchOpen(false);
         setChatSearchQuery('');
@@ -5692,12 +5764,7 @@ ${newer}` : draftSnapshot;
         return true;
       }
       if (activeTaskId !== null) {
-        setActiveTaskId(null);
-        setTaskInitialEditMode(false);
-        const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
-        if (currentNav?.screen === 'tasks' && currentNav.taskId) {
-          nav.replaceTop({ ...currentNav, taskId: null });
-        }
+        closeActiveTaskDetail();
         return true;
       }
     }
@@ -5709,37 +5776,39 @@ ${newer}` : draftSnapshot;
       return true;
     }
     if (screen === 'bot-edit' && mustCreatePrimaryBot && editMode === 'create') {
-      setPrimaryBackNotice(prev => ({
-        text: t('请先创建主 Bot', 'Create a primary Bot first'),
-        seq: (prev?.seq ?? 0) + 1,
-      }));
+      const currentStack = nav.stackRef.current;
+      const prev = currentStack.length > 1 ? currentStack[currentStack.length - 2] : undefined;
+      if (currentStack.length <= 1 || prev?.screen === 'hub') {
+        return false;
+      }
+    }
+    if (popScreen()) {
       return true;
     }
-    return popScreen();
+    if (screen === 'settings' && settingsPage !== 'overview') {
+      nav.resetTo({ screen: 'settings', settingsPage: 'overview' });
+      return true;
+    }
+    if (!isExitRootScreen(screen)) {
+      if (screen === 'chat') {
+        chatScrollAnchorsRef.current.clear();
+        pendingChatAnchorRestoreRef.current = null;
+      }
+      nav.resetTo({ screen: 'hub' });
+      return true;
+    }
+    return false;
   }, [
-    leftDrawerOpen,
-    clearConfirmOpen,
-    roomDeleteModal,
-    botConfirmModal,
-    bubbleActionTurn,
-    action.busy,
-    modelTarget,
-    closeModelTarget,
-    hubContextMenu,
     screen,
+    settingsPage,
     roomSettingsOpen,
     dmSelectedScopeId,
-    vaultTargetKey,
-    scheduleDeleteTarget,
-    scheduleEditing,
-    hubAddMenuOpen,
-    chatTopMenuOpen,
-    composerMenuOpen,
     chatSearchOpen,
     editingTurn,
     editSubmitting,
     creatingTask,
     activeTaskId,
+    closeActiveTaskDetail,
     globalTasks.createDraft,
     globalTasks.markDraftLeftUnpublished,
     searchQuery,
@@ -5747,9 +5816,8 @@ ${newer}` : draftSnapshot;
     mustCreatePrimaryBot,
     editMode,
     nav.stackRef,
-    nav.replaceTop,
+    nav.resetTo,
     popScreen,
-    t,
   ]);
 
   useEffect(() => {
@@ -6441,20 +6509,37 @@ ${newer}` : draftSnapshot;
       setCreatingTask(false);
       setTaskInitialEditMode(false);
     }
+    if (next === 'tasks' || screen === 'tasks') {
+      setActiveTaskId(null);
+    }
     drawerNavigatedRef.current = next !== screen;
     setLeftDrawerOpen(false);
     nav.resetTo(next === 'settings' ? { screen: 'settings', settingsPage: 'overview' } : { screen: next });
   };
 
+  useEffect(() => {
+    if (screen !== 'hub') {
+      setHubAddMenuOpen(false);
+    }
+    if (screen !== 'chat') {
+      setChatTopMenuOpen(false);
+      setComposerMenuOpen(false);
+    }
+  }, [screen]);
+
   const openUpdatesFromShell = () => {
-    drawerNavigatedRef.current = true;
     setLeftDrawerOpen(false);
-    if (screen === 'chat') {
-      saveCurrentChatAnchor();
-      nav.push({ screen: 'settings', settingsPage: 'updates' });
+    setHubAddMenuOpen(false);
+    setChatTopMenuOpen(false);
+    setComposerMenuOpen(false);
+    if (screen === 'settings' && settingsPage === 'updates') {
+      drawerNavigatedRef.current = false;
       return;
     }
-    navigateFromSidebar('settings');
+    drawerNavigatedRef.current = true;
+    if (screen === 'chat') {
+      saveCurrentChatAnchor();
+    }
     nav.push({ screen: 'settings', settingsPage: 'updates' });
   };
   const openUpdatesFromShellRef = useRef(openUpdatesFromShell);
@@ -6579,13 +6664,17 @@ ${newer}` : draftSnapshot;
               setCreatingTask(false);
             }}
             onSelectTask={(taskId, openInEditMode) => {
+              if (taskId === null) {
+                closeActiveTaskDetail();
+                return;
+              }
               setTaskBoardNotice('');
               setCreatingTask(false);
               setActiveTaskId(taskId);
               setTaskInitialEditMode(Boolean(openInEditMode));
               const currentNav = nav.stackRef.current[nav.stackRef.current.length - 1];
-              if (currentNav?.screen === 'tasks' && (currentNav.taskId ?? null) !== (taskId ?? null)) {
-                nav.replaceTop({ ...currentNav, taskId: taskId ?? null });
+              if (currentNav?.screen === 'tasks' && (currentNav.taskId ?? null) !== taskId) {
+                nav.replaceTop({ ...currentNav, taskId });
               }
             }}
             onOpenMobileDrawer={openLeftDrawer}
@@ -6655,7 +6744,7 @@ ${newer}` : draftSnapshot;
           hubRefreshing={hubRefreshing}
           pullDistance={pullDistance}
           pullThreshold={PULL_THRESHOLD}
-          hubAddMenuOpen={hubAddMenuOpen}
+          hubAddMenuOpen={screen === 'hub' && hubAddMenuOpen}
           onToggleHubAddMenu={() => setHubAddMenuOpen(v => !v)}
           onCloseHubAddMenu={() => setHubAddMenuOpen(false)}
           onOpenCreateBot={openCreateBotPage}
@@ -6729,13 +6818,7 @@ ${newer}` : draftSnapshot;
           chatTopMenuOpen={chatTopMenuOpen}
           onToggleChatTopMenu={() => setChatTopMenuOpen(v => !v)}
           onCloseChatTopMenu={() => setChatTopMenuOpen(false)}
-          onBack={() => {
-            if (!popScreen()) {
-              chatScrollAnchorsRef.current.clear();
-              pendingChatAnchorRestoreRef.current = null;
-              nav.resetTo({ screen: 'hub' });
-            }
-          }}
+          onBack={stepBackChatScreen}
           onOpenBotProfile={openBotProfile}
           onOpenBotDmList={openBotDmList}
           onSetPrimaryBot={bot => void handleSetPrimaryBot(bot)}
@@ -7144,6 +7227,11 @@ ${newer}` : draftSnapshot;
             setEditCwd(val);
             setEditCwdSaved(false);
           }}
+          onDiscardEditCwd={() => {
+            editCwdDirtyRef.current = false;
+            setEditCwd(editCwdBaseline);
+            setEditSaveErrors(errors => ({ ...errors, cwd: '' }));
+          }}
           onReloadEditCwd={() => void loadEditCwd(activeBot)}
           onSaveEditCwd={() => void handleSaveBotEdit('cwd')}
           onDismissCwdSaveError={() => setEditSaveErrors(errors => ({ ...errors, cwd: '' }))}
@@ -7169,7 +7257,7 @@ ${newer}` : draftSnapshot;
           hostKind={activeBot.hostKind}
           open={screen === 'bot-screen'}
           onBack={() => {
-            if (!popScreen()) nav.push({ screen: 'bot-profile', botKey: activeBot.key });
+            if (!popScreen()) nav.resetTo({ screen: 'bot-profile', botKey: activeBot.key });
           }}
           showerTarget={showerTarget}
           showerCall={showerCall}
@@ -7184,7 +7272,12 @@ ${newer}` : draftSnapshot;
 
       {/* ==================== SCREEN 3C: FULL-SCREEN BOT BROWSER VIEW ==================== */}
       {screen === 'bot-google-setup' && activeBot && (
-        <SettingsSheet title={t('Google 配置向导', 'Google setup wizard')} onClose={() => { popScreen(); }}>
+        <SettingsSheet
+          title={t('Google 配置向导', 'Google setup wizard')}
+          onClose={() => {
+            if (!popScreen()) nav.resetTo({ screen: 'hub' });
+          }}
+        >
           <GoogleSetupWizard
             key={activeBot.key}
             api={mobileGoogleContext?.api}
@@ -7197,7 +7290,9 @@ ${newer}` : draftSnapshot;
             onOpenBrowser={openBotBrowser}
             onOpenBrowserDestination={openBrowserDestination}
             onOpenCenterAdmin={() => openInAppCenterAdmin('google')}
-            onClose={() => { popScreen(); }}
+            onClose={() => {
+              if (!popScreen()) nav.resetTo({ screen: 'hub' });
+            }}
           />
         </SettingsSheet>
       )}
@@ -7219,7 +7314,7 @@ ${newer}` : draftSnapshot;
             onSwitchToExternalGuide={async (url, reason, rejection) => {
               if (reason === 'google-sign-in-rejected') {
                 if (await continueGoogleSetupAfterSignInRejection(callGoogleSetup, openExternalUrl, rejection)) {
-                  if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
+                  if (!popScreen()) nav.resetTo({ screen: 'chat', botKey: activeBot.key });
                 }
                 return;
               }
@@ -7227,7 +7322,7 @@ ${newer}` : draftSnapshot;
               if (url) await openExternalUrl(url);
             }}
             onClose={() => {
-              if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
+              if (!popScreen()) nav.resetTo({ screen: 'chat', botKey: activeBot.key });
             }}
           />
         </div>
@@ -7292,7 +7387,15 @@ ${newer}` : draftSnapshot;
                 throw new Error(t('尚未找到原请求，保持原 ID，不能重新创建', 'Original request not found; retain its ID and do not recreate'));
               }
               setCreateAttempt(null);
-              nav.resetTo({ screen: 'hub' });
+              const reconcileStack = nav.stackRef.current;
+              if (
+                reconcileStack[reconcileStack.length - 1]?.screen === 'bot-edit' &&
+                reconcileStack[reconcileStack.length - 2]?.screen === 'group-create'
+              ) {
+                if (!popScreen()) nav.resetTo({ screen: 'hub' });
+              } else {
+                nav.resetTo({ screen: 'hub' });
+              }
             });
           }}
           onClearCreateAttempt={() => setCreateAttempt(null)}
@@ -7424,6 +7527,18 @@ ${newer}` : draftSnapshot;
           onBack={() => {
             if (!popScreen()) nav.resetTo({ screen: 'hub' });
           }}
+          onDiscardAndBack={() => {
+            const restored =
+              editMode === 'create'
+                ? editInitialSoul
+                : botSoul && activeBot && botSoulKey === activeBot.key
+                  ? botSoul.text
+                  : '';
+            setSoulDraft(restored);
+            setSoulDirty(false);
+            action.setError('');
+            if (!popScreen()) nav.resetTo({ screen: 'hub' });
+          }}
           onSave={() => void handleSaveSoul()}
           onReload={bot => void loadBotSoul(bot)}
         />
@@ -7444,7 +7559,11 @@ ${newer}` : draftSnapshot;
           scheduleFilter={scheduleFilter}
           onChangeScheduleFilter={setScheduleFilter}
           scheduleEditing={scheduleEditing}
-          onCancelEditing={() => setScheduleEditing(null)}
+          scheduleDirty={scheduleDraftDirty}
+          onCancelEditing={() => {
+            setScheduleEditing(null);
+            setScheduleDraftBaseline(null);
+          }}
           scheduleDraft={scheduleDraft}
           setScheduleDraft={setScheduleDraft}
           scheduleCustomWeekdays={scheduleCustomWeekdays}

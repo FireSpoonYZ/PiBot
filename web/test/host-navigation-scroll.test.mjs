@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
   ROOT_SCREENS,
   createNavStack,
   currentNavEntry,
+  isExitRootScreen,
   isRootScreen,
   navEntryToHash,
   parseHashToRootEntry,
@@ -13,8 +15,14 @@ import {
   pushNavEntry,
   replaceTopNavEntry,
   resetNavStack,
+  resetNavStackChain,
   syncLocationHash,
 } from '../src/hub/navigationLogic.ts';
+import {
+  getOverlayStackDepth,
+  hasOpenOverlay,
+  registerOverlayBackHandler,
+} from '../src/components/ui/overlayStack.ts';
 import {
   CHAT_STICK_THRESHOLD_PX,
   decideChatAutoScroll,
@@ -446,4 +454,209 @@ test('decideChatAutoScroll F6 simplified contract handles entering, targetChange
       showNewContentPill: false,
     },
   );
+});
+
+test('isExitRootScreen only allows hub to exit/background the app at stack bottom', () => {
+  assert.equal(isExitRootScreen('hub'), true);
+  assert.equal(isExitRootScreen('tasks'), false);
+  assert.equal(isExitRootScreen('board'), false);
+  assert.equal(isExitRootScreen('settings'), false);
+  assert.equal(isExitRootScreen('chat'), false);
+  assert.equal(isExitRootScreen('bot-profile'), false);
+});
+
+test('resetNavStackChain builds clean [hub, chat] notification launch stack that pops to hub then hands off', () => {
+  const stack = resetNavStackChain({ screen: 'hub' }, { screen: 'chat', botKey: 'local:local:b1' });
+  assert.deepEqual(stack, [
+    { screen: 'hub' },
+    { screen: 'chat', botKey: 'local:local:b1' },
+  ]);
+
+  const backToHub = popNavEntry(stack);
+  assert.equal(backToHub.popped, true);
+  assert.deepEqual(backToHub.current, { screen: 'hub' });
+  assert.equal(backToHub.stack.length, 1);
+
+  const atRoot = popNavEntry(backToHub.stack);
+  assert.equal(atRoot.popped, false);
+  assert.deepEqual(atRoot.current, { screen: 'hub' });
+});
+
+test('cross-screen TaskDetail, Updates, and Group-Create stacks pop cleanly to their origins', () => {
+  // Chat -> TaskDetail has non-tasks previous entry and pops straight back to chat.
+  let chatTaskStack = createNavStack('hub');
+  chatTaskStack = pushNavEntry(chatTaskStack, { screen: 'chat', botKey: 'local:local:b1' });
+  chatTaskStack = pushNavEntry(chatTaskStack, { screen: 'tasks', taskId: 't1' });
+  assert.equal(previousNavEntry(chatTaskStack)?.screen, 'chat');
+  const backToChat = popNavEntry(chatTaskStack);
+  assert.equal(backToChat.popped, true);
+  assert.deepEqual(backToChat.current, { screen: 'chat', botKey: 'local:local:b1' });
+
+  // Multi-hop Task A -> Chat -> Task B unwinds Task B -> Chat -> Task A cleanly.
+  let multiHop = createNavStack('tasks', { taskId: 'tA' });
+  multiHop = pushNavEntry(multiHop, { screen: 'chat', botKey: 'local:local:b1' });
+  multiHop = pushNavEntry(multiHop, { screen: 'tasks', taskId: 'tB' });
+  assert.equal(multiHop.length, 3);
+  assert.equal(previousNavEntry(multiHop)?.screen, 'chat');
+
+  const hop1 = popNavEntry(multiHop);
+  assert.equal(hop1.popped, true);
+  assert.deepEqual(hop1.current, { screen: 'chat', botKey: 'local:local:b1' });
+
+  const hop2 = popNavEntry(hop1.stack);
+  assert.equal(hop2.popped, true);
+  assert.deepEqual(hop2.current, { screen: 'tasks', taskId: 'tA' });
+
+  const backToTaskList = replaceTopNavEntry(hop2.stack, { ...hop2.current, taskId: null });
+  assert.deepEqual(backToTaskList, [{ screen: 'tasks', taskId: null }]);
+  assert.equal(popNavEntry(backToTaskList).popped, false);
+
+  // Pushing settings/updates onto hub, tasks, board, or chat pops straight back to the origin.
+  const origins = [
+    createNavStack('hub'),
+    createNavStack('tasks'),
+    createNavStack('board'),
+    pushNavEntry(createNavStack('hub'), { screen: 'chat', botKey: 'local:local:b1' }),
+  ];
+  for (const originStack of origins) {
+    const originTop = currentNavEntry(originStack);
+    const withUpdates = pushNavEntry(originStack, { screen: 'settings', settingsPage: 'updates' });
+    assert.equal(withUpdates.length, originStack.length + 1);
+    assert.deepEqual(currentNavEntry(withUpdates), { screen: 'settings', settingsPage: 'updates' });
+    // Pushing updates again while already on updates does not duplicate the frame.
+    assert.equal(
+      pushNavEntry(withUpdates, { screen: 'settings', settingsPage: 'updates' }).length,
+      withUpdates.length,
+    );
+    const popped = popNavEntry(withUpdates);
+    assert.equal(popped.popped, true);
+    assert.deepEqual(popped.current, originTop);
+  }
+
+  // Group-Create -> Bot-Edit keeps group-create beneath top and pops back to group-create.
+  let groupCreateStack = createNavStack('hub');
+  groupCreateStack = pushNavEntry(groupCreateStack, { screen: 'group-create' });
+  groupCreateStack = pushNavEntry(groupCreateStack, { screen: 'bot-edit' });
+  assert.equal(previousNavEntry(groupCreateStack)?.screen, 'group-create');
+  const backToGroupCreate = popNavEntry(groupCreateStack);
+  assert.equal(backToGroupCreate.popped, true);
+  assert.deepEqual(backToGroupCreate.current, { screen: 'group-create' });
+  assert.deepEqual(
+    backToGroupCreate.stack.map(entry => entry.screen),
+    ['hub', 'group-create'],
+  );
+});
+
+test('overlayStack LIFO invokes topmost drawer/modal before page handler and stays clean on out-of-order unregister', () => {
+  const prevWindow = globalThis.window;
+  const listeners = new Map();
+  const fakeWindow = {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    dispatchBack() {
+      const event = {
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true;
+        },
+        stopImmediatePropagation() {},
+      };
+      for (const fn of listeners.get('app-back') ?? []) {
+        fn(event);
+        if (event.defaultPrevented) break;
+      }
+      return event.defaultPrevented;
+    },
+  };
+  globalThis.window = fakeWindow;
+  const cleanups = [];
+  try {
+    assert.equal(hasOpenOverlay(), false);
+    assert.equal(getOverlayStackDepth(), 0);
+    assert.equal(fakeWindow.dispatchBack(), false);
+
+    const calls = [];
+    let unregPage = () => {};
+    let unregDrawer = () => {};
+    unregPage = registerOverlayBackHandler(() => {
+      calls.push('page');
+      unregPage();
+    });
+    cleanups.push(unregPage);
+    unregDrawer = registerOverlayBackHandler(() => {
+      calls.push('drawer');
+      unregDrawer();
+    });
+    cleanups.push(unregDrawer);
+
+    assert.equal(hasOpenOverlay(), true);
+    assert.equal(getOverlayStackDepth(), 2);
+
+    // Topmost drawer/modal closes first.
+    assert.equal(fakeWindow.dispatchBack(), true);
+    assert.deepEqual(calls, ['drawer']);
+    assert.equal(getOverlayStackDepth(), 1);
+
+    // Underlying page-level handler runs second.
+    assert.equal(fakeWindow.dispatchBack(), true);
+    assert.deepEqual(calls, ['drawer', 'page']);
+    assert.equal(getOverlayStackDepth(), 0);
+    assert.equal(hasOpenOverlay(), false);
+
+    // Empty stack returns false so native/Host fallback runs.
+    assert.equal(fakeWindow.dispatchBack(), false);
+
+    // Out-of-order unregistration preserves remaining LIFO order cleanly.
+    const order = [];
+    const unregA = registerOverlayBackHandler(() => order.push('A'));
+    const unregB = registerOverlayBackHandler(() => order.push('B'));
+    const unregC = registerOverlayBackHandler(() => order.push('C'));
+    cleanups.push(unregA, unregB, unregC);
+
+    unregB();
+    unregB(); // duplicate unregister is a no-op
+    assert.equal(getOverlayStackDepth(), 2);
+
+    assert.equal(fakeWindow.dispatchBack(), true);
+    assert.deepEqual(order, ['C']);
+    unregC();
+
+    assert.equal(fakeWindow.dispatchBack(), true);
+    assert.deepEqual(order, ['C', 'A']);
+    unregA();
+
+    assert.equal(getOverlayStackDepth(), 0);
+    assert.equal(fakeWindow.dispatchBack(), false);
+  } finally {
+    for (const fn of cleanups) fn();
+    if (prevWindow === undefined) {
+      delete globalThis.window;
+    } else {
+      globalThis.window = prevWindow;
+    }
+  }
+});
+
+test('TauriMainActivity handleBackNavigation dispatches app-back with dialog Escape & moveTaskToBack and omits dead hooks', () => {
+  const javaSource = readFileSync(
+    new URL('../../app/src/main/java/com/example/launcherprobe/TauriMainActivity.java', import.meta.url),
+    'utf8',
+  );
+  const startIdx = javaSource.indexOf('private void handleBackNavigation()');
+  assert.notEqual(startIdx, -1, 'handleBackNavigation method should exist');
+  const nextMethodIdx = javaSource.indexOf('private float getDisplayDensity', startIdx);
+  assert.notEqual(nextMethodIdx, -1, 'Expected method boundary after handleBackNavigation');
+  const methodBody = javaSource.slice(startIdx, nextMethodIdx);
+
+  assert.match(methodBody, /new Event\('app-back',\{cancelable:true\}\)/);
+  assert.match(methodBody, /\[role=\\"dialog\\"\]:not\(\[aria-hidden=\\"true\\"\]\)/);
+  assert.match(methodBody, /key:'Escape'/);
+  assert.match(methodBody, /moveTaskToBack\(true\)/);
+  assert.doesNotMatch(javaSource, /composer-back/);
+  assert.doesNotMatch(methodBody, /window\.history\.state/);
 });
