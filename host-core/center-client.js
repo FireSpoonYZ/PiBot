@@ -41,7 +41,7 @@ export function validateCenterUrl(centerUrl) {
   return base;
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, oauthToken, onOAuthToken, onDisconnect, onChange, onWebhookReady, onTaskReady }) {
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, oauthToken, onOAuthToken, onDisconnect, onChange, onWebhookReady, onTaskReady, onClientReleasePublished }) {
   const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
@@ -408,18 +408,21 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     const disconnected = () => disconnect(centerError('CENTER_OFFLINE', 'center event stream disconnected'));
     events.setEncoding('utf8');
     events.on('data', (chunk) => {
+      if (closed) return;
       arm();
       buffer += chunk;
       if (buffer.length > 65536) { events.destroy(); return; }
       let end;
-      while ((end = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      while (!closed && (end = buffer.search(/\r?\n\r?\n/)) !== -1) {
         const frame = buffer.slice(0, end);
         const separator = /^\r?\n\r?\n/.exec(buffer.slice(end))[0];
         buffer = buffer.slice(end + separator.length);
         const lines = frame.split(/\r?\n/);
-        if (lines.includes('event: config-changed')) onChange?.();
-        if (lines.includes('event: webhook-ready')) onWebhookReady?.();
-        if (lines.includes('event: task-ready')) onTaskReady?.();
+        const hasEvent = (name) => lines.includes(`event: ${name}`) || lines.includes(`event:${name}`);
+        if (hasEvent('config-changed')) onChange?.();
+        if (hasEvent('webhook-ready')) onWebhookReady?.();
+        if (hasEvent('task-ready')) onTaskReady?.();
+        if (hasEvent('client-release-published')) onClientReleasePublished?.();
       }
     });
     events.once('end', disconnected);

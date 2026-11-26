@@ -181,7 +181,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       else stream.reply.write(`event: ${event}\ndata: {}\n\n`);
     }
   }
-  function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
+  function notifyAll(event = 'config-changed') { for (const deviceId of streams.keys()) notify(deviceId, event); }
   function notifyInstallation(id) { for (const deviceId of new Set(store.listBotBindings({ installationId: id }).map(b => b.deviceId))) notify(deviceId); }
   setOwnerOAuthVerifier(app, (token) => {
     const grant = store.verifyOAuthAdminToken(sha256(token));
