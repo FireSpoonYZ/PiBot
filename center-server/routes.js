@@ -216,11 +216,14 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   const listOwnerDevices = () => bridge.listDevices().map(presentDevice);
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
+  const isAntigravityModelRef = (modelRef) =>
+    typeof modelRef === 'string' && modelRef.startsWith(ANTIGRAVITY_PROVIDER_ID + '/');
   async function preflightModelChange(deviceId, botId, current, next) {
-    if (next?.modelRef === current?.modelRef
-      || !next?.modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) return;
-    // The Host owns conversation history. Never persist a selection that it cannot apply.
-    await bridge.call(deviceId, 'assertModelSelectionAllowed', { botId, modelRef: next.modelRef });
+    const currentIsAgy = isAntigravityModelRef(current?.modelRef);
+    const nextIsAgy = isAntigravityModelRef(next?.modelRef);
+    if (currentIsAgy === nextIsAgy) return;
+    // The Host owns conversation history. Never persist a cross-provider Antigravity switch that it cannot apply.
+    await bridge.call(deviceId, 'assertModelSelectionAllowed', { botId, modelRef: next?.modelRef ?? null });
   }
 
   async function putBotModelConfig(req) {
@@ -240,7 +243,10 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const value = validate(selectionSchema, body.value);
     const current = store.getModelConfig();
     if (body.expectedRevision !== current.revision) fail('REVISION_CONFLICT', 'Revision does not match');
-    if (value.modelRef === current.global.modelRef || !value.modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) {
+    if (
+      value.modelRef === current.global.modelRef
+      || isAntigravityModelRef(value.modelRef) === isAntigravityModelRef(current.global.modelRef)
+    ) {
       return changed(store.putModelConfig(body.expectedRevision, value));
     }
     const affected = [];

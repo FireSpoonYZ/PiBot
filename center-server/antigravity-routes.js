@@ -1,17 +1,29 @@
 import {
+  AGY_HISTORY_CHANGED,
   ANTIGRAVITY_API,
   ANTIGRAVITY_CANCEL_PATH,
   ANTIGRAVITY_PROVIDER_ID,
-  ANTIGRAVITY_STREAM_PATH,
+  ANTIGRAVITY_RUN_PATH,
+  ANTIGRAVITY_STEER_PATH,
+  ANTIGRAVITY_TOOL_RESULT_PATH,
 } from '../center-contract/antigravity.js';
-import { AGY_DELTA_VERSION, historyChanged, isHash } from '../center-contract/antigravity-delta.js';
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const STREAM_BODY_KEYS = new Set(['sessionId', 'requestId', 'modelId', 'delta', 'reasoning', 'turnContext']);
-const CANCEL_BODY_KEYS = new Set(['sessionId', 'requestId']);
+const RUN_BODY_KEYS = new Set([
+  'sessionId', 'runId', 'modelId', 'reasoning', 'initialSystemPrompt',
+  'tools', 'sections', 'routeNote', 'inputs',
+]);
+const TOOL_RESULT_BODY_KEYS = new Set(['sessionId', 'runId', 'callId', 'content', 'isError']);
+const STEER_BODY_KEYS = new Set(['sessionId', 'runId', 'sections', 'routeNote', 'inputs']);
+const CANCEL_BODY_KEYS = new Set(['sessionId', 'runId']);
+const SECTION_KEYS = new Set(['key', 'value']);
+const INPUT_KEYS = new Set(['text', 'images', 'source']);
+const IMAGE_KEYS = new Set(['data', 'mimeType']);
 const MAX_ID_LENGTH = 256;
 const MAX_MESSAGE_PARTS = 512;
-const MAX_SYSTEM_TOOLS = 512;
+const MAX_TOOLS = 512;
+const MAX_SECTIONS = 512;
+const MAX_INPUTS = 512;
 const CATALOG_TIMEOUT_MS = 30_000;
 const TOKEN_CHECK_INTERVAL_MS = 15_000;
 const OPTIONAL_MODEL_FIELDS = [
@@ -47,137 +59,181 @@ function assertAllowedKeys(obj, allowed, label) {
   }
 }
 
-function validateContentParts(parts, allowImage) {
+function validateContentParts(parts) {
   if (!Array.isArray(parts) || parts.length > MAX_MESSAGE_PARTS) {
-    fail('INVALID_ARGUMENT', 'Invalid message content');
+    fail('INVALID_ARGUMENT', 'Invalid tool result content');
   }
+  const normalized = [];
   for (const part of parts) {
-    if (!isPlainObject(part)) fail('INVALID_ARGUMENT', 'Invalid message content part');
+    if (!isPlainObject(part)) fail('INVALID_ARGUMENT', 'Invalid content part');
     if (part.type === 'text') {
       if (typeof part.text !== 'string') fail('INVALID_ARGUMENT', 'Invalid text part');
-    } else if (allowImage && part.type === 'image') {
-      if (typeof part.data !== 'string' || part.data.length === 0 || typeof part.mimeType !== 'string' || !part.mimeType.trim()) {
+      normalized.push({ type: 'text', text: part.text });
+    } else if (part.type === 'image') {
+      if (
+        typeof part.data !== 'string' ||
+        part.data.length === 0 ||
+        typeof part.mimeType !== 'string' ||
+        !part.mimeType.trim()
+      ) {
         fail('INVALID_ARGUMENT', 'Invalid image part');
       }
+      normalized.push({ type: 'image', data: part.data, mimeType: part.mimeType });
     } else {
       fail('INVALID_ARGUMENT', 'Unsupported content part type');
     }
   }
+  return normalized;
 }
 
-function validateSystemMessage(msg) {
-  if (typeof msg.content !== 'string') validateContentParts(msg.content, false);
-  if (msg.sections !== undefined) {
-    if (!isPlainObject(msg.sections)) fail('INVALID_ARGUMENT', 'Invalid system sections');
-    for (const val of Object.values(msg.sections)) {
-      if (val !== null && typeof val !== 'string') fail('INVALID_ARGUMENT', 'Invalid system section value');
-    }
+function validateImages(images) {
+  if (!Array.isArray(images) || images.length > MAX_MESSAGE_PARTS) {
+    fail('INVALID_ARGUMENT', 'Invalid images');
   }
-  if (msg.toolsAdded !== undefined) {
-    if (!Array.isArray(msg.toolsAdded) || msg.toolsAdded.length > MAX_SYSTEM_TOOLS) {
-      fail('INVALID_ARGUMENT', 'Invalid toolsAdded');
+  const normalized = [];
+  for (const image of images) {
+    if (!isPlainObject(image)) fail('INVALID_ARGUMENT', 'Invalid image');
+    assertAllowedKeys(image, IMAGE_KEYS, 'image');
+    if (
+      typeof image.data !== 'string' ||
+      image.data.length === 0 ||
+      typeof image.mimeType !== 'string' ||
+      !image.mimeType.trim()
+    ) {
+      fail('INVALID_ARGUMENT', 'Invalid image');
     }
-    for (const tool of msg.toolsAdded) {
-      if (!isPlainObject(tool)) fail('INVALID_ARGUMENT', 'Invalid tool definition');
-      assertBoundedId(tool.name, 'tool.name');
-      if (tool.description !== undefined && typeof tool.description !== 'string') {
-        fail('INVALID_ARGUMENT', 'Invalid tool.description');
-      }
-      if (!isPlainObject(tool.parameters)) fail('INVALID_ARGUMENT', 'Invalid tool.parameters');
-    }
+    normalized.push({ data: image.data, mimeType: image.mimeType });
   }
-  if (msg.toolsRemoved !== undefined) {
-    if (!Array.isArray(msg.toolsRemoved) || msg.toolsRemoved.length > MAX_SYSTEM_TOOLS) {
-      fail('INVALID_ARGUMENT', 'Invalid toolsRemoved');
-    }
-    for (const ref of msg.toolsRemoved) {
-      if (!isPlainObject(ref)) fail('INVALID_ARGUMENT', 'Invalid toolsRemoved entry');
-      assertBoundedId(ref.name, 'toolsRemoved.name');
-    }
-  }
+  return normalized;
 }
 
-function validateMessage(msg) {
-  if (!isPlainObject(msg)) fail('INVALID_ARGUMENT', 'Invalid message');
-  switch (msg.role) {
-    case 'system':
-      validateSystemMessage(msg);
-      return;
-    case 'user':
-      if (typeof msg.content !== 'string') validateContentParts(msg.content, true);
-      return;
-    case 'assistant':
-      if (!Array.isArray(msg.content) || msg.content.length > MAX_MESSAGE_PARTS) {
-        fail('INVALID_ARGUMENT', 'Invalid assistant content');
-      }
-      for (const part of msg.content) {
-        if (!isPlainObject(part)) fail('INVALID_ARGUMENT', 'Invalid assistant content part');
-        if (part.type === 'text') {
-          if (typeof part.text !== 'string') fail('INVALID_ARGUMENT', 'Invalid text part');
-        } else if (part.type === 'thinking') {
-          if (typeof part.thinking !== 'string') fail('INVALID_ARGUMENT', 'Invalid thinking part');
-        } else if (part.type === 'toolCall') {
-          assertBoundedId(part.id, 'toolCall.id');
-          assertBoundedId(part.name, 'toolCall.name');
-          if (!isPlainObject(part.arguments)) fail('INVALID_ARGUMENT', 'Invalid toolCall arguments');
-        } else {
-          fail('INVALID_ARGUMENT', 'Unsupported assistant content part');
-        }
-      }
-      return;
-    case 'toolResult':
-      assertBoundedId(msg.toolCallId, 'toolCallId');
-      assertBoundedId(msg.toolName, 'toolName');
-      validateContentParts(msg.content, true);
-      if (msg.isError !== undefined && typeof msg.isError !== 'boolean') {
-        fail('INVALID_ARGUMENT', 'Invalid toolResult isError');
-      }
-      return;
-    default:
-      fail('INVALID_ARGUMENT', 'Unsupported message role');
+function validateTools(tools) {
+  if (!Array.isArray(tools) || tools.length > MAX_TOOLS) {
+    fail('INVALID_ARGUMENT', 'Invalid tools');
   }
+  const normalized = [];
+  for (const tool of tools) {
+    if (!isPlainObject(tool)) fail('INVALID_ARGUMENT', 'Invalid tool definition');
+    const name = assertBoundedId(tool.name, 'tool.name');
+    if (tool.description !== undefined && typeof tool.description !== 'string') {
+      fail('INVALID_ARGUMENT', 'Invalid tool.description');
+    }
+    if (!isPlainObject(tool.parameters)) fail('INVALID_ARGUMENT', 'Invalid tool.parameters');
+    normalized.push({
+      name,
+      ...(tool.description !== undefined ? { description: tool.description } : {}),
+      parameters: tool.parameters,
+    });
+  }
+  return normalized;
 }
 
-function validateStreamBody(raw) {
+function validateSections(sections) {
+  if (!Array.isArray(sections) || sections.length > MAX_SECTIONS) {
+    fail('INVALID_ARGUMENT', 'Invalid sections');
+  }
+  const normalized = [];
+  for (const section of sections) {
+    if (!isPlainObject(section)) fail('INVALID_ARGUMENT', 'Invalid section');
+    assertAllowedKeys(section, SECTION_KEYS, 'section');
+    const key = assertBoundedId(section.key, 'section.key');
+    if (section.value !== null && typeof section.value !== 'string') {
+      fail('INVALID_ARGUMENT', 'Invalid section.value');
+    }
+    normalized.push({ key, value: section.value });
+  }
+  return normalized;
+}
+
+function validateInputs(inputs) {
+  if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > MAX_INPUTS) {
+    fail('INVALID_ARGUMENT', 'Invalid inputs');
+  }
+  const normalized = [];
+  for (const item of inputs) {
+    if (!isPlainObject(item)) fail('INVALID_ARGUMENT', 'Invalid input item');
+    assertAllowedKeys(item, INPUT_KEYS, 'input');
+    if (typeof item.text !== 'string') fail('INVALID_ARGUMENT', 'Invalid input text');
+    const images = item.images !== undefined ? validateImages(item.images) : undefined;
+    if (item.source !== undefined && typeof item.source !== 'string') {
+      fail('INVALID_ARGUMENT', 'Invalid input source');
+    }
+    normalized.push({
+      text: item.text,
+      ...(images !== undefined ? { images } : {}),
+      ...(item.source !== undefined ? { source: item.source } : {}),
+    });
+  }
+  return normalized;
+}
+
+function validateRunBody(raw) {
   if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', 'Expected an object');
-  if (!raw.delta) throw historyChanged('Upgrade this Host version before retrying');
-  assertAllowedKeys(raw, STREAM_BODY_KEYS, 'request');
+  assertAllowedKeys(raw, RUN_BODY_KEYS, 'request');
   const sessionId = assertBoundedId(raw.sessionId, 'sessionId');
+  const runId = assertBoundedId(raw.runId, 'runId');
   const modelId = assertBoundedId(raw.modelId, 'modelId');
-  const requestId = Object.hasOwn(raw, 'requestId') ? assertBoundedId(raw.requestId, 'requestId') : undefined;
   if (raw.reasoning !== undefined && (typeof raw.reasoning !== 'string' || !THINKING_LEVELS.has(raw.reasoning))) {
     fail('INVALID_ARGUMENT', 'Invalid reasoning level');
   }
-  const delta = raw.delta;
-  if (!isPlainObject(delta)) fail('INVALID_ARGUMENT', 'Invalid history delta');
-  assertAllowedKeys(delta, new Set(['version', 'offset', 'prefixHash', 'configHash', 'config', 'messages']), 'delta');
-  if (delta.version !== AGY_DELTA_VERSION || !Number.isSafeInteger(delta.offset) || delta.offset < 0 ||
-      !isHash(delta.prefixHash) || !isHash(delta.configHash) || !Array.isArray(delta.messages) ||
-      !Number.isSafeInteger(delta.offset + delta.messages.length)) {
-    fail('INVALID_ARGUMENT', 'Invalid history delta');
+  if (raw.initialSystemPrompt !== undefined && typeof raw.initialSystemPrompt !== 'string') {
+    fail('INVALID_ARGUMENT', 'Invalid initialSystemPrompt');
   }
-  for (const message of delta.messages) {
-    validateMessage(message);
-    if (message.role === 'system') fail('INVALID_ARGUMENT', 'System messages belong to config');
+  const tools = validateTools(raw.tools);
+  const sections = raw.sections !== undefined ? validateSections(raw.sections) : undefined;
+  if (raw.routeNote !== undefined && typeof raw.routeNote !== 'string') {
+    fail('INVALID_ARGUMENT', 'Invalid routeNote');
   }
-  if (delta.config !== undefined) {
-    if (!isPlainObject(delta.config)) fail('INVALID_ARGUMENT', 'Invalid configuration');
-    assertAllowedKeys(delta.config, new Set(['systemPrompt', 'tools', 'routingPolicy']), 'config');
-    if (typeof delta.config.systemPrompt !== 'string' || typeof delta.config.routingPolicy !== 'string' ||
-        !Array.isArray(delta.config.tools)) fail('INVALID_ARGUMENT', 'Invalid configuration');
-    validateSystemMessage({ role: 'system', content: delta.config.systemPrompt, toolsAdded: delta.config.tools });
+  const inputs = validateInputs(raw.inputs);
+  return {
+    sessionId,
+    runId,
+    modelId,
+    ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}),
+    ...(raw.initialSystemPrompt !== undefined ? { initialSystemPrompt: raw.initialSystemPrompt } : {}),
+    tools,
+    ...(sections !== undefined ? { sections } : {}),
+    ...(raw.routeNote !== undefined ? { routeNote: raw.routeNote } : {}),
+    inputs,
+  };
+}
+
+function validateToolResultBody(raw) {
+  if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', 'Expected an object');
+  assertAllowedKeys(raw, TOOL_RESULT_BODY_KEYS, 'request');
+  const sessionId = assertBoundedId(raw.sessionId, 'sessionId');
+  const runId = assertBoundedId(raw.runId, 'runId');
+  const callId = assertBoundedId(raw.callId, 'callId');
+  const content = validateContentParts(raw.content);
+  if (raw.isError !== undefined && typeof raw.isError !== 'boolean') {
+    fail('INVALID_ARGUMENT', 'Invalid isError');
   }
-  const end = delta.offset + delta.messages.length;
-  const turnContext = raw.turnContext;
-  if (!isPlainObject(turnContext)) fail('INVALID_ARGUMENT', 'Invalid turnContext');
-  assertAllowedKeys(turnContext, new Set(['inputIndex', 'routeNote']), 'turnContext');
-  if (!Number.isSafeInteger(turnContext.inputIndex) || turnContext.inputIndex < 0 ||
-      turnContext.inputIndex !== end - 1 ||
-      (turnContext.routeNote !== undefined && typeof turnContext.routeNote !== 'string')) {
-    fail('INVALID_ARGUMENT', 'Invalid turnContext');
+  return {
+    sessionId,
+    runId,
+    callId,
+    content,
+    ...(raw.isError !== undefined ? { isError: raw.isError } : {}),
+  };
+}
+
+function validateSteerBody(raw) {
+  if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', 'Expected an object');
+  assertAllowedKeys(raw, STEER_BODY_KEYS, 'request');
+  const sessionId = assertBoundedId(raw.sessionId, 'sessionId');
+  const runId = assertBoundedId(raw.runId, 'runId');
+  const sections = raw.sections !== undefined ? validateSections(raw.sections) : undefined;
+  if (raw.routeNote !== undefined && typeof raw.routeNote !== 'string') {
+    fail('INVALID_ARGUMENT', 'Invalid routeNote');
   }
-  return { sessionId, ...(requestId !== undefined ? { requestId } : {}), modelId, delta,
-    ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}), turnContext };
+  const inputs = validateInputs(raw.inputs);
+  return {
+    sessionId,
+    runId,
+    ...(sections !== undefined ? { sections } : {}),
+    ...(raw.routeNote !== undefined ? { routeNote: raw.routeNote } : {}),
+    inputs,
+  };
 }
 
 function validateCancelBody(raw) {
@@ -185,7 +241,7 @@ function validateCancelBody(raw) {
   assertAllowedKeys(raw, CANCEL_BODY_KEYS, 'request');
   return {
     sessionId: assertBoundedId(raw.sessionId, 'sessionId'),
-    ...(Object.hasOwn(raw, 'requestId') ? { requestId: assertBoundedId(raw.requestId, 'requestId') } : {}),
+    ...(raw.runId !== undefined ? { runId: assertBoundedId(raw.runId, 'runId') } : {}),
   };
 }
 
@@ -219,34 +275,33 @@ function normalizeCatalogModel(item) {
   return normalized;
 }
 
-function safeStreamErrorEvent(modelId, error) {
-  let errorMessage = 'Upstream stream failed';
-  if (error?.name === 'TimeoutError' || error?.code === 'TIMEOUT') errorMessage = 'Stream timed out';
-  else if (error?.code === 'UNAUTHENTICATED') errorMessage = 'Antigravity authentication required';
-  else if (error?.code === 'INVALID_ARGUMENT') errorMessage = 'Invalid stream request';
-  else if (error?.code === 'INVALID_STATE') errorMessage = 'Antigravity service unavailable';
-  return {
-    type: 'error',
-    reason: 'error',
-    error: {
-      role: 'assistant',
-      content: [],
-      api: ANTIGRAVITY_API,
-      provider: ANTIGRAVITY_PROVIDER_ID,
-      model: modelId,
-      usage: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: 'error',
-      errorMessage,
-      timestamp: Date.now(),
-    },
-  };
+function safeRunErrorEvent(error) {
+  if (error?.code === AGY_HISTORY_CHANGED) {
+    return { type: 'error', code: AGY_HISTORY_CHANGED, message: 'Antigravity session requires /clear before continuing' };
+  }
+  if (error?.name === 'TimeoutError' || error?.code === 'TIMEOUT') {
+    return { type: 'error', code: 'TIMEOUT', message: 'Stream timed out' };
+  }
+  if (error?.code === 'UNAUTHENTICATED') {
+    return { type: 'error', code: 'UNAUTHENTICATED', message: 'Antigravity authentication required' };
+  }
+  if (error?.code === 'INVALID_ARGUMENT') {
+    return { type: 'error', code: 'INVALID_ARGUMENT', message: 'Invalid run request' };
+  }
+  if (error?.code === 'INVALID_STATE') {
+    return { type: 'error', code: 'INVALID_STATE', message: 'Antigravity service unavailable' };
+  }
+  if (error?.name === 'AbortError') {
+    return { type: 'error', message: 'Operation aborted', aborted: true };
+  }
+  return { type: 'error', message: 'Upstream stream failed' };
+}
+
+function rethrowInvalidStateAs409(error, fallbackMessage) {
+  if (error?.code === 'INVALID_STATE') {
+    throw Object.assign(new Error(fallbackMessage), { code: 'INVALID_STATE', statusCode: 409 });
+  }
+  throw error;
 }
 
 function waitForDrain(res, signal) {
@@ -332,9 +387,12 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
     return normalized;
   }
 
-  host('POST', ANTIGRAVITY_STREAM_PATH, async (req, reply) => {
+  host('POST', ANTIGRAVITY_RUN_PATH, async (req, reply) => {
     const { deviceId, token } = req.centerDevice;
-    const { sessionId, requestId, modelId, delta, reasoning, turnContext } = validateStreamBody(req.body);
+    const {
+      sessionId, runId, modelId, reasoning, initialSystemPrompt,
+      tools, sections, routeNote, inputs,
+    } = validateRunBody(req.body);
     assertDeviceAuthorized(deviceId, modelId);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
     if (req.raw.aborted || req.raw.destroyed || reply.raw.destroyed) {
@@ -342,15 +400,18 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
     }
 
     const controller = new AbortController();
-    const eventStream = antigravity.stream(
+    const eventStream = antigravity.run(
       {
         deviceId,
         sessionId,
-        ...(requestId !== undefined ? { requestId } : {}),
+        runId,
         modelId,
-        delta,
         ...(reasoning !== undefined ? { reasoning } : {}),
-        ...(turnContext !== undefined ? { turnContext } : {}),
+        ...(initialSystemPrompt !== undefined ? { initialSystemPrompt } : {}),
+        tools,
+        ...(sections !== undefined ? { sections } : {}),
+        ...(routeNote !== undefined ? { routeNote } : {}),
+        inputs,
       },
       { signal: controller.signal },
     );
@@ -367,17 +428,16 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
     let terminal = false;
     let clientDisconnected = false;
-    const cancelTarget = { deviceId, sessionId, ...(requestId !== undefined ? { requestId } : {}) };
+    const cancelTarget = { deviceId, sessionId, runId };
 
     const abortDisconnect = () => {
       if (terminal || clientDisconnected) return;
       clientDisconnected = true;
       controller.abort();
-      void Promise.resolve(antigravity.cancel(cancelTarget)).catch(() => {});
+      void Promise.resolve(antigravity.cancel?.(cancelTarget)).catch(() => {});
       if (!reply.raw.destroyed) reply.raw.destroy();
     };
     const onResponseClose = () => {
-      // Normal toolUse/stop completion already moved the stream to terminal; keep waiting ACP alive.
       if (!terminal) abortDisconnect();
     };
     const activeEntry = { abort: abortDisconnect };
@@ -397,7 +457,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
         const step = await nextEvent(iterator, controller.signal);
         if (step.aborted || step.done) break;
         const event = step.value;
-        if (event?.type === 'done' || event?.type === 'error') terminal = true;
+        if (event?.type === 'turn_done' || event?.type === 'error') terminal = true;
         if (reply.raw.destroyed || reply.raw.writableEnded) break;
         const line = JSON.stringify(event) + '\n';
         if (!reply.raw.write(line) && !clientDisconnected) {
@@ -408,10 +468,10 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
       if (!clientDisconnected && !terminal) terminal = true;
     } catch (error) {
       if (!clientDisconnected && !terminal) {
-        void Promise.resolve(antigravity.cancel(cancelTarget)).catch(() => {});
+        void Promise.resolve(antigravity.cancel?.(cancelTarget)).catch(() => {});
         terminal = true;
         if (!reply.raw.destroyed && !reply.raw.writableEnded) {
-          reply.raw.write(JSON.stringify(safeStreamErrorEvent(modelId, error)) + '\n');
+          reply.raw.write(JSON.stringify(safeRunErrorEvent(error)) + '\n');
         }
       }
     } finally {
@@ -427,11 +487,50 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
     }
   }, Number.MAX_SAFE_INTEGER);
 
-  host('POST', ANTIGRAVITY_CANCEL_PATH, async req => {
-    const { sessionId, requestId } = validateCancelBody(req.body);
+  host('POST', ANTIGRAVITY_TOOL_RESULT_PATH, async req => {
+    const { sessionId, runId, callId, content, isError } = validateToolResultBody(req.body);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
-    await antigravity.cancel({ deviceId: req.centerDevice.deviceId, sessionId,
-      ...(requestId !== undefined ? { requestId } : {}) });
+    try {
+      await antigravity.submitToolResult({
+        deviceId: req.centerDevice.deviceId,
+        sessionId,
+        runId,
+        callId,
+        content,
+        ...(isError !== undefined ? { isError } : {}),
+      });
+    } catch (error) {
+      rethrowInvalidStateAs409(error, 'Active Antigravity run or tool call is unavailable');
+    }
+    return { ok: true };
+  }, Number.MAX_SAFE_INTEGER);
+
+  host('POST', ANTIGRAVITY_STEER_PATH, async req => {
+    const { sessionId, runId, sections, routeNote, inputs } = validateSteerBody(req.body);
+    if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
+    try {
+      await antigravity.steer({
+        deviceId: req.centerDevice.deviceId,
+        sessionId,
+        runId,
+        ...(sections !== undefined ? { sections } : {}),
+        ...(routeNote !== undefined ? { routeNote } : {}),
+        inputs,
+      });
+    } catch (error) {
+      rethrowInvalidStateAs409(error, 'Active Antigravity run has already ended');
+    }
+    return { ok: true };
+  }, Number.MAX_SAFE_INTEGER);
+
+  host('POST', ANTIGRAVITY_CANCEL_PATH, async req => {
+    const { sessionId, runId } = validateCancelBody(req.body);
+    if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
+    await antigravity.cancel({
+      deviceId: req.centerDevice.deviceId,
+      sessionId,
+      ...(runId !== undefined ? { runId } : {}),
+    });
     return { ok: true };
   });
 

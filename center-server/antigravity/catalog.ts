@@ -197,7 +197,6 @@ export async function probeAcpCatalog(
 		onUpdate: () => {},
 		onExit: () => {},
 		mcpServers: () => [],
-		permissions: () => "deny",
 	});
 
 	const onAbort = (): void => {

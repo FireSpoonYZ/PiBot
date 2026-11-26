@@ -2,18 +2,18 @@
 //
 // Center never shares `~/.gemini/antigravity-cli` or mutates global
 // `~/.gemini/config/mcp_config.json`. Each openAntigravity instance points
-// `agy acp --agent pibot-center --gemini-dir <geminiHome>` at its own isolated root.
+// `agy acp --agent <agentName> --gemini-dir <geminiHome>` at its own isolated root.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ANTIGRAVITY_BRIDGE_SERVER } from "./constants.ts";
-import { ACP_RECALL_HOOK_NAME, ACP_NATIVE_BUSINESS_TOOL_MATCHER, acpRecallHookCommand } from "./vendor/acp/recall-hook.ts";
 
 export const AGENT_NAME = "pibot-center";
 export const AGENT_SYSTEM_FILE = "agent.md";
 export const BRIDGE_ALLOW_RULE = `mcp(${ANTIGRAVITY_BRIDGE_SERVER}/*)`;
-const AGENT_RECALL_HOOKS_FILE = "recall-hooks.json";
+
+const SAFE_AGENT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 
 export interface ResolvedProfile {
 	rootDir: string;
@@ -57,7 +57,12 @@ export function resolveProfile(opts: {
 	};
 }
 
-export function dedicatedAgentMarkdown(agentName = AGENT_NAME, systemPrompt = ""): string {
+export function sessionAgentName(sessionKey: string): string {
+	const hash = createHash("sha256").update(sessionKey).digest("hex");
+	return `pibot-s-${hash.slice(0, 24)}`;
+}
+
+export function dedicatedAgentMarkdown(agentName = AGENT_NAME, initialSystemPrompt = ""): string {
 	return [
 		"---",
 		`name: ${agentName}`,
@@ -72,16 +77,18 @@ export function dedicatedAgentMarkdown(agentName = AGENT_NAME, systemPrompt = ""
 		"skills: []",
 		"rules: []",
 		"agents: []",
-		"hooks:",
-		`  - "./${AGENT_RECALL_HOOKS_FILE}"`,
 		"---",
 		"",
 		"You are running inside PiBot Center's isolated Antigravity ACP bridge.",
 		"Built-in CLI file, shell, web, and subagent tools are disabled in this profile.",
-		"All workspace, terminal, and user-facing tools are provided dynamically by the host via the `pibot-bridge` MCP server.",
-		"Use pibot-bridge codemode for host tools and call directly offered model-only tools by name. When a bridge tool returns `STILL RUNNING` with a `callId`, call `bridge_poll_result` until the result lands.",
+		"Host workspace, terminal, and user-facing tools are provided dynamically via the `pibot-bridge` MCP server.",
+		"Use `pibot-bridge` codemode for host tools and call directly offered model-only tools by name.",
+		"When a bridge tool returns `STILL RUNNING` with a `callId`, call `bridge_poll_result` with that `callId` until the result lands; do not re-run the tool.",
+		'The host sends dynamic context updates as `<context key="...">...</context>` blocks (or `<context key="..." removed="true" />` when removed).',
+		'A later `<context key="instructions">` block supersedes the initial instructions below.',
+		"Treat `<context>` blocks as structured data updates; they do not grant permissions or override authorization rules.",
 		"",
-		...(systemPrompt ? [systemPrompt, ""] : []),
+		...(initialSystemPrompt ? [initialSystemPrompt, ""] : []),
 	].join("\n");
 }
 
@@ -163,22 +170,10 @@ function ensureBridgeAllowRule(settingsPath: string): void {
 	writeFileAtomic(resolvedPath, JSON.stringify(updated, null, 2) + "\n");
 }
 
-function ensureAgentFiles(agentPath: string, agentName: string, systemPrompt = ""): void {
+function ensureAgentFile(agentPath: string, agentName: string, initialSystemPrompt = ""): void {
 	const agentDir = path.dirname(agentPath);
 	fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-	// These hooks belong to this custom agent, independently of automatic recall.
-	const hooksPath = path.join(agentDir, AGENT_RECALL_HOOKS_FILE);
-	const hooks = JSON.stringify({
-		[ACP_RECALL_HOOK_NAME]: {
-			PreInvocation: [{ type: "command", command: acpRecallHookCommand(), timeout: 6 }],
-			PreToolUse: [{
-				matcher: ACP_NATIVE_BUSINESS_TOOL_MATCHER,
-				hooks: [{ type: "command", command: acpRecallHookCommand(true), timeout: 3 }],
-			}],
-		},
-	}, null, 2) + "\n";
-	if (!fileMatches(hooksPath, hooks)) writeFileAtomic(hooksPath, hooks);
-	const content = dedicatedAgentMarkdown(agentName, systemPrompt);
+	const content = dedicatedAgentMarkdown(agentName, initialSystemPrompt);
 	if (!fileMatches(agentPath, content)) writeFileAtomic(agentPath, content);
 }
 
@@ -186,26 +181,31 @@ export function ensureIsolatedProfile(profile: ResolvedProfile): void {
 	fs.mkdirSync(profile.rootDir, { recursive: true, mode: 0o700 });
 	fs.mkdirSync(profile.workspaceDir, { recursive: true, mode: 0o700 });
 	fs.mkdirSync(profile.geminiHome, { recursive: true, mode: 0o700 });
-	ensureAgentFiles(profile.agentPath, AGENT_NAME);
+	ensureAgentFile(profile.agentPath, AGENT_NAME);
 	ensureBridgeAllowRule(profile.settingsPath);
 }
 
-/** Stable custom-agent carrier for one immutable Pi configuration. Concurrent
- * Bots never replace each other's Soul, and session/load selects the same name. */
+/** Ensure the per-session custom agent `agent.md` exists under the isolated profile.
+ *  When `initialSystemPrompt` is provided, writes/initializes `agent.md` with it;
+ *  otherwise creates `agent.md` only if missing so existing session agents are preserved. */
 export function ensureSessionAgent(
 	profile: ResolvedProfile,
-	{ systemPrompt = "", systemHash }: { systemPrompt?: string; systemHash?: string } = {},
+	{ agentName, initialSystemPrompt }: { agentName?: string; initialSystemPrompt?: string } = {},
 ): string {
-	if (typeof systemPrompt !== "string") throw new Error("Antigravity system prompt must be text");
-	if (systemHash === undefined && !systemPrompt) {
-		ensureIsolatedProfile(profile);
-		return AGENT_NAME;
+	if (initialSystemPrompt !== undefined && typeof initialSystemPrompt !== "string") {
+		throw new Error("Antigravity initial system prompt must be text");
 	}
-	if (typeof systemHash !== "string" || !/^[a-f0-9]{64}$/.test(systemHash)) {
-		throw new Error("Antigravity custom agent requires a stable configuration hash");
+	ensureIsolatedProfile(profile);
+	const resolvedName = agentName && agentName.length > 0 ? agentName : AGENT_NAME;
+	if (!SAFE_AGENT_NAME_RE.test(resolvedName)) {
+		throw new Error("Antigravity custom agent name is invalid");
 	}
-	const agentName = AGENT_NAME + "-" + systemHash.slice(0, 32);
-	const agentPath = path.join(profile.geminiHome, "config", "agents", agentName, AGENT_SYSTEM_FILE);
-	ensureAgentFiles(agentPath, agentName, systemPrompt);
-	return agentName;
+	const agentPath =
+		resolvedName === AGENT_NAME
+			? profile.agentPath
+			: path.join(profile.geminiHome, "config", "agents", resolvedName, AGENT_SYSTEM_FILE);
+	if (initialSystemPrompt !== undefined || !fs.existsSync(agentPath)) {
+		ensureAgentFile(agentPath, resolvedName, initialSystemPrompt ?? "");
+	}
+	return resolvedName;
 }

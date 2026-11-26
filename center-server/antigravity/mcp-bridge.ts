@@ -46,6 +46,8 @@ export interface McpCallToolResult {
 
 export interface SessionMcpHandler {
 	listTools(): McpToolDefinition[];
+	/** Synchronously capture the active run when the request enters, before awaiting the body. */
+	captureContext?(): unknown;
 	/** A response could not be written; the owning native turn must fail closed. */
 	onDeliveryError?(error: Error): void;
 	onToolCall(
@@ -53,6 +55,7 @@ export interface SessionMcpHandler {
 		name: string,
 		args: Record<string, unknown>,
 		signal: AbortSignal,
+		captured?: unknown,
 	): Promise<McpCallToolResult>;
 }
 
@@ -319,6 +322,7 @@ export class SharedMcpBridge {
 				res.writeHead(403, { "content-type": "application/json" }).end('{"error":"forbidden"}');
 				return;
 			}
+			const captured = session.handler.captureContext?.();
 
 			const chunks: Buffer[] = [];
 			let bytes = 0;
@@ -416,6 +420,7 @@ export class SharedMcpBridge {
 								? args
 								: {}) as Record<string, unknown>,
 							ac.signal,
+							captured,
 						);
 						const content =
 							r.content && r.content.length > 0
@@ -423,7 +428,6 @@ export class SharedMcpBridge {
 								: [{ type: "text" as const, text: JSON.stringify(r) }];
 						return { content, isError: r.isError ?? false };
 					} catch (e) {
-						failDelivery(currentSession, e);
 						const msg = e instanceof Error ? e.message : String(e);
 						return {
 							content: [{ type: "text" as const, text: `Error: ${msg}` }],
