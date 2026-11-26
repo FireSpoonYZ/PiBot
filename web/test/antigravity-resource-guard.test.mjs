@@ -3,193 +3,342 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { AcpConnection } from '../../center-server/antigravity/vendor/acp/connection.ts';
-import { ensureIsolatedProfile, resolveProfile, BRIDGE_ALLOW_RULE } from '../../center-server/antigravity/profile.ts';
-import { ACP_RECALL_HOOK_NAME } from '../../center-server/antigravity/vendor/acp/recall-hook.ts';
 import {
-  createControlledAcpDriverHarness, openIsolatedAntigravity, closeAndRemove,
-  drainEventStream, BASE_SYSTEM, MODEL_ID,
+  AGENT_SYSTEM_FILE,
+  BRIDGE_ALLOW_RULE,
+  ensureIsolatedProfile,
+  ensureSessionAgent,
+  resolveProfile,
+  sessionAgentName,
+} from '../../center-server/antigravity/profile.ts';
+import { AcpConnection, buildAcpChildEnv } from '../../center-server/antigravity/vendor/acp/connection.ts';
+import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
+import {
+  collectRunEvents,
+  createControlledAcpDriverHarness,
+  openAntigravity,
 } from './helpers/antigravity-sync-harness.mjs';
 
-const SESSION = 'resource-test';
-const HOOK = fileURLToPath(new URL('../../center-server/antigravity/vendor/acp/recall-hook-client.cjs', import.meta.url));
+const MODEL_ID = 'gemini-4-neon';
 
-const fakeAcp = String.raw`
-import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+test('profile writes hook-free frontmatter, preserves settings + BRIDGE_ALLOW_RULE, and keeps initial SOUL on cold recovery', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-profile-'));
+  try {
+    const profile = resolveProfile({ dataRoot: root, geminiHome: path.join(root, 'gemini') });
+    fs.mkdirSync(path.dirname(profile.settingsPath), { recursive: true });
+    fs.writeFileSync(profile.settingsPath, JSON.stringify({
+      permissions: { allow: ['mcp(existing/*)'], deny: ['run_command'] },
+      existingSetting: true,
+    }));
+
+    ensureIsolatedProfile(profile);
+
+    const defaultAgent = fs.readFileSync(profile.agentPath, 'utf8');
+    assert.match(defaultAgent, /^excludeDefaultComponents: true$/m);
+    assert.match(defaultAgent, /^inheritCustomizations: false$/m);
+    assert.match(defaultAgent, /^inheritMcp: true$/m);
+    assert.match(defaultAgent, /^tools: \[\]$/m);
+    assert.doesNotMatch(defaultAgent, /^hooks:/m);
+    assert.equal(fs.existsSync(path.join(path.dirname(profile.agentPath), 'recall-hooks.json')), false);
+
+    assert.deepEqual(JSON.parse(fs.readFileSync(profile.settingsPath, 'utf8')), {
+      permissions: { allow: ['mcp(existing/*)', BRIDGE_ALLOW_RULE], deny: ['run_command'] },
+      existingSetting: true,
+    });
+
+    const agentName = sessionAgentName('["dev-1","sess-1"]');
+    assert.match(agentName, /^pibot-s-[0-9a-f]{24}$/);
+    const writtenName = ensureSessionAgent(profile, {
+      agentName,
+      initialSystemPrompt: 'INITIAL_SESSION_SOUL_DO_NOT_OVERWRITE',
+    });
+    assert.equal(writtenName, agentName);
+
+    const sessionAgentDir = path.join(profile.geminiHome, 'config', 'agents', agentName);
+    const sessionAgentPath = path.join(sessionAgentDir, AGENT_SYSTEM_FILE);
+    const initialContent = fs.readFileSync(sessionAgentPath, 'utf8');
+    assert.match(initialContent, new RegExp(`^name: ${agentName}$`, 'm'));
+    assert.match(initialContent, /^excludeDefaultComponents: true$/m);
+    assert.match(initialContent, /^tools: \[\]$/m);
+    assert.doesNotMatch(initialContent, /^hooks:/m);
+    assert.equal(fs.existsSync(path.join(sessionAgentDir, 'recall-hooks.json')), false);
+    assert.ok(initialContent.includes('INITIAL_SESSION_SOUL_DO_NOT_OVERWRITE'));
+
+    // Cold recovery calls ensureSessionAgent without initialSystemPrompt: existing agent.md must be preserved.
+    ensureSessionAgent(profile, { agentName });
+    assert.equal(fs.readFileSync(sessionAgentPath, 'utf8'), initialContent);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('AcpConnection auto-approves all session/request_permission requests and strips ANTIGRAVITY_* child env', { timeout: 15_000 }, async (t) => {
+  const prevUpper = process.env.ANTIGRAVITY_TEST_SECRET;
+  const prevLower = process.env.antigravity_nested_flag;
+  const prevKeep = process.env.PIBOT_ENV_KEEP_CHECK;
+  process.env.ANTIGRAVITY_TEST_SECRET = 'must-not-leak';
+  process.env.antigravity_nested_flag = '1';
+  process.env.PIBOT_ENV_KEEP_CHECK = 'visible';
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-acp-perm-env-'));
+  const script = path.join(root, 'fake-acp-perm.mjs');
+  const reportFile = path.join(root, 'report.json');
+
+  fs.writeFileSync(script, String.raw`
+import fs from 'node:fs';
 import { createInterface } from 'node:readline';
 
-const [hook, session] = process.argv.slice(2);
+const reportFile = process.argv[2];
 const send = (frame) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...frame }) + '\n');
-const reply = (id, result) => send({ id, result });
-const update = (payload) => send({ method: 'session/update', params: { sessionId: session, update: payload } });
-const finish = (id, status) => update({ sessionUpdate: 'tool_call_update', toolCallId: id, status });
-let parkedPrompt;
+const pendingReplies = new Map();
+let nextReqId = 1000;
 
-function start(name, id, mcp) {
-  update({ sessionUpdate: 'tool_call', toolCallId: id, name, status: 'in_progress', ...(mcp && { _meta: { mcp } }) });
-}
-
-function deny(name, id) {
-  const child = spawnSync(process.execPath, [hook, '--deny-native-tools'], {
-    input: JSON.stringify({ hookEventName: 'PreToolUse', conversationId: session, toolCall: { id, name } }),
-    encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, PI_AGY_RECALL_PORT: '', PI_AGY_RECALL_KEY: '' },
+function askClient(method, params) {
+  const id = nextReqId++;
+  return new Promise((resolve) => {
+    pendingReplies.set(id, resolve);
+    send({ id, method, params });
   });
-  assert.equal(child.status, 0, child.stderr);
-  const result = JSON.parse(child.stdout);
-  assert.equal(result.decision, 'deny');
-  assert.match(result.reason, /codemode/);
-  assert.match(result.reason, /model-only/);
 }
 
 for await (const line of createInterface({ input: process.stdin })) {
-  const { id, method, params } = JSON.parse(line);
-  if (method === 'initialize') reply(id, {});
-  if (method === 'session/new') reply(id, { sessionId: session });
-  if (method === 'session/cancel') {
-    finish('waiting-tool', 'failed');
-    reply(parkedPrompt, { stopReason: 'end_turn' });
-  }
-  if (method !== 'session/prompt') continue;
-
-  const scenario = params.prompt.at(-1).text;
-  if (scenario === 'business-denials') {
-    for (const [index, name] of ['run_command', 'view_file', 'write_to_file', 'browser_navigate'].entries()) {
-      const callId = 'denied-' + index;
-      start(name, callId);
-      deny(name, callId);
-      finish(callId, 'failed');
+  const msg = JSON.parse(line);
+  if (msg.method === undefined && msg.id !== undefined) {
+    const resolver = pendingReplies.get(msg.id);
+    if (resolver) {
+      pendingReplies.delete(msg.id);
+      resolver(msg);
     }
-  } else if (scenario === 'cancel') {
-    start('future_internal_progress', 'waiting-tool');
-    parkedPrompt = id;
-    update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'waiting for cancellation' } });
     continue;
-  } else {
-    start('list_resources', 'resource-discovery');
-    finish('resource-discovery', 'completed');
-    start('read_resource', 'resource-read');
-    finish('resource-read', 'failed');
-    start('future_internal_progress', 'unknown');
-    start('future_internal_progress', 'unknown');
-    finish('unknown', 'failed');
-    finish('unknown', 'completed');
-    start('foreign_tool', 'foreign', { server: 'foreign-server', tool: 'foreign_tool' });
-    finish('foreign', 'completed');
-    start('read_file', 'host-read', { server: 'pibot-bridge', tool: 'read_file' });
-    finish('host-read', 'completed');
   }
-  update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'reply continued' } });
-  reply(id, { stopReason: 'end_turn' });
+  const { id, method, params } = msg;
+  if (method === 'initialize') {
+    send({ id, result: { agentInfo: { name: 'fake-agy', version: '1.5.12' } } });
+    continue;
+  }
+  if (method === 'session/new') {
+    send({ id, result: { sessionId: 'perm-session', configOptions: [] } });
+    continue;
+  }
+  if (method === 'session/prompt') {
+    void (async () => {
+      const nonBridge = await askClient('session/request_permission', {
+        sessionId: params.sessionId,
+        toolCall: { toolCallId: 'nat-1', name: 'manage_task', kind: 'execute' },
+        options: [
+          { optionId: 'reject-once', kind: 'reject_once' },
+          { optionId: 'allow-once', kind: 'allow_once' },
+          { optionId: 'allow-always', kind: 'allow_always' },
+        ],
+      });
+      const bridge = await askClient('session/request_permission', {
+        sessionId: params.sessionId,
+        toolCall: {
+          toolCallId: 'mcp-1',
+          name: 'mcp_pibot-bridge_codemode',
+          _meta: { mcp: { server: 'pibot-bridge', tool: 'codemode' } },
+        },
+        options: [{ optionId: 'allow-always', kind: 'allow_always' }],
+      });
+      const fallbackFirst = await askClient('session/request_permission', {
+        sessionId: params.sessionId,
+        toolCall: { toolCallId: 'nat-2', name: 'read_resource' },
+        options: [{ optionId: 'custom-first', kind: 'other' }],
+      });
+      const emptyOpts = await askClient('session/request_permission', {
+        sessionId: params.sessionId,
+        toolCall: { toolCallId: 'nat-3', name: 'empty_opts' },
+        options: [],
+      });
+      const unsupportedFs = await askClient('fs/read_text_file', { path: '/etc/passwd' });
+
+      const leakedAgyKeys = Object.keys(process.env).filter((k) => /^ANTIGRAVITY_/i.test(k));
+      fs.writeFileSync(reportFile, JSON.stringify({
+        nonBridge,
+        bridge,
+        fallbackFirst,
+        emptyOpts,
+        unsupportedFs,
+        leakedAgyKeys,
+        keepCheck: process.env.PIBOT_ENV_KEEP_CHECK ?? null,
+        extraCheck: process.env.EXTRA_TEST_FLAG ?? null,
+      }));
+      send({
+        method: 'session/update',
+        params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'approved' } } },
+      });
+      send({ id, result: { stopReason: 'end_turn' } });
+    })();
+    continue;
+  }
+  if (id !== undefined) send({ id, result: {} });
 }
-`;
+`, 'utf8');
 
-async function openTestConnection(t) {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-acp-resource-'));
-  const server = path.join(cwd, 'fake-acp.mjs');
-  fs.writeFileSync(server, fakeAcp);
-  const updates = [];
-  const conn = new AcpConnection({
-    cwd, bin: process.execPath, binArgs: [server, HOOK, SESSION],
-    enableTurnRecall: false, enableToolImages: true,
-    log() {}, onExit() {},
-    onUpdate(id, update) {
-      updates.push(update);
-      if (update.content?.text === 'waiting for cancellation') conn.cancel(id);
-    },
-  });
-  t.after(async () => {
-    conn.kill();
-    await conn.waitForExit();
-    fs.rmSync(cwd, { recursive: true, force: true });
-  });
-  await conn.start();
-  await conn.newSession(cwd);
-  return { conn, updates };
+  let conn;
+  try {
+    const built = buildAcpChildEnv({ EXTRA_TEST_FLAG: 'yes' });
+    assert.equal(Object.keys(built).some((k) => /^ANTIGRAVITY_/i.test(k)), false);
+    assert.equal(built.PIBOT_ENV_KEEP_CHECK, 'visible');
+    assert.equal(built.EXTRA_TEST_FLAG, 'yes');
+
+    conn = new AcpConnection({
+      cwd: root,
+      bin: process.execPath,
+      binArgs: [script, reportFile],
+      extraEnv: { EXTRA_TEST_FLAG: 'yes' },
+      log() {},
+      onUpdate() {},
+      onExit() {},
+    });
+    await conn.start();
+    const { sessionId } = await conn.newSession(root);
+    const promptRes = await conn.prompt(sessionId, 'check permissions');
+    assert.equal(promptRes.stopReason, 'end_turn');
+
+    const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
+    assert.deepEqual(report.nonBridge.result, { outcome: { outcome: 'selected', optionId: 'allow-once' } });
+    assert.deepEqual(report.bridge.result, { outcome: { outcome: 'selected', optionId: 'allow-always' } });
+    assert.deepEqual(report.fallbackFirst.result, { outcome: { outcome: 'selected', optionId: 'custom-first' } });
+    assert.deepEqual(report.emptyOpts.result, { outcome: { outcome: 'cancelled' } });
+    assert.ok(report.unsupportedFs.error, 'unsupported fs/* server requests must still be rejected');
+    assert.deepEqual(report.leakedAgyKeys, []);
+    assert.equal(report.keepCheck, 'visible');
+    assert.equal(report.extraCheck, 'yes');
+  } finally {
+    if (prevUpper === undefined) delete process.env.ANTIGRAVITY_TEST_SECRET;
+    else process.env.ANTIGRAVITY_TEST_SECRET = prevUpper;
+    if (prevLower === undefined) delete process.env.antigravity_nested_flag;
+    else process.env.antigravity_nested_flag = prevLower;
+    if (prevKeep === undefined) delete process.env.PIBOT_ENV_KEEP_CHECK;
+    else process.env.PIBOT_ENV_KEEP_CHECK = prevKeep;
+    conn?.kill();
+    await conn?.waitForExit();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cold start uses session/resume (not session/load) with zero history replay and re-applies model + thought_level', { timeout: 15_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-acp-resume-'));
+  const script = path.join(root, 'fake-acp-resume.mjs');
+  const logFile = path.join(root, 'rpc.jsonl');
+
+  fs.writeFileSync(script, String.raw`
+import fs from 'node:fs';
+import { createInterface } from 'node:readline';
+
+const logFile = process.argv[2];
+const send = (frame) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...frame }) + '\n');
+const configOptions = [
+  { id: 'model', currentValue: 'default-model', options: [{ value: 'default-model' }, { value: 'gemini-4-neon' }] },
+  { id: 'thought_level', currentValue: 'low', options: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }] },
+];
+
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line);
+  fs.appendFileSync(logFile, JSON.stringify({ method, params }) + '\n');
+  if (method === 'initialize') {
+    send({ id, result: { agentInfo: { name: 'fake-agy', version: '1.5.12' } } });
+  } else if (method === 'session/resume') {
+    send({ id, result: { configOptions } });
+  } else if (method === 'session/set_config_option') {
+    send({ id, result: { configOptions } });
+  } else if (method === 'session/prompt') {
+    send({
+      method: 'session/update',
+      params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'resumed-reply' } } },
+    });
+    send({ id, result: { stopReason: 'end_turn', usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 } } });
+  } else if (id !== undefined) {
+    send({ id, result: {} });
+  }
 }
+`, 'utf8');
 
-test('Dedicated agent hides business builtins and keeps host MCP permissions intact', t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agent-policy-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const profile = resolveProfile({ dataRoot: root, geminiHome: path.join(root, 'gemini') });
-  fs.mkdirSync(path.dirname(profile.settingsPath), { recursive: true });
-  fs.writeFileSync(profile.settingsPath, JSON.stringify({
-    permissions: { allow: ['mcp(existing/*)'], deny: ['run_command'] },
-    existingSetting: true,
-  }));
-  ensureIsolatedProfile(profile);
-
-  const agent = fs.readFileSync(profile.agentPath, 'utf8');
-  assert.match(agent, /^tools: \[\]$/m);
-  assert.match(agent, /^excludeDefaultComponents: true$/m);
-  assert.match(agent, /^inheritCustomizations: false$/m);
-  assert.match(agent, /^inheritMcp: true$/m);
-  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(profile.agentPath), 'recall-hooks.json'), 'utf8'))[ACP_RECALL_HOOK_NAME];
-  assert.equal(hooks.PreInvocation.length, 1, 'image hook remains installed with automatic recall off');
-  assert.equal(hooks.PreToolUse.length, 1);
-  assert.match(hooks.PreToolUse[0].hooks[0].command, /--deny-native-tools$/);
-  const matcher = new RegExp(hooks.PreToolUse[0].matcher);
-  for (const name of ['view_file', 'write_to_file', 'run_command', 'search_web', 'invoke_subagent', 'browser_navigate']) {
-    assert.equal(matcher.test(name), true, name);
-  }
-  for (const name of ['list_resources', 'read_resource', 'future_internal_progress', 'codemode', 'mcp_pibot-bridge_read_file']) {
-    assert.equal(matcher.test(name), false, name);
-  }
-  assert.deepEqual(JSON.parse(fs.readFileSync(profile.settingsPath, 'utf8')), {
-    permissions: { allow: ['mcp(existing/*)', BRIDGE_ALLOW_RULE], deny: ['run_command'] },
-    existingSetting: true,
-  });
-});
-
-test('Business tool denial is local to each call and generation continues without a receipt counter', { timeout: 15_000 }, async t => {
-  const { conn, updates } = await openTestConnection(t);
-  assert.equal((await conn.prompt(SESSION, 'business-denials')).stopReason, 'end_turn');
-  assert.equal(updates.filter(update => update.sessionUpdate === 'tool_call').length, 4);
-  assert.equal(updates.filter(update => update.sessionUpdate === 'tool_call_update' && update.status === 'failed').length, 4);
-  assert.equal(updates.at(-1).content.text, 'reply continued');
-  assert.equal(conn.alive, true);
-});
-
-test('Unknown and internal ACP tool progress does not abort the prompt or hide bridge events', { timeout: 10_000 }, async t => {
-  const { conn, updates } = await openTestConnection(t);
-  assert.equal((await conn.prompt(SESSION, 'internal-progress')).stopReason, 'end_turn');
-  assert.deepEqual(updates.filter(frame => frame.sessionUpdate === 'tool_call').map(frame =>
-    [frame.name, frame._meta?.mcp?.server]), [
-    ['list_resources', undefined], ['read_resource', undefined],
-    ['future_internal_progress', undefined], ['future_internal_progress', undefined],
-    ['foreign_tool', 'foreign-server'], ['read_file', 'pibot-bridge'],
-  ]);
-  assert.equal(updates.at(-1).content.text, 'reply continued');
-  assert.equal(conn.alive, true);
-});
-
-test('Cancelling internal progress leaves the next prompt usable without a denial receipt', { timeout: 10_000 }, async t => {
-  const { conn } = await openTestConnection(t);
-  assert.equal((await conn.prompt(SESSION, 'cancel')).stopReason, 'cancelled');
-  assert.equal((await conn.prompt(SESSION, 'internal-progress')).stopReason, 'end_turn');
-});
-
-test('Center treats native internal and denied business activity as progress, not Host tool requests', { timeout: 10_000 }, async t => {
-  const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-native-progress-'));
-  const antigravity = openIsolatedAntigravity(rootDir);
-  t.after(() => closeAndRemove({ antigravity, rootDir }));
-  driver.setOnRun(ctx => {
-    for (const name of ['list_resources', 'future_internal_progress', 'run_command']) {
-      ctx.emit({ type: 'tool_start', toolCallId: name, name, args: {} });
-      ctx.emit({ type: 'tool_error', toolCallId: name, name, message: 'denied or unavailable' });
+  const driver = new AcpDriver({ bin: process.execPath, binArgs: [script, logFile] });
+  try {
+    const handle = await driver.run({
+      cwd: root,
+      model: MODEL_ID,
+      effort: 'high',
+      mode: 'default',
+      conversationId: 'existing-native-conv',
+      prompt: 'fresh message after cold restart',
+    });
+    const textDeltas = [];
+    for (;;) {
+      const activity = await handle.next();
+      if (!activity) break;
+      if (activity.type === 'text') textDeltas.push(activity.delta);
     }
-    ctx.emit({ type: 'text', delta: 'Continued after local tool progress.' });
-    ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'Continued.', finished: true, aborted: false });
+    const outcome = await handle.outcome;
+    assert.equal(outcome.status, 'OK');
+    assert.equal(outcome.conversationId, 'existing-native-conv');
+    assert.equal(textDeltas.join(''), 'resumed-reply');
+
+    const frames = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(frames.some((f) => f.method === 'session/load'), false, 'cold start must not call session/load');
+    assert.equal(frames.some((f) => f.method === 'session/new'), false, 'cold start must not call session/new');
+    const resumeIdx = frames.findIndex((f) => f.method === 'session/resume');
+    const modelIdx = frames.findIndex((f) => f.method === 'session/set_config_option' && f.params.configId === 'model');
+    const thoughtIdx = frames.findIndex((f) => f.method === 'session/set_config_option' && f.params.configId === 'thought_level');
+    const promptIdx = frames.findIndex((f) => f.method === 'session/prompt');
+
+    assert.ok(resumeIdx >= 0, 'session/resume must be invoked');
+    assert.equal(frames[resumeIdx].params.sessionId, 'existing-native-conv');
+    assert.ok(modelIdx > resumeIdx && modelIdx < promptIdx);
+    assert.equal(frames[modelIdx].params.value, MODEL_ID);
+    assert.ok(thoughtIdx > modelIdx && thoughtIdx < promptIdx);
+    assert.equal(frames[thoughtIdx].params.value, 'high');
+    assert.deepEqual(frames[promptIdx].params.prompt, [{ type: 'text', text: 'fresh message after cold restart' }]);
+  } finally {
+    await driver.close('shutdown');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('openAntigravity emits native_tool_start/end for non-bridge native tools and suppresses duplicate pibot-bridge notifications', { timeout: 10_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-native-tools-'));
+  const harness = createControlledAcpDriverHarness((ctx) => {
+    ctx.emit({ type: 'tool_start', toolCallId: 'nat-1', name: 'manage_task', args: { action: 'list' } });
+    ctx.emit({ type: 'tool_done', toolCallId: 'nat-1', name: 'manage_task', args: { action: 'list' }, output: 'tasks ok' });
+    ctx.emit({ type: 'tool_start', toolCallId: 'nat-2', name: 'read_resource', args: { uri: 'res://doc' } });
+    ctx.emit({ type: 'tool_error', toolCallId: 'nat-2', name: 'read_resource', message: 'not found' });
+    ctx.emit({ type: 'tool_start', toolCallId: 'mcp-1', name: 'codemode', args: { code: '1+1' }, mcpServer: 'pibot-bridge' });
+    ctx.emit({ type: 'tool_done', toolCallId: 'mcp-1', name: 'codemode', args: { code: '1+1' }, output: '2', mcpServer: 'pibot-bridge' });
+    ctx.emit({ type: 'tool_start', toolCallId: 'mcp-2', name: 'read', args: { path: 'a.txt' }, mcpServer: 'pi-bridge-1' });
+    ctx.emit({ type: 'tool_error', toolCallId: 'mcp-2', name: 'read', message: 'enoent', mcpServer: 'pi-bridge-1' });
+    ctx.emit({ type: 'text', delta: 'Completed.' });
+    ctx.finish();
   });
-  const messages = [BASE_SYSTEM, { role: 'user', content: 'Continue normally.', timestamp: 10 }];
-  const result = await drainEventStream(antigravity.stream({
-    deviceId: 'progress', sessionId: 'progress', modelId: MODEL_ID, messages,
-    turnContext: { inputIndex: 1, auxiliaryIndices: [] },
-  }));
-  assert.equal(result.terminal.reason, 'stop');
-  assert.equal(result.terminal.message.content.some(part => part.type === 'toolCall'), false);
-  assert.equal(driver.runs.length, 1);
+  const service = openAntigravity({
+    dataRoot: root,
+    bin: 'mocked-agy',
+    geminiHome: path.join(root, 'antigravity', 'gemini'),
+  });
+
+  try {
+    const events = await collectRunEvents(service.run({
+      deviceId: 'dev-nat',
+      sessionId: 'sess-nat',
+      runId: 'run-nat-1',
+      modelId: MODEL_ID,
+      tools: [{ name: 'codemode', parameters: { type: 'object', properties: {} } }],
+      inputs: [{ text: 'run native tools' }],
+    }));
+
+    assert.equal(events.some((ev) => ev.type === 'tool_request'), false, 'ACP native tool notifications must not trigger tool_request');
+    const nativeEvents = events.filter((ev) => ev.type === 'native_tool_start' || ev.type === 'native_tool_end');
+    assert.deepEqual(nativeEvents, [
+      { type: 'native_tool_start', toolCallId: 'nat-1', name: 'manage_task', args: { action: 'list' } },
+      { type: 'native_tool_end', toolCallId: 'nat-1', name: 'manage_task', output: 'tasks ok', isError: false },
+      { type: 'native_tool_start', toolCallId: 'nat-2', name: 'read_resource', args: { uri: 'res://doc' } },
+      { type: 'native_tool_end', toolCallId: 'nat-2', name: 'read_resource', output: 'not found', isError: true },
+    ]);
+    assert.equal(events.at(-1)?.type, 'turn_done');
+  } finally {
+    await service.close();
+    harness.restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

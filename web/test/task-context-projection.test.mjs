@@ -238,3 +238,48 @@ test('task tool reminds Bots to output user-facing final replies on step complet
   assert.match(completedResult.output[0].text, /任务已标记完成。请立即在当前对话回复正文中向用户清晰完整地呈现最终结论与结果/);
   await coordPlugin.close();
 });
+
+test('directory projection ignores remote bot online jitter and omits online/offline status', () => {
+  const current = task(1, {
+    coordinatorDeviceId: 'device-peer-a',
+    coordinatorBotId: 'bot-peer-a',
+    steps: [step(1, { deviceId: 'device-peer-b', botId: 'bot-peer-b' })],
+  });
+  const baseInput = {
+    ...identity,
+    activeTasks: [current, task(2)],
+    executionContext: { taskId: current.id, stepId: 'step-001' },
+  };
+  const makeRemoteBots = (onlineMode) => [
+    bot('self', { ...identity, name: '本机 Bot', online: true }),
+    (() => {
+      const remoteA = bot('peer-a', { deviceId: 'device-peer-a', botId: 'bot-peer-a', name: '远端协调 Bot' });
+      const remoteB = bot('peer-b', { deviceId: 'device-peer-b', botId: 'bot-peer-b', name: '远端执行 Bot' });
+      if (onlineMode === 'omitted') {
+        delete remoteA.online;
+        delete remoteB.online;
+      } else {
+        remoteA.online = onlineMode;
+        remoteB.online = onlineMode;
+      }
+      return [remoteA, remoteB];
+    })(),
+  ].flat();
+
+  const outOnline = projectTaskContext({ ...baseInput, directoryBots: makeRemoteBots(true) });
+  const outOffline = projectTaskContext({ ...baseInput, directoryBots: makeRemoteBots(false) });
+  const outUndefined = projectTaskContext({ ...baseInput, directoryBots: makeRemoteBots(undefined) });
+  const outOmitted = projectTaskContext({ ...baseInput, directoryBots: makeRemoteBots('omitted') });
+
+  const baseBytes = Buffer.from(outOnline, 'utf8');
+  assert.equal(Buffer.compare(Buffer.from(outOffline, 'utf8'), baseBytes), 0);
+  assert.equal(Buffer.compare(Buffer.from(outUndefined, 'utf8'), baseBytes), 0);
+  assert.equal(Buffer.compare(Buffer.from(outOmitted, 'utf8'), baseBytes), 0);
+  assert.equal(outOffline, outOnline);
+  assert.equal(outUndefined, outOnline);
+  assert.equal(outOmitted, outOnline);
+  assert.doesNotMatch(outOnline, /状态=在线|状态=离线/);
+  assert.match(outOnline, /远端协调 Bot/);
+  assert.match(outOnline, /远端执行 Bot/);
+});
+
