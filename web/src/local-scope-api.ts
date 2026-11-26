@@ -194,33 +194,60 @@ export function createLocalScopeReadApi(options: LocalScopeApiOptions): LocalSco
       target: LiveTarget,
       onEvent: (event: DesktopObservationEvent) => void,
     ): ObservationHandle {
-      const observationId = 'lscope-' + options.generation + '-' + (++obsSeq);
+      const rejectedHandle = (err: Error & DesktopErrorShape): ObservationHandle => {
+        const ready = Promise.reject(err);
+        // 避免未捕获 ready 拒绝时泄漏 unhandledrejection；调用方仍可通过 ready.catch() 观察错误。
+        void ready.catch(() => {});
+        return { ready, close: async () => {} };
+      };
+      if (disposed || !options.hostRunning()) {
+        return rejectedHandle(
+          Object.assign(new Error('Host 未运行'), toErrorShape('NOT_CONNECTED', 'Host 未运行', 'not-sent')),
+        );
+      }
+      // 代际 fence：页面切换/重启后旧身份不得再建立观察。
+      if (id.generation !== options.generation) {
+        return rejectedHandle(
+          Object.assign(new Error('会话已过期'), toErrorShape('SESSION_EXPIRED', '会话已过期', 'not-sent')),
+        );
+      }
       // 只支持已有两类 target；其余类型立即报错，不假装订阅成功。
-      const valid = !!target && (target.kind === 'primary' || target.kind === 'work');
+      if (!target || (target.kind !== 'primary' && target.kind !== 'work')) {
+        return rejectedHandle(
+          Object.assign(
+            new Error('unsupported observe target'),
+            toErrorShape('INVALID_ARGUMENT', 'unsupported observe target', 'not-sent'),
+          ),
+        );
+      }
+      const observationId = 'lscope-' + options.generation + '-' + (++obsSeq);
       let closed = false;
-      // 回调只在确认未 closed/disposed 时注册（ensureHostListener 之后、BotHost.observe 之前）：
+      // 回调只在确认未 closed/disposed/离线时注册（ensureHostListener 之后、BotHost.observe 之前）：
       // 任何时刻 close/dispose 都让 callback 不再投递，且原生观察被取消。
-      const ready = valid
-        ? (async () => {
-            await ensureHostListener();
-            if (closed || disposed) throw Object.assign(new Error('已关闭'), toErrorShape('DISPOSED', '已关闭', 'not-sent'));
-            listeners.set(observationId, onEvent);
-            try {
-              await BotHost.observe({
-                observationId,
-                target: target as { kind: 'primary'; botId: string } | { kind: 'work'; botId: string; scopeId: string },
-              });
-            } catch (e) {
-              listeners.delete(observationId);
-              throw e;
-            }
-            // observe resolve 后才算建立；若期间已被 close/dispose，清 callback 并补发取消，不留观察。
-            if (closed || disposed) {
-              listeners.delete(observationId);
-              try { await BotHost.cancelObservation({ observationId }); } catch { /* 已结束/未建立 */ }
-            }
-          })()
-        : Promise.reject(Object.assign(new Error('unsupported observe target'), toErrorShape('INVALID_ARGUMENT', 'unsupported observe target', 'not-sent')));
+      const ready = (async () => {
+        await ensureHostListener();
+        if (closed || disposed) {
+          throw Object.assign(new Error('已关闭'), toErrorShape('DISPOSED', '已关闭', 'not-sent'));
+        }
+        if (!options.hostRunning()) {
+          throw Object.assign(new Error('Host 未运行'), toErrorShape('NOT_CONNECTED', 'Host 未运行', 'not-sent'));
+        }
+        listeners.set(observationId, onEvent);
+        try {
+          await BotHost.observe({
+            observationId,
+            target: target as { kind: 'primary'; botId: string } | { kind: 'work'; botId: string; scopeId: string },
+          });
+        } catch (e) {
+          listeners.delete(observationId);
+          throw e;
+        }
+        // observe resolve 后才算建立；若期间已被 close/dispose，清 callback 并补发取消，不留观察。
+        if (closed || disposed) {
+          listeners.delete(observationId);
+          try { await BotHost.cancelObservation({ observationId }); } catch { /* 已结束/未建立 */ }
+        }
+      })();
       // ready 自身失败也要清 callback，不让孤儿回调残留。
       void ready.catch(() => { listeners.delete(observationId); });
       return {

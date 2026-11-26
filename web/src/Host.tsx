@@ -35,7 +35,7 @@ import { mobileClientRequest, mobileHaptic, mobileLocalRequest, onMobileStreamFa
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { mergeRecalledByTarget } from '../../desktop/web/src/drafts';
 import { targetApi } from '../../desktop/web/src/targetApi';
-import type { RoomApiResolver } from '../../desktop/web/src/scope-api';
+import type { MemberApiResolver, RoomApiResolver } from '../../desktop/web/src/scope-api';
 import {
   ConversationContextMenu,
   conversationTitle,
@@ -1457,6 +1457,23 @@ export function HostPage({
     if (!target) return null;
     return roomWriteTargetApiMap.get(target) ?? null;
   }, [roomSendDeviceIdOf, roomWriteTargetApiMap]);
+
+  /**
+   * DM 成员只读端解析器：本机成员优先直连 localScopeApi（Binder IPC，不依赖中心中继在线）；
+   * 远端成员优先命中非本机的 scopeConversationSources，再回退 roomWriteTargetApiMap。
+   * 依赖全为内容签名稳定引用，目录同内容轮询不换引用。
+   */
+  const resolveMemberApi = useCallback<MemberApiResolver>((deviceId) => {
+    if (!deviceId) return null;
+    if (localHost?.deviceId && deviceId === localHost.deviceId) {
+      return localScopeApi;
+    }
+    const remoteSource = scopeConversationSources.find(
+      s => s.api !== localScopeApi && s.identity?.targetDeviceId === deviceId,
+    );
+    if (remoteSource) return remoteSource.api;
+    return roomWriteTargetApiMap.get(deviceId) ?? null;
+  }, [localScopeApi, localHost?.deviceId, scopeConversationSources, roomWriteTargetApiMap]);
 
   // 群成员候选只收未归档 Bot；字段与 ScopeBotInfo 一致（含 hostLabel/platform/description）。
   // 独立签名含归档布尔与展示信息：归档/恢复或设备标签变化必须重建候选，目录同内容刷新引用稳定。
@@ -7591,6 +7608,7 @@ ${newer}` : draftSnapshot;
           scopeConversationSources={scopeConversationSources}
           localScopeApi={localScopeApi}
           resolveRoomApi={resolveRoomApi}
+          resolveMemberApi={resolveMemberApi}
           roomMemberCandidates={roomMemberCandidates}
           knownBots={knownBots}
           onMarkRoomHistoryViewed={markRoomHistoryViewed}

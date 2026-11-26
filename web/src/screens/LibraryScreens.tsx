@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Archive, ArrowLeft, Globe } from 'lucide-react';
 import { Scopes, type ScopeBotInfo } from '../../../desktop/web/src/Scopes';
-import type { RoomApiResolver, ScopeReadApi } from '../../../desktop/web/src/scope-api';
+import type { MemberApiResolver, RoomApiResolver, ScopeReadApi } from '../../../desktop/web/src/scope-api';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { DevicesDirectoryItem, MessageMember } from '../../../host-core/index.js';
 import type { ScopeConversation, ScopeConversationSource } from '../gbot-ui';
@@ -28,6 +28,7 @@ export interface ScopesSubpageScreenProps {
   scopeConversationSources: ScopeConversationSource[];
   localScopeApi: ScopeReadApi | null;
   resolveRoomApi: RoomApiResolver;
+  resolveMemberApi?: MemberApiResolver;
   roomMemberCandidates: ScopeBotInfo[];
   knownBots: ScopeBotInfo[];
   onMarkRoomHistoryViewed(scopeId: string, lastMessageAt: string): void;
@@ -58,6 +59,7 @@ export function ScopesSubpageScreen({
   scopeConversationSources,
   localScopeApi,
   resolveRoomApi,
+  resolveMemberApi,
   roomMemberCandidates,
   knownBots,
   onMarkRoomHistoryViewed,
@@ -210,6 +212,7 @@ export function ScopesSubpageScreen({
                     pageActive={active}
                     readOnly
                     scopeKind="dm"
+                    resolveMemberApi={resolveMemberApi}
                     participant={participant}
                     participantName={bot.role}
                     selectedScopeId={dmSelectedScopeId}

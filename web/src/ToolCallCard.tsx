@@ -1,7 +1,12 @@
 import { useEffect, useId, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import type { ChatToolCallItem } from './chatTurnModel';
-import { formatTurnDuration, pendingToolPrompts, resolveToolPresentationActive } from './chatTurnModel';
+import {
+  collectBotDmSendToTools,
+  formatTurnDuration,
+  pendingToolPrompts,
+  resolveToolPresentationActive,
+} from './chatTurnModel';
 import { BotDmFoldCard } from './BotDmCard';
 import {
   readToolPresentation,
@@ -80,6 +85,8 @@ export interface ToolCallCardProps {
   /** 仅作初始展开态（省略时回退 !collapseOutput）；用户手动切换后不再被自动覆写。 */
   defaultOpen?: boolean;
   presentationOnly?: boolean;
+  /** 是否因包含嵌套 DM send_to 而自动展开父调用（默认 true；DM 详情页可传 false 以遵守折叠设置）。 */
+  autoExpandSendTo?: boolean;
   /** 内部嵌套层级计数（默认 0），用于限制最大缩进 2 层。 */
   depth?: number;
   googleContext?: GoogleChatCardContext;
@@ -104,6 +111,7 @@ export function ToolCallCard({
   forceExpandBotDm = false,
   defaultOpen,
   presentationOnly = false,
+  autoExpandSendTo = true,
   depth = 0,
   googleContext,
   onSubmitQuestionnaire,
@@ -159,10 +167,9 @@ export function ToolCallCard({
                   : presentation.requestId
     : tool.id;
 
-  const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
+  const sendTo = tool.name === 'send_to' ? tool.sendTo : undefined;
   const isDmSendTo = Boolean(
-    !tool.parentCallId &&
-      tool.name === 'send_to' &&
+    tool.name === 'send_to' &&
       (sendTo?.scopeKind === 'dm' || (insideBotDmTurn && sendTo?.scopeKind !== 'room')),
   );
   const sendToTarget = sendTo
@@ -194,15 +201,22 @@ export function ToolCallCard({
       pendingToolPrompts(tool.children, tool.status === 'running').length > 0
     ),
   );
+  const hasVisibleChildSendTo = Boolean(
+    autoExpandSendTo &&
+      tool.children &&
+      collectBotDmSendToTools(tool.children, insideBotDmTurn ? { dmChannel: true as const } : undefined).length > 0 &&
+      (insideBotDmTurn || !collapseBotDm || forceExpandBotDm),
+  );
+  const shouldAutoExpandForChild = hasVisibleChildPresentation || hasVisibleChildSendTo;
 
   // 严格把 defaultOpen / !collapseOutput 作为初始态，在渲染期同步推导自动展开；
   // 一旦用户手动切换展开/收起，永不再由 props 或异步子调用变化自动覆盖。
   const [initialOpen] = useState<boolean>(() => defaultOpen ?? !collapseOutput);
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const [autoExpandedForChild, setAutoExpandedForChild] = useState<boolean>(
-    () => hasVisibleChildPresentation,
+    () => shouldAutoExpandForChild,
   );
-  if (hasVisibleChildPresentation && !autoExpandedForChild && userOpen === null) {
+  if (shouldAutoExpandForChild && !autoExpandedForChild && userOpen === null) {
     setAutoExpandedForChild(true);
   }
 
@@ -268,6 +282,10 @@ export function ToolCallCard({
             variant={variant}
             requesterName={requesterName}
             collapseOutput={collapseOutput}
+            collapseBotDm={collapseBotDm}
+            insideBotDmTurn={insideBotDmTurn}
+            forceExpandBotDm={forceExpandBotDm}
+            autoExpandSendTo={autoExpandSendTo}
             defaultOpen={defaultOpen}
             depth={depth + 1}
             googleContext={googleContext}
@@ -415,7 +433,7 @@ export function ToolCallCard({
     </div>
   );
 
-  if (isDmSendTo) {
+  if (isDmSendTo && depth === 0) {
     const dmPeer = sendTo?.targetName?.trim() || t('对端 Bot', 'Peer bot');
     const dmPeerLabel =
       sendTo?.category === 'reply'
@@ -510,7 +528,7 @@ export function ToolCallCard({
         </div>
       )}
 
-      {sendTo && (sendTo.text || sendTo.silentPass) ? (
+      {sendTo && (sendTo.text || sendTo.silentPass || (sendTo.fileCount && sendTo.fileCount > 0)) ? (
         <div className={`tool-send-to-preview${sendTo.silentPass ? ' is-silent' : ''}`}>
           <div className="tool-send-to-meta">
             <span className="tool-send-to-target">{sendToTarget}</span>

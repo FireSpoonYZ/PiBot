@@ -1828,12 +1828,23 @@ export function createTurnAdmission(deps) {
           return null;
         }
       }
-      // 提交前最后一次 gate 复核：上述 sync/restore 全部 await 之后，排队用户
+      let conversation = null;
+      if (unifiedExecution) {
+        conversation = await h.conversation(executionNativeId, context);
+        if (conversation) {
+          try {
+            await live?.bind?.(bot.botId, conversation);
+          } catch {
+            /* live 观察附着失败不阻断工作决策提交 */
+          }
+        }
+      }
+      // 提交前最后一次 gate 复核：上述 sync/restore/bind 全部 await 之后，排队用户
       // 输入或原生工作可能已先到；忙即保持 pending，绝不在 grant 后硬塞 submit。
       if (!(await canRunWork(bot.botId))) return null;
       // submit 前最后一次核对 pending 身份/标记：gate 复核与提交之间不得插入已取消工作。
       if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
-      const conversation = await h.conversation(executionNativeId, context);
+      conversation ??= await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
       if (!canAdmit()) return null;
       const submission = await conversation.submit(input, context);

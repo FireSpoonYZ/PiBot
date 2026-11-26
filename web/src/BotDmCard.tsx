@@ -1,6 +1,12 @@
 import { useId, useState, type ReactNode } from 'react';
 import { ArrowDownLeft, ArrowUpRight, ChevronDown } from 'lucide-react';
-import { isBotDmSendToTool, isBotDmTurn, type ChatTurn } from './chatTurnModel';
+import {
+  collectBotDmSendToTools,
+  countNonBotDmSendTools,
+  isBotDmTurn,
+  type ChatToolCallItem,
+  type ChatTurn,
+} from './chatTurnModel';
 import './bot-dm-card.css';
 
 export interface BotDmFoldCardProps {
@@ -44,14 +50,20 @@ export interface BotDmTurnSummary {
   silent: boolean;
 }
 
+function hasRunningTool(tools: readonly ChatToolCallItem[]): boolean {
+  return tools.some(
+    tool => tool.status === 'running' || (tool.children ? hasRunningTool(tool.children) : false),
+  );
+}
+
 function resolveDmAssistantPeerName(turns: readonly ChatTurn[], turnIdx: number): string | undefined {
   const turn = turns[turnIdx];
   if (!turn) return undefined;
-  const tools = turn.tools ?? [];
-  for (let i = tools.length - 1; i >= 0; i -= 1) {
-    const tool = tools[i];
-    if (isBotDmSendToTool(tool, turn) && tool.sendTo?.targetName?.trim()) {
-      return tool.sendTo.targetName.trim();
+  const dmSendTools = collectBotDmSendToTools(turn.tools ?? [], turn);
+  for (let i = dmSendTools.length - 1; i >= 0; i -= 1) {
+    const targetName = dmSendTools[i].sendTo?.targetName?.trim();
+    if (targetName) {
+      return targetName;
     }
   }
   const replyTo = turn.attribution?.replyTo;
@@ -113,14 +125,15 @@ export function resolveBotDmTurnSummary(
   }
 
   const tools = turn.tools ?? [];
-  const dmSendTools = tools.filter(tool => isBotDmSendToTool(tool, turn));
+  const dmSendTools = collectBotDmSendToTools(tools, turn);
   const lastSendTo = dmSendTools.at(-1)?.sendTo;
-  const nonSendToolsCount = tools.filter(tool => !isBotDmSendToTool(tool, turn)).length;
+  const hasDmSend = dmSendTools.length > 0;
+  const nonSendToolsCount = countNonBotDmSendTools(tools, turn);
   const peer = resolveDmAssistantPeerName(turns, turnIdx) || t('其他 Bot', 'Peer bot');
   const isSilent = Boolean(lastSendTo?.silentPass && !turn.text.trim());
   const status: BotDmTurnSummary['status'] = turn.error
     ? 'error'
-    : turn.isStreaming || tools.some(tool => tool.status === 'running')
+    : turn.isStreaming || hasRunningTool(tools)
       ? 'running'
       : 'idle';
   const peerLabel =
@@ -134,7 +147,7 @@ export function resolveBotDmTurnSummary(
         ? t('处理失败', 'Failed')
         : isSilent
           ? t('无需回复', 'Silent pass')
-          : lastSendTo
+          : hasDmSend
             ? t('私聊回传', 'DM reply')
             : t('私聊处理', 'DM task');
   const preview =
@@ -142,9 +155,11 @@ export function resolveBotDmTurnSummary(
     compactDmPreview(turn.text) ||
     (isSilent
       ? t('本次无需回复（pass）', 'No reply needed (pass)')
-      : nonSendToolsCount > 0
-        ? t(`调用了 ${nonSendToolsCount} 个工具`, `Used ${nonSendToolsCount} tool(s)`)
-        : '');
+      : lastSendTo?.fileCount && lastSendTo.fileCount > 0
+        ? t(`${lastSendTo.fileCount} 个附件`, `${lastSendTo.fileCount} file(s)`)
+        : nonSendToolsCount > 0
+          ? t(`调用了 ${nonSendToolsCount} 个工具`, `Used ${nonSendToolsCount} tool(s)`)
+          : '');
   const metaParts = [
     lastSendTo?.fileCount && lastSendTo.fileCount > 0
       ? t(`${lastSendTo.fileCount} 个附件`, `${lastSendTo.fileCount} file(s)`)

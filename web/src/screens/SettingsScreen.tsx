@@ -986,7 +986,7 @@ export function HubSettingsView({
             <ListRow
               leading={<Code2 />}
               title={t('隐藏工具输出', 'Hide tool output')}
-              subtitle={t('只显示回复与待操作请求', 'Show only replies and action prompts')}
+              subtitle={t('在主聊天与 Bot 私聊中隐藏工具调用与思考过程，只显示回复与待操作请求', 'Hide tool calls and thinking in main chat and Bot DMs; show only replies and action prompts')}
               trailing={(
                 <Switch
                   label={t('隐藏工具输出', 'Hide tool output')}
@@ -999,7 +999,7 @@ export function HubSettingsView({
               <ListRow
                 leading={<Code2 />}
                 title={t('默认折叠工具输出', 'Collapse tool output')}
-                subtitle={t('保留工具摘要，点击可展开详情', 'Show tool summaries that expand on tap')}
+                subtitle={t('在主聊天与 Bot 私聊中默认折叠工具摘要，点击可展开详情', 'Collapse tool summaries by default in main chat and Bot DMs; tap to expand')}
                 trailing={(
                   <Switch
                     label={t('默认折叠工具输出', 'Collapse tool output')}

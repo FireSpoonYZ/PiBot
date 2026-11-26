@@ -739,7 +739,8 @@ export async function openRuntime(options) {
     getMessageLog: () => workContexts.getMessageLog(),
     context: CTX,
     // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
-    // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
+    // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话；
+    // 事务外幂等附着等待中的 primary live watch，观察失败不阻断持久会话解析/创建。
     getPrimary: async (bot) => {
       const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor, proactiveProfileOptions);
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
@@ -757,6 +758,13 @@ export async function openRuntime(options) {
         }, CTX);
       }
       await applyAgentProfile(harness, conversation.id, profile, CTX);
+      if (conversation) {
+        try {
+          await live?.bind?.(bot.botId, conversation);
+        } catch {
+          /* live 观察附着失败不阻断持久主会话解析/创建 */
+        }
+      }
       return conversation;
     },
   });
@@ -2302,20 +2310,28 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   async function ensurePrimaryConversationForBot(bot) {
     let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (conversation) return conversation;
-    const modelRef = getBotModels()[bot.botId]?.modelRef ?? bot.modelRef ?? null;
-    if (!modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
-    const profile = profileFor(bot.botId, null);
-    conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
-      create: true,
-      defaultModel: modelRef,
-      thinkingLevel: profile.thinkingLevel,
-      instructions: profile.instructions,
-      selectedExtensions: profile.selectedExtensions,
-      removeTools: profile.removeTools,
-      codemodeOnly: profile.codemodeOnly,
-    }, CTX);
-    await applyAgentProfile(harness, conversation.id, profile, CTX);
+    if (!conversation) {
+      const modelRef = getBotModels()[bot.botId]?.modelRef ?? bot.modelRef ?? null;
+      if (!modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
+      const profile = profileFor(bot.botId, null);
+      conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
+        create: true,
+        defaultModel: modelRef,
+        thinkingLevel: profile.thinkingLevel,
+        instructions: profile.instructions,
+        selectedExtensions: profile.selectedExtensions,
+        removeTools: profile.removeTools,
+        codemodeOnly: profile.codemodeOnly,
+      }, CTX);
+      await applyAgentProfile(harness, conversation.id, profile, CTX);
+    }
+    if (conversation) {
+      try {
+        await live?.bind?.(bot.botId, conversation);
+      } catch {
+        /* live 观察附着失败不阻断持久主会话解析/创建 */
+      }
+    }
     return conversation;
   }
 

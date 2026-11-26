@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import type { DesktopViewApi } from './types';
 import { isScopeWritableApi } from './scope-api';
-import type { RoomApiResolver, ScopeReadApi } from './scope-api';
+import type { MemberApiResolver, RoomApiResolver, ScopeReadApi } from './scope-api';
 import type {
   BotRecord,
   MessageCursor,
@@ -26,7 +26,13 @@ import type {
 } from '../../../host-core/index.js';
 import { useDrafts } from './drafts';
 import { ActionBar, Button, InlineBanner } from '../../../web/src/components/ui';
-import { useText } from '../../../web/src/ui';
+import { useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
+import { GrokBotWorkingSlot, resolveBotAvatarPreset } from '../../../web/src/GrokBotAvatar';
+import { botAvatarKey } from '../../../web/src/botAvatarSync';
+import { resolveAssistantFailureDetail, type KnownBotSummary } from '../../../web/src/chatTurnModel';
+import { buildDmScopeTimeline } from '../../../web/src/dmScopeTimeline';
+import { useDmScopeExecution } from '../../../web/src/useDmScopeExecution';
+import { DmScopeExecutionRow } from '../../../web/src/DmScopeExecutionRow';
 import {
   ConversationChatHeader,
   ConversationGroupAvatar,
@@ -623,6 +629,7 @@ function ScopeDetail({
   onBack,
   onOpenLink,
   resolveRoomApi,
+  resolveMemberApi,
   memberCandidates,
   onDeleted,
   onHistoryViewed,
@@ -645,6 +652,8 @@ function ScopeDetail({
   onOpenLink?: (href: string) => void | Promise<unknown>;
   /** 群聊写端解析器：send/members 分别路由真实 DesktopViewApi；返回 null 表示写端未连接。 */
   resolveRoomApi?: RoomApiResolver;
+  /** DM 成员只读端解析器：按成员 deviceId 路由可读 ScopeReadApi（本机优先直连，远端走目标 API）。 */
+  resolveMemberApi?: MemberApiResolver;
   /** 新增成员候选（未归档 Bot）；缺省用 bots；现有成员名字始终走 bots。 */
   memberCandidates?: readonly ScopeBotInfo[];
   /** 群详情删除成功或远端检测到群已删除时触发。 */
@@ -656,6 +665,8 @@ function ScopeDetail({
   onSettingsOpenChange?: (open: boolean) => void;
 }) {
   const t = useText();
+  const [hideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput] = useCollapseToolOutput();
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
@@ -939,8 +950,93 @@ function ScopeDetail({
     }
   }, [isRoom, membersApi, api, scope, onChanged, onDeleted]);
 
-  // 渲染后应用滚动补偿：prepend 保持视口；吸底标记优先；设置页关闭后恢复进入设置前的滚动位置。
+  const handleDmMemberSettled = useCallback(() => {
+    void pollNew();
+  }, [pollNew]);
+
+  // 仅 Bot DM 会话接入双端执行流（observe + 渐进式 raw 历史）；群聊（isRoom === true）完全不启用。
+  const dmExecution = useDmScopeExecution({
+    enabled: !isRoom,
+    scopeId: scope.scope.scopeId,
+    members: scope.scope.members,
+    fallbackApi: api,
+    resolveMemberApi,
+    active: pageActive && docVisible,
+    ledgerMessages: isRoom ? undefined : history,
+    onMemberSettled: handleDmMemberSettled,
+  });
+
+  const dmKnownBots = useMemo<KnownBotSummary[]>(
+    () => (isRoom ? [] : bots.map((b) => ({ botId: b.botId, deviceId: b.deviceId, role: b.role }))),
+    [isRoom, bots],
+  );
+
+  const dmTimeline = useMemo(
+    () =>
+      isRoom
+        ? null
+        : buildDmScopeTimeline({
+            scopeId: scope.scope.scopeId,
+            ledgerMessages: history,
+            members: dmExecution.sources,
+            knownBots: dmKnownBots,
+            hideToolOutput,
+            hasEarlierLedger: Boolean(histCursor),
+          }),
+    [isRoom, scope.scope.scopeId, history, dmExecution.sources, dmKnownBots, hideToolOutput, histCursor],
+  );
+
+  const dmOfflinePeerNames = useMemo(() => {
+    if (isRoom) return [];
+    return dmExecution.sources
+      .filter((s) => s.unavailableReason === 'offline')
+      .map((s) => conversationMemberName(s.member, bots, t));
+  }, [isRoom, dmExecution.sources, bots, t]);
+
+  const dmVisibleLiveStatuses = useMemo(
+    () =>
+      dmTimeline
+        ? dmTimeline.liveStatuses.filter(
+            (s) => s.isBusy || Boolean(s.failureDetail) || s.activity.phase === 'stopped',
+          )
+        : [],
+    [dmTimeline],
+  );
+
+  const dmAnyLiveBusy = Boolean(dmTimeline?.liveStatuses.some((s) => s.isBusy));
+
+  const dmScrollSig = useMemo(() => {
+    if (!dmTimeline) return '';
+    const lastItem = dmTimeline.items.at(-1);
+    const tailSummary =
+      lastItem?.kind === 'execution'
+        ? (() => {
+            const blockSig = lastItem.turn.blocks
+              ? lastItem.turn.blocks
+                  .map((b) =>
+                    b.kind === 'tools'
+                      ? `T${b.tools.map((tool) => `${tool.id}:${tool.status}:${tool.output?.length ?? 0}`).join(',')}`
+                      : `${b.kind[0]}${b.text.length}`,
+                  )
+                  .join(';')
+              : `${lastItem.turn.text.length}:${lastItem.turn.thinking?.length ?? 0}:${lastItem.turn.tools?.map((tool) => `${tool.id}:${tool.status}:${tool.output?.length ?? 0}`).join(',') ?? ''}`;
+            return `${lastItem.key}:${blockSig}:${lastItem.turn.error ?? ''}:${lastItem.isLive ? 1 : 0}`;
+          })()
+        : lastItem?.key ?? '';
+    const liveSummary = dmVisibleLiveStatuses
+      .map(
+        (s) =>
+          `${s.member.deviceId}:${s.member.botId}:${s.isBusy ? 1 : 0}:${s.isStreaming ? 1 : 0}:${s.activeToolName ?? ''}:${s.hasThinking ? 1 : 0}:${s.failureDetail ?? ''}`,
+      )
+      .join('|');
+    return `${dmTimeline.items.length}#${tailSummary}#${liveSummary}`;
+  }, [dmTimeline, dmVisibleLiveStatuses]);
+  const prevDmScrollSigRef = useRef(dmScrollSig);
+
+  // 渲染后应用滚动补偿：prepend 保持视口；吸底标记优先；DM 实时执行流在底部时保持跟随；设置页关闭后恢复进入设置前的滚动位置。
   useLayoutEffect(() => {
+    const dmChanged = !isRoom && prevDmScrollSigRef.current !== dmScrollSig;
+    prevDmScrollSigRef.current = dmScrollSig;
     const justClosedSettings = prevShowSettingsRef.current && !showSettings;
     prevShowSettingsRef.current = showSettings;
     if (showSettings) return;
@@ -960,10 +1056,15 @@ function ScopeDetail({
       wasAtBottomRef.current = true;
       return;
     }
+    if (dmChanged && wasAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      savedScrollTopRef.current = el.scrollTop;
+      return;
+    }
     if (justClosedSettings && savedScrollTopRef.current !== null) {
       el.scrollTop = savedScrollTopRef.current;
     }
-  }, [history, showSettings]);
+  }, [history, showSettings, isRoom, dmScrollSig]);
 
   const latestMessage = history.at(-1)?.message;
   useEffect(() => {
@@ -1132,6 +1233,14 @@ function ScopeDetail({
 
         {roomStatusBar}
 
+        {!isRoom && online && dmOfflinePeerNames.length > 0 ? (
+          <p className="scope-dm-offline-caption" role="status">
+            {dmOfflinePeerNames.length === 1
+              ? t(`「${dmOfflinePeerNames[0]}」所在设备离线，仅显示已同步消息。`, `${dmOfflinePeerNames[0]}'s device is offline; showing synced messages only.`)
+              : t(`${dmOfflinePeerNames.join('、')}所在设备离线，仅显示已同步消息。`, `${dmOfflinePeerNames.join(', ')}'s devices are offline; showing synced messages only.`)}
+          </p>
+        ) : null}
+
         {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room + 可写 API 允许用户消息输入。 */}
         <div className="message-list scope-message-list" ref={msgListRef} onScroll={onMsgListScroll}>
           {histCursor && !histLoading ? (
@@ -1139,33 +1248,135 @@ function ScopeDetail({
               {t('加载更早消息', 'Load earlier messages')}
             </button>
           ) : null}
-          {history.length === 0 && !histLoading && !histError ? (
-            <div className="empty-state">{t('暂无消息。', 'No messages yet.')}</div>
+          {isRoom ? (
+            <>
+              {history.length === 0 && !histLoading && !histError ? (
+                <div className="empty-state">{t('暂无消息。', 'No messages yet.')}</div>
+              ) : null}
+              {history.map((msg, i) => {
+                const replyTo = msg.message.replyTo;
+                const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
+                const replyQuote = replyTo
+                  ? replySource
+                    ? { author: authorName(replySource, bots, t), text: replySource.message.text }
+                    : replyQuotes[replyTo] ?? null
+                  : null;
+                const divider = i === 0
+                  ? <ConversationTimeDivider at={msg.message.createdAt} />
+                  : <ConversationTimeDivider at={msg.message.createdAt} previousAt={history[i - 1].message.createdAt} />;
+                return (
+                  <div key={msg.message.messageId} className="scope-message-wrap">
+                    {divider}
+                    <ConversationMessage
+                      message={msg}
+                      authorName={authorName(msg, bots, t)}
+                      replyQuote={replyQuote}
+                      onReply={canWrite && isRoom ? () => setRoomReply(msg.message.messageId) : undefined}
+                      onOpenLink={onOpenLink}
+                    />
+                  </div>
+                );
+              })}
+            </>
+          ) : dmTimeline ? (
+            <>
+              {dmTimeline.items.length === 0 && !dmAnyLiveBusy && dmVisibleLiveStatuses.length === 0 && !histLoading && !histError ? (
+                <div className="empty-state">{t('暂无消息。', 'No messages yet.')}</div>
+              ) : null}
+              {(() => {
+                let prevLedgerCreatedAt: string | null = null;
+                return dmTimeline.items.map((item) => {
+                  if (item.kind === 'ledger') {
+                    const msg = item.message;
+                    const replyTo = msg.message.replyTo;
+                    const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
+                    const replyQuote = replyTo
+                      ? replySource
+                        ? { author: authorName(replySource, bots, t), text: replySource.message.text }
+                        : replyQuotes[replyTo] ?? null
+                      : null;
+                    const divider = prevLedgerCreatedAt === null
+                      ? <ConversationTimeDivider at={msg.message.createdAt} />
+                      : <ConversationTimeDivider at={msg.message.createdAt} previousAt={prevLedgerCreatedAt} />;
+                    prevLedgerCreatedAt = msg.message.createdAt;
+                    return (
+                      <div key={item.key} className="scope-message-wrap">
+                        {divider}
+                        <ConversationMessage
+                          message={msg}
+                          authorName={authorName(msg, bots, t)}
+                          replyQuote={replyQuote}
+                          onOpenLink={onOpenLink}
+                        />
+                      </div>
+                    );
+                  }
+                  const memberBot = bots.find(
+                    (b) => b.deviceId === item.member.deviceId && b.botId === item.member.botId,
+                  );
+                  const memberKey = botAvatarKey(item.member);
+                  const memberPreset = resolveBotAvatarPreset(
+                    memberKey,
+                    memberBot?.role,
+                    memberBot?.isPrimary,
+                  );
+                  return (
+                    <div key={item.key} className="scope-message-wrap">
+                      <DmScopeExecutionRow
+                        item={item}
+                        scopeId={scope.scope.scopeId}
+                        authorName={conversationMemberName(item.member, bots, t)}
+                        avatarPreset={memberPreset}
+                        botKey={memberKey}
+                        variant={variant}
+                        hideToolOutput={hideToolOutput}
+                        collapseToolOutput={collapseToolOutput}
+                        onOpenLink={onOpenLink}
+                      />
+                    </div>
+                  );
+                });
+              })()}
+              {dmVisibleLiveStatuses.length > 0 ? (
+                <div className="scope-dm-live-slots">
+                  {dmVisibleLiveStatuses.map((status) => {
+                    const memberBot = bots.find(
+                      (b) => b.deviceId === status.member.deviceId && b.botId === status.member.botId,
+                    );
+                    const memberKey = botAvatarKey(status.member);
+                    const memberPreset = resolveBotAvatarPreset(
+                      memberKey,
+                      memberBot?.role,
+                      memberBot?.isPrimary,
+                    );
+                    const memberName = conversationMemberName(status.member, bots, t);
+                    const failureDetail = status.failureDetail
+                      ? resolveAssistantFailureDetail(status.failureDetail, t)
+                      : null;
+                    return (
+                      <div key={`live:${memberKey}`} className="scope-dm-live-slot">
+                        <span className="scope-dm-live-slot-name">{memberName}</span>
+                        <GrokBotWorkingSlot
+                          botKey={`dm:${scope.scope.scopeId}:${memberKey}`}
+                          preset={memberPreset}
+                          isBusy={status.isBusy}
+                          isStreaming={status.isStreaming}
+                          activeToolName={hideToolOutput ? null : status.activeToolName}
+                          hasThinking={!hideToolOutput && status.hasThinking}
+                          startedAt={status.startedAt}
+                          activity={status.activity}
+                          hasError={Boolean(failureDetail)}
+                          failure={failureDetail ? { detail: failureDetail } : undefined}
+                          reserveSlot={false}
+                          t={t}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>
           ) : null}
-          {history.map((msg, i) => {
-            const replyTo = msg.message.replyTo;
-            const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
-            const replyQuote = replyTo
-              ? replySource
-                ? { author: authorName(replySource, bots, t), text: replySource.message.text }
-                : replyQuotes[replyTo] ?? null
-              : null;
-            const divider = i === 0
-              ? <ConversationTimeDivider at={msg.message.createdAt} />
-              : <ConversationTimeDivider at={msg.message.createdAt} previousAt={history[i - 1].message.createdAt} />;
-            return (
-              <div key={msg.message.messageId} className="scope-message-wrap">
-                {divider}
-                <ConversationMessage
-                  message={msg}
-                  authorName={authorName(msg, bots, t)}
-                  replyQuote={replyQuote}
-                  onReply={canWrite && isRoom ? () => setRoomReply(msg.message.messageId) : undefined}
-                  onOpenLink={onOpenLink}
-                />
-              </div>
-            );
-          })}
           {newCount > 0 ? (
             <button type="button" className="scope-new-banner" onClick={jumpToLatest}>
               <ArrowDown size={13} aria-hidden="true" />
@@ -1364,6 +1575,7 @@ export function Scopes({
   knownBots,
   onOpenLink,
   resolveRoomApi,
+  resolveMemberApi,
   memberCandidates,
   onDeleted,
   onHistoryViewed,
@@ -1407,6 +1619,8 @@ export function Scopes({
   onOpenLink?: (href: string) => void | Promise<unknown>;
   /** 群聊写端解析器：传入即表示群聊提供可写入口（写端未就绪时详情降级为待连接，不标只读）。 */
   resolveRoomApi?: RoomApiResolver;
+  /** DM 成员只读端解析器：按成员 deviceId 路由可读 ScopeReadApi（本机优先直连，远端走目标 API）。 */
+  resolveMemberApi?: MemberApiResolver;
   /** 新增成员候选（未归档 Bot）；缺省用合并目录；现有成员名字始终走 knownBots。 */
   memberCandidates?: readonly ScopeBotInfo[];
   /** 群详情删除成功或远端检测到群已删除时触发：父级回到 Hub / 清 stage 并刷新群列表、移除置顶。 */
@@ -1764,6 +1978,7 @@ export function Scopes({
             onBack={detailBack}
             onOpenLink={onOpenLink}
             resolveRoomApi={resolveRoomApi}
+            resolveMemberApi={resolveMemberApi}
             memberCandidates={memberCandidates}
             onDeleted={handleScopeDeleted}
             onHistoryViewed={onHistoryViewed}

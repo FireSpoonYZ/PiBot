@@ -930,7 +930,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                     <span className="settings-row-label">
                       <span>{t('隐藏工具输出', 'Hide Tool Output')}</span>
                       <span className="metadata" style={{ display: 'block' }}>
-                        {t('只显示回复与待操作请求', 'Show replies and prompts that need your input')}
+                        {t('在主聊天与 Bot 私聊中隐藏工具调用与思考过程，只显示回复与待操作请求', 'Hide tool calls and thinking in main chat and Bot DMs; show only replies and prompts that need your input')}
                       </span>
                     </span>
                     <Switch
@@ -944,7 +944,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                       <span className="settings-row-label">
                         <span>{t('默认折叠工具输出', 'Collapse Tool Output by Default')}</span>
                         <span className="metadata" style={{ display: 'block' }}>
-                          {t('保留工具调用摘要，点击可展开详情', 'Show tool summaries that can be expanded')}
+                          {t('在主聊天与 Bot 私聊中默认折叠工具摘要，点击可展开详情', 'Collapse tool summaries by default in main chat and Bot DMs; click to expand')}
                         </span>
                       </span>
                       <Switch

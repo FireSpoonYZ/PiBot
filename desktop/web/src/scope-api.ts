@@ -23,6 +23,13 @@ export type ScopeWriteApi = DesktopViewApi;
  */
 export type RoomApiResolver = (scope: ScopeInfo, purpose: 'send' | 'members') => DesktopViewApi | null;
 
+/**
+ * DM 成员只读端解析器：宿主按成员所在设备 deviceId 路由可读 ScopeReadApi
+ * （本机优先直连只读适配器，远端走目标设备的 targetApi）。目标不可达返回 null。
+ * 内容相同/代际与在线态不变时返回值必须稳定。
+ */
+export type MemberApiResolver = (deviceId: string) => ScopeReadApi | null;
+
 const WRITE_METHODS = ['pending', 'mutateIntent', 'saveDraft', 'clearDraft', 'draftKey', 'pickFile'] as const;
 
 /** 真实能力检查：对象同时具备全部写方法才是可写 API；只读适配器自然返回 false。 */

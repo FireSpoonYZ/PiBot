@@ -5,6 +5,8 @@ import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import {
   chatTurnsWithoutBotDm,
   chatTurnsWithoutToolOutput,
+  collectBotDmSendToTools,
+  countNonBotDmSendTools,
   formatTurnDuration,
   formatWorkingElapsed,
   isBotDmSendToTool,
@@ -1174,4 +1176,681 @@ test('chatTurnsWithoutBotDm hides incoming DM turns, DM assistant turns, and out
   );
   // Default chatTurnsWithoutToolOutput (preserveBotDmSendTo omitted/false) preserves existing behavior.
   assert.deepEqual(chatTurnsWithoutToolOutput([dmOnlyPrimaryTurn]), []);
+});
+
+test('codemode nested send_to in settled raw details.calls extracts DM metadata, handles omitted scopeId, and preserves reply when hiding tool output', () => {
+  const knownBots = [
+    { botId: 'bot_dispatcher', deviceId: 'dev_1', role: '总控助手' },
+    { botId: 'bot_worker', deviceId: 'dev_1', role: '数据分析师' },
+  ];
+
+  const dmAssistantAttr = {
+    kind: 'bot',
+    botId: 'bot_worker',
+    deviceId: 'dev_1',
+    channel: 'dm',
+    scopeId: 'scope_dm_cm',
+    replyTo: 'msg_dm_req',
+    direction: 'outgoing',
+  };
+
+  const entries = [
+    {
+      id: 200,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'dm',
+        selfEcho: false,
+        message: {
+          messageId: 'msg_dm_req',
+          scopeId: 'scope_dm_cm',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'bot', botId: 'bot_dispatcher' },
+          category: 'request',
+          text: '用 codemode 跑完脚本并把报告发回来。',
+          createdAt: '2026-06-02T08:00:00.000Z',
+        },
+        attribution: {
+          kind: 'bot',
+          botId: 'bot_dispatcher',
+          deviceId: 'dev_1',
+          channel: 'dm',
+          scopeId: 'scope_dm_cm',
+          messageId: 'msg_dm_req',
+          category: 'request',
+          direction: 'incoming',
+          createdAt: '2026-06-02T08:00:00.000Z',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+    {
+      id: 201,
+      kind: 'host.work-trigger',
+      data: {
+        requestId: 'req_dm_cm',
+        botId: 'bot_worker',
+        scopeId: 'scope_dm_cm',
+        turn: {
+          requestId: 'req_dm_cm',
+          kind: 'dm',
+          scopeId: 'scope_dm_cm',
+          triggerMessageId: 'msg_dm_req',
+          responseMessageId: 'msg_dm_req',
+          replyTarget: { kind: 'dm', scopeId: 'scope_dm_cm', botId: 'bot_dispatcher', deviceId: 'dev_1' },
+        },
+      },
+    },
+    // Assistant has NO plain text — only codemode running read + send_to (with omitted scopeId + files)
+    {
+      id: 202,
+      kind: 'pi.assistant',
+      data: { attribution: dmAssistantAttr },
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'tc_cm_dm',
+              name: 'codemode',
+              arguments: {
+                code: 'const data = await read({ path: "report.csv" });\nawait send_to({ text: "报告已完成：日活 15,200", files: ["/tmp/a.csv", "/tmp/b.png"] });',
+              },
+            },
+          ],
+          timestamp: Date.parse('2026-06-02T08:00:02.000Z'),
+        },
+      ],
+    },
+    {
+      id: 203,
+      kind: 'pi.tool_result',
+      data: { attribution: dmAssistantAttr },
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_cm_dm',
+          toolName: 'codemode',
+          content: [{ type: 'text', text: 'done' }],
+          details: {
+            calls: [
+              { id: 1, name: 'read', args: JSON.stringify({ path: 'report.csv' }), status: 'ok', durationMs: 12 },
+              {
+                id: 2,
+                name: 'send_to',
+                args: JSON.stringify({
+                  text: '报告已完成：日活 15,200',
+                  files: ['/tmp/a.csv', '/tmp/b.png'],
+                }),
+                status: 'ok',
+                durationMs: 35,
+              },
+            ],
+          },
+          isError: false,
+          timestamp: Date.parse('2026-06-02T08:00:03.000Z'),
+          durationMs: 60,
+        },
+      ],
+    },
+  ];
+
+  const turns = parseHistoryEntries(entries, 0, {
+    selfBotId: 'bot_worker',
+    knownBots,
+  });
+
+  assert.equal(turns.length, 2);
+  const dmTurn = turns[1];
+  assert.equal(isBotDmTurn(dmTurn), true);
+  assert.equal(dmTurn.text, '');
+  assert.equal(dmTurn.tools?.length, 1);
+  assert.equal(dmTurn.tools?.[0].name, 'codemode');
+
+  const dmSendTools = collectBotDmSendToTools(dmTurn.tools ?? [], dmTurn);
+  assert.equal(dmSendTools.length, 1);
+  const nestedSend = dmSendTools[0];
+  assert.equal(nestedSend.id, 'tc_cm_dm/c2');
+  assert.equal(nestedSend.parentCallId, 'tc_cm_dm');
+  assert.equal(isBotDmSendToTool(nestedSend, dmTurn), true);
+  assert.deepEqual(nestedSend.sendTo, {
+    text: '报告已完成：日活 15,200',
+    silentPass: false,
+    fileCount: 2,
+    scopeKind: 'dm',
+    targetName: '总控助手',
+    category: 'reply',
+  });
+  assert.ok(nestedSend.argSummary?.startsWith('→ 总控助手:'));
+  assert.equal(countNonBotDmSendTools(dmTurn.tools ?? [], dmTurn), 1);
+
+  // hideToolOutput = true + hideBotDm = false (preserveBotDmSendTo: true):
+  // DM reply turn must NOT vanish; nested send_to is surfaced without leaking raw codemode script or read.
+  const keptDmTurns = chatTurnsWithoutToolOutput(turns, { preserveBotDmSendTo: true });
+  assert.equal(keptDmTurns.length, 2);
+  assert.equal(keptDmTurns[1].id, dmTurn.id);
+  assert.deepEqual(
+    keptDmTurns[1].tools?.map((t) => [t.id, t.name, t.sendTo?.text, t.sendTo?.targetName]),
+    [['tc_cm_dm/c2', 'send_to', '报告已完成：日活 15,200', '总控助手']],
+  );
+  assert.equal(keptDmTurns[1].blocks?.length, 1);
+  assert.equal(keptDmTurns[1].blocks?.[0].kind, 'tools');
+  assert.deepEqual(
+    keptDmTurns[1].blocks?.[0].kind === 'tools' ? keptDmTurns[1].blocks[0].tools.map((t) => t.id) : [],
+    ['tc_cm_dm/c2'],
+  );
+  assert.equal(countNonBotDmSendTools(keptDmTurns[1].tools ?? [], keptDmTurns[1]), 0);
+
+  // hideToolOutput = true with preserveBotDmSendTo = false drops the tool-only assistant turn cleanly.
+  const droppedTurns = chatTurnsWithoutToolOutput(turns, { preserveBotDmSendTo: false });
+  assert.equal(droppedTurns.length, 1);
+  assert.equal(droppedTurns[0].role, 'user');
+});
+
+test('codemode nested send_to works across live-projected nestedCalls, live nestedTools, and truncated argsPreview without throwing or hallucinating', () => {
+  const knownBots = [
+    { botId: 'bot_a', deviceId: 'dev_1', role: '主控助手' },
+    { botId: 'bot_b', deviceId: 'dev_1', role: '代码审核员' },
+  ];
+
+  // 1) Settled live-projected nestedCalls with >1024-char text truncated by projectLiveState -> normalizeLiveSnapshot
+  const longBody = '核查结论：\n' + '条目详细分析，包含引号"ok"与换行\n'.repeat(60);
+  const view = {
+    entries: [
+      {
+        id: 1,
+        kind: 'pi.user',
+        model: [{ role: 'user', content: [{ type: 'text', text: '发给代码审核员' }], timestamp: 1_730_000_000_000 }],
+      },
+      {
+        id: 2,
+        kind: 'pi.assistant',
+        model: [
+          {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call_cm_proj', name: 'codemode', arguments: { code: '...' } }],
+            timestamp: 1_730_000_000_100,
+          },
+        ],
+      },
+      {
+        id: 3,
+        kind: 'pi.tool_result',
+        model: [
+          {
+            role: 'toolResult',
+            toolCallId: 'call_cm_proj',
+            toolName: 'codemode',
+            content: [{ type: 'text', text: 'sent' }],
+            details: {
+              calls: [
+                {
+                  id: 1,
+                  name: 'ensure_dm',
+                  args: JSON.stringify({ peer: { deviceId: 'dev_1', botId: 'bot_b' } }),
+                  status: 'ok',
+                  durationMs: 10,
+                },
+                {
+                  id: 2,
+                  name: 'send_to',
+                  args: JSON.stringify({
+                    scopeId: 'scope_dm_long',
+                    files: ['/tmp/diff.patch'],
+                    text: longBody,
+                  }),
+                  status: 'ok',
+                  durationMs: 25,
+                },
+              ],
+            },
+            isError: false,
+            timestamp: 1_730_000_000_200,
+            durationMs: 40,
+          },
+        ],
+      },
+    ],
+    docs: { 'pi.live': { run: null, tools: [], nestedTools: [] } },
+  };
+
+  const liveState = projectLiveState(view);
+  const normalized = normalizeLiveSnapshot(
+    { type: 'snapshot', botId: 'bot_a', conversationId: 'conv_1', sequence: 1, state: liveState },
+    { kind: 'primary', botId: 'bot_a' },
+  );
+  const projectedTurns = parseHistoryEntries(normalized.state.history, 0, {
+    selfBotId: 'bot_a',
+    knownBots,
+  });
+  assert.equal(projectedTurns.length, 2);
+  const projSendTools = collectBotDmSendToTools(projectedTurns[1].tools ?? [], projectedTurns[1]);
+  assert.equal(projSendTools.length, 1);
+  assert.equal(projSendTools[0].sendTo?.scopeKind, 'dm');
+  assert.equal(projSendTools[0].sendTo?.targetName, '代码审核员');
+  assert.equal(projSendTools[0].sendTo?.fileCount, 1);
+  assert.equal(projSendTools[0].sendTo?.silentPass, false);
+  assert.ok(projSendTools[0].sendTo?.text?.startsWith('核查结论：\n条目详细分析，包含引号"ok"与换行'));
+  assert.ok(projSendTools[0].sendTo?.text?.endsWith('…'));
+  assert.equal(projectedTurns[1].tools?.[0].nestedCallsTruncated, true);
+  // Even with nestedCallsTruncated = true (due to >1024-char DM text), chatTurnsWithoutBotDm filters the DM-only codemode turn cleanly.
+  assert.equal(chatTurnsWithoutBotDm(projectedTurns).length, 1);
+
+  // 2) Live streaming nestedTools (even when c2 send_to arrives before c1 ensure_dm in liveTools array!)
+  const liveTurns = parseHistoryEntries(
+    [
+      {
+        id: 10,
+        kind: 'pi.user',
+        model: [{ role: 'user', content: [{ type: 'text', text: '转给代码审核员看下' }] }],
+      },
+    ],
+    0,
+    {
+      selfBotId: 'bot_a',
+      knownBots,
+      isBusy: true,
+      liveTools: [
+        { callId: 'call_cm_live', name: 'codemode', status: 'running', output: '' },
+        {
+          callId: 'call_cm_live/c2',
+          parentCallId: 'call_cm_live',
+          name: 'send_to',
+          status: 'running',
+          argsPreview: '{"scopeId":"scope_dm_live","text":"请审核 PR #42\\n重点看第 3 行\\u4e2d\\u65…',
+          output: '',
+        },
+        {
+          callId: 'call_cm_live/c1',
+          parentCallId: 'call_cm_live',
+          name: 'ensure_dm',
+          status: 'done',
+          outcome: 'ok',
+          argsPreview: '{"peer":{"deviceId":"dev_1","botId":"bot_b"}}',
+          output: '',
+        },
+      ],
+    },
+  );
+  assert.equal(liveTurns.length, 2);
+  const liveDmSends = collectBotDmSendToTools(liveTurns[1].tools ?? [], liveTurns[1]);
+  assert.equal(liveDmSends.length, 1);
+  assert.equal(liveDmSends[0].id, 'call_cm_live/c2');
+  assert.equal(liveDmSends[0].status, 'running');
+  assert.equal(liveDmSends[0].sendTo?.scopeKind, 'dm');
+  assert.equal(liveDmSends[0].sendTo?.targetName, '代码审核员');
+  assert.equal(liveDmSends[0].sendTo?.text, '请审核 PR #42\n重点看第 3 行中…');
+
+  // 3) Truncated edge cases: malformed non-JSON, truncated scopeId, truncated "pass" prefix, truncated files array
+  const edgeTurns = parseHistoryEntries([], 0, {
+    selfBotId: 'bot_a',
+    knownBots,
+    isBusy: true,
+    liveTools: [
+      { callId: 'cm_edge', name: 'codemode', status: 'running', output: '' },
+      {
+        callId: 'cm_edge/c1',
+        parentCallId: 'cm_edge',
+        name: 'send_to',
+        status: 'running',
+        argsPreview: 'not-valid-json',
+        output: '',
+      },
+      {
+        callId: 'cm_edge/c2',
+        parentCallId: 'cm_edge',
+        name: 'send_to',
+        status: 'running',
+        argsPreview: '{"text":"hello","files":["/a.png","/b.p…',
+        output: '',
+      },
+      {
+        callId: 'cm_edge/c3',
+        parentCallId: 'cm_edge',
+        name: 'send_to',
+        status: 'running',
+        argsPreview: '{"text":"pass',
+        output: '',
+      },
+      {
+        callId: 'cm_edge/c4',
+        parentCallId: 'cm_edge',
+        name: 'send_to',
+        status: 'running',
+        argsPreview: '{"text":"msg","scopeId":"scope_dm_trunc…',
+        output: '',
+      },
+    ],
+  });
+  const edgeChildren = edgeTurns[0]?.tools?.[0]?.children ?? [];
+  assert.equal(edgeChildren.length, 4);
+  assert.equal(edgeChildren[0].sendTo, undefined);
+  assert.equal(edgeChildren[1].sendTo?.text, 'hello');
+  assert.equal(edgeChildren[1].sendTo?.fileCount, 2);
+  assert.equal(edgeChildren[2].sendTo?.text, 'pass');
+  assert.equal(edgeChildren[2].sendTo?.silentPass, false);
+  assert.equal(edgeChildren[3].sendTo?.text, 'msg');
+  assert.equal(edgeChildren[3].sendTo?.scopeKind, undefined);
+});
+
+test('chatTurnsWithoutBotDm and chatTurnsWithoutToolOutput handle mixed codemode scripts, room vs DM disambiguation, and subsequent selfEcho scope hints', () => {
+  const knownBots = [
+    { botId: 'bot_a', deviceId: 'dev_1', role: '总控助手' },
+    { botId: 'bot_b', deviceId: 'dev_1', role: '研究助手' },
+    { botId: 'bot_c', deviceId: 'dev_1', role: '测试助手' },
+  ];
+
+  const entries = [
+    {
+      id: 1,
+      kind: 'pi.user',
+      model: [{ role: 'user', content: [{ type: 'text', text: '同步一下状态并派发任务' }] }],
+    },
+    // Mixed codemode: read + ensure_dm + DM send_to + create_room + room send_to + send_to to a DM known only via later selfEcho!
+    {
+      id: 2,
+      kind: 'pi.assistant',
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'toolCall', id: 'tc_cm_mixed', name: 'codemode', arguments: { code: '// mixed work' } },
+            { type: 'toolCall', id: 'tc_cm_dm_only', name: 'codemode', arguments: { code: '// dm only' } },
+            { type: 'text', text: '已同步进度。' },
+          ],
+        },
+      ],
+    },
+    {
+      id: 3,
+      kind: 'pi.tool_result',
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_cm_mixed',
+          toolName: 'codemode',
+          content: [{ type: 'text', text: 'ok' }],
+          details: {
+            calls: [
+              { id: 1, name: 'read', args: '{"path":"status.md"}', status: 'ok', durationMs: 5 },
+              { id: 2, name: 'ensure_dm', args: '{"peer":{"deviceId":"dev_1","botId":"bot_b"}}', status: 'ok', durationMs: 8 },
+              { id: 3, name: 'send_to', args: '{"scopeId":"scope_dm_new","text":"请核实 Q3"}', status: 'ok', durationMs: 12 },
+              { id: 4, name: 'create_room', args: '{"members":[{"deviceId":"dev_1","botId":"bot_c"}]}', status: 'ok', durationMs: 9 },
+              { id: 5, name: 'send_to', args: '{"scopeId":"scope_room_new","text":"群里同步"}', status: 'ok', durationMs: 11 },
+              { id: 6, name: 'send_to', args: '{"scopeId":"scope_dm_echo","text":"顺便帮我回归测试"}', status: 'ok', durationMs: 10 },
+            ],
+          },
+          isError: false,
+        },
+      ],
+    },
+    {
+      id: 4,
+      kind: 'pi.tool_result',
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_cm_dm_only',
+          toolName: 'codemode',
+          content: [{ type: 'text', text: 'ok' }],
+          details: {
+            calls: [
+              { id: 1, name: 'ensure_dm', args: '{"peer":{"deviceId":"dev_1","botId":"bot_b"}}', status: 'ok' },
+              { id: 2, name: 'send_to', args: '{"scopeId":"scope_dm_new","text":"补充上下文"}', status: 'ok' },
+            ],
+          },
+          isError: false,
+        },
+      ],
+    },
+    // Later selfEcho + peer reply teaching scope_dm_echo is a DM with 测试助手
+    {
+      id: 5,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'dm',
+        selfEcho: true,
+        message: {
+          messageId: 'msg_echo_1',
+          scopeId: 'scope_dm_echo',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'bot', botId: 'bot_a' },
+          category: 'request',
+          text: '顺便帮我回归测试',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+    {
+      id: 6,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'dm',
+        selfEcho: false,
+        message: {
+          messageId: 'msg_reply_c',
+          scopeId: 'scope_dm_echo',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'bot', botId: 'bot_c' },
+          category: 'reply',
+          text: '回归全部通过。',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+  ];
+
+  const allTurns = parseHistoryEntries(entries, 0, {
+    selfBotId: 'bot_a',
+    knownBots,
+  });
+  assert.equal(allTurns.length, 3);
+  const primaryAssistant = allTurns[1];
+  const mixedChildren = primaryAssistant.tools?.[0].children ?? [];
+  assert.equal(mixedChildren[2].sendTo?.scopeKind, 'dm');
+  assert.equal(mixedChildren[2].sendTo?.targetName, '研究助手');
+  // c5 followed create_room -> must NOT be falsely classified as DM!
+  assert.equal(mixedChildren[4].sendTo?.scopeKind, undefined);
+  assert.equal(isBotDmSendToTool(mixedChildren[4], primaryAssistant), false);
+  // c6 learned from later host.scope-message entries -> DM with 测试助手!
+  assert.equal(mixedChildren[5].sendTo?.scopeKind, 'dm');
+  assert.equal(mixedChildren[5].sendTo?.targetName, '测试助手');
+
+  // hideBotDm = true:
+  // - tc_cm_dm_only (ensure_dm + DM send_to only) is removed completely
+  // - tc_cm_mixed keeps [read, create_room, room send_to] and strips ensure_dm + both DM send_to children
+  // - incoming DM turn from bot_c is removed
+  // - original primaryAssistant is NOT mutated
+  const withoutDm = chatTurnsWithoutBotDm(allTurns);
+  assert.equal(withoutDm.length, 2);
+  assert.equal(withoutDm[1].text, '已同步进度。');
+  assert.deepEqual(
+    withoutDm[1].tools?.map((t) => t.id),
+    ['tc_cm_mixed'],
+  );
+  assert.deepEqual(
+    withoutDm[1].tools?.[0].children?.map((c) => c.id),
+    ['tc_cm_mixed/c1', 'tc_cm_mixed/c4', 'tc_cm_mixed/c5'],
+  );
+  assert.equal(primaryAssistant.tools?.length, 2);
+  assert.equal(primaryAssistant.tools?.[0].children?.length, 6);
+
+  // hideToolOutput = true + hideBotDm = false (preserveBotDmSendTo: true):
+  // surfaces all 3 nested DM send_to tools in execution order without leaking codemode/read/room send_to,
+  // while keeping nested pending prompts in order too!
+  const vaultPrompt = {
+    id: 'tc_cm_mixed/c7',
+    parentCallId: 'tc_cm_mixed',
+    name: 'vault_unlock',
+    status: 'running',
+    presentationLive: true,
+    presentation: { kind: 'vault-unlock', status: 'pending' },
+  };
+  const runningMixedTurn = {
+    ...primaryAssistant,
+    tools: [
+      { ...primaryAssistant.tools[0], status: 'running', children: [...mixedChildren, vaultPrompt] },
+      primaryAssistant.tools[1],
+    ],
+    blocks: [
+      {
+        id: 'blk-tools',
+        kind: 'tools',
+        tools: [
+          { ...primaryAssistant.tools[0], status: 'running', children: [...mixedChildren, vaultPrompt] },
+          primaryAssistant.tools[1],
+        ],
+      },
+      { id: 'blk-text', kind: 'text', text: '已同步进度。' },
+    ],
+  };
+  const hiddenWithDm = chatTurnsWithoutToolOutput([runningMixedTurn], { preserveBotDmSendTo: true });
+  assert.equal(hiddenWithDm.length, 1);
+  assert.deepEqual(
+    hiddenWithDm[0].tools?.map((t) => t.id),
+    ['tc_cm_mixed/c3', 'tc_cm_mixed/c6', 'tc_cm_mixed/c7', 'tc_cm_dm_only/c2'],
+  );
+
+  // Parallel ensure_dm calls before send_to must NOT hallucinate a wrong peerName
+  const parallelTurns = parseHistoryEntries(
+    [
+      {
+        id: 20,
+        kind: 'pi.assistant',
+        model: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'tc_par', name: 'codemode', arguments: { code: '...' } }] }],
+      },
+      {
+        id: 21,
+        kind: 'pi.tool_result',
+        model: [
+          {
+            role: 'toolResult',
+            toolCallId: 'tc_par',
+            toolName: 'codemode',
+            content: [{ type: 'text', text: 'ok' }],
+            details: {
+              calls: [
+                { id: 1, name: 'ensure_dm', args: '{"peer":{"deviceId":"dev_1","botId":"bot_b"}}', status: 'ok' },
+                { id: 2, name: 'ensure_dm', args: '{"peer":{"deviceId":"dev_1","botId":"bot_c"}}', status: 'ok' },
+                { id: 3, name: 'send_to', args: '{"scopeId":"s_p1","text":"hi 1"}', status: 'ok' },
+                { id: 4, name: 'send_to', args: '{"scopeId":"s_p2","text":"hi 2"}', status: 'ok' },
+              ],
+            },
+            isError: false,
+          },
+        ],
+      },
+    ],
+    0,
+    { selfBotId: 'bot_a', knownBots },
+  );
+  const parSends = collectBotDmSendToTools(parallelTurns[0].tools ?? [], parallelTurns[0]);
+  assert.equal(parSends.length, 2);
+  assert.equal(parSends[0].sendTo?.scopeKind, 'dm');
+  assert.equal(parSends[0].sendTo?.targetName, undefined);
+  assert.equal(parSends[1].sendTo?.scopeKind, 'dm');
+  assert.equal(parSends[1].sendTo?.targetName, undefined);
+
+  // Codemode returning send_to JSON receipt teaches scopeKind/category/targetName without ensure_dm,
+  // and silent (pass) inside nested send_to sets silentPass: true without category: 'reply'.
+  const jsonReceiptTurns = parseHistoryEntries(
+    [
+      {
+        id: 30,
+        kind: 'pi.assistant',
+        model: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'tc_json_out', name: 'codemode', arguments: { code: 'return await send_to(...)' } }] }],
+      },
+      {
+        id: 31,
+        kind: 'pi.tool_result',
+        model: [
+          {
+            role: 'toolResult',
+            toolCallId: 'tc_json_out',
+            toolName: 'codemode',
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  messageId: 'm_out_1',
+                  scopeId: 'scope_dm_from_out',
+                  scopeKind: 'dm',
+                  category: 'request',
+                  peerBotId: 'bot_b',
+                  status: 'stored',
+                }),
+              },
+            ],
+            details: {
+              calls: [
+                { id: 1, name: 'send_to', args: '{"scopeId":"scope_dm_from_out","text":"请复核指标"}', status: 'ok' },
+              ],
+            },
+            isError: false,
+          },
+        ],
+      },
+      {
+        id: 32,
+        kind: 'host.work-trigger',
+        data: {
+          requestId: 'req_pass',
+          botId: 'bot_a',
+          scopeId: 'scope_dm_from_out',
+          turn: {
+            requestId: 'req_pass',
+            kind: 'dm',
+            scopeId: 'scope_dm_from_out',
+            replyTarget: { kind: 'dm', scopeId: 'scope_dm_from_out', botId: 'bot_b', deviceId: 'dev_1' },
+          },
+        },
+      },
+      {
+        id: 33,
+        kind: 'pi.assistant',
+        model: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'tc_pass_cm', name: 'codemode', arguments: { code: 'await send_to({ text: "(pass)" })' } }] }],
+      },
+      {
+        id: 34,
+        kind: 'pi.tool_result',
+        model: [
+          {
+            role: 'toolResult',
+            toolCallId: 'tc_pass_cm',
+            toolName: 'codemode',
+            content: [{ type: 'text', text: 'ok' }],
+            details: {
+              calls: [
+                { id: 1, name: 'send_to', args: '{"text":"(pass)"}', status: 'ok' },
+              ],
+            },
+            isError: false,
+          },
+        ],
+      },
+    ],
+    0,
+    { selfBotId: 'bot_a', knownBots },
+  );
+  assert.equal(jsonReceiptTurns.length, 2);
+  const receiptSends = collectBotDmSendToTools(jsonReceiptTurns[0].tools ?? [], jsonReceiptTurns[0]);
+  assert.equal(receiptSends.length, 1);
+  assert.deepEqual(receiptSends[0].sendTo, {
+    text: '请复核指标',
+    silentPass: false,
+    scopeKind: 'dm',
+    category: 'request',
+    targetName: '研究助手',
+  });
+  const passSends = collectBotDmSendToTools(jsonReceiptTurns[1].tools ?? [], jsonReceiptTurns[1]);
+  assert.equal(passSends.length, 1);
+  assert.equal(passSends[0].sendTo?.scopeKind, 'dm');
+  assert.equal(passSends[0].sendTo?.targetName, '研究助手');
+  assert.equal(passSends[0].sendTo?.silentPass, true);
+  assert.equal(passSends[0].sendTo?.category, undefined);
+  assert.equal(countNonBotDmSendTools(jsonReceiptTurns[1].tools ?? [], jsonReceiptTurns[1]), 0);
 });
