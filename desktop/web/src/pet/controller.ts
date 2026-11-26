@@ -3,7 +3,6 @@ import type {
   BotLiveState,
   LiveHistoryItem,
   QuestionnairePresentation,
-  TodoPresentation,
 } from '../../../../host-core/index.js';
 import {
   canStopBotActivity,
@@ -11,7 +10,7 @@ import {
   resolveBotActivity,
   type BotActivity,
 } from '../../../../web/src/botActivity.ts';
-import { resolveGrokMascotState } from '../../../../web/src/grokMascotEngine.ts';
+import type { GrokMascotState } from '../../../../web/src/grokMascotEngine.ts';
 import { toError } from '../api.ts';
 import { hostStatus, type HostStatus } from '../hostService.ts';
 import type { DesktopIdentity, DesktopPanelApi, ObservationHandle } from '../types';
@@ -24,7 +23,6 @@ import {
   type PetHandoffCard,
   type PetMessage,
   type PetProactiveAlert,
-  type PetTaskCard,
 } from './protocol.ts';
 
 export interface DesktopPetControllerDependencies {
@@ -39,12 +37,14 @@ const PROACTIVE_FALLBACK_SUMMARY = '有新的邮件或日程待查看';
 const PROACTIVE_FALLBACK_BOT_NAME = '邮件与日程管家';
 
 export interface PetProjectedCards {
-  activeToolName: string | null;
   questionnaire: PetActiveQuestionnaire | null;
   settledQuestionnaire: QuestionnairePresentation | null;
-  todo: TodoPresentation | null;
-  task: PetTaskCard | null;
   handoff: PetHandoffCard | null;
+}
+
+export interface PetProjectedTranscript {
+  messages: PetMessage[];
+  hasPendingUserTurn: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -68,50 +68,6 @@ function readQuestionnaire(value: unknown): QuestionnairePresentation | null {
     q.options.every((opt) => isRecord(opt) && isNonEmpty(opt.label) && isNonEmpty(opt.description)),
   );
   return validQuestions ? (value as unknown as QuestionnairePresentation) : null;
-}
-
-function readTodo(value: unknown): TodoPresentation | null {
-  if (!isRecord(value) || value.version !== 1 || value.kind !== 'todo') return null;
-  if (!isNonEmpty(value.installationId) || !Array.isArray(value.tasks)) return null;
-  const valid = value.tasks.every((task) =>
-    isRecord(task) &&
-    isSafeInt(task.id) &&
-    task.id >= 0 &&
-    isNonEmpty(task.subject) &&
-    (task.status === 'pending' || task.status === 'in_progress' || task.status === 'completed'),
-  );
-  return valid ? (value as unknown as TodoPresentation) : null;
-}
-
-function readTask(value: unknown): PetTaskCard | null {
-  if (!isRecord(value) || value.version !== 1 || value.kind !== 'task') return null;
-  if (!isNonEmpty(value.taskId) || !isNonEmpty(value.title) || !isNonEmpty(value.cardLabel)) return null;
-  if (
-    value.status !== 'triaging' &&
-    value.status !== 'working' &&
-    value.status !== 'waiting' &&
-    value.status !== 'done' &&
-    value.status !== 'cancelled'
-  ) {
-    return null;
-  }
-  if (
-    !isRecord(value.stepCount) ||
-    !isSafeInt(value.stepCount.done) ||
-    value.stepCount.done < 0 ||
-    !isSafeInt(value.stepCount.total) ||
-    value.stepCount.total < 0
-  ) {
-    return null;
-  }
-  return {
-    taskId: value.taskId,
-    title: value.title,
-    status: value.status,
-    cardLabel: value.cardLabel,
-    ...(typeof value.summary === 'string' && value.summary ? { summary: value.summary } : {}),
-    stepCount: { done: value.stepCount.done, total: value.stepCount.total },
-  };
 }
 
 function readHandoff(value: unknown, fallbackId: string): PetHandoffCard | null {
@@ -187,27 +143,63 @@ function questionnaireIdentityKey(q: Pick<QuestionnairePresentation, 'installati
   return `${q.installationId}:${q.conversationId}:${q.requestId}`;
 }
 
-/** The pet shows a small recent transcript; full history stays in the main chat. */
-export function projectPetMessages(history: readonly LiveHistoryItem[]): PetMessage[] {
-  const cutoff = history.reduce((last, item) => item.kind === 'pi.reset' ? Math.max(last, item.id) : last, 0);
+/** The pet shows a small recent primary transcript; full history stays in the main chat. */
+export function projectPetTranscript(history: readonly LiveHistoryItem[]): PetProjectedTranscript {
+  const items: readonly LiveHistoryItem[] = Array.isArray(history) ? history : [];
+  const cutoff = items.reduce((last, item) => item.kind === 'pi.reset' ? Math.max(last, item.id) : last, 0);
   const messages: PetMessage[] = [];
-  for (const item of history) {
+  let lastRole: 'user' | 'assistant' | null = null;
+  for (const item of items) {
     if (item.id <= cutoff) continue;
-    item.messages.forEach((message, index) => {
-      if ((message.role === 'user' || message.role === 'assistant') && message.text.trim()) {
-        messages.push({ id: item.id + ':' + index, role: message.role, text: message.text });
+    if (item.kind === 'host.scope-message') continue;
+    const channel = item.attribution?.channel;
+    if (channel === 'room' || channel === 'dm') continue;
+    const itemMessages = Array.isArray(item.messages) ? item.messages : [];
+    itemMessages.forEach((message, index) => {
+      const trimmed = typeof message.text === 'string' ? message.text.trim() : '';
+      if (message.role === 'user') {
+        lastRole = 'user';
+        if (trimmed) {
+          messages.push({ id: item.id + ':' + index, role: 'user', text: message.text });
+        }
+      } else if (message.role === 'assistant' && trimmed) {
+        lastRole = 'assistant';
+        messages.push({ id: item.id + ':' + index, role: 'assistant', text: message.text });
       }
     });
   }
-  return messages.slice(-12);
+  return {
+    messages: messages.slice(-12),
+    hasPendingUserTurn: lastRole === 'user',
+  };
 }
 
-/** Project active interactive cards (questionnaire, todo, task, security handoff) for pet bubbles. */
+/** The pet shows a small recent transcript; full history stays in the main chat. */
+export function projectPetMessages(history: readonly LiveHistoryItem[]): PetMessage[] {
+  return projectPetTranscript(history).messages;
+}
+
+export function resolvePetMascotState(params: {
+  connection: DesktopPetSnapshot['connection'];
+  activity: BotActivity;
+  isStreaming: boolean;
+  awaitingUser: boolean;
+}): GrokMascotState {
+  if (params.connection !== 'ready') return 'idle';
+  if (params.activity.phase === 'stopping') return 'powering-down';
+  if (params.awaitingUser) return 'blocked';
+  if (isBotActivityBusy(params.activity)) {
+    return params.isStreaming ? 'streaming' : 'working';
+  }
+  if (params.activity.phase === 'failed') return 'failed';
+  return 'idle';
+}
+
+/** Project active interactive cards (questionnaire, security handoff) for pet bubbles. */
 export function projectPetCards(
   live: BotLiveState,
   activity: BotActivity,
   connectionReady: boolean,
-  progressBaselineId = 0,
 ): PetProjectedCards {
   const history = Array.isArray(live.history) ? live.history : [];
   const tools = Array.isArray(live.tools) ? live.tools : [];
@@ -226,25 +218,11 @@ export function projectPetCards(
   let questionnaire: PetActiveQuestionnaire | null = null;
   let settledQuestionnaire: QuestionnairePresentation | null = null;
   let handoff: PetHandoffCard | null = null;
-  let activeToolName: string | null = null;
-  const seenTaskIds = new Set<string>();
-  const progress: Pick<PetProjectedCards, 'todo' | 'task'> = { todo: null, task: null };
-  function collectProgress(presentation: unknown): void {
-    progress.todo ??= readTodo(presentation);
-    if (progress.task) return;
-    const task = readTask(presentation);
-    if (!task || seenTaskIds.has(task.taskId)) return;
-    seenTaskIds.add(task.taskId);
-    if (task.status !== 'done' && task.status !== 'cancelled') progress.task = task;
-  }
 
-  // 1) Scan live tool slots (newest first) for active presentations & tool names.
+  // 1) Scan live tool slots (newest first) for active interactive presentations.
   for (let i = tools.length - 1; i >= 0; i -= 1) {
     const tool = tools[i];
     if (!tool) continue;
-    if (!activeToolName && tool.status !== 'done' && tool.name && tool.name !== 'ask_user_question') {
-      activeToolName = tool.name;
-    }
     const pres = tool.presentation;
     if (!pres) continue;
 
@@ -268,11 +246,10 @@ export function projectPetCards(
     if (!handoff && tool.status === 'running') {
       handoff = readHandoff(pres, tool.callId);
     }
-    collectProgress(pres);
   }
 
   // 2) Scan post-reset history (newest first) for durable pending questionnaires,
-  //    recently settled questionnaires, google-setup handoff, and post-baseline todo/task progress.
+  //    recently settled questionnaires, and running google-setup handoff.
   const seenGoogleSetupRuns = new Set<string>();
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const item = history[i];
@@ -309,19 +286,12 @@ export function projectPetCards(
           }
         }
       }
-
-      if (item.id > progressBaselineId) {
-        collectProgress(rawPres);
-      }
     }
   }
 
   return {
-    activeToolName,
     questionnaire,
     settledQuestionnaire,
-    todo: progress.todo?.tasks.length ? progress.todo : null,
-    task: progress.task,
     handoff,
   };
 }
@@ -412,7 +382,6 @@ export function createDesktopPetController(
     const previous = observation;
     observation = null;
     live = null;
-    value = { ...value, todo: null, task: null };
     if (previous) void previous.close();
   }
 
@@ -423,9 +392,10 @@ export function createDesktopPetController(
     publish({
       connection: 'connecting',
       botId: null, botName: 'PiBot', avatar: null, avatarReady: false, avatarRevision: undefined, messages: [],
+      hasPendingUserTurn: false,
       activity: resolveBotActivity(null), mascotState: 'idle',
       streamingText: '', generationId: null, canStop: false,
-      activeToolName: null, questionnaire: null, settledQuestionnaire: null, handoff: null,
+      questionnaire: null, settledQuestionnaire: null, handoff: null,
     });
   }
 
@@ -433,45 +403,53 @@ export function createDesktopPetController(
     closeObservation();
     publish({
       connection: 'offline', error: message, canStop: false,
-      activity: resolveBotActivity(null), mascotState: 'idle', streamingText: '',
-      activeToolName: null,
+      activity: resolveBotActivity(null), mascotState: 'idle',
+      hasPendingUserTurn: false, streamingText: '', generationId: null,
+      handoff: null,
       questionnaire: value.questionnaire
         ? { ...value.questionnaire, interactive: false }
         : null,
     });
   }
 
-  function applyLive(next: BotLiveState, progressBaselineId: number): void {
-    const previous = live;
+  function applyLive(next: BotLiveState): void {
     live = next;
     const activity = resolveBotActivity(next);
-    const text = next.generation?.text ?? '';
-    let generationId = value.generationId;
-    if (next.generation && (!previous?.generation || !text.startsWith(previous.generation.text))) {
-      generationSerial += 1;
-      generationId = value.deviceId + ':' + value.botId + ':' + generationSerial;
+    const genChannel = next.generation?.attribution?.channel;
+    const suppressStreaming =
+      genChannel === 'room' ||
+      genChannel === 'dm' ||
+      activity.source === 'room' ||
+      activity.source === 'dm';
+    const text = suppressStreaming ? '' : (next.generation?.text ?? '');
+    let generationId: string | null = null;
+    if (text) {
+      if (!value.streamingText || !text.startsWith(value.streamingText) || !value.generationId) {
+        generationSerial += 1;
+        generationId = `${value.deviceId}:${value.botId}:${generationSerial}`;
+      } else {
+        generationId = value.generationId;
+      }
     }
-    const cards = projectPetCards(next, activity, true, progressBaselineId);
-    const activeTool = next.tools.find((tool) => tool.status === 'running')
-      ?? next.tools.find((tool) => tool.status === 'pending');
+    const transcript = projectPetTranscript(next.history);
+    const cards = projectPetCards(next, activity, true);
+    const awaitingUser = Boolean(cards.questionnaire?.interactive || cards.handoff);
     publish({
       connection: 'ready',
       activity,
       canStop: canStopBotActivity(activity),
-      mascotState: resolveGrokMascotState({
-        isBusy: isBotActivityBusy(activity),
+      mascotState: resolvePetMascotState({
+        connection: 'ready',
+        activity,
         isStreaming: Boolean(text),
-        activeToolName: activeTool?.name,
-        settlementOutcome: activity.phase === 'failed' ? 'error' : null,
+        awaitingUser,
       }),
-      messages: projectPetMessages(next.history),
+      messages: transcript.messages,
+      hasPendingUserTurn: transcript.hasPendingUserTurn,
       streamingText: text,
       generationId,
-      activeToolName: cards.activeToolName,
       questionnaire: cards.questionnaire,
       settledQuestionnaire: cards.settledQuestionnaire,
-      todo: cards.todo,
-      task: cards.task,
       handoff: cards.handoff,
       error: activity.error?.message ?? null,
     });
@@ -482,7 +460,6 @@ export function createDesktopPetController(
     const epoch = observationEpoch;
     const key = observedConnection;
     const current = () => active && epoch === observationEpoch && key === connectionKey(api);
-    let progressBaselineId: number | null = null;
     try {
       const handle = api.observe(target, { kind: 'primary', botId: primary.botId }, (event) => {
         if (!current()) return;
@@ -497,11 +474,9 @@ export function createDesktopPetController(
         }
         if (!('botId' in frame) || 'scopeId' in frame || frame.botId !== primary.botId) return;
         if (frame.type === 'snapshot') {
-          // Existing tool results are history, not new progress; capture once per observation.
-          progressBaselineId ??= frame.state.lastEntryId ?? 0;
-          applyLive(frame.state, progressBaselineId);
+          applyLive(frame.state);
         } else if (live) {
-          applyLive({ ...live, ...frame.changes }, progressBaselineId ?? 0);
+          applyLive({ ...live, ...frame.changes });
         }
       });
       observation = handle;
@@ -804,16 +779,14 @@ export function createDesktopPetController(
       connection: 'connecting',
       avatarReady: false,
       messages: [],
+      hasPendingUserTurn: false,
       activity: resolveBotActivity(null),
       mascotState: 'idle',
       streamingText: '',
       generationId: null,
       canStop: false,
-      activeToolName: null,
       questionnaire: null,
       settledQuestionnaire: null,
-      todo: null,
-      task: null,
       handoff: null,
       error: null,
     };

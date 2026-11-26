@@ -171,15 +171,13 @@ button svg { flex: none; }
   display: none;
 }
 
-/* Variant: Thought & Voice Listening (pill + 2 cloud dots tail) */
-.pet-bubble[data-variant="thought"],
+/* Variant: Voice Listening (pill + 2 cloud dots tail) */
 .pet-bubble[data-variant="voice"] {
   width: max-content;
   max-width: 316px;
   border-radius: 999px;
   padding: 8px 13px;
 }
-.pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   width: 9px;
   height: 9px;
@@ -190,30 +188,25 @@ button svg { flex: none; }
   transform: none;
   box-shadow: 7px 8px 0 -2.5px var(--surface-overlay), 7px 8px 0 -1.5px var(--border-default);
 }
-.pet-stage[data-dock-side="left"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-dock-side="left"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   right: auto;
   left: 44px;
   box-shadow: -7px 8px 0 -2.5px var(--surface-overlay), -7px 8px 0 -1.5px var(--border-default);
 }
-.pet-stage[data-dock-side="center"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-dock-side="center"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   right: auto;
   left: 50%;
   margin-left: -4.5px;
   box-shadow: 0 9px 0 -2.5px var(--surface-overlay), 0 9px 0 -1.5px var(--border-default);
 }
-.pet-stage[data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   bottom: auto;
   top: -10px;
   box-shadow: 7px -8px 0 -2.5px var(--surface-overlay), 7px -8px 0 -1.5px var(--border-default);
 }
-.pet-stage[data-dock-side="left"][data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-dock-side="left"][data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   box-shadow: -7px -8px 0 -2.5px var(--surface-overlay), -7px -8px 0 -1.5px var(--border-default);
 }
-.pet-stage[data-dock-side="center"][data-panel-side="bottom"] .pet-bubble[data-variant="thought"] .pet-bubble-tail,
 .pet-stage[data-dock-side="center"][data-panel-side="bottom"] .pet-bubble[data-variant="voice"] .pet-bubble-tail {
   box-shadow: 0 -9px 0 -2.5px var(--surface-overlay), 0 -9px 0 -1.5px var(--border-default);
 }
@@ -276,11 +269,6 @@ button svg { flex: none; }
 /* Variant: Speech Reply */
 .pet-bubble[data-variant="speech"] {
   width: 332px;
-}
-
-/* Variant: Progress (Todo / Task) */
-.pet-bubble[data-variant="progress"] {
-  width: 308px;
 }
 
 /* Variant: Proactive Assistant Board Alert */
@@ -567,9 +555,8 @@ button svg { flex: none; }
   gap: 6px;
 }
 
-/* Handoff & Progress Bubbles */
-.pet-handoff-wrap,
-.pet-progress-wrap {
+/* Handoff Bubble */
+.pet-handoff-wrap {
   padding: 12px 14px 10px;
 }
 .pet-handoff-head {
@@ -632,66 +619,6 @@ button svg { flex: none; }
   font-weight: var(--weight-semibold);
 }
 .pet-handoff-primary:hover { background: var(--signal-primary-hover); }
-
-.pet-progress-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.pet-progress-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  font-weight: var(--weight-semibold);
-  color: var(--ink-primary);
-  min-width: 0;
-}
-.pet-progress-title span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pet-progress-count {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--signal-primary-soft);
-  color: var(--signal-primary);
-  font-size: 11px;
-  font-weight: var(--weight-semibold);
-}
-.pet-todo-ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  max-height: 170px;
-  overflow-y: auto;
-}
-.pet-todo-li {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--ink-primary);
-}
-.pet-todo-li.is-completed { color: var(--ink-muted); text-decoration: line-through; }
-.pet-todo-li.is-in_progress { font-weight: var(--weight-medium); }
-.pet-todo-bullet {
-  flex: none;
-  display: inline-flex;
-  margin-top: 2px;
-  color: var(--ink-tertiary);
-}
-.pet-todo-li.is-completed .pet-todo-bullet { color: var(--state-live); }
-.pet-todo-li.is-in_progress .pet-todo-bullet { color: var(--signal-primary); }
-.pet-todo-subject { min-width: 0; overflow-wrap: anywhere; }
 
 /* ==========================================================================
  * Floating Quick Composer Pill (Directly Below Mascot)
@@ -885,6 +812,8 @@ button svg { flex: none; }
 }
 .pet-rail-btn:hover:not(:disabled) { background: var(--surface-1); color: var(--ink-primary); }
 .pet-rail-btn.is-recording { background: var(--state-danger-soft); color: var(--state-danger); }
+.pet-rail-btn.is-stop { color: var(--state-danger-ink); background: var(--state-danger-soft); }
+.pet-rail-btn.is-stop:hover:not(:disabled) { background: var(--state-danger-soft); color: var(--state-danger); }
 
 .pet-avatar {
   position: relative;

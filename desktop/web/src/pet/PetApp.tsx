@@ -7,13 +7,8 @@ import {
   AlertTriangle,
   ArrowUp,
   Bell,
-  CheckCircle2,
-  Circle,
-  CircleDot,
-  ClipboardList,
   ExternalLink,
   History,
-  ListTodo,
   Mic,
   RefreshCw,
   Settings2,
@@ -29,7 +24,8 @@ import {
   getDefaultBotAvatarPreset,
   resolveBotAvatarPreset,
 } from '../../../../web/src/GrokBotAvatar';
-import { botActivityText, isBotActivityBusy } from '../../../../web/src/botActivity';
+import { isBotActivityBusy } from '../../../../web/src/botActivity';
+import type { GrokMascotState } from '../../../../web/src/grokMascotEngine';
 import { classifyMarkdownLink } from '../../../../web/src/markdownLink';
 import {
   ToolPresentationCard,
@@ -74,6 +70,13 @@ import {
   resolvePetAvatarState,
   type ResolvedPetAvatarState,
 } from './avatarReady';
+import {
+  captureDismissedStream,
+  reconcileDismissedStream,
+  canAutoShowLatestReply,
+  planMascotTransition,
+  type DismissedStreamState,
+} from './petPresentation';
 import { resolvePetTheme } from './theme';
 import { createPetVoice, voiceError, type PetVoiceStatus } from './voice';
 import { VoiceSettings } from './VoiceSettings';
@@ -144,10 +147,8 @@ type BubbleDescriptor =
       actionLabel?: string;
       showRefresh?: boolean;
     }
-  | { kind: 'thought'; id: string; text: string; canStop: boolean }
   | { kind: 'speech'; id: string; text: string; streaming: boolean; promptQuote?: string; messageId?: string }
-  | { kind: 'proactive-alert'; id: string; alert: PetProactiveAlert }
-  | { kind: 'progress'; id: string };
+  | { kind: 'proactive-alert'; id: string; alert: PetProactiveAlert };
 
 const PetMarkdown = memo(function PetMarkdown({
   text,
@@ -231,12 +232,18 @@ export function PetApp() {
 
   // Bubble visibility & settlement tracking
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [dismissedStream, setDismissedStream] = useState<DismissedStreamState | null>(null);
+  const dismissedStreamRef = useRef<DismissedStreamState | null>(null);
   const [tuckedProactiveIds, setTuckedProactiveIds] = useState<Set<string>>(() => new Set());
   const [revealedProactiveId, setRevealedProactiveId] = useState<string | null>(null);
   const [forcedReplyId, setForcedReplyId] = useState<string | null>(null);
   const [recentQuestionId, setRecentQuestionId] = useState<string | null>(null);
   const initialReplyCapturedRef = useRef<string | null>(null);
   const pendingRpcRef = useRef<Map<string, PendingRpc>>(new Map());
+  const [displayedMascotState, setDisplayedMascotState] = useState<GrokMascotState>(INITIAL_PET_SNAPSHOT.mascotState);
+  const displayedMascotStateRef = useRef<GrokMascotState>(INITIAL_PET_SNAPSHOT.mascotState);
+  const mascotDwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mascotTargetKeyRef = useRef<string>(targetKey(INITIAL_PET_SNAPSHOT));
 
   const stageRef = useRef<HTMLElement | null>(null);
   const envelopeRef = useRef<HTMLDivElement | null>(null);
@@ -259,6 +266,30 @@ export function PetApp() {
   const dockCompact = composerPhase === 'open' || composerPhase === 'closing';
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
+
+  const clearMascotDwellTimer = useCallback(() => {
+    if (mascotDwellTimerRef.current !== null) {
+      clearTimeout(mascotDwellTimerRef.current);
+      mascotDwellTimerRef.current = null;
+    }
+  }, []);
+
+  const clearDismissedStream = useCallback(() => {
+    dismissedStreamRef.current = null;
+    setDismissedStream(null);
+  }, []);
+
+  const stopBotTask = useCallback(() => {
+    const state = snapshotRef.current;
+    if (state.deviceId && state.botId) {
+      void postAction({
+        id: crypto.randomUUID(),
+        kind: 'stop',
+        deviceId: state.deviceId,
+        botId: state.botId,
+      }).catch(report);
+    }
+  }, [report]);
 
   const clearAvatarPressResetTimer = useCallback(() => {
     if (avatarPressResetTimerRef.current !== null) {
@@ -578,6 +609,15 @@ export function PetApp() {
   }, [t]);
 
   const dismissBubble = useCallback((id: string) => {
+    if (id.startsWith('stream:')) {
+      const next = captureDismissedStream(
+        snapshotRef.current.messages,
+        snapshotRef.current.generationId,
+      );
+      dismissedStreamRef.current = next;
+      setDismissedStream(next);
+      return;
+    }
     setDismissedIds((prev) => {
       const next = new Set(prev);
       next.add(id);
@@ -624,6 +664,7 @@ export function PetApp() {
         }
 
         if (previousKey !== nextKey) {
+          clearDismissedStream();
           cancelRecording();
           stopReading();
           setReplyToRead(null);
@@ -642,6 +683,7 @@ export function PetApp() {
           initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
         }
         if (sessionChanged) {
+          clearDismissedStream();
           cancelRecording();
           stopReading();
           setReplyToRead(null);
@@ -651,6 +693,27 @@ export function PetApp() {
           sendFlightRef.current = null;
           setSendFlight(null);
         }
+
+        const reconciled = reconcileDismissedStream({
+          dismissed: dismissedStreamRef.current,
+          streamingText: payload.streamingText,
+          generationId: payload.generationId,
+          messages: payload.messages,
+        });
+        if (reconciled.dismissed !== dismissedStreamRef.current) {
+          dismissedStreamRef.current = reconciled.dismissed;
+          setDismissedStream(reconciled.dismissed);
+        }
+        if (reconciled.dismissSpeechId) {
+          const speechId = reconciled.dismissSpeechId;
+          setDismissedIds((prev) => {
+            if (prev.has(speechId)) return prev;
+            const next = new Set(prev);
+            next.add(speechId);
+            return next;
+          });
+        }
+
         const nextAvatarState = resolvePetAvatarState(payload, avatarStateRef.current, PET_AVATAR_RESOLVER);
         if (nextAvatarState !== avatarStateRef.current) {
           avatarStateRef.current = nextAvatarState;
@@ -750,13 +813,14 @@ export function PetApp() {
       });
       pendingRpcRef.current.clear();
     };
-  }, [applyWindowState, cancelRecording, report, requestCloseComposer, stopReading, t, updateComposerState]);
+  }, [applyWindowState, cancelRecording, clearDismissedStream, report, requestCloseComposer, stopReading, t, updateComposerState]);
 
   useEffect(() => () => {
     clearComposerTimers();
     clearAvatarPressResetTimer();
+    clearMascotDwellTimer();
     voice.dispose();
-  }, [clearAvatarPressResetTimer, clearComposerTimers, voice]);
+  }, [clearAvatarPressResetTimer, clearComposerTimers, clearMascotDwellTimer, voice]);
 
   // Theme & page visibility sync
   useEffect(() => {
@@ -893,6 +957,7 @@ export function PetApp() {
     setSendFlight(flight);
     setNotice('');
     setForcedReplyId(null);
+    clearDismissedStream();
     requestCloseComposer();
     stopReading();
     try {
@@ -901,7 +966,7 @@ export function PetApp() {
       if (sendFlightRef.current === flight) { sendFlightRef.current = null; setSendFlight(null); }
       report(error);
     }
-  }, [report, requestCloseComposer, stopReading, t]);
+  }, [clearDismissedStream, report, requestCloseComposer, stopReading, t]);
 
   const submitQuestionnaire = useCallback(async (input: QuestionnaireSubmitPayload): Promise<unknown> => {
     const state = snapshotRef.current;
@@ -1096,45 +1161,35 @@ export function PetApp() {
       };
     }
 
-    // Priority 3: Live streaming reply
-    if (snapshot.streamingText && !dndMode) {
-      const sid = `stream:${snapshot.generationId ?? 'live'}`;
-      if (!dismissedIds.has(sid)) {
-        return {
-          kind: 'speech',
-          id: sid,
-          text: snapshot.streamingText,
-          streaming: true,
-          promptQuote: latestUserText,
-        };
-      }
-    }
+    const suppressingCurrentStream = Boolean(
+      dismissedStream && snapshot.streamingText && snapshot.generationId === dismissedStream.generationId,
+    );
 
-    // Priority 4: Busy thinking / working thought bubble (or todo progress if available while busy)
-    if (busy && !dndMode) {
-      if (snapshot.todo && snapshot.todo.tasks.some((item) => item.status !== 'completed')) {
-        const tid = `todo:${snapshot.todo.tasks.map((item) => `${item.id}:${item.status}`).join(',')}`;
-        if (!dismissedIds.has(tid)) {
-          return { kind: 'progress', id: tid };
-        }
-      }
-      const thoughtLabel = snapshot.activeToolName
-        ? t(`正在调用 ${snapshot.activeToolName}…`, `Running ${snapshot.activeToolName}…`)
-        : botActivityText(snapshot.activity, t);
+    // Priority 3: Live streaming reply
+    if (snapshot.streamingText && !dndMode && !suppressingCurrentStream) {
       return {
-        kind: 'thought',
-        id: 'thought:live',
-        text: thoughtLabel,
-        canStop: snapshot.canStop,
+        kind: 'speech',
+        id: `stream:${snapshot.generationId ?? 'live'}`,
+        text: snapshot.streamingText,
+        streaming: true,
+        promptQuote: latestUserText,
       };
     }
 
-    // Priority 5: Latest assistant reply (only for newly arrived replies or user-recalled reply)
+    // Priority 4: Latest assistant reply (only for newly arrived replies or user-recalled reply)
     if (latestReply) {
       const rid = `speech:${latestReply.message.id}`;
-      const isFresh = initialReplyCapturedRef.current !== null && initialReplyCapturedRef.current !== rid;
-      const isForced = forcedReplyId === rid;
-      if ((isForced || (isFresh && !dndMode)) && !dismissedIds.has(rid)) {
+      if (
+        canAutoShowLatestReply({
+          replyId: rid,
+          initialReplyId: initialReplyCapturedRef.current,
+          hasPendingUserTurn: snapshot.hasPendingUserTurn,
+          forcedReplyId,
+          dndMode,
+          dismissedIds,
+          suppressingStream: suppressingCurrentStream,
+        })
+      ) {
         return {
           kind: 'speech',
           id: rid,
@@ -1146,7 +1201,7 @@ export function PetApp() {
       }
     }
 
-    // Priority 5b: Proactive Google assistant Board alert (below all active chat/handoff/speech bubbles)
+    // Priority 5: Proactive Google assistant Board alert (below all active chat/handoff/speech bubbles)
     if (snapshot.proactiveAlert) {
       const alert = snapshot.proactiveAlert;
       const isRevealed = revealedProactiveId === alert.resultId;
@@ -1160,21 +1215,11 @@ export function PetApp() {
       }
     }
 
-    // Priority 6: Active Task / incomplete Todo card when idle
-    if (!dndMode && (snapshot.task || (snapshot.todo && snapshot.todo.tasks.some((item) => item.status !== 'completed')))) {
-      const pid = snapshot.task
-        ? `task:${snapshot.task.taskId}:${snapshot.task.status}:${snapshot.task.stepCount.done}`
-        : `todo-idle:${snapshot.todo?.tasks.length ?? 0}`;
-      if (!dismissedIds.has(pid)) {
-        return { kind: 'progress', id: pid };
-      }
-    }
-
     return null;
   }, [
-    busy,
     ctxMenuOpen,
     dismissedIds,
+    dismissedStream,
     dndMode,
     forcedReplyId,
     hasResolvedAvatar,
@@ -1206,13 +1251,13 @@ export function PetApp() {
   }, [activeBubble]);
 
   // Auto-fade completed speech bubbles when user enabled auto-fade
+  const autoFadeSpeechId =
+    activeBubble?.kind === 'speech' && !activeBubble.streaming ? activeBubble.id : null;
   useEffect(() => {
-    if (!autoFade || !activeBubble || activeBubble.kind !== 'speech' || activeBubble.streaming) return;
-    if (hoveringBubble || speaking) return;
-    const bubbleId = activeBubble.id;
-    const timer = setTimeout(() => dismissBubble(bubbleId), AUTO_FADE_MS);
+    if (!autoFade || !autoFadeSpeechId || busy || hoveringBubble || speaking) return;
+    const timer = setTimeout(() => dismissBubble(autoFadeSpeechId), AUTO_FADE_MS);
     return () => clearTimeout(timer);
-  }, [activeBubble, autoFade, dismissBubble, hoveringBubble, speaking]);
+  }, [autoFade, autoFadeSpeechId, busy, dismissBubble, hoveringBubble, speaking]);
 
   // Auto-tuck auto-opened proactive alert back into the mascot badge after 15s without hover/focus.
   // Auto-tuck is NOT dismissal: never dispatch dismiss-proactive-alert here.
@@ -1365,16 +1410,55 @@ export function PetApp() {
     };
   }, [tryCommitComposerOpen]);
 
-  const mascotState = recording ? 'listening' : transcribing ? 'thinking' : speaking ? 'dictating' : snapshot.mascotState;
-  const petMood = recording
+  const currentTargetKey = targetKey(snapshot);
+  const localMascotOverride: GrokMascotState | null = recording
     ? 'listening'
-    : activeBubble?.kind === 'question' && activeBubble.interactive
-      ? 'question'
-      : activeBubble?.kind === 'handoff'
-        ? 'handoff'
-        : busy || transcribing
-          ? 'thinking'
-          : 'idle';
+    : transcribing
+      ? 'thinking'
+      : speaking
+        ? 'dictating'
+        : null;
+  const rawMascotState: GrokMascotState = localMascotOverride ?? snapshot.mascotState;
+  const hasLocalMascotOverride = localMascotOverride !== null;
+
+  useEffect(() => {
+    if (mascotTargetKeyRef.current !== currentTargetKey) {
+      mascotTargetKeyRef.current = currentTargetKey;
+      clearMascotDwellTimer();
+      if (displayedMascotStateRef.current !== rawMascotState) {
+        displayedMascotStateRef.current = rawMascotState;
+        setDisplayedMascotState(rawMascotState);
+      }
+      return;
+    }
+
+    const plan = planMascotTransition({
+      displayed: displayedMascotStateRef.current,
+      target: rawMascotState,
+      hasLocalOverride: hasLocalMascotOverride,
+    });
+
+    if (plan.kind === 'noop') {
+      clearMascotDwellTimer();
+      return;
+    }
+
+    if (plan.kind === 'immediate') {
+      clearMascotDwellTimer();
+      displayedMascotStateRef.current = plan.state;
+      setDisplayedMascotState(plan.state);
+      return;
+    }
+
+    if (mascotDwellTimerRef.current === null) {
+      const nextState = plan.state;
+      mascotDwellTimerRef.current = setTimeout(() => {
+        mascotDwellTimerRef.current = null;
+        displayedMascotStateRef.current = nextState;
+        setDisplayedMascotState(nextState);
+      }, plan.delayMs);
+    }
+  }, [clearMascotDwellTimer, currentTargetKey, hasLocalMascotOverride, rawMascotState]);
   const showDotBadge =
     hasResolvedAvatar && (
       snapshot.connection !== 'ready' ||
@@ -1423,12 +1507,26 @@ export function PetApp() {
               data-variant={activeBubble.kind}
               data-tone={activeBubble.kind === 'handoff' ? activeBubble.tone : undefined}
               data-pet-hit="true"
-              data-pet-hit-pad={activeBubble.kind === 'thought' || activeBubble.kind === 'voice' ? '18' : '14'}
-              data-pet-hit-radius={activeBubble.kind === 'thought' || activeBubble.kind === 'voice' ? '24' : '18'}
+              data-pet-hit-pad={activeBubble.kind === 'voice' ? '18' : '14'}
+              data-pet-hit-radius={activeBubble.kind === 'voice' ? '24' : '18'}
               aria-label={t('桌宠气泡', 'Pet bubble')}
             >
               {activeBubble.kind === 'menu' ? (
                 <div className="pet-ctx-menu" role="menu">
+                  {snapshot.canStop ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="pet-ctx-item is-danger"
+                      onClick={() => {
+                        setCtxMenuOpen(false);
+                        stopBotTask();
+                      }}
+                    >
+                      <span>{t('停止当前任务', 'Stop current task')}</span>
+                      <Square size={10} fill="currentColor" aria-hidden="true" />
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     role="menuitem"
@@ -1545,34 +1643,6 @@ export function PetApp() {
                   </span>
                   <span className="pet-thought-text">{activeBubble.text}</span>
                 </div>
-              ) : activeBubble.kind === 'thought' ? (
-                <div className="pet-thought-row">
-                  <span className="pet-thought-dots" aria-hidden="true">
-                    <span /><span /><span />
-                  </span>
-                  <span className="pet-thought-text">{activeBubble.text}</span>
-                  {activeBubble.canStop ? (
-                    <button
-                      type="button"
-                      className="pet-thought-stop"
-                      title={t('停止 Bot 当前任务', 'Stop bot task')}
-                      onClick={() => {
-                        const state = snapshotRef.current;
-                        if (state.deviceId && state.botId) {
-                          void postAction({
-                            id: crypto.randomUUID(),
-                            kind: 'stop',
-                            deviceId: state.deviceId,
-                            botId: state.botId,
-                          }).catch(report);
-                        }
-                      }}
-                    >
-                      <Square size={9} fill="currentColor" aria-hidden="true" />
-                      <span>{t('停止', 'Stop')}</span>
-                    </button>
-                  ) : null}
-                </div>
               ) : activeBubble.kind === 'question' ? (
                 <ToolPresentationCard
                   key={`${activeBubble.presentation.requestId}:${activeBubble.presentation.status}`}
@@ -1637,75 +1707,6 @@ export function PetApp() {
                         <ExternalLink size={12} aria-hidden="true" />
                       </button>
                     ) : null}
-                  </div>
-                </div>
-              ) : activeBubble.kind === 'progress' ? (
-                <div className="pet-progress-wrap">
-                  {snapshot.todo && snapshot.todo.tasks.length > 0 ? (
-                    <>
-                      <div className="pet-progress-head">
-                        <span className="pet-progress-title">
-                          <ListTodo size={14} aria-hidden="true" />
-                          <span>{t('任务清单', 'Tasks')}</span>
-                        </span>
-                        <span className="pet-progress-count tabular-nums">
-                          {snapshot.todo.tasks.filter((item) => item.status === 'completed').length}/{snapshot.todo.tasks.length}
-                        </span>
-                      </div>
-                      <ul className="pet-todo-ul">
-                        {snapshot.todo.tasks.slice(0, 6).map((item) => (
-                          <li key={item.id} className={`pet-todo-li is-${item.status}`}>
-                            <span className="pet-todo-bullet" aria-hidden="true">
-                              {item.status === 'completed'
-                                ? <CheckCircle2 size={14} />
-                                : item.status === 'in_progress'
-                                  ? <CircleDot size={14} />
-                                  : <Circle size={14} />}
-                            </span>
-                            <span className="pet-todo-subject">{item.subject}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : snapshot.task ? (
-                    <>
-                      <div className="pet-progress-head">
-                        <span className="pet-progress-title">
-                          <ClipboardList size={14} aria-hidden="true" />
-                          <span>{snapshot.task.title}</span>
-                        </span>
-                        <span className="pet-progress-count tabular-nums">
-                          {snapshot.task.stepCount.total > 0
-                            ? `${snapshot.task.stepCount.done}/${snapshot.task.stepCount.total}`
-                            : snapshot.task.cardLabel}
-                        </span>
-                      </div>
-                      {snapshot.task.summary ? (
-                        <p className="pet-handoff-desc">{snapshot.task.summary}</p>
-                      ) : null}
-                    </>
-                  ) : null}
-                  <div className="pet-bubble-foot">
-                    <span className="pet-bubble-meta">{snapshot.botName}</span>
-                    <div className="pet-bubble-actions">
-                      <button
-                        type="button"
-                        className="pet-mini-btn"
-                        onClick={() => void petWindow('show-main').catch(report)}
-                      >
-                        <ExternalLink size={12} aria-hidden="true" />
-                        <span>{t('主窗口', 'Main')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="pet-mini-icon"
-                        title={t('收起', 'Dismiss')}
-                        aria-label={t('收起', 'Dismiss')}
-                        onClick={() => dismissBubble(activeBubble.id)}
-                      >
-                        <X size={13} aria-hidden="true" />
-                      </button>
-                    </div>
                   </div>
                 </div>
               ) : activeBubble.kind === 'proactive-alert' ? (
@@ -1794,21 +1795,12 @@ export function PetApp() {
                           <span>{speaking && speakingMessageId === activeBubble.messageId ? t('停读', 'Mute') : t('朗读', 'Read')}</span>
                         </button>
                       ) : null}
-                      {activeBubble.streaming && snapshot.canStop ? (
+                      {snapshot.canStop ? (
                         <button
                           type="button"
                           className="pet-thought-stop"
-                          onClick={() => {
-                            const state = snapshotRef.current;
-                            if (state.deviceId && state.botId) {
-                              void postAction({
-                                id: crypto.randomUUID(),
-                                kind: 'stop',
-                                deviceId: state.deviceId,
-                                botId: state.botId,
-                              }).catch(report);
-                            }
-                          }}
+                          title={t('停止当前任务', 'Stop current task')}
+                          onClick={stopBotTask}
                         >
                           <Square size={9} fill="currentColor" aria-hidden="true" />
                           <span>{t('停止', 'Stop')}</span>
@@ -1834,7 +1826,7 @@ export function PetApp() {
                       </button>
                     </div>
                   </div>
-                  {autoFade && !activeBubble.streaming && !hoveringBubble && !speaking ? (
+                  {autoFade && !activeBubble.streaming && !busy && !hoveringBubble && !speaking ? (
                     <div className="pet-autofade-bar" aria-hidden="true">
                       <div className="pet-autofade-fill" />
                     </div>
@@ -1851,7 +1843,6 @@ export function PetApp() {
         <div
           ref={dockRef}
           className={`pet-dock${dockCompact ? ' is-composer-open' : ''}`}
-          data-mood={petMood}
           onPointerEnter={() => setHoveringDock(true)}
           onPointerLeave={() => setHoveringDock(false)}
         >
@@ -1895,21 +1886,33 @@ export function PetApp() {
               >
                 <ExternalLink size={12.5} aria-hidden="true" />
               </button>
-              <button
-                type="button"
-                className="pet-rail-btn"
-                title={t('语音设置', 'Voice settings')}
-                aria-label={t('语音设置', 'Voice settings')}
-                onClick={() => {
-                  cancelRecording();
-                  stopReading();
-                  requestCloseComposer({ immediate: true });
-                  focusPendingRef.current = true;
-                  setSettingsOpen((v) => !v);
-                }}
-              >
-                <Settings2 size={12.5} aria-hidden="true" />
-              </button>
+              {snapshot.canStop ? (
+                <button
+                  type="button"
+                  className="pet-rail-btn is-stop"
+                  title={t('停止当前任务', 'Stop current task')}
+                  aria-label={t('停止当前任务', 'Stop current task')}
+                  onClick={stopBotTask}
+                >
+                  <Square size={10} fill="currentColor" aria-hidden="true" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="pet-rail-btn"
+                  title={t('语音设置', 'Voice settings')}
+                  aria-label={t('语音设置', 'Voice settings')}
+                  onClick={() => {
+                    cancelRecording();
+                    stopReading();
+                    requestCloseComposer({ immediate: true });
+                    focusPendingRef.current = true;
+                    setSettingsOpen((v) => !v);
+                  }}
+                >
+                  <Settings2 size={12.5} aria-hidden="true" />
+                </button>
+              )}
               <button
                 type="button"
                 className="pet-rail-btn"
@@ -1987,7 +1990,7 @@ export function PetApp() {
                 (dndMode || tuckedProactiveIds.has(pendingAlert.resultId)) &&
                 revealedProactiveId !== pendingAlert.resultId,
               );
-              if (alertHidden && pendingAlert && (!activeBubble || activeBubble.kind === 'progress')) {
+              if (alertHidden && pendingAlert && !activeBubble) {
                 setTuckedProactiveIds((prev) => {
                   if (!prev.has(pendingAlert.resultId)) return prev;
                   const next = new Set(prev);
@@ -2020,7 +2023,7 @@ export function PetApp() {
                 seedId={avatarState.seedKey || targetKey(snapshot) || 'desktop-pet'}
                 shape={resolvedAvatar.shape}
                 color={resolvedAvatar.color}
-                state={mascotState}
+                state={displayedMascotState}
                 size={88}
                 maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
                 isPlaying={pageVisible}
@@ -2159,15 +2162,7 @@ export function PetApp() {
                   aria-label={t('停止当前任务', 'Stop task')}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
-                    const state = snapshotRef.current;
-                    if (state.deviceId && state.botId) {
-                      void postAction({
-                        id: crypto.randomUUID(),
-                        kind: 'stop',
-                        deviceId: state.deviceId,
-                        botId: state.botId,
-                      }).catch(report);
-                    }
+                    stopBotTask();
                     focusComposerNoScroll();
                   }}
                 >

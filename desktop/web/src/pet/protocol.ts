@@ -1,5 +1,5 @@
 import type { BotAvatar } from '../../../../center-contract/index.js';
-import type { QuestionnairePresentation, TodoPresentation } from '../../../../host-core/index.js';
+import type { QuestionnairePresentation } from '../../../../host-core/index.js';
 import type { BotActivity } from '../../../../web/src/botActivity';
 import type { GrokMascotState } from '../../../../web/src/grokMascotEngine';
 
@@ -39,15 +39,6 @@ export interface PetActiveQuestionnaire {
   interrupted?: boolean;
 }
 
-export interface PetTaskCard {
-  taskId: string;
-  title: string;
-  status: 'triaging' | 'working' | 'waiting' | 'done' | 'cancelled';
-  cardLabel: string;
-  summary?: string;
-  stepCount: { done: number; total: number };
-}
-
 export interface PetHandoffCard {
   id: string;
   kind: 'vault-unlock' | 'google-setup' | 'google-account-select' | 'google-browser-takeover' | 'google-readiness';
@@ -79,13 +70,11 @@ export interface DesktopPetSnapshot {
   activity: BotActivity;
   mascotState: GrokMascotState;
   messages: PetMessage[];
+  hasPendingUserTurn: boolean;
   streamingText: string;
   generationId: string | null;
-  activeToolName: string | null;
   questionnaire: PetActiveQuestionnaire | null;
   settledQuestionnaire: QuestionnairePresentation | null;
-  todo: TodoPresentation | null;
-  task: PetTaskCard | null;
   handoff: PetHandoffCard | null;
   proactiveAlert: PetProactiveAlert | null;
   error: string | null;
@@ -176,13 +165,11 @@ export const INITIAL_PET_SNAPSHOT: DesktopPetSnapshot = {
   activity: { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null },
   mascotState: 'idle',
   messages: [],
+  hasPendingUserTurn: false,
   streamingText: '',
   generationId: null,
-  activeToolName: null,
   questionnaire: null,
   settledQuestionnaire: null,
-  todo: null,
-  task: null,
   handoff: null,
   proactiveAlert: null,
   error: null,

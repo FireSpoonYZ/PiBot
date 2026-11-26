@@ -4,10 +4,17 @@ import {
   createDesktopPetController,
   projectPetCards,
   projectPetMessages,
+  projectPetTranscript,
+  resolvePetMascotState,
 } from '../../desktop/web/src/pet/controller.ts';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
-const history = (id, role, text, kind = 'pi.message') => ({ id, kind, messages: [{ role, text }] });
+const history = (id, role, text, kind = 'pi.message', extra = {}) => ({
+  id,
+  kind,
+  messages: [{ role, text }],
+  ...extra,
+});
 const idle = () => ({
   busy: false, queuedCount: 0, tools: [], history: [history(1, 'assistant', 'Earlier reply')],
   lastEntryId: 1,
@@ -221,7 +228,7 @@ const sampleQuestionnaire = (overrides = {}) => ({
   ...overrides,
 });
 
-test('pet projects active running and durable questionnaires, settled receipt, handoff, and todo', () => {
+test('pet projects active running and durable questionnaires, settled receipt, and handoff without todo or task', () => {
   const readyActivity = { phase: 'running', source: 'primary', scopeId: null, requestId: 't1', startedAt: null };
   const runningCards = projectPetCards({
     busy: true,
@@ -276,13 +283,33 @@ test('pet projects active running and durable questionnaires, settled receipt, h
           ],
         },
       },
+      {
+        callId: 'call-task',
+        name: 'task_progress',
+        status: 'running',
+        output: '',
+        truncated: false,
+        droppedBytes: 0,
+        droppedLines: 0,
+        presentation: {
+          kind: 'task',
+          version: 1,
+          taskId: 'task-live',
+          status: 'working',
+          title: 'Update PiBot',
+          cardLabel: 'Progress',
+          stepCount: { done: 1, total: 3 },
+        },
+      },
     ],
   }, readyActivity, true);
 
   assert.equal(runningCards.questionnaire?.presentation.requestId, 'req-qa-1');
   assert.equal(runningCards.questionnaire?.interactive, true);
   assert.equal(runningCards.handoff?.kind, 'vault-unlock');
-  assert.equal(runningCards.todo?.tasks.length, 2);
+  assert.equal('activeToolName' in runningCards, false);
+  assert.equal('todo' in runningCards, false);
+  assert.equal('task' in runningCards, false);
 
   // Durable wait in history stays active only when listed in durableWaits
   const idleActivity = { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null };
@@ -367,109 +394,6 @@ test('pet answer-questionnaire reuses callCapabilityAction answerQuestionnaire a
   assert.equal(call.params.installationId, 'inst-qa');
   assert.equal(call.params.request.botId, 'local-main');
   assert.deepEqual(call.params.request.input, payload);
-  h.controller.stop();
-});
-
-test('pet skips old progress, shows new results, and does not replay them on reopen', async () => {
-  const result = (id, presentation) => ({
-    id,
-    kind: 'pi.message',
-    messages: [{ role: 'toolResult', text: '', presentation }],
-  });
-  const task = (taskId, status = 'working') => ({
-    kind: 'task', version: 1, taskId, status, title: 'Update PiBot',
-    cardLabel: 'Progress', stepCount: { done: 3, total: 3 },
-  });
-  const todo = (...tasks) => ({ kind: 'todo', version: 1, installationId: 'inst-todo', tasks });
-  const todoItem = { id: 1, subject: 'Deploy PiBot', status: 'in_progress' };
-  let state = {
-    ...idle(),
-    history: [result(1, task('old')), result(2, todo(todoItem)), result(3, sampleQuestionnaire())],
-    lastEntryId: 3,
-    durableWaits: [{ installationId: 'inst-qa', conversationId: 7, requestId: 'req-qa-1' }],
-  };
-  const h = harness({ initialState: () => state });
-  const update = (...entries) => {
-    const changes = { history: [...state.history, ...entries], lastEntryId: entries.at(-1).id };
-    state = { ...state, ...changes };
-    h.watches.at(-1).callback({ frame: { type: 'update', botId: 'local-main', changes } });
-  };
-
-  h.controller.start();
-  await settle();
-  assert.equal(h.controller.snapshot().task, null);
-  assert.equal(h.controller.snapshot().todo, null);
-  assert.equal(h.controller.snapshot().questionnaire?.interactive, true);
-
-  // Fast tools can settle straight into history; no live slot is needed.
-  update(result(4, task('new')), result(5, task('other', 'done')), result(6, todo(todoItem)));
-  assert.equal(h.controller.snapshot().task?.taskId, 'new');
-  assert.equal(h.controller.snapshot().todo?.tasks.length, 1);
-
-  update(result(7, task('new', 'done')), result(8, todo()));
-  assert.equal(h.controller.snapshot().task, null);
-  assert.equal(h.controller.snapshot().todo, null);
-
-  update(result(9, task('before-close')), result(10, todo(todoItem)));
-  h.controller.stop();
-  const beforeReopen = h.snapshots.length;
-  h.controller.start();
-  await h.controller.handleAction({ id: 'reopen', kind: 'ready' });
-  await settle();
-  assert.equal(h.watches.length, 2);
-  for (const snapshot of h.snapshots.slice(beforeReopen)) {
-    assert.equal(snapshot.task, null);
-    assert.equal(snapshot.todo, null);
-  }
-  h.controller.stop();
-});
-
-test('subsequent snapshot frames keep initial progressBaselineId and surface new progress', async () => {
-  const result = (id, presentation) => ({
-    id,
-    kind: 'pi.message',
-    messages: [{ role: 'toolResult', text: '', presentation }],
-  });
-  const task = (taskId, status = 'working') => ({
-    kind: 'task', version: 1, taskId, status, title: 'Update PiBot',
-    cardLabel: 'Progress', stepCount: { done: 1, total: 3 },
-  });
-  const todo = (...tasks) => ({ kind: 'todo', version: 1, installationId: 'inst-todo', tasks });
-  const todoItem = { id: 1, subject: 'Deploy PiBot', status: 'in_progress' };
-
-  let state = {
-    ...idle(),
-    history: [
-      history(1, 'assistant', 'Earlier reply'),
-      result(2, task('old-task')),
-      result(3, todo(todoItem)),
-    ],
-    lastEntryId: 3,
-  };
-  const h = harness({ initialState: () => state });
-  const emitSnapshot = (...entries) => {
-    state = {
-      ...state,
-      history: [...state.history, ...entries],
-      lastEntryId: entries.at(-1).id,
-    };
-    h.watches.at(-1).callback({ frame: { type: 'snapshot', botId: 'local-main', state } });
-  };
-
-  h.controller.start();
-  await settle();
-  assert.equal(h.controller.snapshot().connection, 'ready');
-  assert.equal(h.controller.snapshot().task, null);
-  assert.equal(h.controller.snapshot().todo, null);
-
-  emitSnapshot(result(4, task('new-task')), result(5, todo(todoItem)));
-  assert.equal(h.controller.snapshot().task?.taskId, 'new-task');
-  assert.equal(h.controller.snapshot().todo?.tasks.length, 1);
-  assert.equal(h.controller.snapshot().todo?.tasks[0].subject, 'Deploy PiBot');
-
-  emitSnapshot(result(6, task('new-task', 'done')), result(7, todo()));
-  assert.equal(h.controller.snapshot().task, null);
-  assert.equal(h.controller.snapshot().todo, null);
   h.controller.stop();
 });
 
@@ -632,13 +556,16 @@ test('stop clears stale streamingText, messages, and cards before reopen', async
   const activeSnap = h.controller.snapshot();
   assert.equal(activeSnap.connection, 'ready');
   assert.equal(activeSnap.streamingText, 'Streaming...');
+  assert.equal(typeof activeSnap.generationId, 'string');
   assert.equal(activeSnap.messages.length, 2);
+  assert.equal(activeSnap.hasPendingUserTurn, false);
   assert.equal(activeSnap.questionnaire?.presentation.requestId, 'req-qa-1');
   assert.equal(activeSnap.handoff?.kind, 'vault-unlock');
-  assert.equal(activeSnap.todo?.tasks.length, 1);
-  assert.equal(activeSnap.task?.taskId, 'task-live');
   assert.equal(activeSnap.canStop, true);
-  assert.equal(activeSnap.activeToolName, 'task_progress');
+  assert.equal(activeSnap.mascotState, 'blocked');
+  assert.equal('activeToolName' in activeSnap, false);
+  assert.equal('todo' in activeSnap, false);
+  assert.equal('task' in activeSnap, false);
 
   h.controller.stop();
   holdSnapshot = true;
@@ -655,13 +582,14 @@ test('stop clears stale streamingText, messages, and cards before reopen', async
     assert.equal(snap.connection, 'connecting');
     assert.equal(snap.streamingText, '');
     assert.deepEqual(snap.messages, []);
+    assert.equal(snap.hasPendingUserTurn, false);
     assert.equal(snap.questionnaire, null);
     assert.equal(snap.settledQuestionnaire, null);
     assert.equal(snap.handoff, null);
-    assert.equal(snap.todo, null);
-    assert.equal(snap.task, null);
+    assert.equal('activeToolName' in snap, false);
+    assert.equal('todo' in snap, false);
+    assert.equal('task' in snap, false);
     assert.equal(snap.canStop, false);
-    assert.equal(snap.activeToolName, null);
     assert.equal(snap.mascotState, 'idle');
     assert.equal(snap.generationId, null);
     assert.equal(snap.activity.phase, 'idle');
@@ -684,12 +612,15 @@ test('stop clears stale streamingText, messages, and cards before reopen', async
   assert.equal(afterDeliver.length, 1);
   assert.equal(afterDeliver[0].connection, 'ready');
   assert.equal(afterDeliver[0].streamingText, '');
+  assert.equal(afterDeliver[0].generationId, null);
+  assert.equal(afterDeliver[0].hasPendingUserTurn, false);
   assert.equal(afterDeliver[0].mascotState, 'idle');
   assert.equal(afterDeliver[0].canStop, false);
   assert.equal(afterDeliver[0].questionnaire, null);
   assert.equal(afterDeliver[0].handoff, null);
-  assert.equal(afterDeliver[0].todo, null);
-  assert.equal(afterDeliver[0].task, null);
+  assert.equal('activeToolName' in afterDeliver[0], false);
+  assert.equal('todo' in afterDeliver[0], false);
+  assert.equal('task' in afterDeliver[0], false);
   assert.deepEqual(afterDeliver[0].messages, [
     { id: '1:0', role: 'user', text: 'Check status' },
     { id: '2:0', role: 'assistant', text: 'Working on it' },
@@ -705,6 +636,11 @@ test('live stream end marks controller offline while keeping questionnaire read-
       busy: true,
       activity: { phase: 'running', source: 'primary', scopeId: null, requestId: 'turn-1', startedAt: null },
       generation: { text: 'Streaming...' },
+      history: [
+        history(1, 'assistant', 'Earlier reply'),
+        history(2, 'user', 'Unlock and continue'),
+      ],
+      lastEntryId: 2,
       tools: [
         {
           callId: 'call-qa',
@@ -715,6 +651,24 @@ test('live stream end marks controller offline while keeping questionnaire read-
           droppedBytes: 0,
           droppedLines: 0,
           presentation: sampleQuestionnaire(),
+        },
+        {
+          callId: 'call-vault',
+          name: 'vault_unlock',
+          status: 'running',
+          output: '',
+          truncated: false,
+          droppedBytes: 0,
+          droppedLines: 0,
+          presentation: {
+            kind: 'vault-unlock',
+            version: 1,
+            installationId: 'inst-v',
+            conversationId: 7,
+            requestId: 'vault-1',
+            mode: 'unlock',
+            status: 'pending',
+          },
         },
         {
           callId: 'call-todo',
@@ -737,17 +691,29 @@ test('live stream end marks controller offline while keeping questionnaire read-
 
   h.controller.start();
   await settle();
-  assert.equal(h.controller.snapshot().questionnaire?.interactive, true);
-  assert.equal(h.controller.snapshot().todo?.tasks.length, 1);
+  const beforeEnd = h.controller.snapshot();
+  assert.equal(beforeEnd.questionnaire?.interactive, true);
+  assert.equal(beforeEnd.handoff?.kind, 'vault-unlock');
+  assert.equal(beforeEnd.mascotState, 'blocked');
+  assert.equal(beforeEnd.hasPendingUserTurn, true);
+  assert.equal(typeof beforeEnd.generationId, 'string');
+  assert.equal('activeToolName' in beforeEnd, false);
+  assert.equal('todo' in beforeEnd, false);
+  assert.equal('task' in beforeEnd, false);
 
   h.watches[0].callback({ frame: { type: 'end' } });
   const offline = h.controller.snapshot();
   assert.equal(offline.connection, 'offline');
   assert.equal(offline.streamingText, '');
+  assert.equal(offline.generationId, null);
+  assert.equal(offline.hasPendingUserTurn, false);
+  assert.equal(offline.mascotState, 'idle');
+  assert.equal(offline.handoff, null);
   assert.equal(offline.questionnaire?.presentation.requestId, 'req-qa-1');
   assert.equal(offline.questionnaire?.interactive, false);
-  assert.equal(offline.todo, null);
-  assert.equal(offline.task, null);
+  assert.equal('activeToolName' in offline, false);
+  assert.equal('todo' in offline, false);
+  assert.equal('task' in offline, false);
   h.controller.stop();
 });
 
@@ -924,4 +890,521 @@ test('offline primary from Center keeps real avatar ready, unconfigured marks re
   assert.equal(controller.snapshot().connection, 'unconfigured');
   assert.equal(controller.snapshot().avatarReady, true);
   controller.stop();
+});
+
+test('multi-step tool turn tracks pending user turn, stable working mascot, and fresh generationId per segment', async () => {
+  const runningActivity = {
+    phase: 'running',
+    source: 'primary',
+    scopeId: null,
+    requestId: 'turn-multi',
+    startedAt: null,
+  };
+  const idleActivity = {
+    phase: 'idle',
+    source: null,
+    scopeId: null,
+    requestId: null,
+    startedAt: null,
+  };
+  const toolSlot = (callId, name, status) => ({
+    callId,
+    name,
+    status,
+    output: '',
+    truncated: false,
+    droppedBytes: 0,
+    droppedLines: 0,
+  });
+
+  const h = harness();
+  h.controller.start();
+  await settle();
+  const watch = h.watches[0];
+  const baseHistory = [history(1, 'assistant', 'Earlier reply')];
+  const emit = (changes) => watch.callback({ frame: { type: 'update', botId: 'local-main', changes } });
+
+  assert.equal(h.controller.snapshot().hasPendingUserTurn, false);
+  assert.equal(h.controller.snapshot().mascotState, 'idle');
+  assert.equal(h.controller.snapshot().generationId, null);
+
+  // 1. User turn starts: pending user turn + working mascot
+  const withUser = [...baseHistory, history(2, 'user', 'Fix the build and verify')];
+  emit({
+    busy: true,
+    activity: runningActivity,
+    history: withUser,
+    lastEntryId: 2,
+    generation: null,
+    tools: [],
+  });
+  let snap = h.controller.snapshot();
+  assert.equal(snap.hasPendingUserTurn, true);
+  assert.equal(snap.mascotState, 'working');
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.canStop, true);
+
+  // 2. Intermediate streaming segment gets a non-null generationId and keeps it as text grows
+  emit({ generation: { text: 'Checking', truncated: false } });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'streaming');
+  assert.equal(snap.streamingText, 'Checking');
+  const firstGenId = snap.generationId;
+  assert.equal(typeof firstGenId, 'string');
+  assert.ok(firstGenId.length > 0);
+
+  emit({ generation: { text: 'Checking files first.', truncated: false } });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'streaming');
+  assert.equal(snap.streamingText, 'Checking files first.');
+  assert.equal(snap.generationId, firstGenId);
+
+  // 3. Intermediate text commits, generation clears, and multiple tools run without per-tool mascot morphs
+  const withIntermediate = [...withUser, history(3, 'assistant', 'Checking files first.')];
+  emit({
+    history: withIntermediate,
+    lastEntryId: 3,
+    generation: null,
+    tools: [toolSlot('call-1', 'grep', 'running')],
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.hasPendingUserTurn, false);
+  assert.deepEqual(snap.messages.map((m) => m.text), [
+    'Earlier reply',
+    'Fix the build and verify',
+    'Checking files first.',
+  ]);
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.mascotState, 'working');
+  assert.equal('activeToolName' in snap, false);
+  assert.equal('todo' in snap, false);
+  assert.equal('task' in snap, false);
+
+  emit({ tools: [toolSlot('call-1', 'grep', 'done'), toolSlot('call-2', 'write_file', 'running')] });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'working');
+  assert.equal(snap.generationId, null);
+
+  emit({
+    tools: [
+      toolSlot('call-1', 'grep', 'done'),
+      toolSlot('call-2', 'write_file', 'done'),
+      toolSlot('call-3', 'bash', 'running'),
+    ],
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'working');
+  assert.equal(snap.generationId, null);
+
+  // 4. Next streaming segment gets a fresh generationId
+  emit({
+    tools: [
+      toolSlot('call-1', 'grep', 'done'),
+      toolSlot('call-2', 'write_file', 'done'),
+      toolSlot('call-3', 'bash', 'done'),
+    ],
+    generation: { text: 'Build fixed and verified.', truncated: false },
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'streaming');
+  assert.equal(snap.streamingText, 'Build fixed and verified.');
+  assert.equal(typeof snap.generationId, 'string');
+  assert.notEqual(snap.generationId, firstGenId);
+
+  // 5. afterRun keeps final text in messages while still busy with generation cleared
+  const withFinal = [...withIntermediate, history(4, 'assistant', 'Build fixed and verified.')];
+  emit({
+    busy: true,
+    activity: runningActivity,
+    history: withFinal,
+    lastEntryId: 4,
+    generation: null,
+    tools: [],
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'working');
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.hasPendingUserTurn, false);
+  assert.deepEqual(snap.messages.map((m) => m.text), [
+    'Earlier reply',
+    'Fix the build and verify',
+    'Checking files first.',
+    'Build fixed and verified.',
+  ]);
+
+  // 6. Idle after turn finishes
+  emit({
+    busy: false,
+    activity: idleActivity,
+    generation: null,
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.mascotState, 'idle');
+  assert.equal(snap.canStop, false);
+  assert.equal(snap.hasPendingUserTurn, false);
+  assert.equal(snap.messages.at(-1)?.text, 'Build fixed and verified.');
+  h.controller.stop();
+});
+
+test('image-only user turn sets hasPendingUserTurn without adding empty message and clears on assistant reply', async () => {
+  const imageOnlyUser = {
+    id: 2,
+    kind: 'pi.message',
+    messages: [{
+      role: 'user',
+      text: '',
+      attachments: [{
+        id: 'a'.repeat(64),
+        name: 'screenshot.png',
+        mimeType: 'image/png',
+        size: 2048,
+        width: 800,
+        height: 600,
+      }],
+    }],
+  };
+  const emptyToolCallAssistant = {
+    id: 3,
+    kind: 'pi.message',
+    messages: [{ role: 'assistant', text: '', toolCalls: [{ callId: 'c1', name: 'read' }] }],
+  };
+
+  const pendingTranscript = projectPetTranscript([
+    history(1, 'assistant', 'Earlier reply'),
+    imageOnlyUser,
+  ]);
+  assert.deepEqual(pendingTranscript.messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+  ]);
+  assert.equal(pendingTranscript.hasPendingUserTurn, true);
+
+  const afterEmptyAssistant = projectPetTranscript([
+    history(1, 'assistant', 'Earlier reply'),
+    imageOnlyUser,
+    emptyToolCallAssistant,
+  ]);
+  assert.deepEqual(afterEmptyAssistant.messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+  ]);
+  assert.equal(afterEmptyAssistant.hasPendingUserTurn, true);
+
+  const answeredTranscript = projectPetTranscript([
+    history(1, 'assistant', 'Earlier reply'),
+    imageOnlyUser,
+    emptyToolCallAssistant,
+    history(4, 'assistant', 'I see the screenshot.'),
+  ]);
+  assert.deepEqual(answeredTranscript.messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+    { id: '4:0', role: 'assistant', text: 'I see the screenshot.' },
+  ]);
+  assert.equal(answeredTranscript.hasPendingUserTurn, false);
+
+  const h = harness();
+  h.controller.start();
+  await settle();
+  const watch = h.watches[0];
+  assert.equal(h.controller.snapshot().hasPendingUserTurn, false);
+
+  watch.callback({
+    frame: {
+      type: 'update',
+      botId: 'local-main',
+      changes: {
+        busy: true,
+        activity: { phase: 'running', source: 'primary', scopeId: null, requestId: 'img-1', startedAt: null },
+        history: [history(1, 'assistant', 'Earlier reply'), imageOnlyUser],
+        lastEntryId: 2,
+      },
+    },
+  });
+  assert.equal(h.controller.snapshot().hasPendingUserTurn, true);
+  assert.deepEqual(h.controller.snapshot().messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+  ]);
+
+  watch.callback({
+    frame: {
+      type: 'update',
+      botId: 'local-main',
+      changes: {
+        busy: false,
+        activity: { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null },
+        history: [
+          history(1, 'assistant', 'Earlier reply'),
+          imageOnlyUser,
+          history(3, 'assistant', 'I see the screenshot.'),
+        ],
+        lastEntryId: 3,
+      },
+    },
+  });
+  assert.equal(h.controller.snapshot().hasPendingUserTurn, false);
+  assert.deepEqual(h.controller.snapshot().messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+    { id: '3:0', role: 'assistant', text: 'I see the screenshot.' },
+  ]);
+  h.controller.stop();
+  assert.equal(h.controller.snapshot().hasPendingUserTurn, false);
+});
+
+test('macro mascot state enforces connection, stopping, awaitingUser, busy, and failed priorities', async () => {
+  const idleActivity = { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null };
+  const runningActivity = { phase: 'running', source: 'primary', scopeId: null, requestId: 't-1', startedAt: null };
+  const stoppingActivity = { phase: 'stopping', source: 'primary', scopeId: null, requestId: 't-1', startedAt: null };
+  const failedActivity = {
+    phase: 'failed',
+    source: 'primary',
+    scopeId: null,
+    requestId: 't-1',
+    startedAt: null,
+    error: { code: 'PROVIDER_ERROR', message: 'Upstream failed' },
+  };
+
+  assert.equal(
+    resolvePetMascotState({ connection: 'offline', activity: stoppingActivity, isStreaming: true, awaitingUser: true }),
+    'idle',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'connecting', activity: runningActivity, isStreaming: true, awaitingUser: false }),
+    'idle',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: stoppingActivity, isStreaming: true, awaitingUser: true }),
+    'powering-down',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: idleActivity, isStreaming: false, awaitingUser: true }),
+    'blocked',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: runningActivity, isStreaming: true, awaitingUser: true }),
+    'blocked',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: runningActivity, isStreaming: true, awaitingUser: false }),
+    'streaming',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: runningActivity, isStreaming: false, awaitingUser: false }),
+    'working',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: failedActivity, isStreaming: false, awaitingUser: false }),
+    'failed',
+  );
+  assert.equal(
+    resolvePetMascotState({ connection: 'ready', activity: idleActivity, isStreaming: false, awaitingUser: false }),
+    'idle',
+  );
+
+  const runningVaultTool = {
+    callId: 'call-vault',
+    name: 'vault_unlock',
+    status: 'running',
+    output: '',
+    truncated: false,
+    droppedBytes: 0,
+    droppedLines: 0,
+    presentation: {
+      kind: 'vault-unlock',
+      version: 1,
+      installationId: 'inst-v',
+      conversationId: 7,
+      requestId: 'vault-1',
+      mode: 'unlock',
+      status: 'pending',
+    },
+  };
+
+  const h = harness({
+    initialState: () => ({
+      ...idle(),
+      busy: false,
+      activity: idleActivity,
+      durableWaits: [{ installationId: 'inst-qa', conversationId: 7, requestId: 'req-qa-1' }],
+      history: [
+        history(1, 'assistant', 'Earlier reply'),
+        {
+          id: 2,
+          kind: 'pi.message',
+          messages: [{
+            role: 'toolResult',
+            text: '',
+            toolCallId: 'hist-qa',
+            presentation: sampleQuestionnaire(),
+            durableWait: true,
+          }],
+        },
+      ],
+      lastEntryId: 2,
+    }),
+  });
+
+  h.controller.start();
+  await settle();
+  const watch = h.watches[0];
+  const emit = (changes) => watch.callback({ frame: { type: 'update', botId: 'local-main', changes } });
+
+  // 1. Durable wait questionnaire while idle (busy: false) -> blocked
+  assert.equal(h.controller.snapshot().questionnaire?.interactive, true);
+  assert.equal(h.controller.snapshot().mascotState, 'blocked');
+
+  // 2. Running handoff -> blocked
+  emit({
+    busy: true,
+    activity: runningActivity,
+    durableWaits: [],
+    tools: [runningVaultTool],
+  });
+  assert.equal(h.controller.snapshot().questionnaire, null);
+  assert.equal(h.controller.snapshot().handoff?.kind, 'vault-unlock');
+  assert.equal(h.controller.snapshot().mascotState, 'blocked');
+
+  // 3. Stopping overrides running handoff -> powering-down
+  emit({ activity: stoppingActivity });
+  assert.equal(h.controller.snapshot().handoff?.kind, 'vault-unlock');
+  assert.equal(h.controller.snapshot().mascotState, 'powering-down');
+
+  // 4. Failed activity -> failed
+  emit({
+    busy: false,
+    tools: [],
+    activity: failedActivity,
+  });
+  assert.equal(h.controller.snapshot().handoff, null);
+  assert.equal(h.controller.snapshot().mascotState, 'failed');
+  assert.equal(h.controller.snapshot().error, 'Upstream failed');
+
+  // 5. markOffline clears active handoff and resets mascotState to idle
+  emit({
+    busy: true,
+    activity: runningActivity,
+    tools: [runningVaultTool],
+  });
+  assert.equal(h.controller.snapshot().handoff?.kind, 'vault-unlock');
+  assert.equal(h.controller.snapshot().mascotState, 'blocked');
+
+  watch.callback({ frame: { type: 'end' } });
+  const offline = h.controller.snapshot();
+  assert.equal(offline.connection, 'offline');
+  assert.equal(offline.handoff, null);
+  assert.equal(offline.mascotState, 'idle');
+  assert.equal(offline.generationId, null);
+  assert.equal(offline.hasPendingUserTurn, false);
+  h.controller.stop();
+});
+
+test('collaborative channel history and streaming stay isolated while activity drives canStop and mascotState', async () => {
+  const mixedHistory = [
+    history(1, 'user', 'Primary question', 'pi.message', { attribution: { kind: 'user', channel: 'primary' } }),
+    history(2, 'assistant', 'Primary answer', 'pi.message', { attribution: { kind: 'bot', channel: 'primary' } }),
+    history(3, 'user', 'Scope notice', 'host.scope-message'),
+    history(4, 'user', 'Room prompt', 'pi.message', { attribution: { kind: 'user', channel: 'room', scopeId: 'room-1' } }),
+    history(5, 'assistant', 'Room reply', 'pi.message', { attribution: { kind: 'bot', channel: 'room', scopeId: 'room-1' } }),
+    history(6, 'user', 'DM prompt', 'pi.message', { attribution: { kind: 'bot', channel: 'dm', scopeId: 'dm-1' } }),
+  ];
+
+  const transcript = projectPetTranscript(mixedHistory);
+  assert.deepEqual(transcript.messages, [
+    { id: '1:0', role: 'user', text: 'Primary question' },
+    { id: '2:0', role: 'assistant', text: 'Primary answer' },
+  ]);
+  assert.equal(transcript.hasPendingUserTurn, false);
+  assert.deepEqual(projectPetMessages(mixedHistory), transcript.messages);
+
+  const h = harness();
+  h.controller.start();
+  await settle();
+  const watch = h.watches[0];
+  const emit = (changes) => watch.callback({ frame: { type: 'update', botId: 'local-main', changes } });
+
+  // 1. Room history & streaming do not leak, while canStop and mascotState reflect running work
+  const withCollabHistory = [
+    history(1, 'assistant', 'Earlier reply'),
+    history(2, 'user', 'Scope broadcast', 'host.scope-message'),
+    history(3, 'user', 'Room user turn', 'pi.message', { attribution: { kind: 'user', channel: 'room', scopeId: 'room-1' } }),
+  ];
+  emit({
+    busy: true,
+    activity: { phase: 'running', source: 'room', scopeId: 'room-1', requestId: 'room-turn-1', startedAt: null },
+    history: withCollabHistory,
+    lastEntryId: 3,
+    generation: {
+      text: 'Secret room stream',
+      truncated: false,
+      attribution: { kind: 'bot', channel: 'room', scopeId: 'room-1' },
+    },
+  });
+  let snap = h.controller.snapshot();
+  assert.deepEqual(snap.messages, [{ id: '1:0', role: 'assistant', text: 'Earlier reply' }]);
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.hasPendingUserTurn, false);
+  assert.equal(snap.canStop, true);
+  assert.equal(snap.mascotState, 'working');
+
+  // 2. DM activity & streaming (even without generation.attribution) stay suppressed
+  const withDmHistory = [
+    ...withCollabHistory,
+    history(4, 'user', 'DM turn', 'pi.message', { attribution: { kind: 'bot', channel: 'dm', scopeId: 'dm-1' } }),
+  ];
+  emit({
+    busy: true,
+    activity: { phase: 'running', source: 'dm', scopeId: 'dm-1', requestId: 'dm-turn-1', startedAt: null },
+    history: withDmHistory,
+    lastEntryId: 4,
+    generation: { text: 'Secret DM stream', truncated: false },
+  });
+  snap = h.controller.snapshot();
+  assert.deepEqual(snap.messages, [{ id: '1:0', role: 'assistant', text: 'Earlier reply' }]);
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.hasPendingUserTurn, false);
+  assert.equal(snap.canStop, true);
+  assert.equal(snap.mascotState, 'working');
+
+  // 3. Collaborative generation attribution suppresses streaming even if activity.source is primary
+  emit({
+    busy: true,
+    activity: { phase: 'running', source: 'primary', scopeId: null, requestId: 'dm-turn-2', startedAt: null },
+    generation: {
+      text: 'Attributed DM stream',
+      truncated: false,
+      attribution: { kind: 'bot', channel: 'dm', scopeId: 'dm-1' },
+    },
+  });
+  snap = h.controller.snapshot();
+  assert.equal(snap.streamingText, '');
+  assert.equal(snap.generationId, null);
+  assert.equal(snap.mascotState, 'working');
+
+  // 4. Primary turn after collaborative turns still surfaces normally
+  emit({
+    busy: true,
+    activity: { phase: 'running', source: 'primary', scopeId: null, requestId: 'primary-1', startedAt: null },
+    history: [
+      ...withDmHistory,
+      history(5, 'user', 'Back to primary', 'pi.message', { attribution: { kind: 'user', channel: 'primary' } }),
+    ],
+    lastEntryId: 5,
+    generation: {
+      text: 'Primary stream',
+      truncated: false,
+      attribution: { kind: 'bot', channel: 'primary' },
+    },
+  });
+  snap = h.controller.snapshot();
+  assert.deepEqual(snap.messages, [
+    { id: '1:0', role: 'assistant', text: 'Earlier reply' },
+    { id: '5:0', role: 'user', text: 'Back to primary' },
+  ]);
+  assert.equal(snap.hasPendingUserTurn, true);
+  assert.equal(snap.streamingText, 'Primary stream');
+  assert.equal(typeof snap.generationId, 'string');
+  assert.equal(snap.mascotState, 'streaming');
+  h.controller.stop();
 });
