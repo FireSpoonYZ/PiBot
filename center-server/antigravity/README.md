@@ -1,49 +1,55 @@
-# Antigravity ACP provider
+# Antigravity ACP Provider (`center-server/antigravity`)
 
-`antigravity-acp` 是 Pi Durable 的模型 provider。Pi Durable 保留唯一业务工具循环；Center 托管隔离的 AGY ACP 会话和 `pibot-bridge` MCP 服务，不接管 Host 的业务工具执行。
+`antigravity-acp`（模型 API `pibot-antigravity-acp`）采用**原生整轮架构**：每次用户轮次由 `agy acp` 通过单次 `session/prompt` 跑完整轮推理与工具编排；Center 维护隔离进程池与 `pibot-bridge` MCP 桥接；Host（Pi Durable）通过最小补丁只做界面投影和真实设备侧 `ToolTask` 执行。
 
-## 原生历史与增量传输
+## 整轮执行与 Pi Durable 接入
 
-AGY 会话只追加新输入，既有 Pi 历史不会重放到原生会话。Host 投影稳定的消息前缀，按偏移和前缀哈希发送 delta；Center 校验、持久化后回复 ACK。
+- [`host-core/patch-pi-durable.js`](../../host-core/patch-pi-durable.js) 仅补丁 `@earendil-works/pi-durable` 的 `generation.js`（`tool.js`、`submissions.js`、`live.js` 零改动）：
+  - `prepare` 照常渲染 section（供增量计算），对 AGY 跳过压缩；
+  - `request` 在 `beforeRequest` 后调用挂在 provider 上的 `runExternalTurn`（[`host-core/antigravity-runner.js`](../../host-core/antigravity-runner.js)），不进入 `streamResponse` / overflow 压缩 / Pi 工具循环；
+  - 关闭 AGY 外部轮次的 restart 自动重试与 `classify` 自动重试；
+  - 工具触发 `control.terminate` 时走 `finishExternalTerminate` 收尾，不调用创建后续 generation 的 `finishToolRound`。
+- 每个来自 Center 的 `tool_request`，Host 在单事务中提交含真实 `toolCall` 的 `AssistantEntry` 并创建 `ToolTask`（owner 为当前 generation，`abandonOnRestart: true`），执行完成后读取真实 `ToolResultEntry` 并回传 Center。权限、Code Mode、`beforeTool`/`afterTool`、嵌套槽位和取消级联全部复用原有 `ToolTask`。
 
-| 边界 | 含义 |
-| --- | --- |
-| Delta ACK | Center 已保存这段 Pi 历史，不代表 AGY 已处理输入。Host 重启后可以从偏移 0 重传，Center 去重，不重复发给 AGY。 |
-| Native dispatch intent | `beforePrompt` 在真正发送 ACP prompt 前持久化原生会话 ID 和已认领的用户输入。只有确定尚未尝试发送时才能撤销认领。 |
-| 完成 / 不确定 | 已完成的同一请求可返回保存的结果；发送后取消、断连或失败不能当作未发送而自动重试。 |
+## Center 路由契约
 
-未完成业务工具调用时，新输入可被接收保存，但不能越过待交付的工具结果。原生 `session/load` 失败、旧映射缺少增量状态、已提交历史或稳定配置变化时，返回明确错误并要求 `/clear`；不通过重建会话或历史回放修复。
+契约定义见 [`center-contract/antigravity.js`](../../center-contract/antigravity.js) 与 [`center-contract/antigravity.d.ts`](../../center-contract/antigravity.d.ts)，路由实现位于 [`center-server/antigravity-routes.js`](../antigravity-routes.js)：
 
-## 工具边界
+- `POST /api/host/antigravity/run`：流式返回 `application/x-ndjson`（`thought_delta`、`text_delta`、`usage`、`native_tool_start`、`native_tool_end`、`tool_request`、`turn_done`、`error`）。
+- `POST /api/host/antigravity/tool-result`：按 `{ sessionId, runId, callId, content, isError? }` 交付 Host 工具结果（含标准 `text` 与 `image` 块）。
+- `POST /api/host/antigravity/steer`：轮中追加原生 `session/prompt`（`{ sessionId, runId, sections?, routeNote?, inputs }`）。
+- `POST /api/host/antigravity/cancel`：按 `{ sessionId, runId? }` 发送 `session/cancel`。
+- OAuth 登录与模型目录（`/api/providers/antigravity-acp/*`、`discover`/`validate`）独立保留。
 
-隔离 custom agent 固定 SOUL 和工具配置，关闭默认组件、自定义规则继承及 AGY 内置文件、Shell、搜索、子代理等业务工具。AGY 只通过桥接 MCP 请求 Pi 工具；Center 将调用交给 Pi Durable，等待 Host 执行结果后恢复同一个原生工具调用。
+## 会话身份与单游标增量
 
-AGY 强制 Code Mode only：普通工具在 `codemode` 内渐进发现和执行；全部已启用的 model-only 工具（含 deferred）直接声明，保留 `ask_user_question`。`bridge_poll_result` 属于桥接等待协议。业务代码由 Host 的 codemode 执行，不在 AGY 进程中另建业务工具循环。
+- **身份链**：Host `ProviderDoc.sessionId` ↔ Center [`sessions.json`](./sessions.ts) 中 `(deviceId, sessionId) -> { conversationId, agentName }` ↔ `agy` 原生会话库。
+- **新建与恢复**：仅空会话首轮或 `/clear`（轮换 `ProviderDoc.sessionId`）调用 `session/new`，且在首条 prompt 前持久化映射。热轮直接复用存活连接发送 `session/prompt`（不调 `session/load` / `session/resume`）；冷启动通过 `session/resume` 恢复并重设 `model` 与 `thought_level`。原生会话确认丢失或旧会话缺少新游标时，返回 `AGY_HISTORY_CHANGED` 要求一次性 `/clear`。
+- **单游标（`AntigravityCursorDoc`）**：Host 在写出 `/run` 或 `/steer` 之前推进唯一游标 `dispatchedThrough`，仅发送游标之后的新输入、本轮图片与可选 `<turn-routing>`。
+- **动态 section 增量**：复用 `SystemEntry` changed-key，变更以 `<context key="...">`（移除为 `<context key="..." removed="true" />`）前缀发送一次。SOUL 创建 custom agent 时写入 `initialSystemPrompt`，后续变更走 section 增量；[`plugins/tasks/context-projection.js`](../../plugins/tasks/context-projection.js) 过滤 `bot.online` 抖动。
 
-## 上下文与记忆
+## 工具、图片与权限
 
-- Billion Context 在 AGY 会话中不激活，不参与上下文准备、工具或提示词贡献。Pi 的 threshold / overflow 自动压缩和手动压缩不得改写原生历史；AGY 自身自动压缩由原生会话处理。
-- Hindsight **1.2.2** 关闭 AGY 的 autoRecall，保留来源登记、autoRetain、既有 bank 和记忆工具。模型通过工具按需 recall / reflect / retain；`/clear` 不更换 bank。
-- SOUL、固定路由规则、工具声明是稳定配置；变化后要求 `/clear`。每轮消息来源、请求 ID 和路由目标属于本轮数据，可正常变化，不参与稳定配置指纹。
+- **Code Mode only**：顶层声明 `codemode` 与已启用 model-only 工具；普通工具在 `codemode` 内发现和调用。
+- **连接级 MCP Token 与 run 校验**：每条原生连接分配一个本地回环 MCP token；`tools/call` 请求进入时先捕获当前 active run 引用，派发前校验引用一致。无 active run 时的拒绝只返回普通 MCP 错误，不毒化连接 token。
+- **150s 慢工具升级**：工具挂起满 `150_000ms` 时向模型返回带 `callId` 的 `STILL RUNNING` 确认，模型可调用只读 `bridge_poll_result({ callId })` 继续等待同一调用（绝不重跑工具、不合成 user prompt）。
+- **工具图片**：直接通过标准 MCP `image` 块回传（含 `bridge_poll_result`），无需额外 hook 旁路。
+- **ACP 权限与原生工具**：ACP `session/request_permission` 一律自动放行（`fs/*` 与 `terminal/*` 仍拒绝）；不拒绝 `agy` 残留的原生工具（`manage_task`、`list_resources`、`read_resource`），非 bridge 调用仅按 ACP `tool_call` 通知以 `native_tool_start` / `native_tool_end` 展示。
 
-已有消息的会话不能切入任何 AGY 模型，也不能在 AGY 模型之间切换。模型写入前须由真实在线 Host 验证当前会话；不能先保存模型再靠 `/clear` 补救。已提交的 AGY 历史禁止编辑、回退和 Pi 手动 compact。`/clear` 使用既有新会话语义，生成新的 provider session ID；不批量清除历史工作会话。
+## 模型切换、Steer、停止、问卷与禁用项
 
-## 取消、恢复与图片
+- **模型切换**：同会话支持 AGY 模型间直接切换（`set_config_option`）；非空会话跨服务商切换（非 AGY ↔ AGY）经 Host 在线控制通道拦截，要求先 `/clear`。
+- **Steer**：轮中发原生 `session/prompt`；仅在最后一个在途 prompt 结算时发出 `turn_done` 并合并 `usage`。
+- **Stop**：Host 中止本地工具 → Center 报错结束挂起 MCP 调用 → 发送 `session/cancel` 等待终态，不杀进程不删会话（仅超时才杀进程，仍保留会话供冷 `session/resume`）。
+- **问卷（`ask_user_question`）**：主聊并发与非主聊场景统一通过 `control: { terminate: true }` 结束本轮，答案作为下一轮输入。
+- **明确禁用**：Hindsight `autoRecall`（保留 `autoRetain`、bank 与显式记忆工具）、Billion Context、Pi 压缩（`/compact` 提示 `/clear`）、历史编辑/回退/fork、非空会话跨 provider 切换。
 
-空闲会话可加载原生历史继续。取消或连接中断不保证 AGY 没有收到输入；已认领输入不会自动重复投递。工具结果必须交回仍存活的原生等待调用，重启后丢失这条等待链时要求 `/clear`，不会重跑工具来恢复它。
+## 隔离、部署与源码索引
 
-用户图片随原生 prompt 的 ACP image 块发送。工具结果图片经同一原生轮次的 PreInvocation hook 追加，MCP 结果只返回文本和图片标记，避免重复注入。该通道独立于 autoRecall；图片交付失败须报告失败，不能为了重试图片再次执行已有副作用的工具。
-
-## 接线与源码
-
-产品启动使用 [`openHostService`](../../host-core/host-service.js)：先启动本机 Runtime / control HTTP，再由 `openDeviceLink({ control: { url, token } })` 将控制通道接入 Center。仅调用 `connectCenter()` 不会建立模型验证所需的 Host 控制通道；验收应等待服务的 `relay.phase === 'online'`，再通过 Center 设置 AGY 模型。
-
-- [Host 历史投影与 delta](../../host-core/antigravity-delta.js)、[Center 接收与原生消费](./index.js)
-- [custom agent](./profile.ts)、[工具等待与图片交付](./round-trips.ts)
-- [Host 会话策略](../../host-core/runtime.js)、[Hindsight](../../plugins/hindsight/entry.js)、[vendor 来源与适配](./vendor/README.md)
-
-## 实机验收
-
-运行 `scripts/verify-antigravity-appendonly.mjs` 可在隔离目录启动完整 Host、Center 和本地 HTTPS/WSS，连接真实 AGY，验证增量传输、Code Mode 工具图片、原生会话重启、SOUL/clear、用户图片和 model-only 问卷续接。Hindsight 使用脚本内的隔离协议 fixture，经真实 Center 配置和 Host 插件验证 autoRetain、显式 recall 与 clear 后 bank 保留。它不连接或修改运行中的 PiBot 或记忆服务。
-
-先准备依赖和 `npm run center:prepare`；提供已登录的隔离 `PIBOT_AGY_HOME`、`PIBOT_AGY_BIN`，并准备本机 Cua driver（或设置 `E_LAUNCHER_CUA_DRIVER`）。脚本使用 OpenSSL 和 Python Pillow 生成本地测试证书与随机图片，结果写入所打印目录的 `result.json`。不能使用日常 `~/.gemini` 作为验收 profile。
+- 隔离目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`（可通过 `PIBOT_AGY_HOME` 覆盖，严禁指向 `~/.gemini`）与 `<CENTER_DATA_ROOT>/antigravity/workspace`；可执行文件由 `PIBOT_AGY_BIN` 指定（默认 `agy`）；子进程启动前剥离 `ANTIGRAVITY_*` 环境变量。部署、Dockerfile（`INSTALL_AGY=true`，`AGY_VERSION=1.5.12`）与网页 OAuth 登录说明见 [`docs/antigravity-center.md`](../../docs/antigravity-center.md)。
+- 产品启动使用 [`openHostService`](../../host-core/host-service.js)（先启本机 Runtime / control HTTP，再经 `openDeviceLink` 接入控制通道），以便跨服务商切换前通过在线 Host 完成 `assertModelSelectionAllowed` 核验。
+- 核心模块：
+  - 契约与路由：[`center-contract/antigravity.js`](../../center-contract/antigravity.js)、[`center-server/antigravity-routes.js`](../antigravity-routes.js)
+  - Center 桥接与 ACP：[`index.js`](./index.js)、[`mcp-bridge.ts`](./mcp-bridge.ts)、[`tool-waiters.ts`](./tool-waiters.ts)、[`sessions.ts`](./sessions.ts)、[`profile.ts`](./profile.ts)、[`vendor/acp/driver.ts`](./vendor/acp/driver.ts)、[`vendor/README.md`](./vendor/README.md)
+  - Host 运行与策略：[`antigravity-runner.js`](../../host-core/antigravity-runner.js)、[`antigravity-provider.js`](../../host-core/antigravity-provider.js)、[`patch-pi-durable.js`](../../host-core/patch-pi-durable.js)、[`runtime.js`](../../host-core/runtime.js)
+  - 插件适配：[`plugins/tasks/context-projection.js`](../../plugins/tasks/context-projection.js)、[`plugins/ask-user-question/entry.js`](../../plugins/ask-user-question/entry.js)、[`plugins/hindsight/entry.js`](../../plugins/hindsight/entry.js)

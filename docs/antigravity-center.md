@@ -1,69 +1,108 @@
 # Center Antigravity (`agy`) ACP 接入说明
 
-Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模型 Provider（Provider ID 为 `antigravity-acp`，模型 API 为 `pibot-antigravity-acp`）。该能力默认未启用，不影响普通 Center 部署或其他模型服务商；所有用户也不必配置 `agy`。
+Center 可选接入 Google Antigravity CLI（`agy acp`）作为服务端统一模型 Provider（Provider ID 为 `antigravity-acp`，模型 API 为 `pibot-antigravity-acp`）。该能力默认未启用，不影响普通 Center 部署或其他模型服务商；未启用时用户也无需配置 `agy`。
 
-## 架构与隔离边界
+## 原生整轮架构
 
-- **中心单账号、设备侧执行工具**：`agy` 仅在 Center 进程中运行；Host 工具（文件、Shell、Shower、Vault 等）仍在已配对设备本机执行。Center 在隔离 profile 中生成受限的 `pibot-center` 专用 Agent，并动态注入 `pibot-bridge` MCP server，只暴露当前对话声明的 Host 工具，再通过标准 `toolCall` / `toolResult` 往返设备侧。
-- **仅 Code Mode**：Pi 的顶层工具声明不含独立 `tool_search`。用 `codemode` 内的 `searchTools()`、`describeTool()` 与 `tools.*` 按需执行，不改变当前 ACP prompt 的工具表。MCP 桥复用 Host 的最终 ACP 声明，包括仅由桥处理的 `bridge_poll_result`；仍兼容未声明轮询工具的旧 Host。
-- **原生资源发现**由 `PreToolUse` 在执行前拒绝。Center 只在当前轮的 `list_resources` 调用 ID 同时收到已认证的拒绝回执和 ACP `failed` 事件时继续回答，否则按工具隔离错误处理。
-- **独立 Profile 隔离**：Center 专用配置/会话目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`，专用工作目录为 `<CENTER_DATA_ROOT>/antigravity/workspace`。严禁指向宿主机日常 `~/.gemini`，不得复制或抽取个人 Google token，也不得使用全局 `permissions.deny`。
-- **持久化目录**：专用 home 与 `agy` 会话必须位于已有持久数据目录（Docker 为 `/data`，Linux DEB/systemd 为 `/var/lib/pibot-center`）。
-- **轮级路由与辅助上下文传递**：继续沿用现有 JSON `messages` 封包，不新增配置项；ACP 不从旧版 Host 路由文本前缀猜测可信路由元数据，完整路由行为仍要求 Host 与 Center 成对更新。普通人类 `primary` 轮不带合成路由消息；非默认来源/目标由 Host 在插件最终投影头部前插瞬态 `SystemMessage`（`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，不含其他 section、工具、`requestId` 或原始冻结轮 JSON，永不作为 `user` 消息追加），ACP 从 transcript 提取该 `host-turn-routing` section 并**按轮置于真实本轮输入之前**，独立于会话的有效 system prompt。SOUL 等有效系统指令变化时重建 native 上下文；轮级路由说明不作为持久系统指令参与复用判断。`bcContextMaterial`、`bcSummaryMaterial` 和 Billion Context 提醒继续作为辅助上下文传递。
-- **Hindsight 自动召回**由插件在临时请求消息上标记 `hindsightRecall: true`。Center 按 `auxiliaryIndices` 识别来源，通过 AGY `PreInvocation` hook 将当前用户轮的 recall 作为 `ephemeralMessage` 注入，并从普通 ACP prompt 和历史摘要中排除召回文本。同一次 native 推理挂起等待工具时沿用这一轮的绑定，完成或取消后释放。召回为空时发送普通用户轮。AGY 的本地诊断日志仍可能记录注入文本，模型自行引用的内容属于正常模型输出。
-- **旧 ACP 会话迁移**：缺少内容检查点的旧绑定不能仅凭消息数量继续复用。Center 以 PiBot 当前有效上下文重建配置了 hook 的 native 会话，保留普通对话中的历史回答、工具调用和结果；工具续接按下文的恢复规则处理。PiBot 会话和记录继续保留。旧版 Hindsight 渲染内容也可在已识别为辅助的消息中按轮提取。
+Antigravity 会话由 `agy acp` 原生持有对话上下文与轮内多步推理循环；Center 托管隔离的 `agy` 进程与本地 `pibot-bridge` MCP 服务，Host（Pi Durable）只负责界面投影和真实设备侧业务工具执行。
 
-### 上下文一致性与故障恢复
+```mermaid
+sequenceDiagram
+  participant H as Host (GenerationTask → AGY runner)
+  participant C as Center (ACP + MCP bridge)
+  participant A as agy acp
+  H->>C: POST /api/host/antigravity/run (新输入 + 变更 section)
+  C->>A: 热连接直接 session/prompt / 冷启动先 session/resume
+  A-->>C: session/update (thought / text / native tool_call)
+  C-->>H: NDJSON (thought_delta / text_delta / native_tool_*)
+  A->>C: MCP tools/call (挂起等待)
+  C-->>H: NDJSON tool_request {callId} (流不断开)
+  H->>H: appendAssistant + 真实 ToolTask (权限/Code Mode/钩子)
+  H->>C: POST /api/host/antigravity/tool-result {callId, content}
+  C->>A: 返回 MCP 结果 (text + image)，agy 自主继续
+  A-->>C: end_turn (所有在途 prompt 结算)
+  C-->>H: NDJSON turn_done {conversationId, usage}
+  H->>H: answer / finishExternalTerminate → afterRun / autoRetain
+```
 
-PiBot 每次实际发送的上下文投影是恢复依据。Center 按 `(deviceId, sessionId)` 保存 native 绑定和内容检查点：有效系统提示、工具声明的指纹，以及非 system 消息的内容哈希；除自动 recall 外，当前辅助文本和图片也参与匹配，recall 仍按上述 hook 规则处理。只有已同步内容仍是当前历史的完整前缀，且模型、思考强度、有效系统提示、工具声明与辅助上下文一致时，才复用 native 会话。时间戳、用量等传输信息不影响内容比较；同数量改写、历史缩短和辅助摘要变化会被识别。[上下文快照与回放](../center-server/antigravity/context-sync.ts) · [会话存储](../center-server/antigravity/sessions.ts)
+- **单次 `session/prompt` 跑完整轮**：每轮对话只向 `agy acp` 发起一次原生 `session/prompt`，模型在轮内通过 `pibot-bridge` MCP 自主调用 Host 工具直至 `end_turn`，流式 HTTP 通道在整轮期间保持打开。
+- **Pi Durable 最小补丁（`runExternalTurn`）**：[`host-core/patch-pi-durable.js`](../host-core/patch-pi-durable.js) 仅对 `@earendil-works/pi-durable` 的 `generation.js` 施加最小补丁（`tool.js`、`submissions.js`、`live.js` 零改动）：
+  - `prepare` 阶段照常渲染 section（用于计算增量），并对 AGY 跳过压缩；
+  - `request` 阶段在 `beforeRequest` 之后，将 `antigravity-acp` 委托给挂在 provider 上的 `runExternalTurn`（[`host-core/antigravity-runner.js`](../host-core/antigravity-runner.js)），不进入 `streamResponse`、overflow 压缩或 Pi 侧工具轮次循环；
+  - 关闭外部轮次的重启自动重试（`interrupted`）与 `classify` 自动重试，防止网络中断导致重复发送原生 prompt；
+  - 问卷等触发 `control.terminate` 的场景通过独立收尾 `finishExternalTerminate` 结束本轮，不调用会创建后续 generation 的 `finishToolRound`。
+- **真实 `ToolTask` 执行**：Host 收到每个 `tool_request` 后，在单事务中写入含真实 `toolCall` 的 `AssistantEntry` 并创建归属当前 generation（带 `abandonOnRestart: true`）的 `ToolTask`，完整保留设备端权限审批、Code Mode、`beforeTool`/`afterTool` 钩子、嵌套槽位与取消级联。
 
-| 场景 | 处理方式 |
+## Center 路由契约
+
+契约常量与类型定义位于 [`center-contract/antigravity.js`](../center-contract/antigravity.js) 与 [`center-contract/antigravity.d.ts`](../center-contract/antigravity.d.ts)。
+
+| 路由 | 用途 |
 | --- | --- |
-| 正常追加对话 | 复用已确认的 native 上下文，补充尚未传递的历史；不会仅因 provider 相同而省略未见过的 assistant 回答。 |
-| `/clear` | Host 在提交重置记录的同一事务中更换 provider 会话身份；下一轮建立新的 native 绑定。清空当前上下文不删除旧回执或 agy 原生会话文件。 |
-| SOUL／系统指令或工具声明变化、编辑历史、Billion Context 压缩或改写 | 旧检查点不再匹配时，从当前有效投影重建 native 上下文，应用最新指令。 |
-| 等待工具结果 | 原 ACP turn 仍存活、状态为 `parked`，且上下文、模型和思考强度均相容时，通过 `reentry` 交付结果。Center 重启或原 turn 不可继续时，使用持久化绑定并核对 PiBot 历史中同 ID、同工具名的调用，再重建上下文，包含当前 `toolResult` 的正文和图片。绑定缺失或结果无法配对时明确报错。 |
-| 旧 native 会话加载失败 | Driver 在发送 `session/prompt` 前报告加载失败；Center 用完整上下文新建会话，最多安全重试一次。认证、配置或 prompt 阶段的其他错误不走这条自动重建重试路径。 |
-| 取消、异常退出或 Host 未承接上次输出 | 不再把旧 native 历史视为已确认上下文；后续请求依据 PiBot 实际保留的历史恢复。 |
-| SDK 原生 `/compact` 或自动压缩 | 摘要请求使用独立的 AGY 会话身份和摘要系统指令；身份与持久任务绑定，同一压缩任务重试保持稳定，任务结束后回收临时 driver、MCP 注册和绑定。`max_tokens` 或未知／缺失结束原因即使已有文字也明确失败，不以部分摘要替换原历史。 |
+| `POST /api/host/antigravity/run` | 发起原生整轮推理，以 `application/x-ndjson` 流式返回 `thought_delta`、`text_delta`、`usage`、`native_tool_start`、`native_tool_end`、`tool_request`、`turn_done`、`error` 事件。 |
+| `POST /api/host/antigravity/tool-result` | Host 在真实 `ToolTask` 完成后，按 `{ sessionId, runId, callId, content, isError? }` 回填工具结果（`content` 原样携带 `text` 与 `image` 块）。 |
+| `POST /api/host/antigravity/steer` | 在本轮执行期间投递准入的 steer 输入，由 Center 向同一原生会话追加发出 `session/prompt`。 |
+| `POST /api/host/antigravity/cancel` | 按 `{ sessionId, runId? }` 取消当前运行中的原生轮次。 |
 
-Center 持久化 `ready`、`parked`、`uncertain` 状态及恢复所需的检查点。发送会改变 native 历史的请求前先记录不确定状态；工具挂起时先保存恢复信息，再向 Host 交付工具调用。工具结果必须通过本地 MCP 发送屏障；发送失败、未能与受信桥接结果核对的 ACP `tool_error`，或 ACP 报告成功结果对应的工具失败，都不能确认 `ready`。每次新 native turn 都轮换 MCP 注册，拒绝旧 turn 的迟到调用。存储写入失败会返回错误，不会把未保存的恢复状态当成成功同步。这里只持久化可恢复的数据，进程内等待中的 Promise 和 MCP 连接仍随进程结束；普通会话最多保留 64 个完全空闲的内存 slot，按最近使用顺序回收并保留持久检查点，正在运行或等待工具的会话不参与淘汰；最后一个工具等待到期时会主动检查是否超出上限。[服务层状态转换](../center-server/antigravity/index.js)
+OAuth 授权与模型目录路由保持独立且不变：`/api/providers/antigravity-acp/auth-status`、`/login`、`/login/:flowId/answer`、`/login/:flowId/cancel` 以及模型目录 `discover` / `validate`。
 
-普通 Host 工具失败以 `isError: true` 连同错误正文交付 MCP；确认 ACP 的 `tool_error` 对应这次错误结果时，让 agy 继续原轮，不自动重放工具。如果不能唯一配对，仍按未确认失败中止。后续重建保留错误正文和 `isError` 标记。
+## 会话身份、游标与增量上下文
 
-重建回放覆盖当前投影中的所有 provider 回答、工具调用 ID 和参数、工具结果、错误及历史图片。历史图片按回放中的编号附加；自动 recall 仍遵守上述临时 hook 规则。回放不再默认截断为 8,000 字符，也不会因为普通正文出现 compaction 标记而丢掉前面的记录。完整回放会增加输入 token 和图片传输成本，并受 HTTP／ACP 帧大小、模型上下文等上限约束；超限请求必须显式失败，不能裁掉内容后仍推进检查点。若发送前就能判定回放超限，失败请求不作废旧绑定，也不取消旧轮正在等待的工具。
+### 会话身份与热/冷恢复
 
-该机制维护 PiBot 当前有效投影的传递与恢复。agy 会话内部还会记录桥接、资源块、原生推理等事件，两边的原生事件日志不会逐条相同。回放以历史记录的形式提供已完成调用，桥本身不会为重放而再次执行这些调用。本地 MCP 发送完成不等于对端已读取或模型已理解；外部工具副作用是否恰好执行一次，还需要工具自身的幂等与回执机制，不能由一段恢复提示词保证。
+- **身份映射链**：Host `ProviderDoc.sessionId` ↔ Center [`sessions.json`](../center-server/antigravity/sessions.ts) 中按 `(deviceId, sessionId)` 持久化的 `{ conversationId, agentName }` ↔ `agy` 原生会话库。
+- **新建会话**：仅在空会话首轮或 `/clear`（轮换 `ProviderDoc.sessionId`）后调用 `session/new`，且 Center 在发出第一条 prompt 之前先落盘 `{ conversationId, agentName }`。
+- **热轮复用**：原生连接仍存活且 `activeSessionId` 匹配时，直接发送 `session/prompt`，不调用 `session/load` 或 `session/resume`。
+- **冷启动恢复**：进程空闲回收、Center 重启或异常退出后，下次对话通过 `session/resume` 恢复同一 `conversationId`（零历史帧重放），并经 `set_config_option` 重新设置当前 `model` 与 `thought_level`。
+- **原生会话失效与旧会话升级**：若 `session/resume` 确认原生会话丢失或损坏，Center 明确返回 `AGY_HISTORY_CHANGED` 要求 `/clear`，不静默重放历史。升级后缺少新游标（`AntigravityCursorDoc`）的既有非空 AGY 会话同样一次性返回 `AGY_HISTORY_CHANGED` 要求 `/clear`。
+- **运行中崩溃**：标记为 interrupted，不自动重发；下一条真实用户输入继续沿用同一原生会话。
 
-### 新旧 Host 流传输契约、升级顺序与旧格式歧义边界
+### Host 单游标与动态 section 增量
 
-- **新版协议（仅 Antigravity `POST /api/host/antigravity/stream`）**：
-  - 新版 Host 除既有 `sessionId`、`modelId`、`messages`（及可选 `reasoning`）外，携带可选顶层字段 `turnContext: { inputIndex: number | null, auxiliaryIndices: number[] }`。
-  - 新版 Host 为每个 HTTP 流生成新的 UUID `requestId`，对应取消请求携带同一 ID，防止迟到的旧取消终止下一轮。新版 Center 仍兼容不带 `requestId` 的旧 Host，此时取消按会话生效。
-  - `inputIndex` 与 `auxiliaryIndices` 均使用**最终归一化并实际发送的 `messages` 数组下标坐标**：
-    - `inputIndex` 指向最后一个非 `system`、非辅助条目消息（允许角色为 `user`、`assistant` 或 `toolResult`）；`null` 表示不存在此类消息（例如仅有 `system`，或仅有 `system` 与辅助条目）。
-    - `auxiliaryIndices` 为严格递增且唯一的 `user` 辅助条目索引列表（例如 Billion Context 投影/提醒、Hindsight recall 等由插件/运行时注入的辅助 `user` 消息）。
-  - 新版 Host 基于真实运行时与插件阶段来源生成 `turnContext`，**不**依赖 `user` 正文前缀或 `timestamp === 0` 猜测来源；独立调用裸 `createAntigravityProvider`（缺少 Host 来源上下文）时不会伪造猜测的 `turnContext`。
-  - **Fail-closed 校验**：Center 在 HTTP 路由与服务层均严格校验 `turnContext`：缺失该字段按老 Host 处理；**一旦提供但存在未知键、类型错误、越界、重复/未排序、`auxiliaryIndices` 指向非 `user`、`inputIndex` 指向 `system` 或与 `auxiliaryIndices` 冲突、或与“最后一个非 `system` 非辅助消息”矛盾时，必须直接拒绝（HTTP 400 `INVALID_ARGUMENT` / 服务层终态 `error`、不启动 ACP driver），绝不降级回旧版启发式猜测**。
-  - 当 `messages` 仅有 `system`（或仅有 `system` + 辅助条目，`inputIndex === null`）时，Center 返回错误且不启动 ACP driver。`assistant`/`toolResult` 输入必须已有会话绑定；恢复 `toolResult` 还须在 PiBot 历史中找到之前同 ID、同工具名的调用，不能无条件退回较早的用户输入。
-  - SDK 在真实 `user` 或 `toolResult` 之后追加的增量 `SystemMessage`（例如 `sections`、`toolsAdded`、`toolsRemoved`）不会遮蔽真实本轮输入，且其末尾工具变更仍在 `pibot-bridge` MCP server 上完整生效。正常用户轮的当前输入单独进入 prompt；重建工具续接时，当前 `toolResult` 也会进入历史回放。
+- **单游标推进**：Host 在 Pi Durable 中仅维护一个游标文档 `AntigravityCursorDoc`（`host.antigravity-cursor`，记录 `{ sessionId, dispatchedThrough }`），并在写出 `/run` 或 `/steer` 请求**之前**推进游标。
+- **本轮输入**：每轮只发送游标之后新增的用户输入条目（批量 DM、定时触发、问卷答案等按顺序及可选 `source` 发送）、本轮用户图片（ACP `image` 块，每张只发一次）以及可选的本轮路由短注（`<turn-routing>`）。不再重传旧 assistant、旧 toolResult、旧图片，也不计算任何历史或配置哈希。
+- **动态 section 增量**：复用 Pi Durable 已持久化的 `SystemEntry` changed-key。首轮创建隔离 custom agent 时写入初始 SOUL（`instructions`），其余初始 section 以 `<context key="...">` 附带；后续轮次只收集游标区间内变化或移除的 section（包括后续 SOUL 变更），同 key 取最后值，以 `<context key="...">`（或 `<context key="..." removed="true" />`）发送一次，不会因修改人设、技能、工作目录或任务列表触发 `/clear`。
+- **过滤在线状态抖动**：[`plugins/tasks/context-projection.js`](../plugins/tasks/context-projection.js) 过滤远端 `bot.online` 抖动，避免对端离线/重连造成每轮无意义的 `tasks` section 变化。
 
-- **升级顺序要求（必须先升级 Center，再升级 Host，或成对同步升级）**：
-  1. **新 Center + 新 Host（推荐）**：完整启用 `turnContext` 显式来源契约与 `requestId` 流级取消，消除旧格式歧义并保留全部工具/会话/隔离能力。
-  2. **新 Center + 老 Host（兼容过渡）**：老 Host 请求不含 `turnContext`，新 Center 自动走旧版兼容路径——可正确识别非零时间戳 `user` 与合法图片 `user`（含文图/纯图）后接 SDK 追加的常规 `system`（全部 `system` 工具增删照常生效），且 `toolResult` 后接 `system` 时绝不会错误回退到更早的 `user` 消息。
-  3. **老 Center + 新 Host（不兼容，禁止）**：老 Center 对 `POST /api/host/antigravity/stream` 顶层字段执行严格白名单校验，会以 HTTP 400 `INVALID_ARGUMENT` 拒绝其尚不支持的 `turnContext` 或 `requestId`。新版 Host 不会自动去掉 `requestId` 重试；滚动升级时务必先完成 Center 升级并就绪，再升级各设备 Host。
-  4. **托管 Billion Context 既有安装升级（`1.0.2` → `1.0.3`）**：Center 启动不会自动覆盖已安装的旧版 Billion Context 插件包，且 Host 按 `targetVersion` 缓存插件版本；因此**已启用托管 Billion Context 的既有安装需在 Center 中显式将 Billion Context 更新到 `1.0.3`**，以获得精确的辅助消息来源。此操作**不需要重建会话或数据库**；**未启用 Billion Context 的部署不需要进行这一操作**。
-  5. **托管 Hindsight 既有安装可更新到 `1.2.1`**。新版插件识别当前 Host 的主会话输入并在请求中标记自动召回。构建产物为 `build/builtin-plugins/hindsight.tgz`，通过 Center 的插件更新入口应用。
+## 工具、图片与权限边界
 
-- **无法消除的旧格式歧义（仅老 Host 过渡期存在）**：
-  - 在老 Host（未发送 `turnContext`）的旧线格式中，一条位于既有历史消息之后、无图片块、无 `bcContextMaterial`/`bcSummaryMaterial` 标记且 `timestamp === 0` 的纯文本 `user` 消息，与旧版插件注入的未标记 `timestamp === 0` 合成辅助消息（例如 Hindsight recall 或 Billion Context 尾部 nudge）在传输载荷上可能**完全同形**，Center 无法仅凭旧线格式做到无损区分。
-  - 因此老 Host 兼容路径不承诺对“历史之后的无标记 `timestamp === 0` 纯文本 `user`”做无损判别；升级至新版 Host（如启用了托管 Billion Context 则一并在 Center 显式更新到 `1.0.3`）后即可彻底消除该歧义。
+- **仅 Code Mode**：顶层工具保持 `codemode` 与已启用的 model-only 工具（例如 `ask_user_question`）；普通设备工具在 `codemode` 内按需发现并执行，MCP 工具声明基本稳定。
+- **连接级 MCP Token 与 run 引用校验**：每条原生 ACP 连接绑定一个本地回环 MCP token（`pibot-bridge`）。HTTP 请求进入时先同步捕获当前 active run 引用，读完请求体派发前校验仍为同一 run 引用；无 active run 时拒绝 `tools/call` 并返回普通 MCP 错误，不会毒化连接级 token。
+- **150s 慢工具升级（`bridge_poll_result`）**：`agy` 的 MCP 客户端在约 180 秒后会放弃单次请求且不自动重试。当 Host 工具执行超过 `150_000ms`（150 秒）时，Center 返回含 `callId` 的 `STILL RUNNING` 提示，引导模型调用只读的 `bridge_poll_result({ callId })` 等待同一在途调用结果（可再次等待 150 秒窗口）。`bridge_poll_result` 只读结果，不重跑工具，不合成用户消息。
+- **图片传递**：用户图片随当轮 prompt 以 ACP `image` 块发送；工具结果图片由 `/tool-result` 经标准 MCP `image` 块原样返回给 `agy`（含 `bridge_poll_result` 升级路径），无需额外 hook 旁路。
+- **ACP 权限与原生工具**：
+  - `agy` 运行在 Center 隔离环境中，ACP `session/request_permission` 请求一律自动放行（ACP 客户端自身的 `fs/*` 与 `terminal/*` 请求仍保持拒绝）。
+  - 不拦截 `agy` 残留的原生工具（如 `manage_task`、`list_resources`、`read_resource`）；非 bridge 的原生工具调用仅根据 ACP `tool_call` 通知以 `native_tool_start` / `native_tool_end` 在界面展示，不创建 Pi `ToolTask`。
 
-## 安装与部署方式
+## 模型切换、Steer、停止与问卷
+
+- **模型切换**：同一 Antigravity 会话内可直接切换到其他 `antigravity-acp/*` 模型（热连接通过 `set_config_option` 实时切换，冷恢复时自动重设 `model` 与 `thought_level`）。在非空会话中跨服务商切换（非 AGY ↔ AGY）会被拦截（经 Host 在线控制通道核验），需先 `/clear`。
+- **Steer 与 followUp**：轮中准入的 steer 通过 `/steer` 并发发出原生 `session/prompt`，工具与输出继续流式推进；只有**最后一个在途 prompt** 结算后才发出 `turn_done` 并合并各次 prompt 的 `usage`。`followUp` 继续排队等待本轮结束。
+- **停止（Stop）**：Host 中止本机在途工具 → Center 以错误结束挂起的 MCP 调用 → 向 `agy` 发送 `session/cancel` 等待终态。常规取消不杀进程、不删原生会话；仅在等待终态超时时才终止进程（同样不删会话，下一轮通过冷 `session/resume` 恢复）。
+- **问卷（`ask_user_question`）**：AGY 会话下的所有问卷场景（含主聊并发与非主聊 DM/群/任务分发）统一通过 `control: { terminate: true }` 结束本轮（主聊仍创建真实 `DurableWait` pending 卡片，非主聊仅展示卡片不阻塞），MCP 向模型返回“问卷已展示，请结束本轮”，Host 经 `finishExternalTerminate` 收尾，用户提交的答案作为下一轮输入送入模型。
+
+## AGY 会话明确禁用项
+
+- **Hindsight `autoRecall`**：在 AGY 会话中禁用（[`plugins/hindsight/entry.js`](../plugins/hindsight/entry.js)）；保留来源登记、`autoRetain`、既有记忆 bank（`/clear` 不更换 bank）以及显式 recall / reflect / retain 工具。
+- **Billion Context**：在 AGY 会话中不激活，不参与上下文准备、摘要或工具声明。
+- **Pi 压缩（Compaction）**：关闭 threshold / overflow 自动压缩与手动 `/compact`（输入 `/compact` 提示改用 `/clear`）；原生上下文压缩由 `agy` 自行管理。
+- **历史改写与分叉**：禁止编辑或回退已发送消息，禁止 fork 非空 AGY 会话。
+- **跨服务商切换**：非空会话禁止在 AGY 与其他模型服务商之间直接互切。
+
+## 隔离边界、安装部署与环境变量
+
+### 隔离边界
+
+- **中心单账号、设备侧执行工具**：`agy` 仅在 Center 进程中运行，Host 业务工具仍在已配对设备本机执行。
+- **独立 Profile 隔离**：Center 专用 `--gemini-dir` 默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`，专用工作目录为 `<CENTER_DATA_ROOT>/antigravity/workspace`。严禁指向宿主机日常 `~/.gemini`，不得复制或抽取个人 Google token。
+- **持久化目录**：专用 home 与 `agy` 会话必须位于已有持久数据目录（Docker 为 `/data`，Linux DEB/systemd 为 `/var/lib/pibot-center`）。
+- **子进程环境隔离**：Center 拉起 `agy` 子进程前会剥离 `ANTIGRAVITY_*` 环境变量。在 Windows 上，`--gemini-dir` 无法隔离系统凭据库（keyring），生产部署建议使用 Linux 容器或独立服务账号。
+
+### 安装与部署方式
 
 官方安装脚本 `https://antigravity.google/cli/install.sh` 仅支持 `--dir`，不支持固定版本参数。不要让容器在每次启动时自动下载或运行未固定版本的在线安装脚本。推荐以下任一部署方式：
 
-### 方式 1：预构建 Center 镜像 + 只读挂载宿主机 `agy`（推荐）
+#### 方式 1：预构建 Center 镜像 + 只读挂载宿主机 `agy`（推荐）
 
 1. 按宿主机架构查询官方 manifest 核对版本与 SHA-512：
    - `amd64`：`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json`
@@ -77,7 +116,7 @@ volumes:
   - /usr/local/bin/agy:/usr/local/bin/agy:ro
 ```
 
-### 方式 2：源码构建可选内置 `agy` 的 Center 镜像
+#### 方式 2：源码构建可选内置 `agy` 的 Center 镜像
 
 [`Dockerfile`](../Dockerfile) 提供默认关闭的可选构建参数 `INSTALL_AGY=false`。需要内置时显式传入 `INSTALL_AGY=true`（构建阶段会按固定的 `AGY_VERSION=1.5.12` 与官方 manifest URL/SHA-512 校验安装包，支持 `amd64` 与 `arm64`）：
 
@@ -85,13 +124,13 @@ volumes:
 sh scripts/center-build.sh --build-arg INSTALL_AGY=true
 ```
 
-### 方式 3：Linux DEB / systemd (`pibot-center.service`)
+#### 方式 3：Linux DEB / systemd (`pibot-center.service`)
 
 [`center-server/linux/pibot-center.service`](../center-server/linux/pibot-center.service) 的 `PATH` 已包含 `/usr/local/bin`，且通过 `EnvironmentFile=-/etc/pibot-center/center.env` 读取配置、`HOME` 与 `CENTER_DATA_ROOT` 均指向 `/var/lib/pibot-center`。将已校验的官方 `agy` 放至 `/usr/local/bin/agy`（或通过 `/etc/pibot-center/center.env` 指定 `PIBOT_AGY_BIN`）即可，无需修改 unit 文件。
 
-## 环境变量与数据路径
+### 环境变量与数据路径
 
-除现有 `CENTER_*` 变量外，目前仅提供两个可选环境变量（均可在 `center.env` 或 `/etc/pibot-center/center.env` 中配置，见 [`center.env.example`](../center.env.example)）：
+除现有 `CENTER_*` 变量外，提供两个可选环境变量（均可在 `center.env` 或 `/etc/pibot-center/center.env` 中配置，见 [`center.env.example`](../center.env.example)）：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -109,10 +148,10 @@ sh scripts/center-build.sh --build-arg INSTALL_AGY=true
 
 1. **自动识别既有登录缓存**：同一系统用户若本机已登录过 `agy`，即便使用全新 `PIBOT_AGY_HOME`，Center 启动及 `GET /api/providers/antigravity-acp/auth-status` 也会自动复用官方 CLI 登录缓存，无需强制 SSH 或重新执行终端登录。不同系统用户或独立容器则需具备各自服务用户可访问的登录缓存。
 2. **中心网页授权主流程（手动登录 / 重新授权）**：
-   - 在 Center 管理页「服务商与模型」中选择 **Antigravity (Center agy)**；若未检测到可用缓存或需要更换账号/重新授权，直接点击网页登录入口（调用既有 `POST /api/providers/antigravity-acp/login`）。
+   - 在 Center 管理页「服务商与模型」中选择 **Antigravity (Center agy)**；若未检测到可用缓存或需要更换账号/重新授权，直接点击网页登录入口（调用 `POST /api/providers/antigravity-acp/login`）。
    - 在浏览器打开页面提供的 Google 官方授权链接完成同意，将跳转后的**完整回调 URL 或授权码**粘贴到网页表单提交（`POST /api/providers/antigravity-acp/login/:flowId/answer`），即可由 Center 传入 `agy --login` 完成授权；过程中也可随时点击取消（`POST /api/providers/antigravity-acp/login/:flowId/cancel`）。
    - 官方 `agy` CLI 自行掌管凭据与系统共享 keyring，Center Node 仅中转官方授权链接与用户输入、不触碰或复制 token，也不提供从网页清除系统共享 CLI keyring 的入口。
-3. **自动更新目录与启用切换**：登录完成（或复用既有缓存）后，模型目录会自动同步并可直接在「服务商与模型」验证/启用；随后在「设备与 Bot」页为全局默认或指定 Bot 选择 `antigravity-acp/<modelId>` 及对应思考强度（`thinkingLevel`）。Center 在选中模型后按该会话的 ACP 档位执行。Gemini 4 Neon 和 Hydrogen 在 AGY 提供 `xhigh` 时使用原生的 Extra 档。
+3. **自动更新目录与启用切换**：登录完成（或复用既有缓存）后，模型目录会自动同步并可直接在「服务商与模型」验证/启用；随后在「设备与 Bot」页为全局默认或指定 Bot 选择 `antigravity-acp/<modelId>` 及对应思考强度（`thinkingLevel`）。Gemini 4 Neon 和 Hydrogen 在 AGY 提供 `xhigh` 时使用原生的 Extra 档。
 4. **终端命令登录（仅无浏览器环境或排查时备用）**：
 
    若需以服务用户直接在终端初始化或排查缓存，请以实际运行 Center 的服务用户执行（切勿用 `root` 写入持久目录导致服务用户无权读取）：
@@ -132,48 +171,15 @@ sudo -u pibot-center HOME=/var/lib/pibot-center \
 
    若配置了自定义 `PIBOT_AGY_HOME`，将 `--gemini-dir` 替换为对应路径，并确保目录归属服务用户（权限 `0700`）。
 
-## 可重复验证与验证范围
+## 验证与版本说明
 
-上下文同步回归位于 [`web/test/antigravity-sync.test.mjs`](../web/test/antigravity-sync.test.mjs)，随 `npm test` 执行。它使用真实 Host／Durable／Center 代码与受控 ACP，覆盖清空、SOUL 更新、内容检查点、历史改写与压缩、完整回放、工具等待期间重启、加载失败、取消、响应丢失及存储失败，并检查重复流式增量不会被误当成累计重发而吞掉。受控测试不等同于真实 agy、Google 服务或真实故障时序的端到端验收；测试通过数量以实际运行报告为准。
-
-另有以下真实链路验证脚本。前两个要求 `PIBOT_AGY_HOME` 指向已独立登录的专用 gemini 目录；脚本拒绝使用日常 `~/.gemini`，且永不删除外部 `PIBOT_AGY_HOME`。
-
-### 1. ACP/MCP 服务层往返验证（[`scripts/verify-antigravity-acp.mjs`](../scripts/verify-antigravity-acp.mjs)）
+- **自动化回归测试**：`npm test` 覆盖 Host（Pi Durable 补丁与 `runExternalTurn`）、Center 路由与 ACP/MCP 桥接的受控测试，包括原生整轮工具调用、150s 慢工具 `bridge_poll_result`、标准 MCP 图片块、同会话 AGY 模型切换、跨服务商拦截、轮中 steer、停止取消、问卷 `control.terminate` 以及旧会话升级 `/clear`。
+- **Center Web-Auth 授权链路验证**：[`scripts/verify-antigravity-auth.mjs`](../scripts/verify-antigravity-auth.mjs) 使用真实 `openCenterServer` 与真实 `agy`，验证已有缓存识别（`/auth-status`）、获取官方 Google `auth_url`、无效授权码边界拒绝、取消登录以及既有缓存与目录保持可用：
 
 ```sh
-PIBOT_AGY_HOME=/path/to/dedicated-gemini \
-PIBOT_AGY_BIN=/usr/local/bin/agy \
-  node scripts/verify-antigravity-acp.mjs
-```
-
-- **验证范围**：直接调用 `center-server/antigravity/index.js` 的 `openAntigravity`，使用真实 `agy` 与真实 Host `read` 工具（读取仓库外临时随机文件），验证 `catalog`、两轮上下文记忆、同会话模型与支持强度切换并保留旧记忆、Host `read` 返回普通工具错误后 agy 通过 MCP 在同一轮重试成功（文件只在 Host 上）、内置工具限制探测（仅声明 Host `read` 时不得通过原生 `run_command`/`write_file` 在 Center workspace 写入 sentinel），以及 `cancel({ deviceId, sessionId })` 取消。
-- **未覆盖范围**：不启动 Center HTTP 服务、管理 API 或 Host Provider。
-
-### 2. Center HTTP + Host Provider 工具往返验证（[`scripts/verify-antigravity-center.mjs`](../scripts/verify-antigravity-center.mjs)）
-
-```sh
-PIBOT_AGY_HOME=/path/to/dedicated-gemini \
-PIBOT_AGY_BIN=/usr/local/bin/agy \
-  node scripts/verify-antigravity-center.mjs
-```
-
-- **前置条件**：已安装根目录、`host-core` 与 `center-server` 依赖，本机可执行 `agy`，且 `PIBOT_AGY_HOME` 已完成专用 profile 登录；可选仅用于验证脚本的超时覆盖环境变量 `PIBOT_AGY_TIMEOUT_MS`（正整数毫秒，非 Center 运行时环境变量）。
-- **验证范围**：**Center HTTP + Host Provider 工具往返**——使用临时 `dataRoot` 启动真实 `openCenterServer`、`openHost`、`connectCenter` 与未修改的 `applyCenterModels`，走完真实 Owner 登录（`/api/session` + CSRF）、设备注册（`POST /api/devices`）、Provider 启用与 `discover`/`validate`、Bot 模型分配（`PUT /api/devices/:deviceId/bots/:botId/model-config`），以及 `Host Provider -> 真实 Center /api/host/antigravity/stream -> 真实 agy -> 标准 toolCall -> Host read 工具 -> toolResult -> 最终回答` 完整循环与 `/api/host/antigravity/cancel` 取消。
-- **未覆盖范围**：脚本未启动完整 `pi-durable` Harness（完整 Agent 会话持久化/调度壳）与反向代理 TLS/WSS 终端，也不覆盖 Web 管理页 UI 交互。
-
-### 3. Center Web-Auth 授权链路验证（[`scripts/verify-antigravity-auth.mjs`](../scripts/verify-antigravity-auth.mjs)）
-
-```sh
-# 默认复用当前服务用户已有 agy 缓存（或在提供非 ~/.gemini 隔离目录时使用 PIBOT_AGY_HOME）
 node scripts/verify-antigravity-auth.mjs
 ```
 
-- **前置条件**：已安装根目录与 `center-server` 依赖，本机可执行 `agy` 且当前运行用户在当前网络/代理环境下已完成过 `agy` 登录（脚本会先通过 `/api/providers/antigravity-acp/auth-status` 核查缓存，若未检测到缓存将清晰报前置条件失败）；如传 `PIBOT_AGY_HOME`，脚本会拒绝指向 `~/.gemini` 且永不删除外部目录。
-- **验证范围**：使用真实 `openCenterServer` 与真实 `agy`，验证已有缓存自动识别（`auth-status` 返回 `method: 'oauth'`）、显式发起登录获取官方 Google `auth_url` 与 `manual_code` 表单提示、空值/超长输入边界拒绝（HTTP 400 且不提交给上游）、单次固定无效授权码触发 `failed` 状态且错误信息不回显授权码或日志/token 原文、发起登录后取消（`/cancel` -> `cancelled`），以及失败与取消后既有缓存与目录（`auth-status` / `validate` / `discover`）仍保持可用。
-- **未覆盖范围**：Google 页面人工账号同意及输入真实有效授权码完成 OAuth 换取凭据不作自动化，因此该脚本不宣称端到端完整真实 OAuth 成功登录，仅覆盖授权链接生成、输入校验、无效失败、取消及既有缓存复用能力。
-
-## 版本与已知限制
-
-- 当前针对 `agy 1.5.9` 仅实测过 `--version`、`--help` 及未登录独立 profile 返回 `Authentication required`，支持 `--agent`、`--gemini-dir`、`--app-data-dir`；尚无其他 `1.5.9` 功能实测限制可宣称。
-- 历史 `agy 1.5.2` / `1.5.3` 中存在自定义 Agent 与 `/compact` 的历史已知回归问题，现阶段仅作为 `1.5.9` 后续验收需核查项记录，不表示已在 `1.5.9` 复现。
-- `agy` 常规运行可能触发后台自更新逻辑；在只读挂载 `/usr/local/bin/agy` 的容器中二进制不可写入，需由宿主机统一更新镜像外挂载文件或重新构建镜像。
+  脚本拒绝指向日常 `~/.gemini`，且永不删除外部 `PIBOT_AGY_HOME`。
+- **固定版本与运行特性**：[`Dockerfile`](../Dockerfile) 固定使用 **`agy 1.5.12`**，已实测确认 `session/resume` 零历史帧重放（恢复后需重设 `model`/`thought_level`）、标准 MCP 图片块在当轮与冷恢复后均可读、轮中 steer 由最后结算的 prompt 统一收尾、`session/cancel` 快速到达终态且不破坏会话，以及 MCP 客户端在 180 秒放弃且不自动重试（对应 150 秒升级到只读 `bridge_poll_result`）。
+- **只读挂载更新提示**：`agy` 常规运行可能触发后台自更新逻辑；在只读挂载 `/usr/local/bin/agy` 的容器中二进制不可写入，需由宿主机统一更新镜像外挂载文件或重新构建镜像。
