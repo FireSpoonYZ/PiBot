@@ -115,6 +115,7 @@ import {
   parseHistoryEntries,
   visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
+  resolveAssistantCopyText,
   type ScopedLiveBinding,
   type ScopedLiveState,
 } from './chatTurnModel';
@@ -7934,7 +7935,8 @@ ${newer}` : draftSnapshot;
         const bubbleActionItems: ActionSheetItem[] = [];
         if (bubbleActionTurn && activeBot) {
           const { turn, editable, canRetry } = bubbleActionTurn;
-          const textToUse = turn.text.trim();
+          const copyText = resolveAssistantCopyText(turn);
+          const textToUse = copyText.trim();
           if (textToUse) {
             bubbleActionItems.push({
               key: 'copy',
@@ -7942,7 +7944,7 @@ ${newer}` : draftSnapshot;
               icon: <Copy size={18} />,
               onSelect: () => {
                 if (navigator.clipboard?.writeText) {
-                  void navigator.clipboard.writeText(turn.text).then(
+                  void navigator.clipboard.writeText(copyText).then(
                     () => {
                       const msg = t('已复制', 'Copied');
                       setClearNotice(msg);

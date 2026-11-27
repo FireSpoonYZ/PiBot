@@ -18,6 +18,7 @@ import {
   mergeHistoryWaitProjection,
   parseHistoryEntries,
   normalizeAttribution,
+  resolveAssistantCopyText,
   resolveAssistantFailureDetail,
   type ChatTurn,
   type KnownBotSummary,
@@ -31,7 +32,7 @@ import type {
 } from '../../../web/src/ToolPresentation';
 import { selectCurrentGoogleSetup } from '../../../web/src/google/currentGoogleSetup';
 import { CurrentGoogleSetupCard } from '../../../web/src/google/CurrentGoogleSetupCard';
-import { TurnToolCallsSection } from '../../../web/src/hub/shared';
+import { AssistantTurnBody } from '../../../web/src/TurnProcessRail';
 import {
   GrokBotAvatar,
   GrokBotFailureRow,
@@ -501,7 +502,7 @@ export function ChatTranscript({
               onEditTurn &&
               isEditablePrimaryUserTurn(turn),
           );
-          const copyText = turn.text;
+          const copyText = resolveAssistantCopyText(turn);
           const isAssistantFailure = turn.role === 'assistant' && Boolean(turn.error);
           const showArticle = !isAssistantFailure || hasAssistantVisibleContent(turn);
           const failureDetail = isAssistantFailure ? resolveAssistantFailureDetail(
@@ -510,73 +511,29 @@ export function ChatTranscript({
             t,
           ) : '';
           const renderAssistantBody = (insideDm: boolean) => (
-            <>
-              {turn.blocks
-                ? turn.blocks.map((block) =>
-                    block.kind === 'thinking' ? (
-                      <details key={block.id} className="bot-chat-thinking">
-                        <summary>{t('思考过程', 'Thinking')}</summary>
-                        <pre>{block.text}</pre>
-                      </details>
-                    ) : block.kind === 'tools' ? (
-                      <TurnToolCallsSection
-                        key={block.id}
-                        tools={block.tools}
-                        collapseOutput={collapseToolOutput}
-                        collapseBotDm={insideDm ? false : collapseBotDm}
-                        insideBotDmTurn={insideDm}
-                        forceExpandBotDm={Boolean(searchQuery)}
-                        presentationOnly={hideToolOutput}
-                        scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
-                        active={isBusy && !archived}
-                        disabled={disabled || archived}
-                        variant="desktop"
-                        requesterName={bot.role}
-                        googleContext={googleContext}
-                        onSubmitQuestionnaire={onSubmitQuestionnaire}
-                        onSubmitVaultUnlock={onSubmitVaultUnlock}
-                        onOpenTask={onOpenTask}
-                        onConfirmTaskPlan={onConfirmTaskPlan}
-                        onAnswerTaskPrompt={onAnswerTaskPrompt}
-                        t={t}
-                      />
-                    ) : (
-                      <div key={block.id} data-assistant-entry-id={block.entryId}>
-                        <Markdown text={block.text} onOpenLink={openLink} />
-                      </div>
-                    ),
-                  )
-                : null}
-              {!turn.blocks && turn.thinking ? (
-                <details className="bot-chat-thinking">
-                  <summary>{t('思考过程', 'Thinking')}</summary>
-                  <pre>{turn.thinking}</pre>
-                </details>
-              ) : null}
-              {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
-                <TurnToolCallsSection
-                  tools={turn.tools}
-                  collapseOutput={collapseToolOutput}
-                  collapseBotDm={insideDm ? false : collapseBotDm}
-                  insideBotDmTurn={insideDm}
-                  forceExpandBotDm={Boolean(searchQuery)}
-                  presentationOnly={hideToolOutput}
-                  scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
-                  active={isBusy && !archived}
-                  disabled={disabled || archived}
-                  variant="desktop"
-                  requesterName={bot.role}
-                  googleContext={googleContext}
-                  onSubmitQuestionnaire={onSubmitQuestionnaire}
-                  onSubmitVaultUnlock={onSubmitVaultUnlock}
-                  onOpenTask={onOpenTask}
-                  onConfirmTaskPlan={onConfirmTaskPlan}
-                  onAnswerTaskPrompt={onAnswerTaskPrompt}
-                  t={t}
-                />
-              ) : null}
-              {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
-            </>
+            <AssistantTurnBody
+              turn={turn}
+              isLive={isLastAssistantTurn && isBusy}
+              insideDm={insideDm}
+              collapseToolOutput={collapseToolOutput}
+              hideToolOutput={hideToolOutput}
+              collapseBotDm={collapseBotDm}
+              forceExpand={Boolean(searchQuery)}
+              scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+              active={isBusy && !archived}
+              disabled={disabled || archived}
+              variant="desktop"
+              requesterName={bot.role}
+              trackEntryIds
+              googleContext={googleContext}
+              onOpenLink={openLink}
+              onSubmitQuestionnaire={onSubmitQuestionnaire}
+              onSubmitVaultUnlock={onSubmitVaultUnlock}
+              onOpenTask={onOpenTask}
+              onConfirmTaskPlan={onConfirmTaskPlan}
+              onAnswerTaskPrompt={onAnswerTaskPrompt}
+              t={t}
+            />
           );
 
           if (isDmTurn) {

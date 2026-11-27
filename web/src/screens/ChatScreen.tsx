@@ -49,10 +49,11 @@ import { ChatTurnMeta } from '../ChatTurnMeta';
 import {
   hasAssistantVisibleContent,
   isBotDmTurn,
+  resolveAssistantCopyText,
   resolveAssistantFailureDetail,
   type ChatTurn,
-  type ChatTurnBlock,
 } from '../chatTurnModel';
+import { AssistantTurnBody } from '../TurnProcessRail';
 import { BotDmFoldCard, resolveBotDmTurnSummary } from '../BotDmCard';
 import {
   isEditablePrimaryUserTurn,
@@ -84,7 +85,6 @@ import {
 } from '../tasks';
 import {
   PlatformLogoIcon,
-  TurnToolCallsSection,
   formatArchivedRemainingDays,
   type SlashCommandName,
   type TurnAdmissionStatus,
@@ -1345,7 +1345,7 @@ export function ChatScreen({
                 const isEditingTarget = editingTargetIdx === turnIdx;
                 const isAfterEditingTarget = editingTargetIdx !== -1 && turnIdx > editingTargetIdx;
                 const turnEditable = canEditHistoryTurn && isEditablePrimaryUserTurn(turn);
-                const copyText = turn.text;
+                const copyText = resolveAssistantCopyText(turn);
                 const isAssistantFailure = turn.role === 'assistant' && Boolean(turn.error);
                 const canRetryTurn = isLastTurn && chatTurnAdmission?.phase === 'failed';
                 const showArticle = !isAssistantFailure || hasAssistantVisibleContent(turn);
@@ -1356,68 +1356,26 @@ export function ChatScreen({
                 ) : '';
                 const hasBubbleActions = Boolean(copyText.trim() || turnEditable || canRetryTurn);
                 const renderAssistantBody = (insideDm: boolean) => (
-                  turn.blocks ? (
-                    turn.blocks.map((block: ChatTurnBlock) =>
-                      block.kind === 'thinking' ? (
-                        <details key={block.id} className="bot-chat-thinking">
-                          <summary>{t('思考过程', 'Thinking')}</summary>
-                          <pre>{block.text}</pre>
-                        </details>
-                      ) : block.kind === 'tools' ? (
-                        <TurnToolCallsSection
-                          key={block.id}
-                          tools={block.tools}
-                          collapseOutput={collapseToolOutput}
-                          collapseBotDm={insideDm ? false : collapseBotDm}
-                          insideBotDmTurn={insideDm}
-                          forceExpandBotDm={chatSearchActive}
-                          presentationOnly={hideToolOutput}
-                          scopeKey={toolScopeKey}
-                          active={isBotBusy && !activeBot.archivedAt}
-                          disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
-                          googleContext={googleContext}
-                          onSubmitQuestionnaire={onSubmitQuestionnaire}
-                          onSubmitVaultUnlock={onSubmitVaultUnlock}
-                          onOpenTask={onOpenTaskDetail}
-                          onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
-                          onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
-                          t={t}
-                        />
-                      ) : (
-                        <Markdown key={block.id} text={block.text} />
-                      ),
-                    )
-                  ) : (
-                    <>
-                      {turn.thinking && (
-                        <details className="bot-chat-thinking">
-                          <summary>{t('思考过程', 'Thinking')}</summary>
-                          <pre>{turn.thinking}</pre>
-                        </details>
-                      )}
-                      {turn.tools && turn.tools.length > 0 && (
-                        <TurnToolCallsSection
-                          tools={turn.tools}
-                          collapseOutput={collapseToolOutput}
-                          collapseBotDm={insideDm ? false : collapseBotDm}
-                          insideBotDmTurn={insideDm}
-                          forceExpandBotDm={chatSearchActive}
-                          presentationOnly={hideToolOutput}
-                          scopeKey={toolScopeKey}
-                          active={isBotBusy && !activeBot.archivedAt}
-                          disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
-                          googleContext={googleContext}
-                          onSubmitQuestionnaire={onSubmitQuestionnaire}
-                          onSubmitVaultUnlock={onSubmitVaultUnlock}
-                          onOpenTask={onOpenTaskDetail}
-                          onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
-                          onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
-                          t={t}
-                        />
-                      )}
-                      {turn.text && <Markdown text={turn.text} />}
-                    </>
-                  )
+                  <AssistantTurnBody
+                    turn={turn}
+                    isLive={isLastAssistantTurn && (isBotBusy || Boolean(displayGeneratingText))}
+                    insideDm={insideDm}
+                    collapseToolOutput={collapseToolOutput}
+                    hideToolOutput={hideToolOutput}
+                    collapseBotDm={collapseBotDm}
+                    forceExpand={chatSearchActive}
+                    scopeKey={toolScopeKey}
+                    active={isBotBusy && !activeBot.archivedAt}
+                    disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
+                    variant="mobile"
+                    googleContext={googleContext}
+                    onSubmitQuestionnaire={onSubmitQuestionnaire}
+                    onSubmitVaultUnlock={onSubmitVaultUnlock}
+                    onOpenTask={onOpenTaskDetail}
+                    onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
+                    onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
+                    t={t}
+                  />
                 );
 
                 if (isDmTurn) {

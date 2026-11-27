@@ -79,7 +79,7 @@ export interface ChatToolCallItem {
  * 消息缺有序信息（旧 Host live 投影）时按文本→工具回退顺序追加，不宣称恢复已丢失交错。
  */
 export type ChatTurnBlock =
-  | { id: string; kind: 'text'; text: string; entryId?: string }
+  | { id: string; kind: 'text'; text: string; entryId?: string; interim?: true }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tools'; tools: ChatToolCallItem[] };
 
@@ -1819,6 +1819,21 @@ export function parseHistoryEntries(
         ...(entryId !== undefined ? { entryId } : {}),
       });
     }
+    let lastToolIdx = -1;
+    for (let idx = out.length - 1; idx >= 0; idx -= 1) {
+      if (out[idx].kind === 'tools') {
+        lastToolIdx = idx;
+        break;
+      }
+    }
+    if (lastToolIdx > 0) {
+      for (let idx = 0; idx < lastToolIdx; idx += 1) {
+        const block = out[idx];
+        if (block.kind === 'text') {
+          block.interim = true;
+        }
+      }
+    }
     acc.turn.blocks = out.length > 0 ? out : undefined;
   };
 
@@ -2846,4 +2861,99 @@ export function resolveAssistantFailureDetail(
     return t('模型生成失败。', 'Model generation failed.');
   }
   return trimmed;
+}
+
+export type AssistantTurnSegment =
+  | { id: string; kind: 'process'; blocks: ChatTurnBlock[] }
+  | { id: string; kind: 'block'; block: ChatTurnBlock };
+
+export interface PartitionAssistantBlocksOptions {
+  isLive?: boolean;
+  isPromotedToolBlock?: (tools: readonly ChatToolCallItem[]) => boolean;
+}
+
+export function partitionAssistantTurnBlocks(
+  blocks: readonly ChatTurnBlock[] | undefined,
+  options?: PartitionAssistantBlocksOptions,
+): AssistantTurnSegment[] {
+  if (!blocks || blocks.length === 0) return [];
+  const isTopLevel = blocks.map((block) => {
+    if (block.kind === 'thinking') return false;
+    if (block.kind === 'tools') return Boolean(options?.isPromotedToolBlock?.(block.tools));
+    return block.interim !== true;
+  });
+  if (!options?.isLive && !isTopLevel.some(Boolean)) {
+    for (let idx = blocks.length - 1; idx >= 0; idx -= 1) {
+      if (blocks[idx].kind === 'text') {
+        isTopLevel[idx] = true;
+        break;
+      }
+    }
+  }
+  const segments: AssistantTurnSegment[] = [];
+  let processGroup: ChatTurnBlock[] = [];
+  const flushProcess = () => {
+    if (processGroup.length === 0) return;
+    segments.push({
+      id: `${processGroup[0].id}-process`,
+      kind: 'process',
+      blocks: processGroup,
+    });
+    processGroup = [];
+  };
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx];
+    if (isTopLevel[idx]) {
+      flushProcess();
+      segments.push({ id: block.id, kind: 'block', block });
+    } else {
+      processGroup.push(block);
+    }
+  }
+  flushProcess();
+  return segments;
+}
+
+export interface ProcessTimelineStep {
+  id: string;
+  text?: string;
+  entryId?: string;
+  blocks: ChatTurnBlock[];
+}
+
+export function groupProcessTimelineSteps(
+  blocks: readonly ChatTurnBlock[],
+): ProcessTimelineStep[] {
+  const steps: ProcessTimelineStep[] = [];
+  for (const block of blocks) {
+    if (block.kind === 'text') {
+      steps.push({
+        id: block.id,
+        text: block.text,
+        ...(block.entryId !== undefined ? { entryId: block.entryId } : {}),
+        blocks: [],
+      });
+      continue;
+    }
+    const prev = steps.at(-1);
+    if (prev) {
+      prev.blocks.push(block);
+    } else {
+      steps.push({ id: block.id, blocks: [block] });
+    }
+  }
+  return steps;
+}
+
+export function resolveAssistantCopyText(
+  turn: Pick<ChatTurn, 'role' | 'text' | 'blocks'>,
+): string {
+  if (turn.role !== 'assistant' || !turn.blocks?.length) return turn.text;
+  const finalParts: string[] = [];
+  for (const block of turn.blocks) {
+    if (block.kind !== 'text' || block.interim) continue;
+    const trimmed = block.text.trim();
+    if (trimmed) finalParts.push(trimmed);
+  }
+  return finalParts.length > 0 ? finalParts.join('\n\n') : turn.text;
 }
