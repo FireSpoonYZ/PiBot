@@ -483,7 +483,15 @@ async function openTestRuntime({
     await runtime.setCenterOnline(true);
     await runtime.restoreTurns();
     runtime.resume();
-    return { runtime, deviceId, durableDbPath, makeSnapshot, applySnapshot, waitForSubmission };
+    return {
+      runtime,
+      deviceId,
+      durableDbPath,
+      makeSnapshot,
+      applySnapshot,
+      setCurrentSnapshot: (snapshot) => { currentSnapshot = snapshot; },
+      waitForSubmission,
+    };
   } catch (err) {
     try {
       await runtime.close();
@@ -1281,7 +1289,7 @@ test('ask_user_question creates DurableWait even with concurrent sibling tools i
   }
 });
 
-test('Model switch guard allows AGY-to-AGY switching in the same session and blocks cross-provider switches until /clear', async () => {
+test('Model switching is always allowed; Host rejects continuing incompatible cross-provider conversations until /clear or switching back', async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-model-switch-'));
   const cwd = path.join(rootDir, 'workspace');
   fs.mkdirSync(cwd, { recursive: true });
@@ -1332,22 +1340,35 @@ test('Model switch guard allows AGY-to-AGY switching in the same session and blo
     const snap = (rev, model) => env.makeSnapshot(rev, [{ botId: bot.botId, cwd, model, capabilities: [] }]);
     const isHistoryChanged = (err) => err?.code === AGY_HISTORY_CHANGED && /\/clear/.test(err.message);
 
-    // 1. Non-empty non-AGY -> AGY blocked until /clear.
+    // 1. Non-empty non-AGY -> AGY: model switch itself succeeds; continuing the original conversation errors.
     await env.applySnapshot(snap(2, ordinarySel));
     await env.runtime.submit(bot.botId, { requestId: 'ord-1', text: 'Ordinary turn 1', origin: USER_ORIGIN });
     assert.equal((await env.waitForSubmission(bot.botId, 'ord-1')).status, 'done');
     assert.equal(ordinaryCalls.length, 1);
 
-    await assert.rejects(() => env.runtime.assertModelSelectionAllowed(bot.botId, MODEL_REF), isHistoryChanged);
-    const blockedEnter = await env.runtime.applyCenterSnapshot(snap(3, BASE_MODEL_SEL));
-    assert.equal(blockedEnter.status, 'failed');
-    assert.match(JSON.stringify(blockedEnter), new RegExp(AGY_HISTORY_CHANGED));
+    assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, MODEL_REF), { botId: bot.botId, allowed: true });
+    await env.applySnapshot(snap(3, BASE_MODEL_SEL));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-enter-1', text: 'Continue ordinary on AGY', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
     assert.equal(agyRunCalls.length, 0);
 
-    // 2. /clear allows switching to AGY Model A.
+    // 2. Switching back to non-AGY without /clear still allows continuing the original non-AGY conversation.
+    await env.applySnapshot(snap(4, ordinarySel));
+    await env.runtime.submit(bot.botId, { requestId: 'ord-back-1', text: 'Continue original ordinary chat', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'ord-back-1')).status, 'done');
+    assert.equal(ordinaryCalls.length, 2);
+
+    // 3. Switch to AGY again, reject continuing, then /clear allows starting a fresh AGY session.
+    await env.applySnapshot(snap(5, BASE_MODEL_SEL));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-enter-2', text: 'Still blocked until clear', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
+    assert.equal(agyRunCalls.length, 0);
+
     await env.runtime.clearHistory(bot.botId);
-    assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, MODEL_REF), { botId: bot.botId, allowed: true });
-    await env.applySnapshot(snap(4, BASE_MODEL_SEL));
     await env.runtime.submit(bot.botId, { requestId: 'agy-a-1', text: 'Run on AGY model A', origin: USER_ORIGIN });
     const rA = await env.waitForSubmission(bot.botId, 'agy-a-1');
     assert.equal(rA.status, 'done');
@@ -1355,9 +1376,8 @@ test('Model switch guard allows AGY-to-AGY switching in the same session and blo
     assert.equal(agyRunCalls.length, 1);
     assert.equal(agyRunCalls[0].modelId, MODEL_ID);
 
-    // 3. Same-session AGY Model A -> AGY Model B is ALLOWED (same sessionId, new modelId).
-    assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, SECOND_MODEL_REF), { botId: bot.botId, allowed: true });
-    await env.applySnapshot(snap(5, agyModelB));
+    // 4. Same-session AGY Model A -> AGY Model B is ALLOWED (same sessionId, new modelId).
+    await env.applySnapshot(snap(6, agyModelB));
     await env.runtime.submit(bot.botId, { requestId: 'agy-b-1', text: 'Continue on AGY model B', origin: USER_ORIGIN });
     const rB = await env.waitForSubmission(bot.botId, 'agy-b-1');
     assert.equal(rB.status, 'done');
@@ -1366,19 +1386,98 @@ test('Model switch guard allows AGY-to-AGY switching in the same session and blo
     assert.equal(agyRunCalls[1].modelId, SECOND_MODEL_ID);
     assert.equal(agyRunCalls[1].sessionId, agyRunCalls[0].sessionId);
 
-    // 4. Non-empty AGY -> non-AGY blocked until /clear.
-    await assert.rejects(() => env.runtime.assertModelSelectionAllowed(bot.botId, 'fixture/model'), isHistoryChanged);
-    const blockedLeave = await env.runtime.applyCenterSnapshot(snap(6, ordinarySel));
-    assert.equal(blockedLeave.status, 'failed');
-    assert.match(JSON.stringify(blockedLeave), new RegExp(AGY_HISTORY_CHANGED));
-
-    // 5. /clear allows switching back to non-AGY provider.
-    await env.runtime.clearHistory(bot.botId);
+    // 5. Non-empty AGY -> non-AGY: model switch itself succeeds; continuing the original AGY conversation errors.
     assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, 'fixture/model'), { botId: bot.botId, allowed: true });
     await env.applySnapshot(snap(7, ordinarySel));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-leave-1', text: 'Continue AGY on ordinary', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
+    await assert.rejects(() => env.runtime.compact(bot.botId), isHistoryChanged);
+    assert.equal(ordinaryCalls.length, 2);
+
+    // 6. Switching back to AGY without /clear still continues the original AGY session.
+    await env.applySnapshot(snap(8, BASE_MODEL_SEL));
+    await env.runtime.submit(bot.botId, { requestId: 'agy-back-1', text: 'Resume original AGY session', origin: USER_ORIGIN });
+    const rBack = await env.waitForSubmission(bot.botId, 'agy-back-1');
+    assert.equal(rBack.status, 'done');
+    assert.equal(rBack.answerText, `agy:${MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 3);
+    assert.equal(agyRunCalls[2].sessionId, agyRunCalls[0].sessionId);
+
+    // 7. Switch to non-AGY + /clear allows starting a fresh non-AGY session.
+    await env.applySnapshot(snap(9, ordinarySel));
+    await env.runtime.clearHistory(bot.botId);
     await env.runtime.submit(bot.botId, { requestId: 'ord-2', text: 'Back on ordinary provider', origin: USER_ORIGIN });
     assert.equal((await env.waitForSubmission(bot.botId, 'ord-2')).status, 'done');
-    assert.equal(ordinaryCalls.length, 2);
+    assert.equal(ordinaryCalls.length, 3);
+
+    // 8. Late admission guard (queued before Host applies snapshot): fails with AGY_HISTORY_CHANGED and /clear unblocks cleanly.
+    const lateAgySnap = snap(10, BASE_MODEL_SEL);
+    env.setCurrentSnapshot(lateAgySnap);
+    const queuedReceipt = await env.runtime.submit(bot.botId, {
+      requestId: 'late-race-1',
+      text: 'Sent right as Center switched to AGY',
+      origin: USER_ORIGIN,
+    });
+    assert.equal(queuedReceipt.status, 'queued');
+    const failedAdmission = await waitUntil(
+      async () => {
+        const sub = await env.runtime.getSubmission(bot.botId, 'late-race-1');
+        return sub?.admission?.phase === 'failed' ? sub : null;
+      },
+      { label: 'late admission AGY_HISTORY_CHANGED failure' },
+    );
+    assert.equal(failedAdmission.admission.error.code, AGY_HISTORY_CHANGED);
+    assert.equal(agyRunCalls.length, 3, 'late admission rejection must not call AGY');
+
+    // /clear must succeed despite the AGY_HISTORY_CHANGED failed item in TurnQueue.
+    await env.applySnapshot(lateAgySnap);
+    await env.runtime.clearHistory(bot.botId);
+    await env.runtime.submit(bot.botId, { requestId: 'agy-after-late-clear', text: 'Fresh AGY after clear', origin: USER_ORIGIN });
+    const rFresh = await env.waitForSubmission(bot.botId, 'agy-after-late-clear');
+    assert.equal(rFresh.status, 'done');
+    assert.equal(rFresh.answerText, `agy:${MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 4);
+    assert.notEqual(agyRunCalls[3].sessionId, agyRunCalls[0].sessionId);
+
+    // 9. Work decision (DM/room) after cross-provider switch settles cleanly with AGY_HISTORY_CHANGED without crashing the work engine.
+    const peer = await env.runtime.createBot({ requestId: 'switch-peer', role: 'Peer Bot', cwd });
+    await env.applySnapshot(env.makeSnapshot(11, [
+      { botId: bot.botId, cwd, model: ordinarySel, capabilities: [] },
+      { botId: peer.botId, cwd, model: ordinarySel, capabilities: [] },
+    ]));
+    const createdRoom = await env.runtime.createScope({
+      requestId: 'room-agy-switch-guard',
+      kind: 'room',
+      title: 'Switch Guard Room',
+      members: [
+        { deviceId: env.deviceId, botId: bot.botId },
+        { deviceId: env.deviceId, botId: peer.botId },
+      ],
+    });
+    const scopeId = createdRoom.scope.scopeId;
+    await env.runtime.stopWork(peer.botId, scopeId);
+    await env.runtime.publishUserMessage(scopeId, {
+      messageId: 'msg-room-switch-1',
+      text: `@${bot.role} Please respond in room after cross-provider switch`,
+    });
+    const settledWork = await waitUntil(
+      async () => {
+        const act = await env.runtime.getWorkActivity(bot.botId, scopeId);
+        return act?.lastError?.code === AGY_HISTORY_CHANGED && !act.pending ? act : null;
+      },
+      { label: 'work decision settled with AGY_HISTORY_CHANGED' },
+    );
+    assert.equal(settledWork.lastError.code, AGY_HISTORY_CHANGED);
+    assert.equal(settledWork.error, null);
+    assert.equal(
+      (await env.runtime.history(bot.botId, { limit: 20 })).items.some((entry) =>
+        (entry.model ?? []).some((m) => m?.role === 'assistant' && m?.provider === 'fixture'),
+      ),
+      false,
+      'work decision must not execute an ordinary assistant reply inside an AGY conversation',
+    );
   } finally {
     try {
       await env?.runtime?.close();

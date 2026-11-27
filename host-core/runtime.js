@@ -56,7 +56,7 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { canDetachPrimaryWait, createRuntimeWaits } from './runtime-waits.js';
-import { TurnQueue } from './runtime-turns-docs.js';
+import { TurnQueue, TurnPin } from './runtime-turns-docs.js';
 import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
 import {
   BotSessionState,
@@ -662,6 +662,7 @@ export async function openRuntime(options) {
     CENTER_OFFLINE: 'center is offline',
     MODEL_REQUIRED: 'center model is required',
     MODEL_NO_VISION: 'model does not accept image input',
+    AGY_HISTORY_CHANGED: 'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
     INVALID_STATE: 'request state is invalid',
     CONTEXT_LIMIT: 'context limit reached',
     BOT_CONTEXT_REQUIRED: 'conversation ownership is ambiguous',
@@ -754,7 +755,11 @@ export async function openRuntime(options) {
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
       }
-      await applyAgentProfile(harness, conversation.id, profile, CTX);
+      try {
+        await applyAgentProfile(harness, conversation.id, profile, CTX);
+      } catch (err) {
+        if (err?.code !== 'AGY_HISTORY_CHANGED') throw err;
+      }
       if (conversation) {
         try {
           await live?.bind?.(bot.botId, conversation);
@@ -1082,6 +1087,31 @@ export async function openRuntime(options) {
           if (!preparedConversation) throw errWithCode('request conversation is missing', 'INVALID_STATE');
           const cutoffView = await preparedConversation.context(context, { at: checkpoint.cutoff });
           if (!cutoffView) throw errWithCode('request context view is unavailable', 'INVALID_STATE');
+          const preflightSessionState = await harness.snapshot(BotSessionState, api.conversationId, context);
+          if (!isAntigravity) {
+            if (
+              preflightSessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID ||
+              (cutoffView.entries ?? []).some((entry) =>
+                (entry.model ?? []).some((message) => message?.provider === ANTIGRAVITY_PROVIDER_ID || message?.api === ANTIGRAVITY_API),
+              )
+            ) {
+              throw errWithCode(
+                'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
+                'AGY_HISTORY_CHANGED',
+              );
+            }
+          } else if (
+            (cutoffView.entries ?? []).some((entry) =>
+              (entry.model ?? []).some(
+                (message) => message?.role === 'assistant' && message?.provider !== ANTIGRAVITY_PROVIDER_ID && message?.api !== ANTIGRAVITY_API,
+              ),
+            )
+          ) {
+            throw errWithCode(
+              'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
+              'AGY_HISTORY_CHANGED',
+            );
+          }
           // 构造模型输入视图时去掉旧版自动生成的前置路径块，不改写存储库与显式用户文本。
           const sanitizedMessages = sanitizeLegacyAttachmentPromptMessages(request.messages, cutoffView);
           const sanitizedRequest = sanitizedMessages === request.messages ? request : { ...request, messages: sanitizedMessages };
@@ -2274,7 +2304,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         removeTools: profile.removeTools,
         codemodeOnly: profile.codemodeOnly,
       }, CTX);
-      await applyAgentProfile(harness, conversation.id, profile, CTX);
+      try {
+        await applyAgentProfile(harness, conversation.id, profile, CTX);
+      } catch (err) {
+        if (err?.code !== 'AGY_HISTORY_CHANGED') throw err;
+      }
     }
     if (conversation) {
       try {
@@ -2468,19 +2502,6 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return updated;
   }
 
-  async function isBotCurrentlyAntigravity(bot) {
-    const currentModelRef = getBotModels()[bot.botId]?.modelRef ?? null;
-    if (currentModelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) return true;
-    const primary = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (!primary) return false;
-    const [agentState, sessionState] = await Promise.all([
-      harness.snapshot(durable.AgentDoc, primary.id, CTX),
-      harness.snapshot(BotSessionState, primary.id, CTX),
-    ]);
-    return agentState?.model?.provider === ANTIGRAVITY_PROVIDER_ID
-      || sessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID;
-  }
-
   async function assertModelSelectionAllowed(bot, selection) {
     if (!selection?.modelRef) return;
     const model = parseModelRef(selection.modelRef);
@@ -2489,7 +2510,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     const sessionState = await harness.snapshot(BotSessionState, primary.id, CTX);
     if (model.provider !== ANTIGRAVITY_PROVIDER_ID && sessionState?.nativeHistoryProvider === ANTIGRAVITY_PROVIDER_ID) {
       throw errWithCode(
-        'Cannot switch between Antigravity and another provider in a non-empty session. Use /clear first.',
+        'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
         'AGY_HISTORY_CHANGED',
       );
     }
@@ -2525,7 +2546,13 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   async function refreshBotProfiles(bot) {
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
     if (primary) {
-      await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+      try {
+        await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+      } catch (err) {
+        // Non-empty primary conversations stay untouched across AGY<->non-AGY switches;
+        // continuing the conversation enforces AGY_HISTORY_CHANGED until /clear or switching back.
+        if (err?.code !== 'AGY_HISTORY_CHANGED') throw err;
+      }
     }
     const workIndex = await harness.snapshot(WorkIndex, CTX);
     for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
@@ -2907,7 +2934,6 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       normalizeThinkingLevel(selection?.thinkingLevel);
       normalizeCodemodeFlag(selection?.codemode, 'codemode');
       normalizeCodemodeFlag(selection?.codemodeOnly, 'codemodeOnly');
-      await assertModelSelectionAllowed(record, selection);
       const nextModels = { ...getBotModels() };
       if (selection && (selection.modelRef != null || selection.thinkingLevel != null || selection.codemode != null || selection.codemodeOnly != null)) nextModels[botId] = selection;
       else delete nextModels[botId];
@@ -3128,19 +3154,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getCurrentDevice: collaboration.getCurrentDevice,
     createBot: createRuntimeBot,
     getBot: (botId) => requireBot(botId),
-    assertModelSelectionAllowed: (botId, modelRef) => admitBot(botId, async () => {
-      const bot = await requireBot(botId);
-      if (modelRef == null) return { botId, allowed: true };
-      const nextModel = parseModelRef(modelRef);
-      const nextIsAgy = nextModel.provider === ANTIGRAVITY_PROVIDER_ID;
-      const currentIsAgy = await isBotCurrentlyAntigravity(bot);
-      if (currentIsAgy !== nextIsAgy) {
-        await assertBotIdle(bot);
-        if ((await turns.queuedCount(bot)) > 0) throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
-        await assertModelSelectionAllowed(bot, { modelRef });
-      }
+    assertModelSelectionAllowed: async (botId, modelRef) => {
+      await requireBot(botId);
+      if (modelRef != null) parseModelRef(modelRef);
       return { botId, allowed: true };
-    }),
+    },
     updateBotProfile: (input) => admitBot(input?.botId, async () => {
       const updated = host.updateBotProfile(input);
       if (onBotsSync) await onBotsSync();
@@ -3450,22 +3468,44 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         if (stopInFlight.has(botId) || turns.stopped(botId)) {
           throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
         }
-        if ((await turns.queuedCount(bot)) > 0) {
+        if (await turns.hasBlockingQueueItems(bot)) {
           throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
         }
+        const isBlockingQueueEntry = (entry) =>
+          entry.phase !== 'cancelled' && !(entry.phase === 'failed' && entry.error?.code === 'AGY_HISTORY_CHANGED');
+        const cancelFailedAgyQueueItems = async (tx, queue) => {
+          const failedAgy = queue.items.filter((entry) => entry.phase === 'failed' && entry.error?.code === 'AGY_HISTORY_CHANGED');
+          if (failedAgy.length === 0) return false;
+          const now = new Date().toISOString();
+          const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
+          for (const entry of failedAgy) {
+            entry.phase = 'cancelled';
+            entry.error = null;
+            entry.updatedAt = now;
+            if (entry.admissionId) {
+              const pin = pins.admissions[entry.admissionId];
+              if (pin && (pin.submissionId === null || pin.submissionId === undefined)) {
+                delete pins.admissions[entry.admissionId];
+              }
+            }
+          }
+          return true;
+        };
         const conversation = await idlePrimaryConversation(bot);
         const conversationId = bot.primaryConversationId;
         if (!conversation) {
-          await harness.commit(async (tx) => {
+          const cancelledQueue = await harness.commit(async (tx) => {
             const queue = await tx.doc(TurnQueue, bot.primaryConversationId, {});
-            if (queue.stopPending || queue.items.some((entry) => entry.phase !== 'cancelled')) {
+            if (queue.stopPending || queue.items.some(isBlockingQueueEntry)) {
               throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
             }
             const primaryIndex = await tx.doc(PrimaryIndex);
             if (primaryIndex?.byPrimary?.[bot.primaryConversationId] !== undefined) {
               throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
             }
+            return cancelFailedAgyQueueItems(tx, queue);
           }, CTX);
+          if (cancelledQueue) await turns.refreshActivity(botId);
           clearSettledStopped();
           return { botId, conversationId, clearedThroughEntryId: 0 };
         }
@@ -3496,10 +3536,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         ) {
           throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
         }
-        const resetEntryId = await harness.commit(async (tx) => {
+        const { resetEntryId, cancelledQueue } = await harness.commit(async (tx) => {
           // 全部表/文档读必须位于首次表写（appendEntry）之前，并把并发 enqueue/stop 与 reset 串行定序。
           const queue = await tx.doc(TurnQueue, bot.primaryConversationId, {});
-          if (queue.stopPending || queue.items.some((entry) => entry.phase !== 'cancelled')) {
+          if (queue.stopPending || queue.items.some(isBlockingQueueEntry)) {
             throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
           }
           const primaryIndex = await tx.doc(PrimaryIndex);
@@ -3521,6 +3561,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             }
           }
           const providerState = await tx.doc(durable.ProviderDoc, conversation.id);
+          const hadFailedQueue = await cancelFailedAgyQueueItems(tx, queue);
           await waits.cancelConversationInTransaction(botId, conversation.id, tx);
           const resetEntry = await tx.appendEntry(durable.ResetEntry, conversation.id, { head: 'self' });
           // A reset starts a new provider context even if the next input is identical.
@@ -3533,8 +3574,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           await clearBotBoardResult(tx, conversation.id);
           const sessionState = await tx.doc(BotSessionState, conversation.id);
           applySessionResetState(sessionState, resetEntry.id);
-          return resetEntry.id;
+          return { resetEntryId: resetEntry.id, cancelledQueue: hadFailedQueue };
         }, CTX);
+        if (cancelledQueue) await turns.refreshActivity(botId);
+        if (centerConfigured) {
+          await applyAgentProfile(harness, conversation.id, profileFor(bot.botId, null), CTX);
+        }
         clearSettledStopped();
         // The reset is already committed. Failed cleanup retains its intent and retries.
         await waits.recoverCancellations(botId).catch(() => {});

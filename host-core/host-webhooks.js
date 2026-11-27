@@ -290,6 +290,8 @@ export function createWebhookConsumer({
         receipt = { status: 'cancelled', error: { code: error.code, message: 'Webhook target Bot is unavailable' } };
       } else if (error?.code === 'REQUEST_CONFLICT') {
         receipt = { status: 'failed', error: { code: 'REQUEST_CONFLICT', message: 'Webhook request ID conflicts with an existing submission' } };
+      } else if (error?.code === 'AGY_HISTORY_CHANGED') {
+        receipt = { status: 'failed', error: { code: 'AGY_HISTORY_CHANGED', message: 'Bot conversation requires /clear after switching providers' } };
       } else if (error?.code === 'MCP_DISPATCH_UNAVAILABLE') {
         receipt = { status: 'failed', error: { code: 'MCP_DISPATCH_UNAVAILABLE', message: 'Isolated MCP dispatch channel is unavailable' } };
       } else {

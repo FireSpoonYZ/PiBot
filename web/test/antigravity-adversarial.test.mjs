@@ -635,25 +635,22 @@ test('mapStopReason and TextAccumulator regression assertions', () => {
   assert.equal(sanitized.text, 'Hello World!');
 });
 
-test('center-server/routes.js preflightModelChange skips AGY->AGY and enforces assertModelSelectionAllowed on non-AGY<->AGY both ways', { timeout: 15_000 }, async () => {
+test('center-server/routes.js allows bot and global model switches across AGY without Host preflight even when devices are offline', { timeout: 15_000 }, async () => {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-preflight-routes-'));
   const salt = randomBytes(16);
   const password = 'preflight-owner-password';
   const ownerPasswordHash = `scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64).toString('hex')}`;
 
   const bridgeCalls = [];
-  let rejectBridge = false;
+  let deviceOnline = false;
   let registeredDeviceId = '';
 
   const store = openCenterStore({ dataRoot, encryptionKey: new Uint8Array(32).fill(5) });
   const relay = {
-    getStatus: () => ({ onlineDeviceIds: registeredDeviceId ? [registeredDeviceId] : [] }),
+    getStatus: () => ({ onlineDeviceIds: deviceOnline && registeredDeviceId ? [registeredDeviceId] : [] }),
     async call(_from, target, method, params) {
       bridgeCalls.push({ target, method, params });
-      if (rejectBridge) {
-        throw Object.assign(new Error('Cross-provider switch requires /clear'), { code: AGY_HISTORY_CHANGED });
-      }
-      return { ok: true };
+      throw Object.assign(new Error('Bridge should not be called during model switch'), { code: AGY_HISTORY_CHANGED });
     },
   };
   const bridge = openHostBridge({ dataRoot, store, relay });
@@ -704,7 +701,7 @@ test('center-server/routes.js preflightModelChange skips AGY->AGY and enforces a
       method: 'POST',
       url: '/api/devices',
       headers: writeHeaders,
-      payload: { displayName: 'Preflight Host', platform: 'windows' },
+      payload: { displayName: 'Offline Host', platform: 'windows' },
     });
     assert.equal(regRes.statusCode, 201);
     registeredDeviceId = regRes.json().deviceId;
@@ -725,55 +722,27 @@ test('center-server/routes.js preflightModelChange skips AGY->AGY and enforces a
       });
     };
 
-    // 1. unset (non-AGY) -> openai/gpt-5 (non-AGY): no preflight call
+    // 1. Offline device: bot model switches across non-AGY -> AGY -> AGY -> non-AGY all succeed with 0 bridge calls.
+    assert.equal((await putBotModel('openai/gpt-5')).statusCode, 200);
+    assert.equal((await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`)).statusCode, 200);
+    assert.equal(
+      store.getBotModelConfig(registeredDeviceId, 'bot-1').effective.modelRef,
+      `${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`,
+    );
+    assert.equal((await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_B}`)).statusCode, 200);
+    assert.equal((await putBotModel('openai/gpt-5')).statusCode, 200);
+    assert.equal(bridgeCalls.length, 0, 'bot model switches must never call Host preflight');
+
+    // 2. Online device: still no bridge preflight call (Host enforces continuation on turn execution instead).
+    deviceOnline = true;
+    assert.equal((await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`)).statusCode, 200);
     assert.equal((await putBotModel('openai/gpt-5')).statusCode, 200);
     assert.equal(bridgeCalls.length, 0);
 
-    // 2. non-AGY -> AGY: triggers assertModelSelectionAllowed; rejection blocks persistence
-    rejectBridge = true;
-    const blockedToAgy = await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`);
-    assert.equal(blockedToAgy.statusCode, 409);
-    assert.equal(blockedToAgy.json().error.code, AGY_HISTORY_CHANGED);
-    assert.equal(store.getBotModelConfig(registeredDeviceId, 'bot-1').effective.modelRef, 'openai/gpt-5');
-    assert.deepEqual(bridgeCalls.at(-1), {
-      target: registeredDeviceId,
-      method: 'assertModelSelectionAllowed',
-      params: { botId: 'bot-1', modelRef: `${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}` },
-    });
-
-    rejectBridge = false;
-    assert.equal((await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`)).statusCode, 200);
-    assert.equal(bridgeCalls.length, 2);
-
-    // 3. AGY -> AGY: MUST NOT invoke assertModelSelectionAllowed (succeeds even with rejectBridge = true!)
-    rejectBridge = true;
-    const agyToAgy = await putBotModel(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_B}`);
-    assert.equal(agyToAgy.statusCode, 200);
-    assert.equal(bridgeCalls.length, 2, 'AGY -> AGY must not invoke assertModelSelectionAllowed');
-    assert.equal(
-      store.getBotModelConfig(registeredDeviceId, 'bot-1').effective.modelRef,
-      `${ANTIGRAVITY_PROVIDER_ID}/${MODEL_B}`,
-    );
-
-    // 4. AGY -> non-AGY: triggers assertModelSelectionAllowed; rejection blocks persistence
-    const blockedToNonAgy = await putBotModel('openai/gpt-5');
-    assert.equal(blockedToNonAgy.statusCode, 409);
-    assert.equal(blockedToNonAgy.json().error.code, AGY_HISTORY_CHANGED);
-    assert.deepEqual(bridgeCalls.at(-1), {
-      target: registeredDeviceId,
-      method: 'assertModelSelectionAllowed',
-      params: { botId: 'bot-1', modelRef: 'openai/gpt-5' },
-    });
-
-    rejectBridge = false;
-    assert.equal((await putBotModel('openai/gpt-5')).statusCode, 200);
-    assert.equal(store.getBotModelConfig(registeredDeviceId, 'bot-1').effective.modelRef, 'openai/gpt-5');
-
-    // 5. Global model config switch: AGY -> AGY skips preflight; non-AGY -> AGY invokes preflight
-    // Clear bot override so bot inherits global config
+    // 3. Global default model switches: succeed even when registered device is offline and bots inherit global config.
+    deviceOnline = false;
     const curBot = store.getBotModelConfig(registeredDeviceId, 'bot-1');
     store.putBotModelConfig(registeredDeviceId, 'bot-1', curBot.revision, {});
-    const beforeGlobal = bridgeCalls.length;
     const putGlobal = (modelRef) => {
       const cfg = store.getModelConfig();
       return app.inject({
@@ -784,14 +753,11 @@ test('center-server/routes.js preflightModelChange skips AGY->AGY and enforces a
       });
     };
     assert.equal((await putGlobal(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`)).statusCode, 200);
-    assert.equal(bridgeCalls.length, beforeGlobal + 1);
-    rejectBridge = true;
+    assert.equal(store.getModelConfig().global.modelRef, `${ANTIGRAVITY_PROVIDER_ID}/${MODEL_A}`);
     assert.equal((await putGlobal(`${ANTIGRAVITY_PROVIDER_ID}/${MODEL_B}`)).statusCode, 200);
-    assert.equal(bridgeCalls.length, beforeGlobal + 1, 'global AGY -> AGY must skip assertModelSelectionAllowed');
-    const blockedGlobalLeave = await putGlobal('openai/gpt-5');
-    assert.equal(blockedGlobalLeave.statusCode, 409);
-    assert.equal(blockedGlobalLeave.json().error.code, AGY_HISTORY_CHANGED);
-    assert.equal(bridgeCalls.length, beforeGlobal + 2, 'global AGY -> non-AGY must invoke assertModelSelectionAllowed');
+    assert.equal((await putGlobal('openai/gpt-5')).statusCode, 200);
+    assert.equal(store.getModelConfig().global.modelRef, 'openai/gpt-5');
+    assert.equal(bridgeCalls.length, 0, 'global model switches must never call Host preflight');
   } finally {
     routes.close();
     await app.close();

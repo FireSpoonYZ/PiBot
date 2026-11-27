@@ -25,9 +25,9 @@ import { parseModelRef } from './runtime-models.js';
 const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'SCOPE_DELETED', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
 // NOT_CONNECTED 来自 Bot 准入队列关闭（runtime 已在关闭）：只拒绝新准入，不升级为 fatal。
 const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED', 'BOT_NOT_FOUND', 'SCOPE_DELETED']);
-const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
+const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'AGY_HISTORY_CHANGED', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
 // 已知的确定模型配置失败：可立即请求级结算并回执；离线/忙碌/SessionFailed/未知仍按暂不可达处理。
-const DETERMINATE_CONFIG_CODES = new Set(['MODEL_REQUIRED', 'MODEL_NOT_FOUND']);
+const DETERMINATE_CONFIG_CODES = new Set(['MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'AGY_HISTORY_CHANGED']);
 const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'SCOPE_DELETED', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
 const WORK_TRIGGER_KIND = 'host.work-trigger';
@@ -910,10 +910,12 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       if (error instanceof SessionFailed || error?.code === 'UNSUPPORTED_SCHEMA') throw error;
       if (error?.code && DETERMINATE_CONFIG_CODES.has(error.code)) {
         // 固定安全文案与已定错误契约一致，不回传原始 error.message。
-        return { configFailure: {
-          code: error.code,
-          message: error.code === 'MODEL_REQUIRED' ? 'center model is required' : 'work model is not available',
-        } };
+        const message = error.code === 'MODEL_REQUIRED'
+          ? 'center model is required'
+          : error.code === 'AGY_HISTORY_CHANGED'
+            ? 'Cannot continue this conversation after switching between Antigravity and another provider. Use /clear first.'
+            : 'work model is not available';
+        return { configFailure: { code: error.code, message } };
       }
       // 主会话暂不可达（离线/忙碌/其它瞬时错误）：本轮放弃，下轮 poll 重试。
       return null;
@@ -985,6 +987,21 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         : await (await conversationFor({ nativeId: executionId })).submit(input, context);
     } catch (error) {
       if (error instanceof ConversationBusy) return;
+      if (error?.code && DETERMINATE_CONFIG_CODES.has(error.code)) {
+        const message = error.code === 'MODEL_REQUIRED'
+          ? 'center model is required'
+          : error.code === 'AGY_HISTORY_CHANGED'
+            ? 'Cannot continue this conversation after switching between Antigravity and another provider. Use /clear first.'
+            : 'work model is not available';
+        await harness.commit(async (tx) => {
+          const meta = await tx.doc(WorkContextState, binding.nativeId);
+          const state = await tx.doc(WorkDecisionState, binding.nativeId);
+          if (state.pending?.requestId === input.requestId) {
+            settleFailedDecision(state, meta, { code: error.code, message });
+          }
+        }, context);
+        return;
+      }
       throw error;
     }
     if (!submission) return;

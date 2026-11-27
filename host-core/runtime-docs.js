@@ -237,7 +237,7 @@ async function assertNativeModelChange(current, model, readPage) {
       if (entry.kind === ResetEntry.kind) return;
       if ((entry.model ?? []).some((message) => message.role !== 'system')) {
         throw errWithCode(
-          'Cannot switch between Antigravity and another provider in a non-empty session. Use /clear first.',
+          'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
           'AGY_HISTORY_CHANGED',
         );
       }
@@ -247,7 +247,7 @@ async function assertNativeModelChange(current, model, readPage) {
   }
 }
 
-/** Read-only preflight shared by Center configuration and turn admission. */
+/** Read-only conversation continuation check enforced at Host turn admission. */
 export async function assertAntigravityModelSelection(harness, conversationId, model, context) {
   const state = await harness.snapshot(AgentDoc, conversationId, context);
   if (state?.model?.provider !== ANTIGRAVITY_PROVIDER_ID && model?.provider !== ANTIGRAVITY_PROVIDER_ID) return;

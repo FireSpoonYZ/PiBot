@@ -38,16 +38,16 @@
 
 ## 模型切换、Steer、停止、问卷与禁用项
 
-- **模型切换**：同会话支持 AGY 模型间直接切换（`set_config_option`）；非空会话跨服务商切换（非 AGY ↔ AGY）经 Host 在线控制通道拦截，要求先 `/clear`。
+- **模型切换**：全局与单 Bot 模型切换始终放行（不再因设备离线或存在历史对话禁止切模）。同会话支持 AGY 模型间直接切换（`set_config_option`）；非空会话跨服务商切换（非 AGY ↔ AGY）后，Host 拒绝继续原对话并返回 `AGY_HISTORY_CHANGED` 要求 `/clear`（或切回原服务商模型继续）。
 - **Steer**：轮中发原生 `session/prompt`；仅在最后一个在途 prompt 结算时发出 `turn_done` 并合并 `usage`。
 - **Stop**：Host 中止本地工具 → Center 报错结束挂起 MCP 调用 → 发送 `session/cancel` 等待终态，不杀进程不删会话（仅超时才杀进程，仍保留会话供冷 `session/resume`）。
 - **问卷（`ask_user_question`）**：主聊并发与非主聊场景统一通过 `control: { terminate: true }` 结束本轮，答案作为下一轮输入。
-- **明确禁用**：Hindsight `autoRecall`（保留 `autoRetain`、bank 与显式记忆工具）、Billion Context、Pi 压缩（`/compact` 提示 `/clear`）、历史编辑/回退/fork、非空会话跨 provider 切换。
+- **明确禁用**：Hindsight `autoRecall`（保留 `autoRetain`、bank 与显式记忆工具）、Billion Context、Pi 压缩（`/compact` 提示 `/clear`）、历史编辑/回退/fork、非空会话跨 provider 继续原对话。
 
 ## 隔离、部署与源码索引
 
 - 隔离目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`（可通过 `PIBOT_AGY_HOME` 覆盖，严禁指向 `~/.gemini`）与 `<CENTER_DATA_ROOT>/antigravity/workspace`；可执行文件由 `PIBOT_AGY_BIN` 指定（默认 `agy`）；子进程启动前剥离 `ANTIGRAVITY_*` 环境变量。部署、Dockerfile（`INSTALL_AGY=true`，`AGY_VERSION=1.5.12`）与网页 OAuth 登录说明见 [`docs/antigravity-center.md`](../../docs/antigravity-center.md)。
-- 产品启动使用 [`openHostService`](../../host-core/host-service.js)（先启本机 Runtime / control HTTP，再经 `openDeviceLink` 接入控制通道），以便跨服务商切换前通过在线 Host 完成 `assertModelSelectionAllowed` 核验。
+- 产品启动使用 [`openHostService`](../../host-core/host-service.js)（先启本机 Runtime / control HTTP，再经 `openDeviceLink` 接入控制通道）。
 - 核心模块：
   - 契约与路由：[`center-contract/antigravity.js`](../../center-contract/antigravity.js)、[`center-server/antigravity-routes.js`](../antigravity-routes.js)
   - Center 桥接与 ACP：[`index.js`](./index.js)、[`mcp-bridge.ts`](./mcp-bridge.ts)、[`tool-waiters.ts`](./tool-waiters.ts)、[`sessions.ts`](./sessions.ts)、[`profile.ts`](./profile.ts)、[`vendor/acp/driver.ts`](./vendor/acp/driver.ts)、[`vendor/README.md`](./vendor/README.md)

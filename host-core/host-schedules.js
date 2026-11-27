@@ -52,6 +52,7 @@ const NOT_SENT_ERROR_CODES = new Set([
   'BOT_ARCHIVED',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
+  'AGY_HISTORY_CHANGED',
 ]);
 
 function isPlainObject(value) {

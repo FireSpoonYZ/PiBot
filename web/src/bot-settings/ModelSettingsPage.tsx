@@ -318,8 +318,8 @@ export function ModelSettingsPage({
       <ErrorNotice error={state.error} onDismiss={state.dismissError} />
       {renderReadinessSummary()}
       {renderModelSection()}
-      {isAntigravity ? <p className="bs-muted">{t('Antigravity 会话内可直接切换其他 Antigravity 模型，跨服务商切换前请先 /clear；工具调用固定使用代码编排，历史不能编辑。',
-        'You can switch between Antigravity models within the same session; use /clear before switching across providers. Tool calling uses Code Mode and history cannot be edited.')}</p> : null}
+      {isAntigravity ? <p className="bs-muted">{t('Antigravity 会话内可直接切换其他 Antigravity 模型；跨服务商切换模型后无法继续原对话，需先 /clear 开启新会话。工具调用固定使用代码编排，历史不能编辑。',
+        'You can switch between Antigravity models within the same session. After switching across providers, continuing the previous conversation will fail until you run /clear. Tool calling uses Code Mode and history cannot be edited.')}</p> : null}
       {renderThinkingSection()}
       {renderToolModeSection()}
     </>

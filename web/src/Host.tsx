@@ -4851,8 +4851,11 @@ ${newer}` : draftSnapshot;
     ? chatTurnAdmission.error?.code === 'MODEL_NO_VISION'
       ? t('当前模型不支持图片输入：请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。',
           'Current model does not support image input. Switch to a vision-capable model and retry, or restore to the composer to edit or remove images.')
-      : t('同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
-          'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.')
+      : chatTurnAdmission.error?.code === 'AGY_HISTORY_CHANGED'
+        ? t('跨服务商切换模型后不能继续原对话：请先输入 /clear 开启新会话，或切回原服务商模型后重试。',
+            'Cannot continue this conversation after switching providers. Use /clear to start a new session, or switch back to the previous provider and retry.')
+        : t('同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
+            'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.')
     : '';
 
   // 统一活动状态：新 Host 帧带 activity 则以它为准；旧 Host 缺省走 resolveBotActivity 的旧字段 fallback。
@@ -4894,8 +4897,8 @@ ${newer}` : draftSnapshot;
     botActivity.phase === 'failed' && botActivity.error
       ? botActivity.error.code === 'CONTEXT_LIMIT'
         ? t('上下文超过模型上限，请压缩对话或调整模型的上下文窗口后重试。', 'Context limit reached. Compact the conversation or adjust the model context window, then retry.')
-        : botActivity.error.code === 'MODEL_NO_VISION'
-          ? `${botActivity.error.code}: ${botActivity.error.message || 'model does not accept image input'}`
+        : botActivity.error.code === 'MODEL_NO_VISION' || botActivity.error.code === 'AGY_HISTORY_CHANGED'
+          ? `${botActivity.error.code}: ${botActivity.error.message || (botActivity.error.code === 'MODEL_NO_VISION' ? 'model does not accept image input' : 'use /clear before continuing')}`
           : botActivity.error.message || botActivity.error.code
       : undefined;
   const failureNotice = activityFailure || submissionFailure;

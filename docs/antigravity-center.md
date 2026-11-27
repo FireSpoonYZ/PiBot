@@ -76,7 +76,7 @@ OAuth 授权与模型目录路由保持独立且不变：`/api/providers/antigra
 
 ## 模型切换、Steer、停止与问卷
 
-- **模型切换**：同一 Antigravity 会话内可直接切换到其他 `antigravity-acp/*` 模型（热连接通过 `set_config_option` 实时切换，冷恢复时自动重设 `model` 与 `thought_level`）。在非空会话中跨服务商切换（非 AGY ↔ AGY）会被拦截（经 Host 在线控制通道核验），需先 `/clear`。
+- **模型切换**：模型切换本身（含全局默认模型与单 Bot 模型、在线或离线设备、空会话或非空会话）均直接允许并持久保存。同一 Antigravity 会话内可直接切换到其他 `antigravity-acp/*` 模型（热连接通过 `set_config_option` 实时切换，冷恢复时自动重设 `model` 与 `thought_level`）。若非空会话发生跨服务商切换（非 AGY ↔ AGY），Host 不允许继续原对话，尝试继续对话会明确报错 `AGY_HISTORY_CHANGED`，需先 `/clear` 开启新会话（或切回原服务商模型继续）。
 - **Steer 与 followUp**：轮中准入的 steer 通过 `/steer` 并发发出原生 `session/prompt`，工具与输出继续流式推进；只有**最后一个在途 prompt** 结算后才发出 `turn_done` 并合并各次 prompt 的 `usage`。`followUp` 继续排队等待本轮结束。
 - **停止（Stop）**：Host 中止本机在途工具 → Center 以错误结束挂起的 MCP 调用 → 向 `agy` 发送 `session/cancel` 等待终态。常规取消不杀进程、不删原生会话；仅在等待终态超时时才终止进程（同样不删会话，下一轮通过冷 `session/resume` 恢复）。
 - **问卷（`ask_user_question`）**：AGY 会话下的所有问卷场景（含主聊并发与非主聊 DM/群/任务分发）统一通过 `control: { terminate: true }` 结束本轮（主聊仍创建真实 `DurableWait` pending 卡片，非主聊仅展示卡片不阻塞），MCP 向模型返回“问卷已展示，请结束本轮”，Host 经 `finishExternalTerminate` 收尾，用户提交的答案作为下一轮输入送入模型。
@@ -87,7 +87,7 @@ OAuth 授权与模型目录路由保持独立且不变：`/api/providers/antigra
 - **Billion Context**：在 AGY 会话中不激活，不参与上下文准备、摘要或工具声明。
 - **Pi 压缩（Compaction）**：关闭 threshold / overflow 自动压缩与手动 `/compact`（输入 `/compact` 提示改用 `/clear`）；原生上下文压缩由 `agy` 自行管理。
 - **历史改写与分叉**：禁止编辑或回退已发送消息，禁止 fork 非空 AGY 会话。
-- **跨服务商切换**：非空会话禁止在 AGY 与其他模型服务商之间直接互切。
+- **跨服务商续聊**：允许随时在 AGY 与其他模型服务商之间切换模型；但在非空会话中跨服务商切换后，Host 拒绝继续原对话并报错 `AGY_HISTORY_CHANGED`（需先 `/clear` 或切回原服务商）。
 
 ## 隔离边界、安装部署与环境变量
 

@@ -270,6 +270,8 @@ export function createTaskDispatchConsumer({
         receipt = { status: 'cancelled', error: 'Task dispatch target Bot is unavailable' };
       } else if (error?.code === 'REQUEST_CONFLICT') {
         receipt = { status: 'failed', error: 'Task dispatch request ID conflicts with an existing submission' };
+      } else if (error?.code === 'AGY_HISTORY_CHANGED') {
+        receipt = { status: 'failed', error: 'AGY_HISTORY_CHANGED: Bot conversation requires /clear after switching providers' };
       } else {
         return;
       }

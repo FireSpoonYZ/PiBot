@@ -679,7 +679,12 @@ export function RemotePendingComposer({
               }
             }
             onNotSent(input.requestId);
-            setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
+            if (pendingRecord.lastError?.code === 'AGY_HISTORY_CHANGED') {
+              setNotice(t('跨服务商切换模型后无法继续原对话，请先输入 /clear 开启新会话；草稿已恢复。',
+                'Cannot continue this conversation after switching providers. Use /clear to start a new session; draft restored.'), 'error');
+            } else {
+              setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
+            }
             return;
           }
         }
@@ -743,7 +748,12 @@ export function RemotePendingComposer({
         if (!drafts.files.length) draft.files.forEach(file => drafts.addFile(file));
         (draft.attachments ?? []).forEach(att => drafts.addAttachment(att));
         onNotSent(pending.requestId);
-        setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
+        if (record.lastError?.code === 'AGY_HISTORY_CHANGED') {
+          setNotice(t('跨服务商切换模型后无法继续原对话，请先输入 /clear 开启新会话；草稿已恢复。',
+            'Cannot continue this conversation after switching providers. Use /clear to start a new session; draft restored.'), 'error');
+        } else {
+          setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
+        }
       } catch { /* preserve the original request when reconciliation fails */ }
       finally { reading = false; }
     };

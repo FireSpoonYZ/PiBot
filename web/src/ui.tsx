@@ -563,9 +563,9 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   if (code === 'AGY_HISTORY_CHANGED' || body.includes('AGY_HISTORY_CHANGED')) {
     return {
       tone: 'warning',
-      title: t('请开启新的 Antigravity 会话', 'Start a New Antigravity Session'),
-      description: t('跨服务商切换模型、旧会话升级或原生会话失效时，请先输入 /clear 开启新会话。Antigravity 会话不支持编辑历史或手动压缩。',
-        'Use /clear to start a new session when switching across providers, upgrading a legacy session, or when the native session is no longer available. Antigravity sessions do not support editing history or manual compaction.'),
+      title: t('请先 /clear 开启新会话', 'Use /clear to Start a New Session'),
+      description: t('跨服务商切换模型后无法继续原对话，旧会话升级或原生会话失效时同样需先输入 /clear 开启新会话（也可切回原服务商模型继续）。Antigravity 会话不支持编辑历史或手动压缩。',
+        'Cannot continue this conversation after switching between Antigravity and another provider. Use /clear to start a new session (or switch back to the previous provider), and also use /clear when upgrading a legacy session or when the native session is unavailable. Antigravity sessions do not support editing history or manual compaction.'),
       detail,
     };
   }

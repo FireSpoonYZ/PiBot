@@ -56,7 +56,12 @@ export async function ensureWorkBinding(tx, deviceId, bot, scope, profile) {
   const existing = index.byKey[key];
   if (existing !== undefined) {
     // 已有绑定只在人格/工具实际变化时写入，不重置会话、不改水位。
-    await applyAgentProfileInTx(tx, existing.nativeId, profile);
+    // 跨 AGY 切模后的遗留工作会话保持原样，不阻断协调/停止/同步。
+    try {
+      await applyAgentProfileInTx(tx, existing.nativeId, profile);
+    } catch (err) {
+      if (err?.code !== 'AGY_HISTORY_CHANGED') throw err;
+    }
     return { nativeId: existing.nativeId, conversationId: existing.conversationId };
   }
 
