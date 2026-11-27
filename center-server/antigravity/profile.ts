@@ -8,9 +8,11 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ANTIGRAVITY_BRIDGE_SERVER } from "./constants.ts";
+import { ACP_TOOL_IMAGE_HOOK_NAME, acpToolImageHookCommand } from "./vendor/acp/tool-image-hook.ts";
 
 export const AGENT_NAME = "pibot-center";
 export const AGENT_SYSTEM_FILE = "agent.md";
+export const AGENT_TOOL_IMAGE_HOOKS_FILE = "tool-image-hooks.json";
 export const BRIDGE_ALLOW_RULE = `mcp(${ANTIGRAVITY_BRIDGE_SERVER}/*)`;
 
 const SAFE_AGENT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -77,6 +79,8 @@ export function dedicatedAgentMarkdown(agentName = AGENT_NAME, initialSystemProm
 		"skills: []",
 		"rules: []",
 		"agents: []",
+		"hooks:",
+		`  - "./${AGENT_TOOL_IMAGE_HOOKS_FILE}"`,
 		"---",
 		"",
 		"You are running inside PiBot Center's isolated Antigravity ACP bridge.",
@@ -170,9 +174,20 @@ function ensureBridgeAllowRule(settingsPath: string): void {
 	writeFileAtomic(resolvedPath, JSON.stringify(updated, null, 2) + "\n");
 }
 
+function ensureToolImageHooksFile(agentDir: string): void {
+	fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+	const hooksPath = path.join(agentDir, AGENT_TOOL_IMAGE_HOOKS_FILE);
+	const hooks = JSON.stringify({
+		[ACP_TOOL_IMAGE_HOOK_NAME]: {
+			PreInvocation: [{ type: "command", command: acpToolImageHookCommand(), timeout: 10 }],
+		},
+	}, null, 2) + "\n";
+	if (!fileMatches(hooksPath, hooks)) writeFileAtomic(hooksPath, hooks);
+}
+
 function ensureAgentFile(agentPath: string, agentName: string, initialSystemPrompt = ""): void {
 	const agentDir = path.dirname(agentPath);
-	fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+	ensureToolImageHooksFile(agentDir);
 	const content = dedicatedAgentMarkdown(agentName, initialSystemPrompt);
 	if (!fileMatches(agentPath, content)) writeFileAtomic(agentPath, content);
 }
@@ -186,8 +201,9 @@ export function ensureIsolatedProfile(profile: ResolvedProfile): void {
 }
 
 /** Ensure the per-session custom agent `agent.md` exists under the isolated profile.
- *  When `initialSystemPrompt` is provided, writes/initializes `agent.md` with it;
- *  otherwise creates `agent.md` only if missing so existing session agents are preserved. */
+ *  When `initialSystemPrompt` is provided, writes/initializes `agent.md` and its
+ *  PreInvocation tool-image hook file; otherwise preserves existing `agent.md`
+ *  (refreshing `tool-image-hooks.json` if the agent already uses it). */
 export function ensureSessionAgent(
 	profile: ResolvedProfile,
 	{ agentName, initialSystemPrompt }: { agentName?: string; initialSystemPrompt?: string } = {},
@@ -206,6 +222,11 @@ export function ensureSessionAgent(
 			: path.join(profile.geminiHome, "config", "agents", resolvedName, AGENT_SYSTEM_FILE);
 	if (initialSystemPrompt !== undefined || !fs.existsSync(agentPath)) {
 		ensureAgentFile(agentPath, resolvedName, initialSystemPrompt ?? "");
+	} else {
+		const agentDir = path.dirname(agentPath);
+		if (fs.existsSync(path.join(agentDir, AGENT_TOOL_IMAGE_HOOKS_FILE))) {
+			ensureToolImageHooksFile(agentDir);
+		}
 	}
 	return resolvedName;
 }

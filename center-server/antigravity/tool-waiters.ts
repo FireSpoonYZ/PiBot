@@ -155,6 +155,41 @@ function normalizeMcpContent(content: unknown, isError: boolean): McpContentBloc
 	return blocks;
 }
 
+function splitToolResultBlocks(content: unknown, isError: boolean): {
+	text: string;
+	images: AntigravityImageBlock[];
+} {
+	const textParts: string[] = [];
+	const images: AntigravityImageBlock[] = [];
+	if (typeof content === "string") {
+		if (content.length > 0) textParts.push(content);
+	} else if (Array.isArray(content)) {
+		for (const part of content) {
+			if (!part || typeof part !== "object") continue;
+			const rec = part as AntigravityContentPart;
+			if (rec.type === "text" && typeof rec.text === "string") {
+				textParts.push(rec.text);
+			} else if (rec.type === "image" && typeof rec.data === "string" && rec.data.length > 0 &&
+				typeof rec.mimeType === "string" && rec.mimeType.trim().length > 0) {
+				images.push({ data: rec.data, mimeType: rec.mimeType });
+			}
+		}
+	}
+	const text = textParts.join("\n");
+	if (text.length === 0 && images.length === 0 && isError) {
+		return { text: "Tool execution failed", images };
+	}
+	return { text, images };
+}
+
+function toolResultTextWithImageNote(callId: string, text: string, imageCount: number): string {
+	if (imageCount <= 0) return text;
+	const note =
+		`Visual attachments for Pi host tool result ${JSON.stringify(callId)}: ` +
+		`${imageCount} image(s), in result order.`;
+	return text ? `${text}\n\n${note}` : note;
+}
+
 function errorResult(message: string): McpCallToolResult {
 	return { content: [{ type: "text", text: message }], isError: true };
 }
@@ -183,6 +218,9 @@ export interface RunToolWaitersOptions {
 	escalateAfterMs?: number;
 	onToolRequest: (event: ToolRequestEvent) => void;
 	onInFlightChange?: (count: number) => void;
+	/** When supplied, delivers tool-result images through the native PreInvocation
+	 *  hook channel and returns a text-only MCP block (single image channel). */
+	deliverToolImages?: (callId: string, images: readonly AntigravityImageBlock[]) => void;
 }
 
 interface WaiterHandle {
@@ -195,15 +233,20 @@ interface ToolEntry {
 	name: string;
 	escalated: boolean;
 	running: boolean;
+	completed: boolean;
 	directWaiter: WaiterHandle | null;
 	pollWaiters: Set<WaiterHandle>;
 	result: McpCallToolResult | null;
+	rawText: string;
+	rawIsError: boolean;
+	pendingImages: AntigravityImageBlock[];
 }
 
 export class RunToolWaiters {
 	#escalateAfterMs: number;
 	#onToolRequest: (event: ToolRequestEvent) => void;
 	#onInFlightChange?: (count: number) => void;
+	#deliverToolImages?: (callId: string, images: readonly AntigravityImageBlock[]) => void;
 	#entries = new Map<string, ToolEntry>();
 	#inFlight = 0;
 	#failed = false;
@@ -213,6 +256,7 @@ export class RunToolWaiters {
 		this.#escalateAfterMs = options.escalateAfterMs ?? ANTIGRAVITY_ESCALATE_AFTER_MS;
 		this.#onToolRequest = options.onToolRequest;
 		this.#onInFlightChange = options.onInFlightChange;
+		this.#deliverToolImages = options.deliverToolImages;
 	}
 
 	get inFlightCount(): number {
@@ -223,6 +267,45 @@ export class RunToolWaiters {
 		if (next === this.#inFlight) return;
 		this.#inFlight = next;
 		this.#onInFlightChange?.(next);
+	}
+
+	#materializeResult(entry: ToolEntry): McpCallToolResult {
+		if (entry.result) return cloneResult(entry.result);
+		const images = entry.pendingImages;
+		entry.pendingImages = [];
+		if (this.#deliverToolImages && images.length > 0) {
+			try {
+				this.#deliverToolImages(entry.callId, images);
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				entry.result = {
+					content: [{
+						type: "text",
+						text: [
+							entry.rawText,
+							`Tool image delivery failed: ${reason}.`,
+							"The tool already ran. Its images were not delivered; do not repeat side effects to retry an image.",
+						].filter(Boolean).join("\n\n"),
+					}],
+					isError: true,
+				};
+				return cloneResult(entry.result);
+			}
+			// Single image channel: do not also emit MCP image blocks (which agy offloads above ~19 KB).
+			entry.result = {
+				content: [{
+					type: "text",
+					text: toolResultTextWithImageNote(entry.callId, entry.rawText, images.length),
+				}],
+				isError: entry.rawIsError,
+			};
+			return cloneResult(entry.result);
+		}
+		entry.result = {
+			content: [{ type: "text", text: entry.rawText }],
+			isError: entry.rawIsError,
+		};
+		return cloneResult(entry.result);
 	}
 
 	#createWaiter(
@@ -287,7 +370,7 @@ export class RunToolWaiters {
 				),
 			);
 		}
-		if (entry.result) return Promise.resolve(cloneResult(entry.result));
+		if (entry.completed) return Promise.resolve(this.#materializeResult(entry));
 		if (signal.aborted) return Promise.resolve(errorResult("MCP poll request aborted"));
 
 		return new Promise<McpCallToolResult>((resolve) => {
@@ -323,9 +406,13 @@ export class RunToolWaiters {
 				name,
 				escalated: false,
 				running: true,
+				completed: false,
 				directWaiter: null,
 				pollWaiters: new Set(),
 				result: null,
+				rawText: "",
+				rawIsError: false,
+				pendingImages: [],
 			};
 			const waiter = this.#createWaiter(
 				signal,
@@ -367,27 +454,36 @@ export class RunToolWaiters {
 		if (!entry || !entry.running) return false;
 
 		entry.running = false;
-		const result: McpCallToolResult = {
-			content: normalizeMcpContent(content, Boolean(isError)),
-			isError: Boolean(isError),
-		};
-		entry.result = result;
+		entry.completed = true;
+		entry.rawIsError = Boolean(isError);
+		if (this.#deliverToolImages) {
+			const split = splitToolResultBlocks(content, Boolean(isError));
+			entry.rawText = split.text;
+			entry.pendingImages = split.images;
+		} else {
+			entry.result = {
+				content: normalizeMcpContent(content, Boolean(isError)),
+				isError: Boolean(isError),
+			};
+		}
 		this.#setInFlight(Math.max(0, this.#inFlight - 1));
 
 		if (entry.directWaiter) {
 			const waiter = entry.directWaiter;
 			entry.directWaiter = null;
+			const delivered = this.#materializeResult(entry);
 			if (!entry.escalated) this.#entries.delete(callId);
 			waiter.cleanup();
-			waiter.settle(cloneResult(result));
+			waiter.settle(delivered);
 			return true;
 		}
 		if (entry.pollWaiters.size > 0) {
 			const waiters = [...entry.pollWaiters];
 			entry.pollWaiters.clear();
+			const delivered = this.#materializeResult(entry);
 			for (const waiter of waiters) {
 				waiter.cleanup();
-				waiter.settle(cloneResult(result));
+				waiter.settle(cloneResult(delivered));
 			}
 			return true;
 		}
@@ -402,6 +498,7 @@ export class RunToolWaiters {
 		const err = errorResult(reason);
 		for (const entry of this.#entries.values()) {
 			entry.running = false;
+			entry.pendingImages = [];
 			if (entry.directWaiter) {
 				const waiter = entry.directWaiter;
 				entry.directWaiter = null;

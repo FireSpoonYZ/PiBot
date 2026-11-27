@@ -82,6 +82,7 @@ export function createControlledAcpDriverHarness(handler) {
   const mcpRegistrations = [];
   const closes = [];
   const steers = [];
+  const toolImages = [];
   let pendingMcp = null;
   let convSeq = 1;
   let handleSeq = 1;
@@ -241,6 +242,25 @@ export function createControlledAcpDriverHarness(handler) {
     },
   });
 
+  patchProperty(AcpDriver.prototype, 'queueToolResultImages', {
+    writable: true,
+    value: function queueToolResultImages(toolCallId, images) {
+      const s = stateFor(this);
+      const turn = s.activeTurn;
+      if (!turn || turn.isSettled() || turn.isAborted() || !s.alive) {
+        throw new Error('Tool image delivery has no active native turn');
+      }
+      const entry = {
+        driver: this,
+        sessionId: s.activeSessionId,
+        toolCallId,
+        images: images.map((img) => ({ ...img })),
+      };
+      toolImages.push(entry);
+      turn.pushToolImages(entry);
+    },
+  });
+
   patchProperty(AcpDriver.prototype, 'cancel', {
     writable: true,
     value: function cancel() {
@@ -329,6 +349,7 @@ export function createControlledAcpDriverHarness(handler) {
       else s.sessionsCreated += 1;
 
       const turnSteers = [];
+      const turnToolImages = [];
       const steerWaiters = [];
       const abortWaiters = [];
       let nextSteerIndex = 0;
@@ -472,6 +493,9 @@ export function createControlledAcpDriverHarness(handler) {
             }
           }
         },
+        pushToolImages: (entry) => {
+          turnToolImages.push(entry);
+        },
         closeDriver: (reason, cause) => {
           settle({
             conversationId: convId,
@@ -497,6 +521,7 @@ export function createControlledAcpDriverHarness(handler) {
         mcp: s.mcp,
         driver: this,
         steers: turnSteers,
+        toolImages: turnToolImages,
         waitForSteer,
         waitForAbort,
         setAlive,
@@ -552,6 +577,7 @@ export function createControlledAcpDriverHarness(handler) {
     mcpRegistrations,
     closes,
     steers,
+    toolImages,
     setHandler(next) {
       activeHandler = next;
     },

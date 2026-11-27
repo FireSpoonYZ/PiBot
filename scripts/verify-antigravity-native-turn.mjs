@@ -6,7 +6,7 @@
 // in a strictly isolated temp workspace outside the repo (never reads/writes daily ~/.gemini):
 //   1. Catalog discovery + multi-turn memory without session rebuild (Turn 1 -> Turn 2).
 //   2. Dynamic section / SOUL update without session rebuild or AGY_HISTORY_CHANGED (Turn 3).
-//   3. Real Host ToolTask (codemode read) + tool image via standard MCP image block, no recall-hook (Turn 4).
+//   3. Real Host ToolTask (codemode read) + >100 KB tool image via PreInvocation tool-image hook (Turn 4).
 //   4. Center restart + cold `session/resume` preserving conversationId & memory/image (Turn 5).
 //   5. In-session AGY model switch (`modelA -> modelB`) via `set_config_option` without `/clear` (Turn 6).
 //   6. Mid-turn Stop (`abort`) preserving `convId1`, followed by continuation on same session (Turn 7 -> Turn 8).
@@ -66,7 +66,12 @@ const PREFERRED_MODEL_ORDER = [
 ];
 const IMAGE_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 const STRIP_ENV_PATTERNS = [/^ANTIGRAVITY_/i, /^ORCA_/i, /^HINDSIGHT_/i];
-const STRIP_EXACT_ENV_KEYS = ['PI_AGY_RECALL_PORT', 'PI_AGY_RECALL_KEY'];
+const STRIP_EXACT_ENV_KEYS = [
+  'PI_AGY_RECALL_PORT',
+  'PI_AGY_RECALL_KEY',
+  'PI_AGY_IMAGE_HOOK_PORT',
+  'PI_AGY_IMAGE_HOOK_KEY',
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -590,6 +595,21 @@ function generateTestPng({ code, shape = 'circle', colorName = 'red', corner = '
   if (!rgb) throw new Error(`Unknown color: ${colorName}`);
 
   const pixels = Buffer.alloc(W * H * 3, 255);
+  // Fill with subtle high-entropy pastel noise so the compressed PNG exceeds
+  // 100 KB (well above agy's ~19 KB MCP media offload threshold, matching real
+  // Android screenshots) while keeping dark text and corner shapes unmistakable.
+  let seed = 0x51a7c3d9;
+  for (let i = 0; i < code.length; i++) {
+    seed = (Math.imul(seed, 31) + code.charCodeAt(i)) >>> 0;
+  }
+  for (let i = 0; i < pixels.length; i += 3) {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    pixels[i] = 236 + (seed & 7);
+    pixels[i + 1] = 236 + ((seed >>> 8) & 7);
+    pixels[i + 2] = 236 + ((seed >>> 16) & 7);
+  }
   const setPx = (x, y, r, g, b) => {
     if (x < 0 || x >= W || y < 0 || y >= H) return;
     const idx = (y * W + x) * 3;
@@ -612,7 +632,7 @@ function generateTestPng({ code, shape = 'circle', colorName = 'red', corner = '
     }
   }
 
-  // Draw centered 6-character code.
+  // Draw centered 6-character code on a crisp solid white plate for high legibility.
   const scale = 11;
   const glyphW = 5 * scale;
   const glyphH = 7 * scale;
@@ -620,6 +640,12 @@ function generateTestPng({ code, shape = 'circle', colorName = 'red', corner = '
   const totalW = code.length * glyphW + (code.length - 1) * gap;
   const startX = Math.floor((W - totalW) / 2);
   const startY = Math.floor((H - glyphH) / 2);
+  const pad = 22;
+  for (let y = startY - pad; y < startY + glyphH + pad; y++) {
+    for (let x = startX - pad; x < startX + totalW + pad; x++) {
+      setPx(x, y, 255, 255, 255);
+    }
+  }
 
   for (let ci = 0; ci < code.length; ci++) {
     const ch = code[ci];
@@ -801,6 +827,7 @@ function readDeviceSessions(sessionsPath, deviceId) {
       sessionId: pair[1],
       conversationId: value.conversationId,
       agentName: value.agentName,
+      toolImageHook: value.toolImageHook,
     });
   }
   return out;
@@ -1623,8 +1650,11 @@ async function run() {
       summary.sessionsEvidence.agentName1 = agentName1;
 
       const agentMdPath = path.join(geminiDir, 'config', 'agents', agentName1, 'agent.md');
-      assertRecord('Per-session custom agent.md created without recall-hooks.json', () => {
+      const toolImageHookPath = path.join(geminiDir, 'config', 'agents', agentName1, 'tool-image-hooks.json');
+      assertRecord('Per-session custom agent.md + tool-image-hooks.json created without recall-hooks.json', () => {
         assert.equal(existsSync(agentMdPath), true, `Expected custom agent file at ${agentMdPath}`);
+        assert.equal(existsSync(toolImageHookPath), true, `Expected tool-image hook config at ${toolImageHookPath}`);
+        assert.equal(sessionsAfterT1[0].toolImageHook, true, 'Session entry must record toolImageHook: true');
         assert.equal(findFilesByName(geminiDir, 'recall-hooks.json').length, 0, 'No recall-hooks.json should exist');
       });
 
@@ -1697,9 +1727,9 @@ async function run() {
     });
 
     // =========================================================================
-    // Scenario 3: Tool call + tool image (standard MCP image block, no recall-hook)
+    // Scenario 3: Tool call + >100 KB tool image (PreInvocation tool-image hook)
     // =========================================================================
-    await runScenario(3, 'Host ToolTask (codemode read) and tool image via standard MCP image block', async ({ assertRecord }) => {
+    await runScenario(3, 'Host ToolTask (codemode read) and >100 KB tool image via PreInvocation hook', async ({ assertRecord }) => {
       const textFileName = 'probe-note.txt';
       const imageFileName = 'probe-code.png';
       const textFilePath = path.join(workspaceDir, textFileName);
@@ -1712,6 +1742,10 @@ async function run() {
         colorName: 'red',
         corner: 'bottom-right',
       });
+      assert.ok(
+        pngBytes.length >= 100_000,
+        `Test PNG must be >= 100 KB to exceed agy's ~19 KB MCP offload threshold (got ${pngBytes.length} bytes)`,
+      );
       writeFileSync(imageFilePath, pngBytes);
       writeFileSync(path.join(logsDir, imageFileName), pngBytes);
 
@@ -1730,8 +1764,9 @@ async function run() {
 
       const sessionsAfterT4 = readDeviceSessions(sessionsPath, deviceId);
       const recallHooks = findFilesByName(geminiDir, 'recall-hooks.json');
+      const toolImageHooks = findFilesByName(geminiDir, 'tool-image-hooks.json');
       const totalImageBlocks = turn4.inspected.toolResults.reduce((acc, r) => acc + (r.imageBlocks ?? 0), 0);
-      assertRecord('Real codemode ToolTask executed on Host and returned standard image block', () => {
+      assertRecord('Real codemode ToolTask executed on Host and produced >100 KB image result', () => {
         assert.ok(
           turn4.inspected.toolCalls.some((c) => c.name === 'codemode'),
           `Expected codemode toolCall in Turn 4 history, saw: ${JSON.stringify(turn4.inspected.toolCalls)}`,
@@ -1742,10 +1777,10 @@ async function run() {
         );
         assert.ok(
           turn4.inspected.toolResults.some((r) => r.toolName === 'codemode' && r.isError === false && r.imageBlocks > 0),
-          `Expected codemode toolResult to contain a standard image block, saw: ${JSON.stringify(turn4.inspected.toolResults)}`,
+          `Expected codemode toolResult to contain an image block, saw: ${JSON.stringify(turn4.inspected.toolResults)}`,
         );
       });
-      assertRecord('Model accurately read both textCode and 6-char PNG imageCode without recall-hook', () => {
+      assertRecord('Model accurately read both textCode and >100 KB PNG imageCode via PreInvocation hook', () => {
         assert.ok(
           turn4.answerText.toUpperCase().includes(textCode),
           `Turn 4 reply missing textCode ${textCode}; got: ${turn4.answerText.slice(0, 240)}`,
@@ -1754,6 +1789,7 @@ async function run() {
           turn4.answerText.toUpperCase().includes(imageCode),
           `Turn 4 reply missing imageCode ${imageCode}; got: ${turn4.answerText.slice(0, 240)}`,
         );
+        assert.ok(toolImageHooks.length >= 1, 'Expected tool-image-hooks.json to be present');
         assert.equal(recallHooks.length, 0, `Unexpected recall-hooks.json files found: ${recallHooks.join(', ')}`);
       });
       assertRecord('Turn 4 kept same convId1', () => {

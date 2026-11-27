@@ -19,7 +19,7 @@ sequenceDiagram
   C-->>H: NDJSON tool_request {callId} (流不断开)
   H->>H: appendAssistant + 真实 ToolTask (权限/Code Mode/钩子)
   H->>C: POST /api/host/antigravity/tool-result {callId, content}
-  C->>A: 返回 MCP 结果 (text + image)，agy 自主继续
+  C->>A: 返回 MCP 文本回执，工具图片经 PreInvocation hook 注入 systemMessage.media，agy 自主继续
   A-->>C: end_turn (所有在途 prompt 结算)
   C-->>H: NDJSON turn_done {conversationId, usage}
   H->>H: answer / finishExternalTerminate → afterRun / autoRetain
@@ -69,7 +69,9 @@ OAuth 授权与模型目录路由保持独立且不变：`/api/providers/antigra
 - **仅 Code Mode**：顶层工具保持 `codemode` 与已启用的 model-only 工具（例如 `ask_user_question`）；普通设备工具在 `codemode` 内按需发现并执行，MCP 工具声明基本稳定。
 - **连接级 MCP Token 与 run 引用校验**：每条原生 ACP 连接绑定一个本地回环 MCP token（`pibot-bridge`）。HTTP 请求进入时先同步捕获当前 active run 引用，读完请求体派发前校验仍为同一 run 引用；无 active run 时拒绝 `tools/call` 并返回普通 MCP 错误，不会毒化连接级 token。
 - **150s 慢工具升级（`bridge_poll_result`）**：`agy` 的 MCP 客户端在约 180 秒后会放弃单次请求且不自动重试。当 Host 工具执行超过 `150_000ms`（150 秒）时，Center 返回含 `callId` 的 `STILL RUNNING` 提示，引导模型调用只读的 `bridge_poll_result({ callId })` 等待同一在途调用结果（可再次等待 150 秒窗口）。`bridge_poll_result` 只读结果，不重跑工具，不合成用户消息。
-- **图片传递**：用户图片随当轮 prompt 以 ACP `image` 块发送；工具结果图片由 `/tool-result` 经标准 MCP `image` 块原样返回给 `agy`（含 `bridge_poll_result` 升级路径），无需额外 hook 旁路。
+- **图片传递**：
+  - 用户图片随当轮 prompt 以原生 ACP `image` 块发送；
+  - 工具结果图片由 `/tool-result` 收到后，通过每进程私有的回环 `PreInvocation` hook（[`tool-image-hooks.json`](../center-server/antigravity/profile.ts) → `injectSteps[].systemMessage.media`，HMAC 鉴权与显式投递 ACK）单通道注入给模型，MCP 侧仅返回文本回执（含 `bridge_poll_result` 慢工具升级路径）。这样可绕过 `agy` 对超过约 19 KB 的 MCP 图片块执行磁盘卸载（`[Resource offloaded to file:///...]`）导致隔离环境下模型无 `read_file` 看不到截图的问题；既有在无该 hook 版本创建的会话在首次返回工具图片时会明确报错 `AGY_HISTORY_CHANGED` 提示 `/clear` 一次性重建。
 - **ACP 权限与原生工具**：
   - `agy` 运行在 Center 隔离环境中，ACP `session/request_permission` 请求一律自动放行（ACP 客户端自身的 `fs/*` 与 `terminal/*` 请求仍保持拒绝）。
   - 不拦截 `agy` 残留的原生工具（如 `manage_task`、`list_resources`、`read_resource`）；非 bridge 的原生工具调用仅根据 ACP `tool_call` 通知以 `native_tool_start` / `native_tool_end` 在界面展示，不创建 Pi `ToolTask`。
@@ -173,7 +175,7 @@ sudo -u pibot-center HOME=/var/lib/pibot-center \
 
 ## 验证与版本说明
 
-- **自动化回归测试**：`npm test` 覆盖 Host（Pi Durable 补丁与 `runExternalTurn`）、Center 路由与 ACP/MCP 桥接的受控测试，包括原生整轮工具调用、150s 慢工具 `bridge_poll_result`、标准 MCP 图片块、同会话 AGY 模型切换、跨服务商拦截、轮中 steer、停止取消、问卷 `control.terminate` 以及旧会话升级 `/clear`。
+- **自动化回归测试**：`npm test` 覆盖 Host（Pi Durable 补丁与 `runExternalTurn`）、Center 路由与 ACP/MCP 桥接的受控测试，包括原生整轮工具调用、150s 慢工具 `bridge_poll_result`、`PreInvocation` 工具图片通道与旧会话拦截、同会话 AGY 模型切换、跨服务商拦截、轮中 steer、停止取消、问卷 `control.terminate` 以及旧会话升级 `/clear`。
 - **Center Web-Auth 授权链路验证**：[`scripts/verify-antigravity-auth.mjs`](../scripts/verify-antigravity-auth.mjs) 使用真实 `openCenterServer` 与真实 `agy`，验证已有缓存识别（`/auth-status`）、获取官方 Google `auth_url`、无效授权码边界拒绝、取消登录以及既有缓存与目录保持可用：
 
 ```sh
@@ -181,5 +183,5 @@ node scripts/verify-antigravity-auth.mjs
 ```
 
   脚本拒绝指向日常 `~/.gemini`，且永不删除外部 `PIBOT_AGY_HOME`。
-- **固定版本与运行特性**：[`Dockerfile`](../Dockerfile) 固定使用 **`agy 1.5.12`**，已实测确认 `session/resume` 零历史帧重放（恢复后需重设 `model`/`thought_level`）、标准 MCP 图片块在当轮与冷恢复后均可读、轮中 steer 由最后结算的 prompt 统一收尾、`session/cancel` 快速到达终态且不破坏会话，以及 MCP 客户端在 180 秒放弃且不自动重试（对应 150 秒升级到只读 `bridge_poll_result`）。
+- **固定版本与运行特性**：[`Dockerfile`](../Dockerfile) 固定使用 **`agy 1.5.12`**，已实测确认 `session/resume` 零历史帧重放（恢复后需重设 `model`/`thought_level`）、`PreInvocation` 工具图片通道对大于 100 KB 的截图在当轮与冷恢复后均可稳定读取、轮中 steer 由最后结算的 prompt 统一收尾、`session/cancel` 快速到达终态且不破坏会话，以及 MCP 客户端在 180 秒放弃且不自动重试（对应 150 秒升级到只读 `bridge_poll_result`）。
 - **只读挂载更新提示**：`agy` 常规运行可能触发后台自更新逻辑；在只读挂载 `/usr/local/bin/agy` 的容器中二进制不可写入，需由宿主机统一更新镜像外挂载文件或重新构建镜像。

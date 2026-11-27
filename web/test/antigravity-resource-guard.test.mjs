@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   AGENT_SYSTEM_FILE,
+  AGENT_TOOL_IMAGE_HOOKS_FILE,
   BRIDGE_ALLOW_RULE,
   ensureIsolatedProfile,
   ensureSessionAgent,
@@ -13,6 +14,7 @@ import {
 } from '../../center-server/antigravity/profile.ts';
 import { AcpConnection, buildAcpChildEnv } from '../../center-server/antigravity/vendor/acp/connection.ts';
 import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
+import { ACP_TOOL_IMAGE_HOOK_NAME } from '../../center-server/antigravity/vendor/acp/tool-image-hook.ts';
 import {
   collectRunEvents,
   createControlledAcpDriverHarness,
@@ -21,7 +23,7 @@ import {
 
 const MODEL_ID = 'gemini-4-neon';
 
-test('profile writes hook-free frontmatter, preserves settings + BRIDGE_ALLOW_RULE, and keeps initial SOUL on cold recovery', () => {
+test('profile writes PreInvocation tool-image hook, preserves settings + BRIDGE_ALLOW_RULE, and keeps initial SOUL on cold recovery', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-profile-'));
   try {
     const profile = resolveProfile({ dataRoot: root, geminiHome: path.join(root, 'gemini') });
@@ -38,8 +40,16 @@ test('profile writes hook-free frontmatter, preserves settings + BRIDGE_ALLOW_RU
     assert.match(defaultAgent, /^inheritCustomizations: false$/m);
     assert.match(defaultAgent, /^inheritMcp: true$/m);
     assert.match(defaultAgent, /^tools: \[\]$/m);
-    assert.doesNotMatch(defaultAgent, /^hooks:/m);
+    assert.match(defaultAgent, /^hooks:\n  - "\.\/tool-image-hooks\.json"$/m);
     assert.equal(fs.existsSync(path.join(path.dirname(profile.agentPath), 'recall-hooks.json')), false);
+
+    const defaultHooks = JSON.parse(
+      fs.readFileSync(path.join(path.dirname(profile.agentPath), AGENT_TOOL_IMAGE_HOOKS_FILE), 'utf8'),
+    );
+    assert.deepEqual(Object.keys(defaultHooks), [ACP_TOOL_IMAGE_HOOK_NAME]);
+    assert.deepEqual(Object.keys(defaultHooks[ACP_TOOL_IMAGE_HOOK_NAME]), ['PreInvocation']);
+    assert.equal(defaultHooks[ACP_TOOL_IMAGE_HOOK_NAME].PreInvocation.length, 1);
+    assert.match(defaultHooks[ACP_TOOL_IMAGE_HOOK_NAME].PreInvocation[0].command, /tool-image-hook-client\.cjs/);
 
     assert.deepEqual(JSON.parse(fs.readFileSync(profile.settingsPath, 'utf8')), {
       permissions: { allow: ['mcp(existing/*)', BRIDGE_ALLOW_RULE], deny: ['run_command'] },
@@ -56,28 +66,50 @@ test('profile writes hook-free frontmatter, preserves settings + BRIDGE_ALLOW_RU
 
     const sessionAgentDir = path.join(profile.geminiHome, 'config', 'agents', agentName);
     const sessionAgentPath = path.join(sessionAgentDir, AGENT_SYSTEM_FILE);
+    const sessionHooksPath = path.join(sessionAgentDir, AGENT_TOOL_IMAGE_HOOKS_FILE);
     const initialContent = fs.readFileSync(sessionAgentPath, 'utf8');
     assert.match(initialContent, new RegExp(`^name: ${agentName}$`, 'm'));
     assert.match(initialContent, /^excludeDefaultComponents: true$/m);
     assert.match(initialContent, /^tools: \[\]$/m);
-    assert.doesNotMatch(initialContent, /^hooks:/m);
+    assert.match(initialContent, /^hooks:\n  - "\.\/tool-image-hooks\.json"$/m);
     assert.equal(fs.existsSync(path.join(sessionAgentDir, 'recall-hooks.json')), false);
+    assert.equal(fs.existsSync(sessionHooksPath), true);
     assert.ok(initialContent.includes('INITIAL_SESSION_SOUL_DO_NOT_OVERWRITE'));
 
-    // Cold recovery calls ensureSessionAgent without initialSystemPrompt: existing agent.md must be preserved.
+    // Cold recovery calls ensureSessionAgent without initialSystemPrompt: existing agent.md must be preserved
+    // and existing tool-image-hooks.json is refreshed if stale.
+    fs.writeFileSync(sessionHooksPath, '{"stale":true}\n', 'utf8');
     ensureSessionAgent(profile, { agentName });
     assert.equal(fs.readFileSync(sessionAgentPath, 'utf8'), initialContent);
+    const refreshedHooks = JSON.parse(fs.readFileSync(sessionHooksPath, 'utf8'));
+    assert.deepEqual(Object.keys(refreshedHooks), [ACP_TOOL_IMAGE_HOOK_NAME]);
+
+    // Pre-fix legacy agent dir without tool-image-hooks.json keeps its existing agent.md untouched.
+    const legacyName = sessionAgentName('["dev-1","sess-legacy"]');
+    const legacyDir = path.join(profile.geminiHome, 'config', 'agents', legacyName);
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const legacyPath = path.join(legacyDir, AGENT_SYSTEM_FILE);
+    fs.writeFileSync(legacyPath, '---\nname: legacy\ntools: []\n---\nLEGACY\n', 'utf8');
+    ensureSessionAgent(profile, { agentName: legacyName });
+    assert.equal(fs.readFileSync(legacyPath, 'utf8'), '---\nname: legacy\ntools: []\n---\nLEGACY\n');
+    assert.equal(fs.existsSync(path.join(legacyDir, AGENT_TOOL_IMAGE_HOOKS_FILE)), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('AcpConnection auto-approves all session/request_permission requests and strips ANTIGRAVITY_* child env', { timeout: 15_000 }, async (t) => {
+test('AcpConnection auto-approves all session/request_permission requests and strips ANTIGRAVITY_* and hook child env', { timeout: 15_000 }, async (t) => {
   const prevUpper = process.env.ANTIGRAVITY_TEST_SECRET;
   const prevLower = process.env.antigravity_nested_flag;
+  const prevRecall = process.env.PI_AGY_RECALL_PORT;
+  const prevImgHookPort = process.env.PI_AGY_IMAGE_HOOK_PORT;
+  const prevImgHookKey = process.env.PI_AGY_IMAGE_HOOK_KEY;
   const prevKeep = process.env.PIBOT_ENV_KEEP_CHECK;
   process.env.ANTIGRAVITY_TEST_SECRET = 'must-not-leak';
   process.env.antigravity_nested_flag = '1';
+  process.env.PI_AGY_RECALL_PORT = '9999';
+  process.env.PI_AGY_IMAGE_HOOK_PORT = '9998';
+  process.env.PI_AGY_IMAGE_HOOK_KEY = 'stale-key';
   process.env.PIBOT_ENV_KEEP_CHECK = 'visible';
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-acp-perm-env-'));
@@ -152,7 +184,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
       const unsupportedFs = await askClient('fs/read_text_file', { path: '/etc/passwd' });
 
-      const leakedAgyKeys = Object.keys(process.env).filter((k) => /^ANTIGRAVITY_/i.test(k));
+      const leakedAgyKeys = Object.keys(process.env).filter((k) => /^(?:ANTIGRAVITY_|PI_AGY_RECALL_|PI_AGY_IMAGE_HOOK_)/i.test(k));
       fs.writeFileSync(reportFile, JSON.stringify({
         nonBridge,
         bridge,
@@ -178,7 +210,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   let conn;
   try {
     const built = buildAcpChildEnv({ EXTRA_TEST_FLAG: 'yes' });
-    assert.equal(Object.keys(built).some((k) => /^ANTIGRAVITY_/i.test(k)), false);
+    assert.equal(Object.keys(built).some((k) => /^(?:ANTIGRAVITY_|PI_AGY_RECALL_|PI_AGY_IMAGE_HOOK_)/i.test(k)), false);
     assert.equal(built.PIBOT_ENV_KEEP_CHECK, 'visible');
     assert.equal(built.EXTRA_TEST_FLAG, 'yes');
 
@@ -210,6 +242,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     else process.env.ANTIGRAVITY_TEST_SECRET = prevUpper;
     if (prevLower === undefined) delete process.env.antigravity_nested_flag;
     else process.env.antigravity_nested_flag = prevLower;
+    if (prevRecall === undefined) delete process.env.PI_AGY_RECALL_PORT;
+    else process.env.PI_AGY_RECALL_PORT = prevRecall;
+    if (prevImgHookPort === undefined) delete process.env.PI_AGY_IMAGE_HOOK_PORT;
+    else process.env.PI_AGY_IMAGE_HOOK_PORT = prevImgHookPort;
+    if (prevImgHookKey === undefined) delete process.env.PI_AGY_IMAGE_HOOK_KEY;
+    else process.env.PI_AGY_IMAGE_HOOK_KEY = prevImgHookKey;
     if (prevKeep === undefined) delete process.env.PIBOT_ENV_KEEP_CHECK;
     else process.env.PIBOT_ENV_KEEP_CHECK = prevKeep;
     conn?.kill();

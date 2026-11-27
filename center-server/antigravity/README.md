@@ -33,7 +33,7 @@
 - **Code Mode only**：顶层声明 `codemode` 与已启用 model-only 工具；普通工具在 `codemode` 内发现和调用。
 - **连接级 MCP Token 与 run 校验**：每条原生连接分配一个本地回环 MCP token；`tools/call` 请求进入时先捕获当前 active run 引用，派发前校验引用一致。无 active run 时的拒绝只返回普通 MCP 错误，不毒化连接 token。
 - **150s 慢工具升级**：工具挂起满 `150_000ms` 时向模型返回带 `callId` 的 `STILL RUNNING` 确认，模型可调用只读 `bridge_poll_result({ callId })` 继续等待同一调用（绝不重跑工具、不合成 user prompt）。
-- **工具图片**：直接通过标准 MCP `image` 块回传（含 `bridge_poll_result`），无需额外 hook 旁路。
+- **工具图片**：用户图片走原生 ACP `image` 块；工具结果图片（含 `bridge_poll_result` 升级路径）由私有回环 `PreInvocation` hook（`tool-image-hooks.json` → `injectSteps[].systemMessage.media`）单通道注入，MCP 仅返回文本回执，避免 `agy` 将大于约 19 KB 的 MCP 图片块卸载为 `[Resource offloaded to file:///...]` 而在隔离环境下不可读。新建会话会在 [`sessions.json`](./sessions.ts) 中记录 `toolImageHook: true`；既有无该 hook 的旧会话在首次遇到工具图片时返回 `AGY_HISTORY_CHANGED` 要求 `/clear`。
 - **ACP 权限与原生工具**：ACP `session/request_permission` 一律自动放行（`fs/*` 与 `terminal/*` 仍拒绝）；不拒绝 `agy` 残留的原生工具（`manage_task`、`list_resources`、`read_resource`），非 bridge 调用仅按 ACP `tool_call` 通知以 `native_tool_start` / `native_tool_end` 展示。
 
 ## 模型切换、Steer、停止、问卷与禁用项
@@ -50,6 +50,6 @@
 - 产品启动使用 [`openHostService`](../../host-core/host-service.js)（先启本机 Runtime / control HTTP，再经 `openDeviceLink` 接入控制通道）。
 - 核心模块：
   - 契约与路由：[`center-contract/antigravity.js`](../../center-contract/antigravity.js)、[`center-server/antigravity-routes.js`](../antigravity-routes.js)
-  - Center 桥接与 ACP：[`index.js`](./index.js)、[`mcp-bridge.ts`](./mcp-bridge.ts)、[`tool-waiters.ts`](./tool-waiters.ts)、[`sessions.ts`](./sessions.ts)、[`profile.ts`](./profile.ts)、[`vendor/acp/driver.ts`](./vendor/acp/driver.ts)、[`vendor/README.md`](./vendor/README.md)
+  - Center 桥接与 ACP：[`index.js`](./index.js)、[`mcp-bridge.ts`](./mcp-bridge.ts)、[`tool-waiters.ts`](./tool-waiters.ts)、[`sessions.ts`](./sessions.ts)、[`profile.ts`](./profile.ts)、[`vendor/acp/driver.ts`](./vendor/acp/driver.ts)、[`vendor/acp/tool-image-hook.ts`](./vendor/acp/tool-image-hook.ts)、[`vendor/README.md`](./vendor/README.md)
   - Host 运行与策略：[`antigravity-runner.js`](../../host-core/antigravity-runner.js)、[`antigravity-provider.js`](../../host-core/antigravity-provider.js)、[`patch-pi-durable.js`](../../host-core/patch-pi-durable.js)、[`runtime.js`](../../host-core/runtime.js)
   - 插件适配：[`plugins/tasks/context-projection.js`](../../plugins/tasks/context-projection.js)、[`plugins/ask-user-question/entry.js`](../../plugins/ask-user-question/entry.js)、[`plugins/hindsight/entry.js`](../../plugins/hindsight/entry.js)

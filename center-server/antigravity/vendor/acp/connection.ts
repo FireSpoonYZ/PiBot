@@ -17,6 +17,11 @@ import type { AgyUsage, ToolResultImage } from "../driver-types.ts";
 import { redactText } from "../redact.ts";
 import { frameCarriesUsage } from "./events.ts";
 import { JsonRpcResponseError, JsonRpcSession } from "./jsonrpc.ts";
+import {
+	createToolImageHook,
+	type AcpToolImageBinding,
+	type AcpToolImageHook,
+} from "./tool-image-hook.ts";
 
 export interface AcpMcpServer {
 	name: string;
@@ -50,6 +55,8 @@ export interface AcpConnectionOptions {
 	/** Isolated Gemini profile directory forwarded via `--gemini-dir`. */
 	geminiDir?: string;
 	extraEnv?: Record<string, string>;
+	/** Enable private loopback PreInvocation hook listener for tool-result images. */
+	enableToolImages?: boolean;
 	log: (msg: string, data?: unknown) => void;
 	/** Incoming `session/update` payloads. */
 	onUpdate: (sessionId: string | null, update: unknown) => void;
@@ -84,11 +91,17 @@ export interface AcpPermissionRequest {
 	[key: string]: unknown;
 }
 
-/** Copy `process.env` with all `ANTIGRAVITY_*` keys stripped, then merge `extraEnv`. */
+interface TurnHooks {
+	sessionId: string;
+	binding: AcpToolImageBinding;
+	cancelled: boolean;
+}
+
+/** Copy `process.env` with `ANTIGRAVITY_*` and internal hook env keys stripped, then merge `extraEnv`. */
 export function buildAcpChildEnv(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(process.env)) {
-		if (/^ANTIGRAVITY_/i.test(key)) continue;
+		if (/^(?:ANTIGRAVITY_|PI_AGY_RECALL_|PI_AGY_IMAGE_HOOK_)/i.test(key)) continue;
 		env[key] = value;
 	}
 	if (extraEnv) {
@@ -105,6 +118,8 @@ export class AcpConnection {
 	#startPromise: Promise<void> | undefined;
 	#exitPromise: Promise<void> | undefined;
 	#resolveExit: (() => void) | undefined;
+	#toolImageHook: AcpToolImageHook | undefined;
+	#turnHooks: TurnHooks | undefined;
 	#usageSeen = false;
 	/** Set ONLY by a parsed PromptResponse.usage; this gates estimate
 	 *  suppression. #usageSeen stays diagnostic: any usage-shaped frame trips
@@ -147,10 +162,66 @@ export class AcpConnection {
 		return this.#exactUsageSeen;
 	}
 
+	get toolImagesUnavailable(): boolean {
+		return Boolean(this.#opts.enableToolImages && !this.#toolImageHook?.listening);
+	}
+
+	beginTurnHooks(sessionId: string): void {
+		this.releaseTurnHooks();
+		if (!this.#opts.enableToolImages || !this.#toolImageHook?.listening) return;
+		this.#turnHooks = {
+			sessionId,
+			binding: this.#toolImageHook.bind(sessionId),
+			cancelled: false,
+		};
+	}
+
+	queueToolResultImages(sessionId: string, toolCallId: string, images: readonly ToolResultImage[]): void {
+		const hooks = this.#turnHooks;
+		if (
+			!this.#opts.enableToolImages ||
+			!this.#toolImageHook?.listening ||
+			!hooks ||
+			hooks.sessionId !== sessionId ||
+			hooks.cancelled
+		) {
+			throw new Error("Tool image delivery is unavailable for this native turn");
+		}
+		hooks.binding.queueToolResultImages(toolCallId, images);
+	}
+
+	assertTurnImagesDelivered(): void {
+		const hooks = this.#turnHooks;
+		if (hooks && !hooks.cancelled) {
+			hooks.binding.assertImagesDelivered();
+		}
+	}
+
+	cancelTurnHooks(sessionId: string): void {
+		const hooks = this.#turnHooks;
+		if (hooks && hooks.sessionId === sessionId) {
+			hooks.cancelled = true;
+			hooks.binding.release();
+		}
+	}
+
+	releaseTurnHooks(): void {
+		const hooks = this.#turnHooks;
+		this.#turnHooks = undefined;
+		hooks?.binding.release();
+	}
+
+	#closeToolImageHook(): void {
+		this.releaseTurnHooks();
+		this.#toolImageHook?.close();
+		this.#toolImageHook = undefined;
+	}
+
 	/** Spawn the server and perform the initialize handshake. Idempotent per
 	 *  instance: call once. */
 	start(): Promise<void> {
 		this.#startPromise ??= this.#start().catch((err) => {
+			this.#closeToolImageHook();
 			if (!this.#child) {
 				this.#resolveExit?.();
 				this.#resolveExit = undefined;
@@ -169,12 +240,21 @@ export class AcpConnection {
 		this.#exitPromise = new Promise<void>((resolve) => {
 			this.#resolveExit = resolve;
 		});
+		if (this.#opts.enableToolImages) {
+			try {
+				this.#toolImageHook = await createToolImageHook();
+			} catch {
+				this.#opts.log("tool-image-hook-unavailable");
+			}
+			if (this.#killed) throw new Error("ACP connection closed before startup");
+		}
+		const hookEnv = this.#toolImageHook?.env;
 		const child = spawn(this.#opts.bin, args, {
 			cwd: this.#opts.cwd,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: process.platform !== "win32",
 			windowsHide: true,
-			env: buildAcpChildEnv(this.#opts.extraEnv),
+			env: buildAcpChildEnv({ ...this.#opts.extraEnv, ...hookEnv }),
 		});
 		this.#child = child;
 		child.stdout?.setEncoding("utf8");
@@ -389,6 +469,7 @@ export class AcpConnection {
 
 	/** Reject every pending request. */
 	abortAll(reason: string): void {
+		this.releaseTurnHooks();
 		this.#rpc?.abortAll(reason);
 	}
 
@@ -397,6 +478,7 @@ export class AcpConnection {
 		this.#killed = true;
 		this.#activeSessionId = null;
 		this.abortAll("connection killed");
+		this.#closeToolImageHook();
 		const child = this.#child;
 		if (!child || this.#exited) return;
 		this.#opts.log("kill", { pid: child.pid ?? "?" });
@@ -427,6 +509,7 @@ export class AcpConnection {
 		this.#exited = true;
 		this.#activeSessionId = null;
 		this.abortAll(`connection exited: ${reason || "process gone"}`);
+		this.#closeToolImageHook();
 		this.#opts.onExit({ code, signal, stderrTail: redactText(this.#stderrTail) });
 	}
 }

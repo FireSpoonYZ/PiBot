@@ -136,6 +136,8 @@ export interface TurnDriver {
 	run(request: DriverTurnRequest): Promise<TurnHandle>;
 	/** Send an in-flight steer prompt on the active native session. */
 	steer(prompt: string, images?: ToolResultImage[]): Promise<void>;
+	/** Queue tool-result images for delivery on the next PreInvocation hook of the active turn. */
+	queueToolResultImages?(toolCallId: string, images: readonly ToolResultImage[]): void;
 	/** Pause idle/overall timers while host MCP tools are executing. */
 	pauseTimers(): void;
 	/** Resume idle/overall timers once host MCP tools finish. */

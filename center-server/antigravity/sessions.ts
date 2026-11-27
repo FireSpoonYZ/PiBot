@@ -10,6 +10,7 @@ import path from "node:path";
 export interface AgySession {
 	conversationId: string;
 	agentName: string;
+	toolImageHook?: boolean;
 	legacy?: true;
 }
 
@@ -32,8 +33,11 @@ async function durableRename(tmp: string, destination: string): Promise<void> {
 }
 
 function copySession(session: AgySession): AgySession {
-	return session.legacy
-		? { conversationId: session.conversationId, agentName: session.agentName, legacy: true }
+	if (session.legacy) {
+		return { conversationId: session.conversationId, agentName: session.agentName, legacy: true };
+	}
+	return session.toolImageHook === true
+		? { conversationId: session.conversationId, agentName: session.agentName, toolImageHook: true }
 		: { conversationId: session.conversationId, agentName: session.agentName };
 }
 
@@ -46,10 +50,12 @@ function narrowStoreMap(parsed: unknown): StoreMap {
 	const clean: StoreMap = {};
 	for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
 		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-		const rec = value as { conversationId?: unknown; agentName?: unknown };
+		const rec = value as { conversationId?: unknown; agentName?: unknown; toolImageHook?: unknown };
 		if (typeof rec.conversationId !== "string" || rec.conversationId.length === 0) continue;
 		if (typeof rec.agentName === "string" && rec.agentName.length > 0) {
-			clean[key] = { conversationId: rec.conversationId, agentName: rec.agentName };
+			clean[key] = rec.toolImageHook === true
+				? { conversationId: rec.conversationId, agentName: rec.agentName, toolImageHook: true }
+				: { conversationId: rec.conversationId, agentName: rec.agentName };
 		} else {
 			clean[key] = { conversationId: rec.conversationId, agentName: "", legacy: true };
 		}
@@ -135,9 +141,11 @@ export class SessionStore {
 			delete merged[key];
 		}
 
-		const serialized: Record<string, { conversationId: string; agentName: string }> = {};
+		const serialized: Record<string, { conversationId: string; agentName: string; toolImageHook?: true }> = {};
 		for (const [key, entry] of Object.entries(merged)) {
-			serialized[key] = { conversationId: entry.conversationId, agentName: entry.agentName };
+			serialized[key] = entry.toolImageHook === true
+				? { conversationId: entry.conversationId, agentName: entry.agentName, toolImageHook: true }
+				: { conversationId: entry.conversationId, agentName: entry.agentName };
 		}
 
 		const tmp = `${this.#path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;

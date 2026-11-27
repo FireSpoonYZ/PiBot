@@ -520,3 +520,89 @@ test('bridge_poll_result rejects unknown, non-escalated, and cross-run callIds w
   assert.match(crossRun.content[0].text, /Unknown or non-escalated callId/);
   assert.equal(requests2.length, 0);
 });
+
+test('RunToolWaiters with deliverToolImages routes images via hook channel and returns text-only MCP block', async () => {
+  const delivered = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: () => {},
+    deliverToolImages: (callId, images) => delivered.push({ callId, images }),
+  });
+
+  const ac = new AbortController();
+  const pending = waiters.handleToolCall('call-hook-1', 'codemode', { code: 'screenshot()' }, ac.signal);
+  assert.equal(
+    waiters.resolve('call-hook-1', [
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+
+  const result = await pending;
+  assert.equal(result.isError, false);
+  assert.equal(result.content.length, 1);
+  assert.equal(result.content[0].type, 'text');
+  assert.match(result.content[0].text, /screenshot taken/);
+  assert.match(result.content[0].text, /Visual attachments for Pi host tool result "call-hook-1": 1 image\(s\)/);
+  assert.deepEqual(delivered, [
+    { callId: 'call-hook-1', images: [{ data: PNG_1X1, mimeType: 'image/png' }] },
+  ]);
+});
+
+test('RunToolWaiters with deliverToolImages defers slow-tool images until bridge_poll_result and surfaces delivery failures', { timeout: 10_000 }, async () => {
+  const delivered = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 40,
+    onToolRequest: () => {},
+    deliverToolImages: (callId, images) => delivered.push({ callId, images }),
+  });
+  const ac = new AbortController();
+
+  // Slow tool escalates before resolve.
+  const ack = await waiters.handleToolCall('slow-img-1', 'codemode', { code: 'slowShot()' }, ac.signal);
+  assert.match(ack.content[0].text, /STILL RUNNING/);
+
+  // Resolve while no poll is waiting -> deliverToolImages must NOT fire yet.
+  assert.equal(
+    waiters.resolve('slow-img-1', [
+      { type: 'text', text: 'slow shot done' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+  assert.equal(delivered.length, 0, 'images for escalated tool must wait until bridge_poll_result materializes result');
+
+  // First bridge_poll_result delivers images once and returns text-only MCP receipt.
+  const polled = await waiters.handleToolCall('poll-img-1', POLL_TOOL_NAME, { callId: 'slow-img-1' }, ac.signal);
+  assert.equal(polled.isError, false);
+  assert.equal(polled.content.length, 1);
+  assert.equal(polled.content[0].type, 'text');
+  assert.match(polled.content[0].text, /slow shot done/);
+  assert.match(polled.content[0].text, /Visual attachments for Pi host tool result "slow-img-1": 1 image\(s\)/);
+  assert.equal(delivered.length, 1);
+
+  // Repeat poll returns cached text receipt without re-delivering images.
+  const repeated = await waiters.handleToolCall('poll-img-2', POLL_TOOL_NAME, { callId: 'slow-img-1' }, ac.signal);
+  assert.deepEqual(repeated, polled);
+  assert.equal(delivered.length, 1, 'repeat poll must not re-deliver tool images');
+
+  // Delivery error returns isError: true with non-retry guidance.
+  const failingWaiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: () => {},
+    deliverToolImages: () => {
+      throw new Error('hook budget exceeded');
+    },
+  });
+  const failPending = failingWaiters.handleToolCall('call-fail-1', 'codemode', {}, ac.signal);
+  failingWaiters.resolve('call-fail-1', [
+    { type: 'text', text: 'tool ran' },
+    { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+  ], false);
+  const failed = await failPending;
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /tool ran/);
+  assert.match(failed.content[0].text, /Tool image delivery failed: hook budget exceeded/);
+  assert.match(failed.content[0].text, /do not repeat side effects/);
+});

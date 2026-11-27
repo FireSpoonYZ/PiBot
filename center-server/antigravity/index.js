@@ -234,6 +234,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			bin: profile.bin,
 			binArgs: (request) => ["acp", "--agent", request.agentName || AGENT_NAME, "--process-per-session"],
 			geminiDir: profile.geminiHome,
+			enableToolImages: true,
 			resolveEffort: resolveSessionThoughtLevel,
 			mcpServers: () => (slot.mcpToken ? [mcpBridge.serverConfig(slot.mcpToken)] : []),
 		});
@@ -459,6 +460,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			let resolveSettled;
 			const settledPromise = new Promise((resolve) => { resolveSettled = resolve; });
 
+			const hasToolImageHook = !existing || existing.toolImageHook === true;
 			const waiters = new RunToolWaiters({
 				escalateAfterMs: escalateAfterMs ?? ANTIGRAVITY_ESCALATE_AFTER_MS,
 				onToolRequest: ({ callId, name, args }) => {
@@ -474,6 +476,28 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 						slot.driver.resumeTimers();
 					}
 				},
+				deliverToolImages: (callId, images) => {
+					if (!run || run.aborted || run.deliveryError) {
+						throw new Error("Active Antigravity run is no longer available");
+					}
+					if (!run.hasToolImageHook) {
+						const err = Object.assign(
+							new Error("This Antigravity session was created without tool-image hook support; use /clear to start a new session."),
+							{ code: AGY_HISTORY_CHANGED },
+						);
+						run.incompatibleImageError ??= err;
+						run.aborted = true;
+						run.waiters.failAll(err.message);
+						if (!run.abortController.signal.aborted) {
+							run.abortController.abort();
+						}
+						throw err;
+					}
+					if (typeof slot.driver.queueToolResultImages !== "function") {
+						throw new Error("Tool image delivery hook is unavailable");
+					}
+					slot.driver.queueToolResultImages(callId, images);
+				},
 			});
 
 			run = {
@@ -481,8 +505,10 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 				abortController: runAbort,
 				waiters,
 				allowedToolNames: new Set(mcpTools.map((tool) => tool.name)),
+				hasToolImageHook,
 				aborted: false,
 				deliveryError: null,
+				incompatibleImageError: null,
 				recyclePromise: null,
 				handle: null,
 				settledPromise,
@@ -517,7 +543,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 				beforePrompt: async ({ conversationId }) => {
 					if (isCancelled()) throw createAbortError("Operation aborted");
 					if (!existing) {
-						store.set(slot.key, { conversationId, agentName });
+						store.set(slot.key, { conversationId, agentName, toolImageHook: true });
 						try {
 							await store.flush();
 						} catch (err) {
@@ -582,6 +608,14 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			}
 
 			const outcome = await handle.outcome;
+			if (run.incompatibleImageError) {
+				stream.push({
+					type: "error",
+					code: AGY_HISTORY_CHANGED,
+					message: run.incompatibleImageError.message,
+				});
+				return;
+			}
 			if (run.deliveryError) {
 				stream.push({ type: "error", message: redactText(run.deliveryError.message) });
 				return;
@@ -608,6 +642,14 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			}
 
 			await slot.mcpRegistration?.waitForDeliveries({ signal: runAbort.signal });
+			if (run.incompatibleImageError) {
+				stream.push({
+					type: "error",
+					code: AGY_HISTORY_CHANGED,
+					message: run.incompatibleImageError.message,
+				});
+				return;
+			}
 			if (run.deliveryError) {
 				stream.push({ type: "error", message: redactText(run.deliveryError.message) });
 				return;
@@ -625,7 +667,13 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			});
 		} catch (error) {
 			invalidateAuthCacheIfNeeded(error);
-			if (run?.deliveryError) {
+			if (run?.incompatibleImageError) {
+				stream.push({
+					type: "error",
+					code: AGY_HISTORY_CHANGED,
+					message: run.incompatibleImageError.message,
+				});
+			} else if (run?.deliveryError) {
 				stream.push({ type: "error", message: redactText(run.deliveryError.message) });
 			} else if (isCancelled() || error?.name === "AbortError") {
 				stream.push({ type: "error", message: "Operation aborted", aborted: true });

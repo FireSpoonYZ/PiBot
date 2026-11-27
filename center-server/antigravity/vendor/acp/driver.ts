@@ -38,6 +38,8 @@ export interface AcpDriverOptions {
 	/** Isolated Gemini profile directory forwarded via `--gemini-dir`. */
 	geminiDir?: string;
 	extraEnv?: Record<string, string>;
+	/** Enable private loopback PreInvocation hook listener for tool-result images. */
+	enableToolImages?: boolean;
 	/** Select a native effort using the just-selected model's session options. */
 	resolveEffort?: (requested: string, configOptions: unknown) => string | undefined;
 	/** Bridge registration for session/new and session/resume. */
@@ -187,6 +189,15 @@ export class AcpDriver implements TurnDriver {
 			images: images?.length ?? 0,
 		});
 		this.#dispatchPrompt(turn, conn, prompt, images);
+	}
+
+	/** Queue tool-result images for delivery on the next PreInvocation hook of the active turn. */
+	queueToolResultImages(toolCallId: string, images: readonly ToolResultImage[]): void {
+		const turn = this.#active;
+		if (!turn || turn.closed || turn.aborted || !turn.promptStarted || !this.#conn?.alive) {
+			throw new Error("Tool image delivery requires an active native prompt");
+		}
+		this.#conn.queueToolResultImages(turn.sessionId, toolCallId, images);
 	}
 
 	cancel(): void {
@@ -372,6 +383,7 @@ export class AcpDriver implements TurnDriver {
 				}
 				return;
 			}
+			conn.beginTurnHooks(turn.sessionId);
 			turn.promptStarted = true;
 			this.#dispatchPrompt(turn, conn, request.prompt, request.images);
 		} catch (err) {
@@ -425,6 +437,14 @@ export class AcpDriver implements TurnDriver {
 					this.#emit(turn, { type: "usage", usage: settleUsage });
 				}
 				const mapped = mapStopReason(turn.lastStopReason);
+				if (mapped.status === "OK" && !mapped.aborted && !turn.aborted) {
+					try {
+						conn.assertTurnImagesDelivered();
+					} catch (err) {
+						this.#failTurn(turn, describe(err));
+						return;
+					}
+				}
 				this.#settle(turn, {
 					conversationId: turn.sessionId,
 					status: mapped.status,
@@ -614,7 +634,7 @@ export class AcpDriver implements TurnDriver {
 	#ensureConnection(request: DriverTurnRequest): Promise<AcpConnection> {
 		const previous = this.#conn;
 		if (previous?.alive) {
-			if (request.agentName === this.#agentName) {
+			if (request.agentName === this.#agentName && !previous.toolImagesUnavailable) {
 				return Promise.resolve(previous);
 			}
 			const prevAgent = this.#agentName;
@@ -622,8 +642,11 @@ export class AcpDriver implements TurnDriver {
 			this.#agentName = undefined;
 			this.#appliedModel = null;
 			this.#appliedEffort = null;
-			this.#log("recycle-agent-changed", { from: prevAgent, to: request.agentName });
-			previous.abortAll("native agent changed");
+			this.#log(previous.toolImagesUnavailable ? "recycle-tool-image-hook" : "recycle-agent-changed", {
+				from: prevAgent,
+				to: request.agentName,
+			});
+			previous.abortAll(previous.toolImagesUnavailable ? "tool image hook unavailable" : "native agent changed");
 			previous.kill();
 		}
 		this.#generation += 1;
@@ -636,6 +659,7 @@ export class AcpDriver implements TurnDriver {
 			binArgs: typeof this.#opts.binArgs === "function" ? this.#opts.binArgs(request) : this.#opts.binArgs,
 			geminiDir: this.#opts.geminiDir,
 			extraEnv: this.#opts.extraEnv,
+			enableToolImages: this.#opts.enableToolImages,
 			cwd: request.cwd,
 			mcpServers: this.#opts.mcpServers,
 			log: (msg, data) => this.#log(msg, data),
@@ -682,6 +706,7 @@ export class AcpDriver implements TurnDriver {
 		turn.aborted = true;
 		turn.abortedBy = "signal";
 		const conn = this.#conn;
+		if (turn.sessionId) conn?.cancelTurnHooks(turn.sessionId);
 		if (!conn?.alive || turn.sessionId === "" || !turn.promptStarted) {
 			this.#teardownAbort(turn);
 			return;
@@ -852,6 +877,7 @@ export class AcpDriver implements TurnDriver {
 		}
 		turn.abortCleanup?.();
 		turn.abortCleanup = undefined;
+		this.#conn?.releaseTurnHooks();
 		this.#active = undefined;
 		this.#state = this.#conn?.alive ? "ready" : "dead";
 		if (outcome.conversationId) this.#lastSessionId = outcome.conversationId;

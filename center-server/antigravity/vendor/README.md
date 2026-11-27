@@ -18,7 +18,7 @@ Adapted from upstream [`@estebanforge/pi-antigravity-bridge`](https://www.npmjs.
 - `acp/driver.ts` <- `src/acp/driver.ts`
 - `acp/events.ts` <- `src/acp/events.ts`
 - `acp/jsonrpc.ts` <- `src/acp/jsonrpc.ts`
-- `acp/recall-hook.ts` and `acp/recall-hook-client.cjs` come from `src/acp/` in `@firespoon/pi-antigravity-bridge` `1.10.11` (`04f72f47558d5496fd3d2b56113ac90aebf2380e`) under the same MIT license.
+- `acp/tool-image-hook.ts` and `acp/tool-image-hook-client.cjs` are adapted from `src/acp/recall-hook.ts` and `src/acp/recall-hook-client.cjs` in `@firespoon/pi-antigravity-bridge` `1.10.11` (`04f72f47558d5496fd3d2b56113ac90aebf2380e`) under the same MIT license, narrowed specifically to `PreInvocation` tool-result image delivery.
 - `acp/usage-estimate.ts` <- `src/acp/usage-estimate.ts`
 
 ## Adaptations for `center-server`
@@ -31,4 +31,4 @@ Adapted from upstream [`@estebanforge/pi-antigravity-bridge`](https://www.npmjs.
 
 ## Current PiBot integration
 
-See [the provider contract](../README.md) for append-only history, tool ownership, memory policy and recovery boundaries. The inherited `recall-hook` filenames describe their upstream origin; AGY autoRecall is disabled. PiBot keeps the PreInvocation hook for tool-result image delivery.
+See [the provider contract](../README.md) for native-turn execution, tool ownership, memory policy, and recovery boundaries. AGY autoRecall is disabled; PiBot uses `acp/tool-image-hook.ts` exclusively for `PreInvocation` tool-result image delivery so screenshots above `agy`'s MCP media offload threshold remain readable in the isolated Center agent.
