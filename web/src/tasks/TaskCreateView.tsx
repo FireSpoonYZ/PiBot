@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import { mobileHaptic } from '../native/tauri-host';
 import { useText } from '../ui';
 import type { GlobalTasksController } from './useGlobalTasks';
@@ -59,6 +60,15 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
     controller.markDraftLeftUnpublished();
     onClose();
   }, [controller, onClose, submitting]);
+
+  const handleBackRef = useRef(handleBack);
+  handleBackRef.current = handleBack;
+
+  useEffect(() => {
+    return registerOverlayBackHandler(() => {
+      handleBackRef.current();
+    });
+  }, []);
 
   const handleSubmit = async () => {
     if (submitting) return;

@@ -24,6 +24,7 @@ import {
 import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { InlineBanner, PopoverMenu, type PopoverMenuItem } from '../components/ui';
 import { useExternalOverlayPresent, useTopLayerClose } from '../components/ui/Overlay';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import type { GoogleSignInRejectionContext } from '../google/currentGoogleSetup';
 import { useText } from '../ui';
 import { BotBrowserViewport } from './BotBrowserViewport';
@@ -1252,13 +1253,13 @@ export function BotBrowserPanel({
     }
   };
 
-  const canNavigate =
+  const canNavigateBase =
     connected &&
     pageVisible &&
-    pendingAction === null &&
     Boolean(view?.available && (view.canStreamInteract || view.nativePresentation) && view.pageId) &&
     view?.phase === 'human' &&
     isHolder;
+  const canNavigate = canNavigateBase && pendingAction === null;
 
   const handleUrlSubmit = (ev: FormEvent<HTMLFormElement>) => {
     ev.preventDefault();
@@ -1393,6 +1394,26 @@ export function BotBrowserPanel({
     getElement: () => panelRef.current,
     onClose: () => setExternalConfirmOpen(false),
   });
+
+  // In fullscreen mobile mode, Android hardware Back navigates browser history when available
+  // while deferring to any open local floating overlay/popover in LIFO order.
+  const hasLocalBrowserOverlay =
+    moreOpen || urlEditing || (preemptConfirmOpen && isOtherHolder) || externalConfirmOpen;
+  const canHardwareBackNavigateHistory =
+    resolvedMode === 'fullscreen' &&
+    canNavigateBase &&
+    (pendingAction === null || pendingAction === 'navigating') &&
+    view?.canGoBack === true &&
+    !hasLocalBrowserOverlay;
+  const runPageActionRef = useRef(runPageAction);
+  runPageActionRef.current = runPageAction;
+
+  useEffect(() => {
+    if (!canHardwareBackNavigateHistory) return;
+    return registerOverlayBackHandler(() => {
+      void runPageActionRef.current('navigating', 'back');
+    });
+  }, [canHardwareBackNavigateHistory]);
   const isTaking = pendingAction === 'taking' || view?.phase === 'taking';
   const isConnectingSharedInput = pendingAction === 'sharing' ||
     Boolean(sharedPage && attemptedSharedPage !== sharedPage && pendingAction === null);

@@ -241,9 +241,6 @@ fn watch_loop(
     if mime::has_origin_marker(&mime_types) {
       continue;
     }
-    if mime::has_concealed_mime(&mime_types) {
-      continue;
-    }
     if mime::has_file_copy_mime(&mime_types) {
       continue;
     }
@@ -274,7 +271,7 @@ fn watch_loop(
     let Some(text) = mime::decode_text_bytes(bytes, encoding, MAX_TEXT_BYTES) else {
       continue;
     };
-    if !eligible_text(&text, false) {
+    if !eligible_text(&text) {
       continue;
     }
     if stop_flag.load(Ordering::Acquire) {

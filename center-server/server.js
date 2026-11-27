@@ -10,7 +10,7 @@ import { registerAuth } from './auth.js';
 import { registerClientReleaseRoutes } from './client-releases.js';
 import { registerRoutes } from './routes.js';
 import { openOperations } from './operations/index.js';
-import { OPERATION_ERROR_STATUS } from './operations/errors.js';
+import { OPERATION_ERROR_MESSAGES, OPERATION_ERROR_STATUS } from './operations/errors.js';
 import { operationScopes } from '../center-contract/operations/index.js';
 import { registerMcpOAuth } from './mcp/oauth.js';
 import { validateClients, validateSupportedScopes } from './mcp/oauth-store.js';
@@ -139,7 +139,9 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       else if (error.statusCode === 400 && !Object.hasOwn(status, code)) code = 'INVALID_ARGUMENT';
       else if (['OFFLINE', 'NOT_CONNECTED', 'DISCONNECTED', 'CONNECT_FAILED'].includes(code)) code = 'DEVICE_OFFLINE';
       if (!Object.hasOwn(status, code)) code = 'INTERNAL_ERROR';
-      reply.code(status[code] || 500).send({ error: { code, message: code === 'INTERNAL_ERROR' ? 'Internal error' : code.replaceAll('_', ' ').toLowerCase() } });
+      const message = code === 'AGY_HISTORY_CHANGED' ? OPERATION_ERROR_MESSAGES[code]
+        : code === 'INTERNAL_ERROR' ? 'Internal error' : code.replaceAll('_', ' ').toLowerCase();
+      reply.code(status[code] || 500).send({ error: { code, message } });
     });
     // The relay shares this HTTP server: native ws noServer handleUpgrade on
     // /v1/link keeps first-frame auth, hello timeout, backpressure and
@@ -148,7 +150,10 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     bridge = openHostBridge({ dataRoot, store, relay });
     oauth = openMcpOAuth({ store, publicUrl });
     googleAccounts = await openGoogleAccounts({ store, publicUrl });
-    googleWorkspaceMcp = createGoogleWorkspaceMcpAdapter({ accounts: googleAccounts });
+    googleWorkspaceMcp = createGoogleWorkspaceMcpAdapter({
+      accounts: googleAccounts,
+      getAssistantBinding: () => (typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null),
+    });
     const builtinAdapters = new Map([[GOOGLE_WORKSPACE_INSTALLATION_ID, googleWorkspaceMcp]]);
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth, builtinAdapters });
     packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
@@ -163,7 +168,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     app.get('/api/setup', () => ({ required: false }));
     app.get('/api/health', () => ({ status: 'ready' }));
     await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
-    const { listReleases, setReleasePublished } = registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl });
+    const { listReleases, setReleasePublished } = registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl, onReleasePublished: () => routes?.notifyAll('client-release-published') });
     const turns = openTurnAdmission({ store, packages });
     // New services are constructed after packages (publish/mutation backend)
     // and before routes; notify is delegated lazily until routes exists.

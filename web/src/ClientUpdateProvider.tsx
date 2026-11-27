@@ -1,7 +1,6 @@
-// 共享客户端更新 provider：桌面定时检查，Android 读取原生后台检查结果。
+// 共享客户端更新 provider：统一编排桌面与 Android 全生命周期自动检查、原生推送与零闪烁状态同步。
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -10,15 +9,14 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  CLIENT_UPDATE_AUTO_INTERVAL_MS,
   CLIENT_UPDATE_LIVE_PHASES,
-  CLIENT_UPDATE_OPEN_EVENT,
   CLIENT_UPDATE_POLL_MS,
-  CLIENT_UPDATE_STATUS_EVENT,
-  resolveAutoInstallAction,
+  createClientUpdateController,
+  type ClientUpdateCheckReason,
+  type ClientUpdateController,
   type ClientUpdateOp,
-  type ClientUpdateParams,
   type ClientUpdateRequest,
+  type ClientUpdateSnapshot,
   type ClientUpdateStatus,
 } from './ClientUpdate';
 
@@ -26,9 +24,12 @@ export interface ClientUpdateContextValue {
   status: ClientUpdateStatus | undefined;
   pending: ClientUpdateOp | null;
   ready: boolean;
+  centerKey: string;
   actionError: string;
+  lastCheckedAt: number | null;
   dismissError(): void;
   check(): void;
+  triggerAutoCheck(reason: ClientUpdateCheckReason): void;
   download(): void;
   install(stopActive: boolean): void;
   cancel(): void;
@@ -40,14 +41,6 @@ export function useClientUpdate(): ClientUpdateContextValue | null {
   return useContext(ClientUpdateContext);
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'object' && error !== null && 'message' in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return String(error);
-}
-
 export function ClientUpdateProvider(props: {
   request: ClientUpdateRequest;
   ready: boolean;
@@ -56,177 +49,30 @@ export function ClientUpdateProvider(props: {
   children: ReactNode;
 }) {
   const { request, ready, centerKey, nativeCheck = false } = props;
-  const [status, setStatus] = useState<ClientUpdateStatus | undefined>(undefined);
-  const [pending, setPending] = useState<ClientUpdateOp | null>(null);
-  const [actionError, setActionError] = useState('');
-  const epochRef = useRef(0);
   const requestRef = useRef(request);
   requestRef.current = request;
-  const connectedRef = useRef(false);
-  connectedRef.current = ready && Boolean(centerKey);
-  const autoAtRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const opSequence = useRef(0);
-  const opInFlight = useRef<{ id: number; op: ClientUpdateOp } | null>(null);
-  const autoInstallRef = useRef(false);
-  const runOpRef = useRef<(op: Exclude<ClientUpdateOp, 'status'>, params?: ClientUpdateParams, automatic?: boolean) => Promise<void>>(
-    async () => {},
-  );
-  const statusRevision = useRef(0);
-  const pollSequence = useRef(0);
-  const appliedPoll = useRef(0);
-  const lastPolledOp = useRef(0);
 
-  const refresh = useCallback(async (reportError = true): Promise<void> => {
-    if (!connectedRef.current) return;
-    const epoch = epochRef.current;
-    const revision = statusRevision.current;
-    const poll = ++pollSequence.current;
-    try {
-      const next = await requestRef.current('status');
-      if (epoch !== epochRef.current || revision !== statusRevision.current || poll < appliedPoll.current) return;
-      const active = opInFlight.current;
-      // 操作刚发出时原生状态可能仍是上一次的稳定态。
-      if (active?.op === 'check' && next.phase !== 'checking') return;
-      if (active?.op === 'download' && ['idle', 'checking', 'available', 'up-to-date'].includes(next.phase)) return;
-      if (active?.op === 'install' && next.phase === 'downloaded') return;
-      appliedPoll.current = poll;
-      if (active) lastPolledOp.current = active.id;
-      setStatus(next);
-      // 异步下载平台（如 Android）由轮询/事件观测到 downloaded 后自动衔接安装。
-      if (!active) {
-        const action = resolveAutoInstallAction(autoInstallRef.current, next.phase);
-        if (action === 'install') {
-          autoInstallRef.current = false;
-          void runOpRef.current('install', { stopActive: false });
-        } else if (action === 'clear') {
-          autoInstallRef.current = false;
-        }
-      }
-    } catch (error) {
-      if (reportError && epoch === epochRef.current && revision === statusRevision.current && poll >= appliedPoll.current) {
-        setActionError(errorMessage(error));
-      }
-    }
-  }, []);
+  const controllerRef = useRef<ClientUpdateController | null>(null);
+  if (!controllerRef.current) {
+    controllerRef.current = createClientUpdateController({
+      request: (op, params) => requestRef.current(op, params),
+    });
+  }
+  const controller = controllerRef.current;
 
-  const runOp = useCallback(
-    async (op: Exclude<ClientUpdateOp, 'status'>, params?: ClientUpdateParams, automatic = false): Promise<void> => {
-      if (!connectedRef.current) return;
-      const active = opInFlight.current;
-      if (active && !(op === 'cancel' && (active.op === 'download' || active.op === 'check'))) return;
-      const id = ++opSequence.current;
-      const epoch = epochRef.current;
-      opInFlight.current = { id, op };
-      statusRevision.current += 1;
-      setPending(op);
-      if (!automatic) setActionError('');
-      if (op === 'check' && !automatic) {
-        setStatus(prev => prev && !CLIENT_UPDATE_LIVE_PHASES.has(prev.phase) ? { ...prev, phase: 'checking' } : prev);
-      }
-      try {
-        const next = await requestRef.current(op, params);
-        if (epoch === epochRef.current && opInFlight.current?.id === id) {
-          statusRevision.current += 1;
-          if (lastPolledOp.current !== id || (op !== 'check' && op !== 'download') || (next.phase !== 'checking' && next.phase !== 'downloading')) {
-            setStatus(next);
-          }
-          if (op === 'download') {
-            const action = resolveAutoInstallAction(autoInstallRef.current, next.phase);
-            if (action === 'install') {
-              autoInstallRef.current = false;
-              opInFlight.current = { id, op: 'install' };
-              setPending('install');
-              const installed = await requestRef.current('install', { stopActive: false });
-              if (epoch === epochRef.current && opInFlight.current?.id === id) {
-                statusRevision.current += 1;
-                setStatus(installed);
-              }
-            } else if (action === 'clear') {
-              autoInstallRef.current = false;
-            }
-          }
-        }
-      } catch (error) {
-        if (epoch === epochRef.current && opInFlight.current?.id === id) {
-          if (op === 'download') autoInstallRef.current = false;
-          statusRevision.current += 1;
-          if (!automatic) {
-            setActionError(errorMessage(error));
-            void refresh();
-          }
-        }
-      } finally {
-        if (epoch === epochRef.current && opInFlight.current?.id === id) {
-          opInFlight.current = null;
-          setPending(null);
-        }
-      }
-    },
-    [refresh],
-  );
-  runOpRef.current = runOp;
-
-  const check = useCallback(() => {
-    autoInstallRef.current = false;
-    void runOp('check', { automatic: false });
-  }, [runOp]);
-  const download = useCallback(() => {
-    autoInstallRef.current = true;
-    void runOp('download');
-  }, [runOp]);
-  const install = useCallback((stopActive: boolean) => {
-    autoInstallRef.current = false;
-    void runOp('install', { stopActive });
-  }, [runOp]);
-  const cancel = useCallback(() => {
-    autoInstallRef.current = false;
-    void runOp('cancel');
-  }, [runOp]);
+  const [snapshot, setSnapshot] = useState<ClientUpdateSnapshot>(() => controller.getSnapshot());
 
   useEffect(() => {
-    epochRef.current += 1;
-    opInFlight.current = null;
-    autoInstallRef.current = false;
-    statusRevision.current += 1;
-    setStatus(undefined);
-    setPending(null);
-    setActionError('');
-    autoAtRef.current = 0;
-    if (!ready || !centerKey) return;
-    const syncNative = () => { if (!document.hidden) void refresh(false); };
-    if (nativeCheck) {
-      window.addEventListener(CLIENT_UPDATE_STATUS_EVENT, syncNative);
-      window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, syncNative);
-      document.addEventListener('visibilitychange', syncNative);
-      syncNative();
-    } else {
-      autoAtRef.current = Date.now();
-      void runOp('check', { automatic: true }, true);
-      const tick = () => {
-        if (!opInFlight.current && Date.now() - autoAtRef.current >= CLIENT_UPDATE_AUTO_INTERVAL_MS) {
-          autoAtRef.current = Date.now();
-          void runOp('check', { automatic: true }, true);
-        }
-        timerRef.current = setTimeout(tick, 60_000);
-      };
-      timerRef.current = setTimeout(tick, 60_000);
-    }
-    return () => {
-      epochRef.current += 1;
-      opInFlight.current = null;
-      autoInstallRef.current = false;
-      statusRevision.current += 1;
-      if (nativeCheck) {
-        window.removeEventListener(CLIENT_UPDATE_STATUS_EVENT, syncNative);
-        window.removeEventListener(CLIENT_UPDATE_OPEN_EVENT, syncNative);
-        document.removeEventListener('visibilitychange', syncNative);
-      }
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = undefined;
-    };
-  }, [ready, centerKey, nativeCheck, refresh, runOp]);
+    setSnapshot(controller.getSnapshot());
+    return controller.subscribe(setSnapshot);
+  }, [controller]);
 
+  useEffect(() => {
+    controller.start({ ready, centerKey, nativeCheck });
+    return () => controller.stop();
+  }, [ready, centerKey, nativeCheck, controller]);
+
+  const { status, pending, actionError, lastCheckedAt } = snapshot;
   const live =
     (status !== undefined && CLIENT_UPDATE_LIVE_PHASES.has(status.phase)) ||
     pending === 'check' ||
@@ -234,23 +80,26 @@ export function ClientUpdateProvider(props: {
     pending === 'install';
   useEffect(() => {
     if (!live || !ready) return;
-    const timer = setInterval(() => void refresh(), CLIENT_UPDATE_POLL_MS);
+    const timer = setInterval(() => void controller.refresh(true, false), CLIENT_UPDATE_POLL_MS);
     return () => clearInterval(timer);
-  }, [live, ready, refresh]);
+  }, [live, ready, controller]);
 
   const value = useMemo<ClientUpdateContextValue>(
     () => ({
       status,
       pending,
       ready: ready && Boolean(centerKey),
+      centerKey,
       actionError,
-      dismissError: () => setActionError(''),
-      check,
-      download,
-      install,
-      cancel,
+      lastCheckedAt,
+      dismissError: controller.dismissError,
+      check: controller.check,
+      triggerAutoCheck: controller.triggerAutoCheck,
+      download: controller.download,
+      install: controller.install,
+      cancel: controller.cancel,
     }),
-    [status, pending, ready, centerKey, actionError, check, download, install, cancel],
+    [status, pending, ready, centerKey, actionError, lastCheckedAt, controller],
   );
 
   return <ClientUpdateContext.Provider value={value}>{props.children}</ClientUpdateContext.Provider>;

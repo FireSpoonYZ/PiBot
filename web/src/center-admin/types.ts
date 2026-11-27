@@ -189,6 +189,7 @@ export interface CenterAdminPanelProps {
   onConfigureBot?: (deviceId: string, botId: string) => void;
   onStartGoogleSetupWizard?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
+  backHandlerRef?: React.MutableRefObject<(() => boolean) | null>;
 }
 
 export interface ResolvedModelSummary {
@@ -536,4 +537,124 @@ export interface GoogleRuleRemoveRequest {
   id: string;
   deviceId?: string;
   botId?: string;
+}
+
+export type GoogleAssistantMode = 'dedicated' | 'existing';
+
+export interface GoogleAssistantConfig {
+  enabled: boolean;
+  deviceId: string;
+  botId: string;
+  mode: GoogleAssistantMode;
+  accounts: string[];
+  batchWindowMinutes: number;
+  digestTimes: string[];
+  calendarEnabled: boolean;
+  calendarLeadMinutes: number;
+  hindsightPrivateMemory: boolean;
+  revision: number;
+  listeningSince: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GoogleAssistantLastDelivery {
+  eventId?: string;
+  eventKey?: string;
+  kind?: string;
+  status?: string;
+  deliveredAt?: string | null;
+  updatedAt?: string | null;
+  error?: { code?: string; message?: string } | null;
+}
+
+export interface GoogleAssistantRuntime {
+  status: string;
+  reason?: string | null;
+  detail?: string | null;
+  lastCheckedAt?: string | null;
+  lastEventAt?: string | null;
+  pendingBucketCount: number;
+  pendingDeliveryCount: number;
+  missedCount: number;
+  targetOnline?: boolean | null;
+  lastDelivery?: GoogleAssistantLastDelivery | null;
+}
+
+export interface GoogleAssistantResponse {
+  assistant: GoogleAssistantConfig | null;
+  runtime: GoogleAssistantRuntime | null;
+}
+
+export interface GoogleAssistantCreateBotInput {
+  role?: string;
+  description?: string;
+  modelRef?: string;
+  thinkingLevel?: string;
+  cwd?: string;
+}
+
+export interface GoogleAssistantBaseOptions {
+  accounts?: string[];
+  batchWindowMinutes?: number;
+  digestTimes?: string[];
+  calendarEnabled?: boolean;
+  calendarLeadMinutes?: number;
+  hindsightPrivateMemory?: boolean;
+}
+
+export type GoogleAssistantSetupRequest =
+  | (GoogleAssistantBaseOptions & {
+      mode: 'dedicated';
+      deviceId: string;
+      botId?: string;
+      createBot?: GoogleAssistantCreateBotInput;
+    })
+  | (GoogleAssistantBaseOptions & {
+      mode: 'existing';
+      deviceId: string;
+      botId: string;
+    });
+
+export interface GoogleAssistantCreatedBot {
+  deviceId: string;
+  botId: string;
+  role: string;
+  soulApplied?: boolean;
+  modelApplied?: boolean;
+}
+
+export interface GoogleAssistantSetupResponse extends GoogleAssistantResponse {
+  createdBot?: GoogleAssistantCreatedBot | null;
+}
+
+export interface GoogleAssistantSaveRequest extends GoogleAssistantBaseOptions {
+  enabled: boolean;
+  deviceId: string;
+  botId: string;
+  mode: GoogleAssistantMode;
+  expectedRevision?: number;
+}
+
+export interface GoogleAssistantRemoveResponse {
+  removed: boolean;
+}
+
+export interface GoogleAssistantEventItem {
+  id: string;
+  eventKey?: string;
+  deviceId?: string;
+  botId?: string;
+  account?: string | null;
+  kind?: string;
+  status: string;
+  requestId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  expiresAt?: string | null;
+  error?: { code?: string; message?: string } | null;
+}
+
+export interface GoogleAssistantEventsResponse {
+  items: GoogleAssistantEventItem[];
 }

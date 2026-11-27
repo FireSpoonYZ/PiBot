@@ -46,6 +46,7 @@ const FRAME_LABEL = 'frame frame';
 const READY_LABEL = 'ready frame';
 const CLOSED_LABEL = 'closed frame';
 const NATIVE_LABEL = 'native_call frame';
+const CENTER_EVENT_LABEL = 'center_event frame';
 const MAX_QUEUED_OUTPUT_BYTES = 80 * 1024 * 1024; // bound queued stdout frames
 const DRAIN_TIMEOUT_MS = 5000;
 
@@ -900,12 +901,22 @@ export function createAndroidBridge(options = {}) {
     rec.op.catch(() => {});
   }
 
-  // Broker events are DesktopObservationEvents; forward them unchanged and
-  // release the slot on a terminal (error or inner end) event. A local delivery
-  // failure still goes through the real unobserve path: the subscription must
-  // not keep running once the bridge record is gone.
+  // Broker events are either lightweight center notifications ({type:'center_event'})
+  // or DesktopObservationEvents ({type:'event'}); forward observation events
+  // unchanged and release the slot on a terminal (error or inner end) event. A
+  // local delivery failure still goes through the real unobserve path: the
+  // subscription must not keep running once the bridge record is gone.
   function handleClientEvent(event) {
-    if (!isPlainObject(event) || event.type !== 'event' || typeof event.observationId !== 'string') return;
+    if (!isPlainObject(event)) return;
+    if (event.type === 'center_event') {
+      if (phase !== 'ready' || event.event !== 'client-release-published') return;
+      return fire(sendFrameObject(
+        { type: 'center_event', event: 'client-release-published' },
+        BRIDGE_MAX_CONTROL_BYTES,
+        CENTER_EVENT_LABEL,
+      ));
+    }
+    if (event.type !== 'event' || typeof event.observationId !== 'string') return;
     const id = event.observationId;
     const rec = observers.get(id);
     if (!rec || rec.done) return;

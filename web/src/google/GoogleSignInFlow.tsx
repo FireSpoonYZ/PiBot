@@ -3,9 +3,19 @@
 // - Client secrets live only in uncontrolled DOM inputs or transient File reads, never React state or chat.
 // - Google OAuth always opens the system browser via openExternalUrl, never a Bot WebView.
 // - Completion is verified strictly from Center /api/google/flow + /api/google/status, never chat text.
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Check, Copy, ExternalLink, Lock, RefreshCw, Upload } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Bot, Check, Copy, ExternalLink, Lock, RefreshCw, Upload } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import {
+  DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES,
+  DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES,
+  buildGoogleAssistantSetupPayload,
+  defaultDigestTimesForMode,
+  formatDigestTimesInput,
+  pickDefaultAssistantDeviceId,
+  pickDefaultExistingAssistantBot,
+  shouldPromptGoogleAssistantSetup,
+} from '../center-admin/googleHelpers';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { InlineBanner } from '../components/ui';
 import { useText } from '../ui';
@@ -13,8 +23,11 @@ import {
   cancelGoogleAuthFlow,
   classifyGoogleError,
   configureGoogleClient,
+  fetchGoogleAssistant,
+  fetchGoogleBotSync,
   fetchGoogleStatus,
   pollGoogleAuthFlow,
+  setupGoogleAssistant,
   startGoogleAuthorize,
 } from './googleClient';
 import {
@@ -29,7 +42,10 @@ import {
 } from './googleCopy';
 import type {
   GoogleAccountView,
+  GoogleAssistantMode,
   GoogleAuthFlowStart,
+  GoogleBotSyncBot,
+  GoogleBotSyncDevice,
   GoogleServiceChoice,
   GoogleStatusSnapshot,
 } from './types';
@@ -433,6 +449,8 @@ export function GoogleSignInFlow({
   const mountedRef = useRef(true);
   const pollingRef = useRef<{ check: () => void; stop: () => void } | null>(null);
   const onCompletedRef = useRef(onCompleted);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   useLayoutEffect(() => {
     onCompletedRef.current = onCompleted;
@@ -455,8 +473,41 @@ export function GoogleSignInFlow({
   const [flow, setFlow] = useState<GoogleAuthFlowStart | null>(null);
   const [phase, setPhase] = useState<'pick' | 'pending' | 'connected' | 'failed' | 'cancelled'>('pick');
   const [connectedAccount, setConnectedAccount] = useState<GoogleAccountView | null>(null);
+  const [connectedAccounts, setConnectedAccounts] = useState<GoogleAccountView[]>([]);
+  const connectedAccountsRef = useRef<GoogleAccountView[]>(connectedAccounts);
+  connectedAccountsRef.current = connectedAccounts;
   const [error, setError] = useState('');
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Post-OAuth proactive assistant quick-choice state (silently hidden on older Centers)
+  const assistantIdPrefix = useId();
+  const [assistantProbe, setAssistantProbe] = useState<'idle' | 'loading' | 'prompt' | 'hidden'>('idle');
+  const [assistantDismissed, setAssistantDismissed] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<GoogleAssistantMode>('dedicated');
+  const [assistantDevices, setAssistantDevices] = useState<GoogleBotSyncDevice[]>([]);
+  const [assistantBots, setAssistantBots] = useState<GoogleBotSyncBot[]>([]);
+  const [assistantDeviceId, setAssistantDeviceId] = useState(identity.targetDeviceId);
+  const [assistantBotName, setAssistantBotName] = useState(() =>
+    t('邮件与日程管家', 'Mail & Calendar Assistant'),
+  );
+  const [assistantTargetBotKey, setAssistantTargetBotKey] = useState('');
+  const [assistantDigestTimes, setAssistantDigestTimes] = useState('');
+  const [assistantDigestDirty, setAssistantDigestDirty] = useState(false);
+  const [assistantHindsight, setAssistantHindsight] = useState(true);
+  const [assistantHindsightDirty, setAssistantHindsightDirty] = useState(false);
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantError, setAssistantError] = useState('');
+  const [assistantEnabledSummary, setAssistantEnabledSummary] = useState('');
+
+  const activeAssistantBots = useMemo(
+    () => assistantBots.filter(b => !b.archivedAt),
+    [assistantBots],
+  );
+  const assistantDeviceNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const d of assistantDevices) map.set(d.deviceId, d.name || d.deviceId);
+    return map;
+  }, [assistantDevices]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -511,6 +562,13 @@ export function GoogleSignInFlow({
           const verifiedAccount =
             res.account ??
             snapshot?.accounts.find(a => (targetAccount ? a.email === targetAccount : true));
+          const resolvedAccounts =
+            snapshot?.accounts && snapshot.accounts.length > 0
+              ? snapshot.accounts
+              : verifiedAccount
+                ? [verifiedAccount]
+                : [];
+          setConnectedAccounts(resolvedAccounts);
           setConnectedAccount(verifiedAccount ?? null);
           setPhase('connected');
           onCompletedRef.current(verifiedAccount, snapshot);
@@ -556,6 +614,136 @@ export function GoogleSignInFlow({
       document.removeEventListener('visibilitychange', onReturn);
     };
   }, [api, identity, flow, phase, targetAccount, t]);
+
+  // Best-effort probe for proactive assistant right after OAuth finishes; 404/error hides card silently.
+  useEffect(() => {
+    if (phase !== 'connected' || !connectedAccount) return;
+    let cancelled = false;
+    setAssistantProbe('loading');
+    setAssistantDismissed(false);
+    setAssistantError('');
+    setAssistantEnabledSummary('');
+
+    void Promise.all([
+      fetchGoogleAssistant(api, identity),
+      fetchGoogleBotSync(api, identity).catch(() => ({ devices: [] as GoogleBotSyncDevice[], bots: [] as GoogleBotSyncBot[] })),
+    ])
+      .then(([assistantRes, syncRes]) => {
+        if (cancelled || !mountedRef.current) return;
+        const accountCount = connectedAccountsRef.current.length > 0 ? connectedAccountsRef.current.length : 1;
+        if (!shouldPromptGoogleAssistantSetup(assistantRes.assistant, accountCount)) {
+          setAssistantProbe('hidden');
+          return;
+        }
+        setAssistantDevices(syncRes.devices);
+        setAssistantBots(syncRes.bots);
+        const defaultDev = pickDefaultAssistantDeviceId(syncRes.devices, identity.targetDeviceId);
+        const defaultBot = pickDefaultExistingAssistantBot(
+          syncRes.bots,
+          syncRes.devices,
+          identity.targetDeviceId,
+        );
+        setAssistantMode('dedicated');
+        setAssistantDeviceId(defaultDev || identity.targetDeviceId);
+        const translate = tRef.current;
+        const t = translate;
+        setAssistantBotName(t('邮件与日程管家', 'Mail & Calendar Assistant'));
+        setAssistantTargetBotKey(defaultBot ? `${defaultBot.deviceId}::${defaultBot.botId}` : '');
+        setAssistantDigestTimes(formatDigestTimesInput(defaultDigestTimesForMode('dedicated')));
+        setAssistantDigestDirty(false);
+        setAssistantHindsight(true);
+        setAssistantHindsightDirty(false);
+        setAssistantProbe('prompt');
+      })
+      .catch(() => {
+        if (!cancelled && mountedRef.current) {
+          setAssistantProbe('hidden');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [api, connectedAccount, identity, phase]);
+
+  const handleSelectQuickAssistantMode = (nextMode: GoogleAssistantMode) => {
+    setAssistantMode(nextMode);
+    setAssistantError('');
+    if (!assistantDigestDirty) {
+      setAssistantDigestTimes(formatDigestTimesInput(defaultDigestTimesForMode(nextMode)));
+    }
+    if (!assistantHindsightDirty) {
+      setAssistantHindsight(nextMode === 'dedicated');
+    }
+  };
+
+  const handleEnableQuickAssistant = async () => {
+    if (assistantBusy || !connectedAccount) return;
+    setAssistantError('');
+
+    let resolvedDeviceId = assistantDeviceId || identity.targetDeviceId;
+    let resolvedBotId = '';
+    if (assistantMode === 'existing') {
+      const sep = assistantTargetBotKey.indexOf('::');
+      if (sep > 0) {
+        resolvedDeviceId = assistantTargetBotKey.slice(0, sep);
+        resolvedBotId = assistantTargetBotKey.slice(sep + 2);
+      } else {
+        resolvedDeviceId = '';
+        resolvedBotId = '';
+      }
+    }
+
+    const watchedEmails =
+      connectedAccounts.length > 0
+        ? connectedAccounts.filter(a => a.status !== 'reconnect').map(a => a.email)
+        : [connectedAccount.email];
+    const effectiveAccounts = watchedEmails.length > 0 ? watchedEmails : [connectedAccount.email];
+
+    const built = buildGoogleAssistantSetupPayload(
+      {
+        mode: assistantMode,
+        deviceId: resolvedDeviceId,
+        ...(resolvedBotId ? { botId: resolvedBotId } : {}),
+        ...(assistantMode === 'dedicated' ? { role: assistantBotName } : {}),
+        accounts: effectiveAccounts,
+        batchWindowMinutes: DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES,
+        digestTimesInput: assistantDigestTimes,
+        calendarEnabled: true,
+        calendarLeadMinutes: DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES,
+        hindsightPrivateMemory: assistantHindsight,
+      },
+      t,
+    );
+
+    if (!built.ok) {
+      setAssistantError(built.error);
+      return;
+    }
+
+    setAssistantBusy(true);
+    try {
+      const res = await setupGoogleAssistant(api, identity, built.payload);
+      if (!mountedRef.current) return;
+      const createdName = res.createdBot?.role;
+      setAssistantEnabledSummary(
+        createdName
+          ? t(`已创建独立专职管家 Bot「${createdName}」并启用主动邮箱与日程感知。`, `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring.`)
+          : t('已为所选 Bot 启用主动邮箱与日程感知，可在中心管理页随时调整设置。', 'Proactive mail & calendar assistant enabled. You can adjust settings anytime in Center Admin.'),
+      );
+      setAssistantProbe('hidden');
+    } catch (cause) {
+      if (!mountedRef.current) return;
+      const info = classifyGoogleError(cause);
+      setAssistantError(
+        info.unavailable
+          ? t('当前 Center 版本暂不支持主动邮箱与日程管家。', 'This Center version does not support the proactive assistant yet.')
+          : info.message || t('启用主动管家失败，请稍后重试。', 'Failed to enable proactive assistant. Please try again.'),
+      );
+    } finally {
+      if (mountedRef.current) setAssistantBusy(false);
+    }
+  };
 
   const toggleChoice = (choice: GoogleServiceChoice) => {
     setSelected(prev => {
@@ -695,6 +883,203 @@ export function GoogleSignInFlow({
             {t('未勾选的服务已保持「未授权」状态，你可以现在补授权，或暂不使用此项。', 'Unchecked services remain “Needs permission”. You can grant permission now or skip them.')}
           </p>
         ) : null}
+
+        {assistantEnabledSummary ? (
+          <InlineBanner tone="live" role="status" compact title={assistantEnabledSummary} />
+        ) : assistantProbe === 'prompt' && !assistantDismissed ? (
+          <div className="gws-card" aria-busy={assistantBusy}>
+            <div className="gws-private-head">
+              <Bot size={15} aria-hidden="true" />
+              <span>{t('开启主动邮箱与日程管家？', 'Enable Proactive Mail & Calendar Assistant?')}</span>
+            </div>
+            <p className="gws-muted">
+              {t('可选择创建独立专职管家或交给已有 Bot 后台聚合新邮件与会前提醒，后台仅读信与草拟回复、绝不自动外发。', 'Batch incoming mail and pre-meeting reminders with a dedicated assistant Bot or an existing Bot. Background runs read & draft only, never auto-send.')}
+            </p>
+
+            <div className="gws-mode-list" role="radiogroup" aria-label={t('选择主动管家模式', 'Choose proactive assistant mode')}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={assistantMode === 'dedicated'}
+                disabled={assistantBusy}
+                className={`gws-mode-option${assistantMode === 'dedicated' ? ' is-selected' : ''}`}
+                onClick={() => handleSelectQuickAssistantMode('dedicated')}
+              >
+                <span className="gws-mode-title">
+                  <span>{t('选项 1：创建独立专职管家 Bot', 'Option 1: Create Dedicated Assistant Bot')}</span>
+                  <span className="gws-pill is-accent">{t('推荐', 'Recommended')}</span>
+                </span>
+                <span className="gws-mode-desc">
+                  {t('独立会话与私人记忆，不打扰主 Bot，后台仅读信与草拟回复。', 'Isolated session & private memory without crowding your main Bot; read & draft only.')}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                role="radio"
+                aria-checked={assistantMode === 'existing'}
+                disabled={assistantBusy}
+                className={`gws-mode-option${assistantMode === 'existing' ? ' is-selected' : ''}`}
+                onClick={() => handleSelectQuickAssistantMode('existing')}
+              >
+                <span className="gws-mode-title">
+                  <span>{t('选项 2：交给已有 Bot（如主 Bot）', 'Option 2: Assign to Existing Bot (e.g. Main Bot)')}</span>
+                </span>
+                <span className="gws-mode-desc">
+                  {t('无需切换聊天；普通邮件默认按 09:00 / 18:00 简报合并，跨 Bot Skill 仍保持隔离。', 'No chat switching; routine mail merges into 09:00 / 18:00 digests with cross-Bot skill isolation intact.')}
+                </span>
+              </button>
+            </div>
+
+            {assistantMode === 'dedicated' ? (
+              <div className="gws-form">
+                <label className="gws-field" htmlFor={`${assistantIdPrefix}-bot-name`}>
+                  <span className="gws-label">{t('专职管家 Bot 名称', 'Dedicated Bot name')}</span>
+                  <input
+                    id={`${assistantIdPrefix}-bot-name`}
+                    type="text"
+                    className="gws-input"
+                    maxLength={64}
+                    disabled={assistantBusy}
+                    value={assistantBotName}
+                    onChange={e => setAssistantBotName(e.target.value)}
+                  />
+                </label>
+
+                {assistantDevices.length > 1 ? (
+                  <label className="gws-field" htmlFor={`${assistantIdPrefix}-device`}>
+                    <span className="gws-label">{t('托管设备', 'Host device')}</span>
+                    <select
+                      id={`${assistantIdPrefix}-device`}
+                      className="gws-input"
+                      disabled={assistantBusy}
+                      value={assistantDeviceId}
+                      onChange={e => setAssistantDeviceId(e.target.value)}
+                    >
+                      {assistantDevices.map(dev => (
+                        <option key={dev.deviceId} value={dev.deviceId}>
+                          {dev.name || dev.deviceId}
+                          {dev.online ? '' : t('（离线）', ' (offline)')}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+
+                <label className="gws-choice-card">
+                  <input
+                    type="checkbox"
+                    disabled={assistantBusy}
+                    checked={assistantHindsight}
+                    onChange={e => {
+                      setAssistantHindsight(e.target.checked);
+                      setAssistantHindsightDirty(true);
+                    }}
+                  />
+                  <span className="gws-choice-body">
+                    <span className="gws-choice-title">
+                      {t('允许管家使用自己的 Hindsight 私人记忆记住邮件偏好', 'Use assistant’s own Hindsight private memory for mail preferences')}
+                    </span>
+                    <span className="gws-choice-desc">
+                      {t('仅写入该管家自己的私有主库，不与其他 Bot 共享。', 'Strictly limited to this assistant’s own private primary bank.')}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            ) : (
+              <div className="gws-form">
+                {activeAssistantBots.length > 0 ? (
+                  <label className="gws-field" htmlFor={`${assistantIdPrefix}-existing-bot`}>
+                    <span className="gws-label">{t('目标已有 Bot', 'Target existing Bot')}</span>
+                    <select
+                      id={`${assistantIdPrefix}-existing-bot`}
+                      className="gws-input"
+                      disabled={assistantBusy}
+                      value={assistantTargetBotKey}
+                      onChange={e => setAssistantTargetBotKey(e.target.value)}
+                    >
+                      <option value="">{t('请选择 Bot…', 'Select a Bot…')}</option>
+                      {activeAssistantBots.map(b => (
+                        <option key={`${b.deviceId}::${b.botId}`} value={`${b.deviceId}::${b.botId}`}>
+                          {b.name}
+                          {b.isPrimary ? t('（主 Bot）', ' (Primary)') : ''}
+                          {' @ '}
+                          {assistantDeviceNameById.get(b.deviceId) || b.deviceId}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <p className="gws-muted">
+                    {t('未读取到已有 Bot 列表，建议选择「选项 1」创建独立管家，或稍后在中心管理页配置。', 'No existing Bots loaded. Use Option 1 to create a dedicated assistant, or configure later in Center Admin.')}
+                  </p>
+                )}
+
+                <label className="gws-field" htmlFor={`${assistantIdPrefix}-digest`}>
+                  <span className="gws-label">{t('早晚简报时间（24 小时制）', 'Digest times (24h HH:mm)')}</span>
+                  <input
+                    id={`${assistantIdPrefix}-digest`}
+                    type="text"
+                    className="gws-input"
+                    disabled={assistantBusy}
+                    placeholder="09:00, 18:00"
+                    value={assistantDigestTimes}
+                    onChange={e => {
+                      setAssistantDigestTimes(e.target.value);
+                      setAssistantDigestDirty(true);
+                    }}
+                  />
+                </label>
+
+                <label className="gws-choice-card">
+                  <input
+                    type="checkbox"
+                    disabled={assistantBusy}
+                    checked={assistantHindsight}
+                    onChange={e => {
+                      setAssistantHindsight(e.target.checked);
+                      setAssistantHindsightDirty(true);
+                    }}
+                  />
+                  <span className="gws-choice-body">
+                    <span className="gws-choice-title">
+                      {t('允许写入该 Bot 的主 Hindsight 记忆库', 'Allow writing preferences to this Bot’s primary Hindsight bank')}
+                    </span>
+                    <span className="gws-choice-desc">
+                      {t('默认关闭，避免后台邮件内容混入主 Bot 长期记忆。', 'Off by default to keep background mail out of your main Bot’s memory.')}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+
+            {assistantError ? (
+              <InlineBanner tone="danger" role="alert" compact title={assistantError} />
+            ) : null}
+
+            <div className="gws-actions">
+              <button
+                type="button"
+                className="gws-btn is-primary is-sm"
+                disabled={assistantBusy}
+                onClick={() => void handleEnableQuickAssistant()}
+              >
+                {assistantBusy
+                  ? t('正在启用…', 'Enabling…')
+                  : t('启用主动感知', 'Enable proactive assistant')}
+              </button>
+              <button
+                type="button"
+                className="gws-btn is-ghost is-sm"
+                disabled={assistantBusy}
+                onClick={() => setAssistantDismissed(true)}
+              >
+                {t('暂不开启', 'Not now')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {onCancel ? (
           <div className="gws-actions">
             <button type="button" className="gws-btn is-ghost is-sm" onClick={onCancel}>

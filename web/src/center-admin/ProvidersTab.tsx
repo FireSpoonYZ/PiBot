@@ -10,6 +10,13 @@ import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import { openExternalUrl } from './openExternalUrl';
 import {
+  areAllVisibleSelected,
+  buildDiscoverRequest,
+  deselectVisibleModelIds,
+  saveModelsInChunks,
+  selectVisibleModelIds,
+} from './providerDiscoverHelpers';
+import {
   CaCardSkeleton,
   CaChips,
   CaConfirmDialog,
@@ -181,11 +188,13 @@ export function ProvidersTab({
   active = true,
   cacheKey = 'default',
   onOpenExternalUrl,
+  onRegisterBackHandler,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
+  onRegisterBackHandler?: (handler: () => boolean) => () => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
@@ -220,6 +229,7 @@ export function ProvidersTab({
   tRef.current = t;
   const loadGenRef = useRef(0);
   const detailLoadGenRef = useRef(0);
+  const discoverGenRef = useRef(0);
   const clearKeyGenRef = useRef(0);
   const flowGenRef = useRef(0);
 
@@ -292,6 +302,7 @@ export function ProvidersTab({
 
   // Single-layer Discover / Restore models modal state
   const [discovered, setDiscovered] = useState<Model[]>([]);
+  const [discoverTotalCount, setDiscoverTotalCount] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [discoverQuery, setDiscoverQuery] = useState('');
   const [discoverDeviceId, setDiscoverDeviceId] = useState('');
@@ -373,6 +384,7 @@ export function ProvidersTab({
     return () => {
       loadGenRef.current += 1;
       detailLoadGenRef.current += 1;
+      discoverGenRef.current += 1;
       clearKeyGenRef.current += 1;
       flowGenRef.current += 1;
     };
@@ -401,6 +413,7 @@ export function ProvidersTab({
 
   const closeProviderDetail = useCallback(() => {
     detailLoadGenRef.current += 1;
+    discoverGenRef.current += 1;
     clearKeyGenRef.current += 1;
     stopFlowPoll();
     setFlowId(null);
@@ -409,6 +422,7 @@ export function ProvidersTab({
     setDetailError('');
     setDetailNotice('');
     setDetailLoading(false);
+    setDiscoverFetching(false);
     setClearingKey(false);
     setActiveModal(null);
     setConfirmError('');
@@ -416,12 +430,24 @@ export function ProvidersTab({
     setEdit(null);
   }, [stopFlowPoll]);
 
+  const closeProviderDetailRef = useRef(closeProviderDetail);
+  closeProviderDetailRef.current = closeProviderDetail;
+
   useEffect(() => {
     if (!active || !inDetailView) return;
-    return registerOverlayBackHandler(() => {
-      closeProviderDetail();
+    const handleBack = () => {
+      closeProviderDetailRef.current();
+      return true;
+    };
+    const unregisterOverlay = registerOverlayBackHandler(() => {
+      handleBack();
     });
-  }, [active, closeProviderDetail, inDetailView]);
+    const unregisterPanel = onRegisterBackHandler?.(handleBack);
+    return () => {
+      unregisterPanel?.();
+      unregisterOverlay();
+    };
+  }, [active, inDetailView, onRegisterBackHandler]);
 
   const loadProviderDetails = useCallback(
     async (provider: Provider) => {
@@ -464,7 +490,9 @@ export function ProvidersTab({
 
   const openExistingProvider = (provider: Provider) => {
     detailLoadGenRef.current += 1;
+    discoverGenRef.current += 1;
     clearKeyGenRef.current += 1;
+    setDiscoverFetching(false);
     setClearingKey(false);
     stopFlowPoll();
     setFlowId(null);
@@ -494,7 +522,9 @@ export function ProvidersTab({
 
   const openCreateProvider = () => {
     detailLoadGenRef.current += 1;
+    discoverGenRef.current += 1;
     clearKeyGenRef.current += 1;
+    setDiscoverFetching(false);
     setClearingKey(false);
     stopFlowPoll();
     setFlowId(null);
@@ -1133,18 +1163,24 @@ export function ProvidersTab({
 
   // Discover / Restore models
   const runDiscoverFetch = async (provider: Provider, deviceId: string) => {
+    const gen = ++discoverGenRef.current;
     setDiscoverFetching(true);
     setDiscoverFormError('');
     try {
-      const res = await api.discoverModels(provider.id, {
-        ...(deviceId ? { deviceId } : {}),
-        ...(keyValue.trim() ? { apiKey: keyValue.trim() } : {}),
+      const req = buildDiscoverRequest(provider, {
+        deviceId,
+        apiKey: keyValue,
+        customJson,
       });
+      const res = await api.discoverModels(provider.id, req);
+      if (gen !== discoverGenRef.current) return;
       const activeIds = new Set(models.map(m => m.id));
       const candidates = res.models.filter(m => !activeIds.has(m.id));
+      setDiscoverTotalCount(res.models.length);
       setDiscovered(candidates);
       setSelectedIds(new Set(candidates.map(m => m.id)));
     } catch (err) {
+      if (gen !== discoverGenRef.current) return;
       setDiscoverFormError(
         errorMessage(
           err,
@@ -1152,13 +1188,50 @@ export function ProvidersTab({
         ),
       );
     } finally {
-      setDiscoverFetching(false);
+      if (gen === discoverGenRef.current) setDiscoverFetching(false);
     }
+  };
+
+  const handleSyncAntigravityModels = async () => {
+    if (!edit || edit.id !== ANTIGRAVITY_PROVIDER_ID || discoverFetching) return;
+    const target = edit;
+    const gen = ++discoverGenRef.current;
+    setDiscoverFetching(true);
+    setDetailError('');
+    setDetailNotice('');
+    try {
+      const res = await api.discoverModels(target.id, {});
+      if (gen !== discoverGenRef.current) return;
+      await loadProviderDetails(target);
+      await refreshPageData();
+      if (gen !== discoverGenRef.current) return;
+      setDetailNotice(
+        t(`已同步并保存 ${res.models.length} 个 Antigravity 模型`, `Synced and saved ${res.models.length} Antigravity models`),
+      );
+    } catch (err) {
+      if (gen !== discoverGenRef.current) return;
+      setDetailError(
+        errorMessage(
+          err,
+          t('拉取 Antigravity 模型列表失败，请确认 OAuth 已授权后重试', 'Failed to sync Antigravity models. Verify OAuth authorization and try again.'),
+        ),
+      );
+    } finally {
+      if (gen === discoverGenRef.current) setDiscoverFetching(false);
+    }
+  };
+
+  const closeDiscoverModal = () => {
+    discoverGenRef.current += 1;
+    setDiscoverFetching(false);
+    setDiscoverFormError('');
+    setActiveModal(null);
   };
 
   const openDiscoverModal = () => {
     if (!edit) return;
     setDiscovered([]);
+    setDiscoverTotalCount(0);
     setSelectedIds(new Set());
     setDiscoverQuery('');
     setDiscoverDeviceId('');
@@ -1170,6 +1243,7 @@ export function ProvidersTab({
 
   const openRestoreModal = () => {
     const candidates = removedModels.map(m => ({ ...m, removed: false, enabled: true }));
+    setDiscoverTotalCount(candidates.length);
     setDiscovered(candidates);
     setSelectedIds(new Set(candidates.map(m => m.id)));
     setDiscoverQuery('');
@@ -1179,28 +1253,54 @@ export function ProvidersTab({
 
   const confirmBatchModels = async () => {
     if (!edit || selectedIds.size === 0 || activeModal?.kind !== 'discover') return;
+    const target = edit;
     const mode = activeModal.mode;
     setDiscoverSaving(true);
     setDiscoverFormError('');
+    const chosen = discovered
+      .filter(m => selectedIds.has(m.id))
+      .map(m => ({ ...m, enabled: true, removed: false, revision: 0 }));
     try {
-      const chosen = discovered
-        .filter(m => selectedIds.has(m.id))
-        .map(m => ({ ...m, enabled: true, removed: false, revision: 0 }));
-      await api.createModelsBatch(edit.id, { models: chosen });
-      if (!edit.configured) {
-        const updated = await api.putProvider(edit.id, {
-          expectedRevision: edit.revision,
-          value: { ...edit, configured: true },
+      const { savedIds, failedError } = await saveModelsInChunks(chosen, batch =>
+        api.createModelsBatch(target.id, { models: batch }),
+      );
+      if (failedError) {
+        if (savedIds.length > 0) {
+          const savedSet = new Set(savedIds);
+          setDiscovered(prev => prev.filter(m => !savedSet.has(m.id)));
+          setSelectedIds(prev => {
+            const next = new Set(prev);
+            for (const id of savedSet) next.delete(id);
+            return next;
+          });
+          void loadProviderDetails(target).catch(() => {});
+          void refreshPageData().catch(() => {});
+        }
+        const baseMsg = errorMessage(
+          failedError,
+          t('批量保存模型失败，请检查所选模型后重试', 'Failed to save selected models. Please try again.'),
+        );
+        setDiscoverFormError(
+          savedIds.length > 0
+            ? t(`已保存前 ${savedIds.length} 个模型，剩余模型保存失败：${baseMsg}`, `Saved the first ${savedIds.length} models, but remaining models failed: ${baseMsg}`)
+            : baseMsg,
+        );
+        return;
+      }
+      if (!target.configured) {
+        const updated = await api.putProvider(target.id, {
+          expectedRevision: target.revision,
+          value: { ...target, configured: true },
         });
         setEdit(updated);
       }
       setActiveModal(null);
-      await loadProviderDetails(edit);
+      await loadProviderDetails(target);
       await refreshPageData();
       setDetailNotice(
         mode === 'restore'
-          ? t(`已恢复 ${chosen.length} 个模型`, `Restored ${chosen.length} models`)
-          : t(`已添加 ${chosen.length} 个模型`, `Added ${chosen.length} models`),
+          ? t(`已恢复并保存 ${chosen.length} 个模型`, `Restored and saved ${chosen.length} models`)
+          : t(`已保存 ${chosen.length} 个模型`, `Saved ${chosen.length} models`),
       );
     } catch (err) {
       setDiscoverFormError(
@@ -1238,6 +1338,16 @@ export function ProvidersTab({
     if (!q) return discovered;
     return discovered.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q));
   }, [discoverQuery, discovered]);
+
+  const filteredDiscoveredIds = useMemo(
+    () => filteredDiscovered.map(m => m.id),
+    [filteredDiscovered],
+  );
+
+  const allVisibleDiscoveredSelected = useMemo(
+    () => areAllVisibleSelected(selectedIds, filteredDiscoveredIds),
+    [filteredDiscoveredIds, selectedIds],
+  );
 
   const currentThinking: ThinkingChoice = (modelConfig?.global.thinkingLevel as ThinkingChoice | undefined) ?? '';
   const currentThinkingLabel =
@@ -1556,6 +1666,8 @@ export function ProvidersTab({
       </section>
     );
 
+    const isAntigravityProvider = edit.id === ANTIGRAVITY_PROVIDER_ID;
+
     const modelsSection = !creating ? (
       <section className="ca-section">
         <div className="ca-section-head ca-models-head">
@@ -1564,8 +1676,23 @@ export function ProvidersTab({
               {t(`模型列表 (${enabledCount}/${models.length})`, `Models (${enabledCount}/${models.length})`)}
             </h3>
             <div className="ca-inline-row ca-models-actions">
-              <button type="button" className="ca-btn ca-btn-sm" onClick={openDiscoverModal}>
-                {t('拉取模型', 'Discover models')}
+              <button
+                type="button"
+                className="ca-btn ca-btn-sm"
+                disabled={isAntigravityProvider && discoverFetching}
+                onClick={() => {
+                  if (isAntigravityProvider) void handleSyncAntigravityModels();
+                  else openDiscoverModal();
+                }}
+              >
+                {isAntigravityProvider ? (
+                  <LabelStack
+                    active={discoverFetching ? t('拉取中…', 'Fetching…') : t('拉取模型', 'Discover models')}
+                    labels={[t('拉取模型', 'Discover models'), t('拉取中…', 'Fetching…')]}
+                  />
+                ) : (
+                  t('拉取模型', 'Discover models')
+                )}
               </button>
               {removedModels.length > 0 && (
                 <button type="button" className="ca-btn ca-btn-sm" onClick={openRestoreModal}>
@@ -2400,102 +2527,19 @@ export function ProvidersTab({
         open={discoverModalOpen}
         onOpenChange={open => {
           if (!open && !discoverSaving) {
-            setDiscoverFormError('');
-            setActiveModal(null);
+            closeDiscoverModal();
           }
         }}
         title={discoverMode === 'restore' ? t('恢复已移除的模型', 'Restore removed models') : t('从 /v1/models 拉取模型', 'Discover models from /v1/models')}
         variant="modal"
-      >
-        <div className="ca-form-stack">
-          {discoverFormError && <CaNotice tone="danger">{discoverFormError}</CaNotice>}
-
-          <div className="ca-inline-row ca-wrap ca-discover-bar">
-            <input
-              type="search"
-              className="ca-input ca-discover-search"
-              placeholder={t('筛选模型…', 'Filter models…')}
-              value={discoverQuery}
-              onChange={e => setDiscoverQuery(e.target.value)}
-            />
-            {discoverMode === 'remote' && (
-              <>
-                <select
-                  className="ca-select ca-discover-device"
-                  disabled={discoverFetching || discoverSaving}
-                  value={discoverDeviceId}
-                  onChange={e => {
-                    const nextDev = e.target.value;
-                    setDiscoverDeviceId(nextDev);
-                    if (edit) void runDiscoverFetch(edit, nextDev);
-                  }}
-                >
-                  <option value="">{t('中心直连拉取', 'Direct from center')}</option>
-                  {devices
-                    .filter(d => d.online)
-                    .map(d => (
-                      <option key={d.deviceId} value={d.deviceId}>
-                        {t(`经 ${d.name} 探测`, `Via ${d.name}`)}
-                      </option>
-                    ))}
-                </select>
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  disabled={discoverFetching || discoverSaving || !edit}
-                  onClick={() => edit && void runDiscoverFetch(edit, discoverDeviceId)}
-                >
-                  <LabelStack
-                    active={discoverFetching ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
-                    labels={[t('重新拉取', 'Refetch'), t('拉取中…', 'Fetching…')]}
-                  />
-                </button>
-              </>
-            )}
-          </div>
-
-          <div className="ca-model-list">
-            {discoverFetching && discovered.length === 0 ? (
-              <div className="ca-empty">{t('正在读取可用模型…', 'Loading available models…')}</div>
-            ) : filteredDiscovered.length === 0 ? (
-              <div className="ca-empty">{t('暂无可添加的新模型', 'No new models to add')}</div>
-            ) : (
-              filteredDiscovered.map(item => {
-                const checked = selectedIds.has(item.id);
-                return (
-                  <label key={item.id} className="ca-model-option">
-                    <div className="ca-inline-row">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={discoverSaving}
-                        onChange={e => {
-                          const next = new Set(selectedIds);
-                          if (e.target.checked) next.add(item.id);
-                          else next.delete(item.id);
-                          setSelectedIds(next);
-                        }}
-                      />
-                      <div>
-                        <div>{item.name || item.id}</div>
-                        <div className="ca-muted ca-mono">{item.id}</div>
-                      </div>
-                    </div>
-                  </label>
-                );
-              })
-            )}
-          </div>
-
-          <div className="ca-form-actions">
+        bodyClassName="ca-dialog-body-flex"
+        footer={
+          <>
             <button
               type="button"
               className="ca-btn"
               disabled={discoverSaving}
-              onClick={() => {
-                setDiscoverFormError('');
-                setActiveModal(null);
-              }}
+              onClick={closeDiscoverModal}
             >
               {t('取消', 'Cancel')}
             </button>
@@ -2508,10 +2552,135 @@ export function ProvidersTab({
               {discoverSaving
                 ? t('保存中…', 'Saving…')
                 : discoverMode === 'restore'
-                  ? t(`恢复所选 (${selectedIds.size})`, `Restore selected (${selectedIds.size})`)
-                  : t(`添加所选 (${selectedIds.size})`, `Add selected (${selectedIds.size})`)}
+                  ? t(`恢复并保存 (${selectedIds.size})`, `Restore & save (${selectedIds.size})`)
+                  : t(`保存所选 (${selectedIds.size})`, `Save selected (${selectedIds.size})`)}
             </button>
+          </>
+        }
+      >
+        {discoverFormError && <CaNotice tone="danger">{discoverFormError}</CaNotice>}
+
+        <div className="ca-inline-row ca-wrap ca-discover-bar">
+          <input
+            type="search"
+            className="ca-input ca-discover-search"
+            placeholder={t('筛选模型…', 'Filter models…')}
+            value={discoverQuery}
+            onChange={e => setDiscoverQuery(e.target.value)}
+          />
+          {discoverMode === 'remote' && (
+            <>
+              <select
+                className="ca-select ca-discover-device"
+                disabled={discoverFetching || discoverSaving}
+                value={discoverDeviceId}
+                onChange={e => {
+                  const nextDev = e.target.value;
+                  setDiscoverDeviceId(nextDev);
+                  if (edit) void runDiscoverFetch(edit, nextDev);
+                }}
+              >
+                <option value="">{t('中心直连拉取', 'Direct from center')}</option>
+                {devices
+                  .filter(d => d.online)
+                  .map(d => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {t(`经 ${d.name} 探测`, `Via ${d.name}`)}
+                    </option>
+                  ))}
+              </select>
+              <button
+                type="button"
+                className="ca-btn ca-btn-sm"
+                disabled={discoverFetching || discoverSaving || !edit}
+                onClick={() => edit && void runDiscoverFetch(edit, discoverDeviceId)}
+              >
+                <LabelStack
+                  active={discoverFetching ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
+                  labels={[t('重新拉取', 'Refetch'), t('拉取中…', 'Fetching…')]}
+                />
+              </button>
+            </>
+          )}
+        </div>
+
+        {discovered.length > 0 && (
+          <div className="ca-discover-summary">
+            <span className="ca-muted ca-num">
+              {discoverQuery.trim()
+                ? t(`已选 ${selectedIds.size} / ${discovered.length}（当前匹配 ${filteredDiscovered.length}）`, `Selected ${selectedIds.size} / ${discovered.length} (${filteredDiscovered.length} matching)`)
+                : t(`已选 ${selectedIds.size} / ${discovered.length}`, `Selected ${selectedIds.size} / ${discovered.length}`)}
+            </span>
+            <div className="ca-inline-row">
+              <button
+                type="button"
+                className="ca-btn ca-btn-ghost ca-btn-sm"
+                disabled={discoverSaving || filteredDiscoveredIds.length === 0}
+                onClick={() =>
+                  setSelectedIds(prev =>
+                    allVisibleDiscoveredSelected
+                      ? deselectVisibleModelIds(prev, filteredDiscoveredIds)
+                      : selectVisibleModelIds(prev, filteredDiscoveredIds),
+                  )
+                }
+              >
+                {allVisibleDiscoveredSelected
+                  ? discoverQuery.trim()
+                    ? t('取消选中匹配', 'Deselect matches')
+                    : t('取消全选', 'Deselect all')
+                  : discoverQuery.trim()
+                    ? t('全选匹配', 'Select matches')
+                    : t('全选', 'Select all')}
+              </button>
+              {discoverQuery.trim() && (
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-ghost ca-btn-sm"
+                  disabled={discoverSaving || selectedIds.size === 0}
+                  onClick={() => setSelectedIds(new Set())}
+                >
+                  {t('清空已选', 'Clear all')}
+                </button>
+              )}
+            </div>
           </div>
+        )}
+
+        <div className="ca-model-list ca-discover-list">
+          {discoverFetching && discovered.length === 0 ? (
+            <div className="ca-empty">{t('正在读取可用模型…', 'Loading available models…')}</div>
+          ) : discovered.length === 0 ? (
+            <div className="ca-empty">
+              {discoverMode === 'remote' && discoverTotalCount > 0
+                ? t(`已拉取 ${discoverTotalCount} 个模型，均已添加到当前服务商`, `Fetched ${discoverTotalCount} models; all are already added to this provider`)
+                : t('暂无可添加的新模型', 'No new models to add')}
+            </div>
+          ) : filteredDiscovered.length === 0 ? (
+            <div className="ca-empty">{t('没有匹配的模型', 'No matching models')}</div>
+          ) : (
+            filteredDiscovered.map(item => {
+              const checked = selectedIds.has(item.id);
+              return (
+                <label key={item.id} className="ca-model-option ca-discover-option">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={discoverSaving}
+                    onChange={e => {
+                      const next = new Set(selectedIds);
+                      if (e.target.checked) next.add(item.id);
+                      else next.delete(item.id);
+                      setSelectedIds(next);
+                    }}
+                  />
+                  <span className="ca-model-option-main">
+                    <span>{item.name || item.id}</span>
+                    <span className="ca-muted ca-mono">{item.id}</span>
+                  </span>
+                </label>
+              );
+            })
+          )}
         </div>
       </CaModal>
 

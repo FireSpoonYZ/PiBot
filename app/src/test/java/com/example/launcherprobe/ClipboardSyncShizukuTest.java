@@ -257,7 +257,7 @@ public class ClipboardSyncShizukuTest {
     }
 
     @Test
-    public void suppressesPreExistingBaselineAndFiltersOwnShowerSensitiveAndOversizedClips() {
+    public void skipsPreExistingOwnShowerAndOversizedClipsButAllowsSensitiveText() {
         FakeClipboardBackend backend = new FakeClipboardBackend();
         backend.primaryClip = plainClip("old", "pre-existing-before-online", 1_000L);
         RecordingCallback callback = new RecordingCallback();
@@ -303,15 +303,15 @@ public class ClipboardSyncShizukuTest {
         assertEquals(1, callback.changeCount.get());
         assertNull(service.readFilteredPlainText());
 
-        // OS-sensitive clip must be rejected.
-        ClipData sensitive = plainClip("pw", "hunter2", 4_000L);
+        // A sensitive plain-text clip is still captured.
+        ClipData sensitive = plainClip("test-code", "123456", 4_000L);
         PersistableBundle extras = new PersistableBundle();
         extras.putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true);
         sensitive.getDescription().setExtras(extras);
         backend.primaryClip = sensitive;
         backend.fireChanged();
-        assertEquals(1, callback.changeCount.get());
-        assertNull(service.readFilteredPlainText());
+        assertEquals(2, callback.changeCount.get());
+        assertEquals("123456", service.readFilteredPlainText());
 
         // Oversized > 64 KiB UTF-8 clip must be rejected.
         backend.primaryClip = plainClip("big", "x".repeat(ClipboardSyncController.MAX_TEXT_BYTES + 1), 5_000L);

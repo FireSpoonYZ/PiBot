@@ -23,6 +23,23 @@ export function isRootScreen(screen: string): screen is RootScreen {
   return (ROOT_SCREENS as readonly string[]).includes(screen);
 }
 
+/**
+ * Only 'hub' ("对话") exits/backgrounds the app when hardware Back reaches stack bottom.
+ * Other root screens ('tasks', 'board', 'settings') return to 'hub' instead of exiting.
+ */
+export function isExitRootScreen(screen: string): boolean {
+  return screen === 'hub';
+}
+
+function cloneNavEntry<S extends string>(entry: NavEntry<S>): NavEntry<S> {
+  return {
+    screen: entry.screen,
+    ...(entry.botKey !== undefined ? { botKey: entry.botKey } : {}),
+    ...(entry.settingsPage !== undefined ? { settingsPage: entry.settingsPage } : {}),
+    ...(entry.taskId !== undefined ? { taskId: entry.taskId } : {}),
+  };
+}
+
 export function createNavStack<S extends string>(
   root: S,
   extra?: Omit<NavEntry<S>, 'screen'>,
@@ -128,6 +145,21 @@ export function resetNavStack<S extends string>(
   extra?: Omit<NavEntry<S>, 'screen'>,
 ): NavEntry<S>[] {
   return [{ screen: root, ...(extra ?? {}) }];
+}
+
+/**
+ * Reset the entire stack to a clean, cycle-free chain of entries
+ * (e.g. notification launch resetting to [{ screen: 'hub' }, { screen: 'chat', botKey }]).
+ */
+export function resetNavStackChain<S extends string>(
+  root: NavEntry<S>,
+  ...rest: NavEntry<S>[]
+): NavEntry<S>[] {
+  let stack: NavEntry<S>[] = [cloneNavEntry(root)];
+  for (const entry of rest) {
+    stack = pushNavEntry(stack, cloneNavEntry(entry));
+  }
+  return stack;
 }
 
 /**

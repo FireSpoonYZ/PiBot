@@ -21,6 +21,7 @@ import { messageError } from './message-protocol.js';
 export const GOOGLE_WORKSPACE_MCP_INSTALLATION_ID = 'builtin.google-workspace';
 export const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
 export const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
+export const GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE = 'google-workspace-assistant';
 export const GOOGLE_WORKSPACE_PRIVACY_DOC_KIND = 'host.google-workspace-privacy';
 export const GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE = 'GOOGLE_WORKSPACE_PRIVACY_BLOCKED';
 export const GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE = 'GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE';
@@ -28,6 +29,13 @@ export const GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE = 'GOOGLE_WORKSPACE_PRIVA
 export const TRUSTED_HOST_SOURCE_TYPES = Object.freeze([
   'webhook',
   GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+  GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE,
+]);
+
+export const PRIVATE_HINDSIGHT_WRITE_OPERATIONS = new Set([
+  'hindsight:retainMemory',
+  'hindsight:correctMemory',
+  'hindsight:retryMemory',
 ]);
 
 const RESET_ENTRY_KIND = ResetEntry.kind;
@@ -228,7 +236,11 @@ export function isGoogleWorkspaceCapability(capability) {
 
 /** Host 侧合法的自动化 sourceType 白名单。 */
 export function isTrustedHostSourceType(value) {
-  return value === 'webhook' || value === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE;
+  return (
+    value === 'webhook' ||
+    value === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE ||
+    value === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE
+  );
 }
 
 /** 受信数据边界字面量校验。 */
@@ -236,8 +248,38 @@ export function isTrustedDataBoundary(value) {
   return value === GOOGLE_WORKSPACE_DATA_BOUNDARY;
 }
 
+function isTrustedGoogleWorkspaceSourceType(value) {
+  return (
+    value === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE ||
+    value === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE
+  );
+}
+
 /**
- * 识别由 Host 内部可信规则分发器写入的 Google Workspace 规则条目。
+ * 仅允许已绑定主动 Google 助手的 Bot 在未启用 sharedMemory 时向自身 primary Hindsight bank
+ * 执行显式写操作（retainMemory / correctMemory / retryMemory）；任何异常或缺失均 fail-closed。
+ */
+export function isPrivateHindsightWriteAllowed({
+  operation,
+  botId,
+  targetKind,
+  sharedMemory,
+  canUsePrivateHindsightBank,
+} = {}) {
+  if (!PRIVATE_HINDSIGHT_WRITE_OPERATIONS.has(operation)) return false;
+  if (typeof canUsePrivateHindsightBank !== 'function') return false;
+  if (typeof botId !== 'string' || botId.trim() === '') return false;
+  if (targetKind !== 'primary') return false;
+  if (sharedMemory === true) return false;
+  try {
+    return canUsePrivateHindsightBank(botId) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 识别由 Host 内部可信规则/主动助手分发器写入的 Google Workspace 条目。
  * 绝不检查 entry.model 文本或 webhook payload JSON 内容。
  */
 export function isTrustedGoogleWorkspaceRuleEntry(entry) {
@@ -255,13 +297,13 @@ export function isTrustedGoogleWorkspaceRuleEntry(entry) {
   }
   if (
     data.attribution?.kind === 'host' &&
-    data.attribution?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE
+    isTrustedGoogleWorkspaceSourceType(data.attribution?.sourceType)
   ) {
     return true;
   }
   if (
     data.turn?.sender?.kind === 'host' &&
-    data.turn?.sender?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE
+    isTrustedGoogleWorkspaceSourceType(data.turn?.sender?.sourceType)
   ) {
     return true;
   }
@@ -567,8 +609,23 @@ function recordMarkOnDoc(doc, {
  *   bot-learning 与模型管理工具查询/强制隔离边界；
  * - filterConversationEntriesForLearning：供 bot-learning.js 精准裁剪学习快照。
  */
-export function createGoogleWorkspacePrivacy({ getHarness, context, documents = {} } = {}) {
+export function createGoogleWorkspacePrivacy({
+  getHarness,
+  context,
+  documents = {},
+  canUsePrivateHindsightBank = null,
+} = {}) {
   const BotSessionStateDoc = documents?.BotSessionState ?? null;
+
+  function canUsePrivateHindsightBankForBot(botId) {
+    if (typeof canUsePrivateHindsightBank !== 'function') return false;
+    if (typeof botId !== 'string' || botId.trim() === '') return false;
+    try {
+      return canUsePrivateHindsightBank(botId) === true;
+    } catch {
+      return false;
+    }
+  }
 
   function requireHarness() {
     const harness = typeof getHarness === 'function' ? getHarness() : null;
@@ -857,9 +914,29 @@ export function createGoogleWorkspacePrivacy({ getHarness, context, documents = 
     return inspection.tainted === true;
   }
 
-  async function assertExportAllowed(conversationId, { operation = 'export', callContext = context } = {}) {
+  async function assertExportAllowed(
+    conversationId,
+    {
+      operation = 'export',
+      callContext = context,
+      botId = null,
+      targetKind = null,
+      sharedMemory = false,
+    } = {},
+  ) {
     const inspection = await inspectConversationPrivacy(conversationId, { callContext });
     if (inspection.tainted) {
+      if (
+        isPrivateHindsightWriteAllowed({
+          operation,
+          botId,
+          targetKind,
+          sharedMemory,
+          canUsePrivateHindsightBank,
+        })
+      ) {
+        return { allowed: true, exception: 'proactive-private-hindsight' };
+      }
       throw messageError(
         GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
         `Blocked ${operation}: Google Workspace results in this conversation cannot be exported to learning, long-term memory, or cross-Bot skills by default.`,
@@ -907,6 +984,7 @@ export function createGoogleWorkspacePrivacy({ getHarness, context, documents = 
     syncTrustedRuleEntries,
     inspectConversationPrivacy,
     isConversationTainted,
+    canUsePrivateHindsightBank: canUsePrivateHindsightBankForBot,
     assertExportAllowed,
     filterConversationEntriesForLearning,
   };

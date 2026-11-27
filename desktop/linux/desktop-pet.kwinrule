@@ -1,0 +1,14 @@
+[PiBot desktop pet]
+Description=PiBot desktop pet
+wmclass=pibot
+wmclassmatch=1
+title=PiBot
+titlematch=1
+above=true
+aboverule=2
+skiptaskbar=true
+skiptaskbarrule=2
+skippager=true
+skippagerrule=2
+skipswitcher=true
+skipswitcherrule=2

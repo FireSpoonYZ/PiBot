@@ -1,3 +1,14 @@
+import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from '../../center-contract/antigravity.js';
+
+/** UI hint only; the Host enforces the same restriction against authoritative history. */
+export function hasAntigravityHistory(modelRef: string | null | undefined, entries: readonly unknown[], cutoff = 0): boolean {
+  if (modelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/')) return true;
+  const records = entries.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object');
+  const resetId = records.reduce((last, entry) => entry.kind === 'pi.reset' ? Math.max(last, Number(entry.id) || 0) : last, cutoff);
+  return records.some(entry => Number(entry.id) > resetId && Array.isArray(entry.model)
+    && entry.model.some(message => message?.provider === ANTIGRAVITY_PROVIDER_ID || message?.api === ANTIGRAVITY_API));
+}
+
 export function isBotMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'BOT_NOT_FOUND';
 }
@@ -20,7 +31,7 @@ export function isDefiniteSendFailure(error: unknown): boolean {
   if (outcome === 'not-sent') return true;
   return outcome === 'responded' && new Set([
     'INVALID_ARGUMENT', 'INVALID_CWD', 'BOT_NOT_FOUND', 'BOT_ARCHIVED',
-    'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'MODEL_NO_VISION', 'REQUEST_CONFLICT',
+    'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'MODEL_NO_VISION', 'AGY_HISTORY_CHANGED', 'REQUEST_CONFLICT',
   ]).has(code ?? '');
 }
 

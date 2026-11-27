@@ -25,6 +25,7 @@
         "postRemoveScript": "../linux/e-launcher-host.postrm",
         "files": {
           "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service",
+          "/usr/share/pibot/desktop-pet.kwinrule": "../linux/desktop-pet.kwinrule",
           "/usr/lib/pibot/pibot-hostctl": "../linux/pibot-hostctl",
           "/etc/sudoers.d/pibot-hostctl": "../linux/pibot.sudoers"
         },
@@ -45,7 +46,8 @@
           "(ffmpeg-free or ffmpeg)"
         ],
         "files": {
-          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
+          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service",
+          "/usr/share/pibot/desktop-pet.kwinrule": "../linux/desktop-pet.kwinrule"
         },
         "desktopTemplate": "../linux/pibot.desktop"
       }

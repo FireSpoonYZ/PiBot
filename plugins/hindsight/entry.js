@@ -63,7 +63,8 @@ export function createPlugin({ installationId, version, dataDir, host }) {
       const getBotPolicy = (id) => {
         if (id !== botId || !active || closed) return { enabled: false, canWrite: false };
         try { host.assertCapabilityAllowed(botId, installationId); } catch { return { enabled: false, canWrite: false }; }
-        return { enabled: true, canRead: true, canWrite: mode === 'read-write', mode, retentionFloor: policy.floor };
+        return { enabled: true, canRead: true, canWrite: mode === 'read-write', mode, retentionFloor: policy.floor,
+          autoRecall: host.isAntigravityBot?.(botId) !== true };
       };
       const localHost = Object.create(host.host);
       Object.defineProperty(localHost, 'dataRoot', { value: botDataDir });
@@ -122,12 +123,8 @@ export function createPlugin({ installationId, version, dataDir, host }) {
             throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
           }
           check();
-          if (WRITE_ACTIONS.has(operation) && typeof host.dataPrivacy?.assertExportAllowed === 'function') {
-            await host.dataPrivacy.assertExportAllowed(api.conversationId, {
-              operation: 'hindsight:' + operation,
-              callContext: context,
-            });
-          }
+          // Google Workspace 写隐私门控（含主动助手绑定 Bot 私有 primary bank 例外）由
+          // memory.fromTool 在 resolveBotIdentity 与 target 解析后基于权威身份统一执行。
           return memory.fromTool(api, context, operation, input);
         },
         async runPiTool(api, _context, isWrite, runFn) {

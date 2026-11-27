@@ -170,7 +170,7 @@ const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
 const LEGACY_HOST_SOURCE_TYPES = new Set(['webhook', 'google-workspace-rule']);
-const EXTENDED_HOST_SOURCE_TYPES = new Set(['webhook', 'google-workspace-rule', 'schedule', 'task_dispatch']);
+const EXTENDED_HOST_SOURCE_TYPES = new Set(['webhook', 'google-workspace-rule', 'google-workspace-assistant', 'schedule', 'task_dispatch']);
 const ATTRIBUTION_STRING_KEYS = new Set([
   'botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt',
 ]);
@@ -899,6 +899,9 @@ function downgradeAttributionForPeer(attribution, allowHostSources) {
   if (attribution.sourceType === 'task_dispatch') {
     return { ...attribution, sourceType: 'webhook' };
   }
+  if (attribution.sourceType === 'google-workspace-assistant') {
+    return { ...attribution, sourceType: 'google-workspace-rule' };
+  }
   return attribution;
 }
 
@@ -908,9 +911,9 @@ function downgradeAttributionForPeer(attribution, allowHostSources) {
  *  - durableWaits off: omits state.durableWaits and message/tool durableWait
  *    flags so legacy peers neither reject unknown fields nor receive live-only
  *    authority they cannot handle.
- *  - hostSources off: maps schedule -> legacy host (no sourceType) and
- *    task_dispatch -> webhook, while preserving google-workspace-rule and
- *    webhook markers expected on D.
+ *  - hostSources off: maps schedule -> legacy host (no sourceType),
+ *    task_dispatch -> webhook, and google-workspace-assistant -> google-workspace-rule,
+ *    while preserving google-workspace-rule and webhook markers expected on D.
  *  - googleSetupRevision off: omits the setup revision invalidation signal.
  */
 export function projectLiveSnapshotForPeer(snapshot, peerExtensions) {

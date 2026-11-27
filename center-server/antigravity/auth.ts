@@ -15,7 +15,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { stripVTControlCharacters } from "node:util";
 import { AGENT_NAME, ensureIsolatedProfile, type ResolvedProfile } from "./profile.ts";
-import { AcpAuthError, AcpConnection } from "./vendor/acp/connection.ts";
+import { AcpAuthError, AcpConnection, buildAcpChildEnv } from "./vendor/acp/connection.ts";
 
 const LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_OUTPUT_CHARS = 32 * 1024;
@@ -196,7 +196,6 @@ export async function probeAcpAuth(
 		onUpdate: () => {},
 		onExit: () => {},
 		mcpServers: () => [],
-		permissions: () => "deny",
 	});
 
 	const onAbort = (): void => {
@@ -267,6 +266,7 @@ export async function loginAcpProfile(
 			shell: false,
 			detached: process.platform !== "win32",
 			windowsHide: true,
+			env: buildAcpChildEnv(),
 		});
 	} catch (err) {
 		clearTimeout(timeoutTimer);

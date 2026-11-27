@@ -1,8 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   Archive,
   ArrowLeft,
   AudioLines,
+  ChevronsDownUp,
   ChevronsUpDown,
   ClipboardCheck,
   Clock,
@@ -12,6 +13,7 @@ import {
   Globe,
   LayoutDashboard,
   Loader2,
+  MessageSquareOff,
   PanelLeft,
   ScanLine,
   Server,
@@ -33,7 +35,15 @@ import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../../host-core/desktop-client.js';
 import type { DevicesDirectoryItem } from '../../../host-core/index.js';
 import { CenterAdminPanel, type CenterTransport } from '../center-admin';
-import { humanizeError, useAction, useCollapseToolOutput, useHideToolOutput, useText } from '../ui';
+import {
+  humanizeError,
+  useAction,
+  useCollapseBotDm,
+  useCollapseToolOutput,
+  useHideBotDm,
+  useHideToolOutput,
+  useText,
+} from '../ui';
 import { useNotice, type NoticeTone } from '../notice';
 import { useConnectionPhaseContext } from '../connection';
 import { LabelStack, ReservedSlot, Skeleton } from '../layout';
@@ -41,7 +51,7 @@ import { uuid } from '../hub/shared';
 import { Badge, Disclosure, Row, Section } from '../bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from '../ClientUpdateSection';
 import { ClipboardSyncSection } from '../ClipboardSyncSection';
-import { ConfirmDialog, ListRow, Switch, type ListRowStatusTone } from '../components/ui';
+import { ConfirmDialog, ListRow, Switch, registerOverlayBackHandler, type ListRowStatusTone } from '../components/ui';
 import type { CenterAdminTab, HubSettingsPage } from './types';
 
 export interface SettingsCenterAdminScreenProps {
@@ -64,6 +74,12 @@ export function SettingsCenterAdminScreen({
   const t = useText();
   const centerConn = useCenterConnection();
   const [everMountedAdmin, setEverMountedAdmin] = useState(() => centerConn.ready || centerConn.displayReady);
+  const centerAdminBackRef = useRef<(() => boolean) | null>(null);
+
+  const handleHeaderBack = useCallback(() => {
+    if (centerAdminBackRef.current?.()) return;
+    onBack();
+  }, [onBack]);
 
   useEffect(() => {
     if (centerConn.ready || centerConn.displayReady) {
@@ -86,7 +102,7 @@ export function SettingsCenterAdminScreen({
         <button
           type="button"
           className="grok-floating-circle-btn"
-          onClick={onBack}
+          onClick={handleHeaderBack}
           aria-label={t('返回', 'Back')}
         >
           <ArrowLeft size={20} />
@@ -144,6 +160,7 @@ export function SettingsCenterAdminScreen({
                 onOpenExternalUrl={url => openCenterUrl(url)}
                 onConfigureBot={onConfigureBot}
                 onStartGoogleSetupWizard={onStartGoogleSetupWizard}
+                backHandlerRef={centerAdminBackRef}
               />
             </div>
           )}
@@ -219,6 +236,7 @@ export function HubSettingsView({
   const previousPage = useRef<HubSettingsPage | null>(null);
   const pendingScrollRestoreRef = useRef<{ page: HubSettingsPage; targetTop: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
+  const clipboardBackRef = useRef<(() => boolean) | null>(null);
 
   const [editingCenter, setEditingCenter] = useState(false);
   const [settingsConfirm, setSettingsConfirm] = useState<
@@ -247,6 +265,8 @@ export function HubSettingsView({
   const [remoteApiReady, setRemoteApiReady] = useState(false);
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
+  const [hideBotDm, setHideBotDm] = useHideBotDm();
+  const [collapseBotDm, setCollapseBotDm] = useCollapseBotDm();
 
   const pageHydrated =
     page === 'overview'
@@ -263,9 +283,12 @@ export function HubSettingsView({
     const previous = previousPage.current;
     if (previous === page) return;
     previousPage.current = page;
-    if (previous === 'connection') {
+    if (previous === 'connection' || page !== 'connection') {
+      if (previous === 'connection') centerConn.setToken('');
       setEditingCenter(false);
-      centerConn.setToken('');
+    }
+    if (previous === 'manual' || page !== 'manual') {
+      setAddingRemote(false);
     }
     setSettingsConfirm(null);
     const targetTop = scrollByPage.current[page] ?? 0;
@@ -420,6 +443,51 @@ export function HubSettingsView({
   const hasCenterConfigured = centerConn.hasSavedCenter || centerConn.displayReady;
   const showCenterForm = !hasCenterConfigured || editingCenter;
   const showCenterActions = hasCenterConfigured && !editingCenter;
+
+  useEffect(() => {
+    if (!hasCenterConfigured && editingCenter) {
+      setEditingCenter(false);
+    }
+  }, [hasCenterConfigured, editingCenter]);
+
+  const isEditingCenterSub = page === 'connection' && editingCenter && hasCenterConfigured;
+  const isAddingRemoteSub = page === 'manual' && addingRemote;
+
+  const handleSettingsSubStateBack = useCallback((): boolean => {
+    if (isEditingCenterSub) {
+      if (!centerConn.busy) {
+        setEditingCenter(false);
+        centerConn.setToken('');
+      }
+      return true;
+    }
+    if (isAddingRemoteSub) {
+      if (!action.busy) {
+        setAddingRemote(false);
+      }
+      return true;
+    }
+    if (page === 'clipboard' && clipboardBackRef.current?.()) {
+      return true;
+    }
+    return false;
+  }, [isEditingCenterSub, centerConn.busy, centerConn.setToken, isAddingRemoteSub, action.busy, page]);
+
+  const handleSettingsSubStateBackRef = useRef(handleSettingsSubStateBack);
+  handleSettingsSubStateBackRef.current = handleSettingsSubStateBack;
+
+  const hasSettingsInlineSubState = isEditingCenterSub || isAddingRemoteSub;
+  useEffect(() => {
+    if (!hasSettingsInlineSubState) return;
+    return registerOverlayBackHandler(() => {
+      handleSettingsSubStateBackRef.current();
+    });
+  }, [hasSettingsInlineSubState]);
+
+  const handleHeaderBack = useCallback(() => {
+    if (handleSettingsSubStateBackRef.current()) return;
+    onBack();
+  }, [onBack]);
   const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url || (hasCenterConfigured ? centerConn.url : '');
   const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready || centerConn.displayReady ? centerConn.deviceId : '');
   const centerClientId = centerConn.status?.clientId;
@@ -549,7 +617,7 @@ export function HubSettingsView({
           <button
             type="button"
             className="grok-floating-circle-btn"
-            onClick={onBack}
+            onClick={handleHeaderBack}
             aria-label={t('返回', 'Back')}
           >
             <ArrowLeft size={20} />
@@ -577,7 +645,7 @@ export function HubSettingsView({
           scrollByPage.current[page] = top;
         }}
       >
-        {page === 'clipboard' && <ClipboardSyncSection variant="mobile" />}
+        {page === 'clipboard' && <ClipboardSyncSection variant="mobile" backHandlerRef={clipboardBackRef} />}
         {page === 'connection' && (
           <>
             <Section>
@@ -918,7 +986,7 @@ export function HubSettingsView({
             <ListRow
               leading={<Code2 />}
               title={t('隐藏工具输出', 'Hide tool output')}
-              subtitle={t('只显示回复与待操作请求', 'Show only replies and action prompts')}
+              subtitle={t('在主聊天与 Bot 私聊中隐藏工具调用与思考过程，只显示回复与待操作请求', 'Hide tool calls and thinking in main chat and Bot DMs; show only replies and action prompts')}
               trailing={(
                 <Switch
                   label={t('隐藏工具输出', 'Hide tool output')}
@@ -931,7 +999,7 @@ export function HubSettingsView({
               <ListRow
                 leading={<Code2 />}
                 title={t('默认折叠工具输出', 'Collapse tool output')}
-                subtitle={t('保留工具摘要，点击可展开详情', 'Show tool summaries that expand on tap')}
+                subtitle={t('在主聊天与 Bot 私聊中默认折叠工具摘要，点击可展开详情', 'Collapse tool summaries by default in main chat and Bot DMs; tap to expand')}
                 trailing={(
                   <Switch
                     label={t('默认折叠工具输出', 'Collapse tool output')}
@@ -941,6 +1009,36 @@ export function HubSettingsView({
                 )}
               />
             )}
+            <ListRow
+              leading={<MessageSquareOff />}
+              title={t('隐藏 Bot 间私聊', 'Hide bot-to-bot DMs')}
+              subtitle={t('不在对话框显示与其他 Bot 的私聊，可在 Bot 资料页查看', 'Keep peer bot DMs out of chat; still viewable in bot profile')}
+              trailing={(
+                <Switch
+                  label={t('隐藏 Bot 间私聊', 'Hide bot-to-bot DMs')}
+                  checked={hideBotDm}
+                  onCheckedChange={setHideBotDm}
+                />
+              )}
+            />
+            <ListRow
+              className={`hst-sub-setting-row${hideBotDm ? ' is-inactive' : ''}`}
+              leading={<ChevronsDownUp />}
+              title={t('默认折叠 Bot 间私聊', 'Collapse bot-to-bot DMs')}
+              subtitle={
+                hideBotDm
+                  ? t('关闭「隐藏 Bot 间私聊」后生效，默认折叠接收与发送内容', 'Applies when bot DMs are shown; collapses incoming & outgoing DMs')
+                  : t('默认折叠与其他 Bot 接收和发送的私聊内容，点击可展开', 'Collapse incoming & outgoing peer DMs by default; tap to expand')
+              }
+              trailing={(
+                <Switch
+                  label={t('默认折叠 Bot 间私聊', 'Collapse bot-to-bot DMs')}
+                  checked={collapseBotDm}
+                  onCheckedChange={setCollapseBotDm}
+                  disabled={hideBotDm}
+                />
+              )}
+            />
             <ListRow
               leading={<AudioLines />}
               title={t('语音朗读倍速', 'Speech rate')}

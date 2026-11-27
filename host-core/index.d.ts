@@ -748,6 +748,7 @@ export interface Runtime {
   clearHistory(botId: string): Promise<ClearHistoryResult>;
   /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
   compact(botId: string): Promise<CompactResult>;
+  assertModelSelectionAllowed(botId: string, modelRef: string | null): Promise<{ botId: string; allowed: true }>;
   /** Stop this Bot's accepted primary, room and DM work, preserving history and cancellation receipts. */
   abort(botId: string): Promise<AbortBotResult>;
   /** Recall single (by requestId) or all unplaced user primary queued messages without stopping active work. */
@@ -1239,7 +1240,7 @@ export interface Attribution {
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
   /** Trusted Host entry source only; never accepted from a user sender. */
-  sourceType?: 'webhook' | 'google-workspace-rule' | 'schedule' | 'task_dispatch';
+  sourceType?: 'webhook' | 'google-workspace-rule' | 'google-workspace-assistant' | 'schedule' | 'task_dispatch';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -1359,6 +1360,13 @@ export interface BotBoardParams {
   botIds: string[];
 }
 
+export interface BotBoardResult {
+  id: string;
+  completedAt: string;
+  summary: string;
+  kind?: 'proactive-google';
+}
+
 export interface BotBoardItem {
   botId: string;
   /** Public primary conversation UUID, even before a native conversation exists. */
@@ -1368,7 +1376,7 @@ export interface BotBoardItem {
   attention: null | { kind: 'questionnaire'; requestId: string; summary: string; count: number };
   progress: null | { completed: number; total: number; current: string | null };
   /** Committed success only, hidden while non-idle; summary <=500, attention/current <=200 characters. */
-  lastResult: null | { id: string; completedAt: string; summary: string };
+  lastResult: null | BotBoardResult;
   taskId?: string | null;
   taskTitle?: string | null;
   taskStatusLine?: string | null;
@@ -1577,6 +1585,7 @@ export interface ControlClient {
   getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
+  assertModelSelectionAllowed(botId: string, modelRef: string | null, options?: ControlClientCallOptions): Promise<{ botId: string; allowed: true }>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<AbortBotResult>;
   withdrawQueued(botId: string, input?: WithdrawQueuedInput, options?: ControlClientCallOptions): Promise<WithdrawQueuedResult>;
   steerQueued(botId: string, input: SteerQueuedInput, options?: ControlClientCallOptions): Promise<SteerQueuedResult>;
@@ -2712,6 +2721,7 @@ export interface RemoteControlMethodMap {
   reviewBotSkills: { params: { botId: string; input: BotSkillReviewInput }; result: Record<string, unknown> };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
+  assertModelSelectionAllowed: { params: { botId: string; modelRef: string | null }; result: { botId: string; allowed: true } };
   abort: { params: { botId: string }; result: AbortBotResult };
   withdrawQueued: { params: { botId: string; requestId?: string }; result: WithdrawQueuedResult };
   steerQueued: { params: { botId: string; requestId: string }; result: SteerQueuedResult };

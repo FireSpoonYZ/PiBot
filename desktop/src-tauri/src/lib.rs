@@ -10,13 +10,14 @@ mod clipboard_windows;
 mod desktop_tray;
 pub mod host_service;
 pub mod image_picker;
+pub mod kde_window_rule;
 pub mod pairing_code;
 pub mod pet_voice;
 pub mod updates;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::{AppHandle, Manager, RunEvent, State, Webview, WindowEvent, ipc::Channel, webview::PageLoadEvent};
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, Webview, WindowEvent, ipc::Channel, webview::PageLoadEvent};
 use tauri_plugin_dialog::DialogExt;
 
 pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
@@ -112,7 +113,7 @@ async fn desktop_pick_file(
   ensure_main_webview(&webview)?;
   let picked = tauri::async_runtime::spawn_blocking(move || {
     let mut dialog = app.dialog().file();
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
       dialog = dialog.set_parent(&window);
     }
     dialog.blocking_pick_file()
@@ -162,11 +163,14 @@ async fn close_browser_window(app: &AppHandle, guest_ids: Vec<String>) {
   bridge.notify_browser_window_close().await;
 }
 
+const DESKTOP_MAIN_WINDOW_SHOWN_EVENT: &str = "desktop-main-window-shown";
+
 fn show_main_window(app: &AppHandle) {
-  if let Some(window) = app.get_webview_window("main") {
+  if let Some(window) = app.get_window("main") {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    let _ = app.emit_to("main", DESKTOP_MAIN_WINDOW_SHOWN_EVENT, json!({}));
   }
 }
 
@@ -195,6 +199,7 @@ pub fn run() {
     .manage(clipboard_runtime::ClipboardRuntime::new())
     .manage(host_service::HostStartup::default())
     .manage(desktop_pet::DesktopPet::default())
+    .manage(kde_window_rule::KdeWindowRuleManager::default())
     .manage(pet_voice::PetVoiceState::default())
     .on_window_event(|window, event| {
       if window.label() == desktop_pet::PET_LABEL {
@@ -222,7 +227,7 @@ pub fn run() {
         let window = window.clone();
         tauri::async_runtime::spawn(async move {
           close_browser_window(&app, guest_ids).await;
-          let _ = desktop_pet::control(&app, "hide", None).await;
+          desktop_pet::shutdown(&app).await;
           let _ = window.destroy();
         });
       }
@@ -247,9 +252,10 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
+      browser_guest::prepare_main_window(app.handle());
       browser_guest::start_watchdog(app.handle().clone());
       host_service::start_configured_host(app.handle());
-      if let Some(window) = app.get_webview_window("main") {
+      if let Some(window) = app.get_window("main") {
         let _ = window.set_title("Pi Bot");
         window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
         #[cfg(windows)]
@@ -269,6 +275,8 @@ pub fn run() {
       if let Err(error) = desktop_tray::install(app.handle()) {
         eprintln!("Failed to create the PiBot system tray: {error}");
       }
+      kde_window_rule::ensure_auto_configured_in_background(app.handle());
+      desktop_pet::restore_if_enabled(app.handle());
       Ok(())
     });
 
@@ -276,6 +284,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       desktop_request,
       desktop_pet::desktop_pet,
+      kde_window_rule::desktop_pet_kde_rule,
       pet_voice::desktop_pet_voice,
       browser_guest::desktop_browser_guest,
       desktop_open_center,

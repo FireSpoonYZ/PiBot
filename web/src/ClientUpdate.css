@@ -25,6 +25,44 @@
   gap: var(--space-2, 8px);
 }
 
+.cu-status-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 固定单行副说明槽：承载“正在查询中心…”与“上次检查”，保证任何检查切换 0px 高度变化。 */
+.cu-caption-slot {
+  height: 18px;
+  min-height: 18px;
+  max-height: 18px;
+  flex: none;
+  overflow: hidden;
+}
+
+.cu-caption-slot .ls-reserved-slot-inner {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  height: 18px;
+}
+
+.cu-caption-text {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-size: var(--text-xs, .75rem);
+  line-height: 18px;
+  color: var(--color-text-muted, var(--muted));
+  font-variant-numeric: tabular-nums;
+}
+
 .cu-expand-inner {
   padding-top: var(--space-2, 8px);
 }
@@ -78,7 +116,7 @@
   color: var(--color-danger, var(--danger));
 }
 
-/* 进度轨道常驻布局，空闲时仅淡出透明，保持零高度差。 */
+/* 进度轨道（由 SmoothExpand 在下载/安装阶段按需展开，非活动态淡出透明）。 */
 .cu-progress {
   position: relative;
   width: 100%;
@@ -146,7 +184,7 @@
   flex-wrap: wrap;
   gap: var(--space-2, 8px);
   align-items: center;
-  margin-top: var(--space-3, 12px);
+  margin-top: var(--space-2, 8px);
   min-height: 40px;
 }
 
@@ -167,6 +205,43 @@
 
 .cu-mobile .cu-action-btn {
   padding: 0 var(--space-3, 12px);
+}
+
+/* 处理中态（checking / downloading / installing）：区别于 disabled，保持文字与图标清晰可读，不压暗、不响应悬停/按压缩放。 */
+.cu-action-btn.is-busy {
+  opacity: 1;
+  cursor: progress;
+}
+
+.cu-action-btn.is-busy:active,
+.cu-desktop .primary-button.cu-action-btn.is-busy:active,
+.cu-desktop .secondary-button.cu-action-btn.is-busy:active,
+.cu-mobile .hst-btn.cu-action-btn.is-busy:active {
+  transform: none;
+  opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cu-desktop .primary-button.cu-action-btn.is-busy:hover {
+    background: var(--signal-primary, var(--color-primary));
+    opacity: 1;
+  }
+
+  .cu-desktop .secondary-button.cu-action-btn.is-busy:hover {
+    background: var(--surface-raised, var(--color-surface-2));
+    border-color: var(--color-line, var(--line));
+    opacity: 1;
+  }
+
+  .cu-mobile .hst-btn.cu-action-btn.is-busy:hover {
+    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+    opacity: 1;
+  }
+
+  .cu-mobile .hst-btn.is-primary.cu-action-btn.is-busy:hover {
+    background: var(--color-text);
+    opacity: 1;
+  }
 }
 
 .cu-btn-icon {

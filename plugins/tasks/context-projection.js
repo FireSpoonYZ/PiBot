@@ -164,7 +164,7 @@ function capabilities(bot) {
 
 function directorySection(bots, task, deviceId, botId, limit) {
   const out = writer(limit, 160);
-  out.add('团队 Bot 目录摘要（职责 / 能力 / 设备 / 在线状态）：');
+  out.add('团队 Bot 目录摘要（职责 / 能力 / 设备）：');
   const owners = new Set(items(task?.steps).map((step) => `${id(step.deviceId)}\0${id(step.botId)}`));
   const rank = (bot) => bot.deviceId === deviceId && bot.botId === botId ? 0
     : task?.coordinatorBotId === bot.botId && (!task.coordinatorDeviceId || task.coordinatorDeviceId === bot.deviceId) ? 1
@@ -175,7 +175,7 @@ function directorySection(bots, task, deviceId, botId, limit) {
   for (const bot of sorted.slice(0, TASK_CONTEXT_LIMITS.directoryBots)) {
     const name = text(bot.name ?? bot.botName ?? bot.role ?? bot.botId, 60);
     const tags = [bot.botId === botId && bot.deviceId === deviceId ? '当前Bot' : '', bot.isPrimary ? '主Bot' : '', bot.isDispatcher || bot.dispatcher ? '分派Bot' : ''].filter(Boolean);
-    const row = `- ${name}${tags.length ? ` [${tags.join(' / ')}]` : ''} (deviceId=${text(bot.deviceId, 128)}, botId=${text(bot.botId, 128)}) | 设备=${text(bot.deviceName, 60) || text(bot.deviceId, 128)}${bot.platform ? `/${text(bot.platform, 24)}` : ''} | 状态=${bot.online === false ? '离线' : bot.online === true ? '在线' : '未确认'} | 职责=${text(bot.description || bot.role, 100) || '未标注'} | 能力=${capabilities(bot)}`;
+    const row = `- ${name}${tags.length ? ` [${tags.join(' / ')}]` : ''} (deviceId=${text(bot.deviceId, 128)}, botId=${text(bot.botId, 128)}) | 设备=${text(bot.deviceName, 60) || text(bot.deviceId, 128)}${bot.platform ? `/${text(bot.platform, 24)}` : ''} | 职责=${text(bot.description || bot.role, 100) || '未标注'} | 能力=${capabilities(bot)}`;
     if (!out.add(row)) break;
     shown += 1;
   }

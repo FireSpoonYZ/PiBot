@@ -156,6 +156,96 @@
   margin: 0;
 }
 
+/* DM peer offline non-blocking caption & per-member live activity slots */
+.scope-shell .scope-dm-offline-caption {
+  flex: none;
+  margin: 0;
+  padding: 5px var(--space-4);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--ink-secondary);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.scope-shell .scope-dm-live-slots {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+  min-width: 0;
+}
+
+.scope-shell .scope-dm-live-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.scope-shell .scope-dm-live-slot-name {
+  padding: 0 var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.scope-shell .scope-dm-live-slots .sand-activity-slot,
+.scope-shell .scope-dm-live-slots .sand-activity-mark {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.scope-shell .scope-dm-live-slots .sand-activity-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  min-height: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.scope-shell .scope-dm-live-slots .sand-activity-detail-toggle svg {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.scope-shell .scope-dm-live-slots .sand-activity-detail-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.scope-shell .scope-dm-live-slots .sand-activity-failure-detail {
+  margin: var(--space-1) 0 0 46px;
+  padding: var(--space-2) 10px;
+  max-width: calc(100% - 46px);
+  min-width: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* Member list & candidate chips (shared by ScopeCreateForm and GroupSettings). */
 .scope-shell .scope-member-edit-btn {
   margin-left: auto;
@@ -595,6 +685,11 @@
   .scope-shell .scope-kind-tabs > button:hover:not(.active):not(:disabled) {
     color: var(--ink-primary);
   }
+
+  .scope-shell .scope-dm-live-slots .sand-activity-detail-toggle:hover {
+    color: var(--ink-primary);
+    background: var(--surface-1);
+  }
 }
 
 .scope-shell-desktop .conversation-chat-header__members:active:not(:disabled),
@@ -621,7 +716,8 @@
   .scope-shell .primary-button,
   .scope-shell .secondary-button,
   .scope-shell .toolbar-btn,
-  .scope-shell .scope-kind-tabs > button {
+  .scope-shell .scope-kind-tabs > button,
+  .scope-shell .scope-dm-live-slots .sand-activity-detail-toggle svg {
     transition: none;
   }
 

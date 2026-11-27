@@ -137,7 +137,7 @@ final class ClipboardSyncShizukuAdapter implements ClipboardSyncController.Privi
                 .processNameSuffix("clipboard_sync")
                 .daemon(false)
                 .debuggable(debuggable)
-                .version(1);
+                .version(2);
     }
 
     /**

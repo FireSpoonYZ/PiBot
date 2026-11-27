@@ -1,47 +1,50 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AGY_HISTORY_CHANGED,
   ANTIGRAVITY_API,
   ANTIGRAVITY_PROVIDER_ID,
-  ANTIGRAVITY_STREAM_PATH,
 } from '../../center-contract/antigravity.js';
-import { openAntigravity } from '../../center-server/antigravity/index.js';
 import { buildThinkingProfile, resolveSessionThoughtLevel } from '../../center-server/antigravity/catalog.ts';
-import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
-import { RESUME_PROMPT, toolsFromMessages } from '../../center-server/antigravity/round-trips.ts';
-import { makeSessionKey, SessionStore } from '../../center-server/antigravity/sessions.ts';
-import { AcpDriver } from '../../center-server/antigravity/vendor/acp/driver.ts';
-import { registerAntigravityRoutes } from '../../center-server/antigravity-routes.js';
-import { createAntigravityProvider } from '../../host-core/antigravity-provider.js';
+import { AntigravityCursorDoc } from '../../host-core/antigravity-runner.js';
 import { openHost } from '../../host-core/host.js';
-import {
-  advanceTurnProvenance,
-  createTurnProvenanceFromCutoff,
-  resolveAntigravityTurnContext,
-} from '../../host-core/request-context.js';
 import { openRuntime } from '../../host-core/runtime.js';
-import { createContextCodec } from '../../plugins/billion-context/context-codec.js';
-import { renderHindsightRecall } from '../../plugins/hindsight/hindsight-format.js';
+import { PrimaryIndex } from '../../host-core/runtime-docs.js';
+import { DurableWaitIndex } from '../../host-core/runtime-waits.js';
+import { apply as applyDelta } from '../../host-core/node_modules/@earendil-works/chord/dist/delta/index.js';
+import {
+  LiveDoc,
+  ProviderDoc,
+  UsageDoc,
+} from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
+import { registerApiProvider } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/compat.js';
+import { createAssistantMessageEventStream } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js';
 
-// Valid 1x1 transparent PNG (canonical base64).
 const PNG_1X1 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const MODEL_ID = 'gemini-3-pro';
+const SECOND_MODEL_ID = 'second-model';
 const MODEL_REF = `${ANTIGRAVITY_PROVIDER_ID}/${MODEL_ID}`;
-const COMPACTION_MARKER = 'compacted into the following summary';
-const PENDING_STATUSES = new Set(['queued', 'placed', 'running', 'pending', 'admitted']);
+const SECOND_MODEL_REF = `${ANTIGRAVITY_PROVIDER_ID}/${SECOND_MODEL_ID}`;
 const USER_ORIGIN = { sender: { kind: 'user' }, replyTo: null };
 const BASE_MODEL_SEL = { modelRef: MODEL_REF, thinkingLevel: 'off', codemode: false, codemodeOnly: false };
+const PENDING_STATUSES = new Set(['queued', 'placed', 'running', 'pending', 'admitted']);
+
+const hindsightRoot = fileURLToPath(new URL('../../plugins/hindsight/', import.meta.url));
+const hindsightManifest = JSON.parse(fs.readFileSync(path.join(hindsightRoot, 'capability.json'), 'utf8'));
+const questionnaireRoot = fileURLToPath(new URL('../../plugins/ask-user-question/', import.meta.url));
+const questionnaireManifest = JSON.parse(fs.readFileSync(path.join(questionnaireRoot, 'capability.json'), 'utf8'));
 
 test('ACP uses the selected model’s current thinking options for xhigh', () => {
-  const thoughtOption = (...values) => ({ id: 'thought_level', options: values.map(value => ({ value })) });
+  const thoughtOption = (...values) => ({ id: 'thought_level', options: values.map((value) => ({ value })) });
   const neon = thoughtOption('low', 'medium', 'high', 'xhigh');
   const argon = thoughtOption('low', 'medium', 'high');
   assert.equal(buildThinkingProfile(neon).thinkingLevelMap.xhigh, 'xhigh');
@@ -51,303 +54,233 @@ test('ACP uses the selected model’s current thinking options for xhigh', () =>
   assert.equal(resolveSessionThoughtLevel('xhigh', [{ id: 'model' }]), undefined);
   assert.equal(resolveSessionThoughtLevel('xhigh', undefined), 'xhigh');
 });
-const hindsightRoot = fileURLToPath(new URL('../../plugins/hindsight/', import.meta.url));
-const hindsightManifest = JSON.parse(fs.readFileSync(path.join(hindsightRoot, 'capability.json'), 'utf8'));
-
-const USAGE = {
-  input: 12,
-  output: 8,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 20,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
-
-const BASE_SYSTEM = {
-  role: 'system',
-  content: 'Base assistant instructions.',
-  sections: { 'host-base-behavior': 'Primary and collaboration baseline.' },
-  toolsAdded: [
-    {
-      name: 'read_file',
-      description: 'Read a workspace file.',
-      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
-    },
-  ],
-  timestamp: 1,
-};
-
-const asstText = (text, timestamp, provider = ANTIGRAVITY_PROVIDER_ID, api = ANTIGRAVITY_API, model = MODEL_ID) => ({
-  role: 'assistant',
-  provider,
-  api,
-  model,
-  content: [{ type: 'text', text }],
-  usage: USAGE,
-  stopReason: 'stop',
-  timestamp,
-});
-
-const asstToolCall = (id, name, args, timestamp) => ({
-  role: 'assistant',
-  provider: ANTIGRAVITY_PROVIDER_ID,
-  api: ANTIGRAVITY_API,
-  model: MODEL_ID,
-  content: [{ type: 'toolCall', id, name, arguments: args }],
-  usage: USAGE,
-  stopReason: 'toolUse',
-  timestamp,
-});
-
-const toolResult = (toolCallId, toolName, content, timestamp, isError = false) => ({
-  role: 'toolResult',
-  toolCallId,
-  toolName,
-  content: typeof content === 'string' ? [{ type: 'text', text: content }] : content,
-  isError,
-  timestamp,
-});
 
 async function waitUntil(predicate, { timeoutMs = 15_000, intervalMs = 20, label = 'condition' } = {}) {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     const value = await predicate();
     if (value) return value;
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-function messageText(msg) {
-  if (!msg) return '';
-  if (typeof msg.content === 'string') return msg.content;
-  if (!Array.isArray(msg.content)) return '';
-  return msg.content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+function docKind(docOrKind) {
+  return typeof docOrKind === 'string' ? docOrKind : (docOrKind?.definition?.kind ?? docOrKind?.kind);
 }
 
-function hasImage(msg) {
-  return Array.isArray(msg?.content) && msg.content.some((b) => b?.type === 'image' && typeof b.data === 'string' && b.data.length > 0);
-}
-
-async function drainEventStream(stream) {
-  const events = [];
-  for await (const ev of stream) events.push(ev);
-  return { events, terminal: events.at(-1) ?? null };
-}
-
-function createControlledHandle(id) {
-  const queue = [];
-  const waiters = [];
-  let closed = false;
-  let resolveOutcome;
-  const outcome = new Promise((res) => { resolveOutcome = res; });
-  const push = (activity) => {
-    if (closed) return;
-    const waiter = waiters.shift();
-    if (waiter) waiter(activity);
-    else queue.push(activity);
-  };
-  return {
-    handle: {
-      id,
-      outcome,
-      next() {
-        if (queue.length > 0) return Promise.resolve(queue.shift());
-        if (closed) return Promise.resolve(null);
-        return new Promise((resolve) => waiters.push(resolve));
-      },
-      pushExternal: push,
-    },
-    emit: push,
-    settle(result) {
-      if (!closed) {
-        closed = true;
-        while (waiters.length > 0) waiters.shift()(null);
-      }
-      resolveOutcome(result);
-    },
-  };
-}
-
-/** Controlled AcpDriver + SharedMcpBridge harness via node:test prototype mocks (never launches agy). */
-function createControlledAcpDriverHarness(t) {
-  const states = new WeakMap();
-  const driverByListTools = new WeakMap();
-  const runs = [];
-  let pendingDriverForMcp = null;
-  let convSeq = 1;
-  let handleSeq = 1;
-  let onRunHandler = null;
-
-  const stateFor = (driver) => {
-    let s = states.get(driver);
-    if (!s) {
-      s = { state: 'idle', active: null, conversationId: undefined, onTurnEnd: undefined, mcp: null, reentryCalls: 0, abortActive: null };
-      states.set(driver, s);
+function readDurableDoc(durableDbPath, kindOrDoc, scopeKind, ownerId = 0, key = undefined) {
+  const kind = docKind(kindOrDoc);
+  const db = new DatabaseSync(durableDbPath, { readOnly: true });
+  try {
+    const row = db
+      .prepare(
+        `SELECT id FROM documents
+         WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ?
+           AND retired_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(JSON.stringify(kind), scopeKind, ownerId, key === undefined ? 0 : 1, JSON.stringify(key ?? ''));
+    if (!row) return null;
+    const base = db
+      .prepare(
+        `SELECT seq, content FROM document_revisions
+         WHERE document_id = ? AND kind = 'base'
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(row.id);
+    if (!base) return null;
+    let value = JSON.parse(base.content);
+    const deltas = db
+      .prepare(
+        `SELECT seq, content FROM document_revisions
+         WHERE document_id = ? AND kind = 'delta' AND seq > ?
+         ORDER BY seq ASC`,
+      )
+      .all(row.id, base.seq);
+    for (const delta of deltas) {
+      value = applyDelta(value, JSON.parse(delta.content));
     }
-    return s;
-  };
-
-  const origRegister = SharedMcpBridge.prototype.registerSession;
-  t.mock.setter(AcpDriver.prototype, 'onTurnEnd', function (fn) {
-    stateFor(this).onTurnEnd = fn;
-    pendingDriverForMcp = this;
-  });
-  t.mock.method(SharedMcpBridge.prototype, 'registerSession', function (handler) {
-    const reg = origRegister.call(this, handler);
-    const owner = pendingDriverForMcp ?? driverByListTools.get(handler.listTools);
-    if (owner) {
-      driverByListTools.set(handler.listTools, owner);
-      // Replace the registration: prior run contexts retain their old token
-      // and handler, so stale-call tests exercise the real epoch checks.
-      stateFor(owner).mcp = { bridge: this, token: reg.token, handler };
-    }
-    pendingDriverForMcp = null;
-    return reg;
-  });
-  t.mock.getter(AcpDriver.prototype, 'state', function () { return stateFor(this).state; });
-  t.mock.getter(AcpDriver.prototype, 'activeHandle', function () { return stateFor(this).active; });
-  t.mock.method(AcpDriver.prototype, 'reentry', function () { const s = stateFor(this); s.reentryCalls += 1; return s.active; });
-  t.mock.method(AcpDriver.prototype, 'kickIdle', () => {});
-  t.mock.method(AcpDriver.prototype, 'snapshot', function () { const s = stateFor(this); return { state: s.state, conversationId: s.conversationId }; });
-  t.mock.method(AcpDriver.prototype, 'close', async function () { const s = stateFor(this); s.abortActive?.(); s.active = null; s.state = 'dead'; });
-  t.mock.method(AcpDriver.prototype, 'run', async function (request) {
-    const s = stateFor(this);
-    if (request?.signal?.aborted) throw new Error('aborted before start');
-    const ctrl = createControlledHandle(`h-${handleSeq++}`);
-    const convId = request.conversationId ?? `conv-${convSeq++}`;
-    s.state = 'running';
-    s.active = ctrl.handle;
-    s.conversationId = convId;
-
-    const mcpTools = (s.mcp?.handler.listTools() ?? []).map((tool) => ({ name: tool.name }));
-    const record = {
-      driver: this,
-      driverState: s,
-      assignedConversationId: convId,
-      request: {
-        model: request.model,
-        conversationId: request.conversationId ?? null,
-        prompt: request.prompt,
-        images: request.images ? request.images.map((img) => ({ ...img })) : undefined,
-        contextBlock: request.contextBlock ? { ...request.contextBlock } : undefined,
-        turnRecall: request.turnRecall,
-      },
-      mcpTools,
-      mcp: s.mcp,
-    };
-    runs.push(record);
-
-    let settled = false;
-    const finish = (outcome) => {
-      if (settled) return;
-      settled = true;
-      request.signal?.removeEventListener('abort', onAbort);
-      if (s.active === ctrl.handle) s.active = null;
-      s.abortActive = null;
-      s.state = 'ready';
-      if (outcome.conversationId) s.conversationId = outcome.conversationId;
-      s.onTurnEnd?.(outcome);
-      ctrl.settle(outcome);
-    };
-    const onAbort = () => finish({ conversationId: s.conversationId, status: 'OK', response: '', finished: true, aborted: true });
-    s.abortActive = onAbort;
-    request.signal?.addEventListener('abort', onAbort, { once: true });
-
-    const ctx = { record, request: record.request, mcpTools, mcp: s.mcp, conversationId: convId, signal: request.signal, emit: ctrl.emit, finish };
-    queueMicrotask(() => {
-      if (settled) return;
-      const fn = onRunHandler ?? (async (turnCtx) => {
-        const reply = `ack:${turnCtx.conversationId}:turn-${runs.length}`;
-        turnCtx.emit({ type: 'text', delta: reply });
-        turnCtx.finish({ conversationId: turnCtx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
-      });
-      Promise.resolve(fn(ctx)).catch((err) => {
-        record.error = err;
-        finish({ conversationId: s.conversationId, status: 'ERROR', response: '', error: err instanceof Error ? err.message : String(err), finished: true, aborted: false });
-      });
-    });
-    return ctrl.handle;
-  });
-
-  t.after(() => t.mock.restoreAll());
-  return { runs, setOnRun: (fn) => { onRunHandler = fn; }, getDriverState: stateFor };
-}
-
-function openIsolatedAntigravity(rootDir) {
-  const centerRoot = path.join(rootDir, 'center');
-  return openAntigravity({ dataRoot: centerRoot, bin: 'mocked-agy-never-spawned', geminiHome: path.join(centerRoot, 'gemini') });
-}
-
-async function closeAndRemove({ runtime, antigravity, routes, rootDir, hadError }) {
-  const errors = [];
-  for (const fn of [() => routes?.close(), () => runtime?.close(), () => antigravity?.close()]) {
-    try { await fn(); } catch (err) { errors.push(err); }
+    return value;
+  } finally {
+    db.close();
   }
-  try { fs.rmSync(rootDir, { recursive: true, force: true }); } catch (err) { errors.push(err); }
-  if (!hadError && errors.length > 0) throw errors[0];
 }
 
-function makeCapability(installationId, effectiveConfig, revision = 1) {
-  return { installationId, kind: 'plugin', target: 'host', targetVersion: '1.0.0', enabled: true, authorized: true, revision, effectiveConfig, credentialRefs: [] };
+function readDurableTasks(durableDbPath, conversationId = null) {
+  const db = new DatabaseSync(durableDbPath, { readOnly: true });
+  try {
+    const rows =
+      conversationId === null
+        ? db.prepare('SELECT id, conversation_id, status, record FROM tasks ORDER BY id ASC').all()
+        : db
+            .prepare('SELECT id, conversation_id, status, record FROM tasks WHERE conversation_id = ? ORDER BY id ASC')
+            .all(conversationId);
+    return rows.map((row) => ({
+      id: row.id,
+      conversationId: row.conversation_id,
+      status: row.status,
+      record: JSON.parse(row.record),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+function getPrimaryNativeId(durableDbPath, primaryConversationId) {
+  const index = readDurableDoc(durableDbPath, PrimaryIndex.definition.kind, 'session', 0);
+  return index?.byPrimary?.[primaryConversationId] ?? null;
+}
+
+function makeCapability(installationId, effectiveConfig, { targetVersion = '1.0.0', revision = 1 } = {}) {
+  return {
+    installationId,
+    kind: 'plugin',
+    target: 'host',
+    targetVersion,
+    enabled: true,
+    authorized: true,
+    revision,
+    effectiveConfig,
+    credentialRefs: [],
+  };
 }
 
 function writeTestPlugins(rootDir) {
-  const bcDir = path.join(rootDir, 'plugins', 'test-bc-context');
-  fs.mkdirSync(bcDir, { recursive: true });
+  const pluginDir = path.join(rootDir, 'plugins', 'test-agy-suite');
+  fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(
-    path.join(bcDir, 'entry.mjs'),
+    path.join(pluginDir, 'entry.mjs'),
     `import fs from 'node:fs';
+const PNG_1X1 = ${JSON.stringify(PNG_1X1)};
+
 export function createPlugin({ host }) {
   const bots = new Set();
   return {
     async forBot({ effectiveConfig: cfg }) {
-      const tools = cfg?.enableProbeTool ? [host.sdk.defineTool({
-        name: 'ping_probe_tool',
-        description: 'Dynamic test probe tool.',
-        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false },
-        replay: 'safe',
-        async execute(args) { return { output: [{ type: 'text', text: 'probe:' + String(args?.query ?? '') }] }; },
-      })] : [];
-      const bot = {
-        durableContributions: { tools },
-        requestContributions: {
-          async prepareContext(request) {
-            const mode = cfg?.mode ?? 'bc';
-            if (mode === 'passthrough') return request;
-            if (mode === 'drop-current-leave-earlier-user') {
-              const users = request.messages.filter((m) => m && m.role === 'user');
-              const [earlier, current] = [users[0], users[users.length - 1]];
-              if (cfg?.recordFile) {
-                fs.writeFileSync(cfg.recordFile, JSON.stringify({
-                  called: true, userCount: users.length, distinctRef: earlier !== current,
-                  sameRole: earlier?.role === current?.role, sameContent: earlier?.content === current?.content,
-                }));
-              }
-              return { messages: [request.messages[0], earlier] };
-            }
-            if (mode === 'drop-current-replace-with-containing-aux') {
-              const current = request.messages.findLast((m) => m && m.role === 'user');
-              const text = typeof current?.content === 'string' ? current.content : '';
-              const aux = { role: 'user', content: '辅助上下文包装：' + text + '（仅供参考）', timestamp: current?.timestamp ?? 0 };
-              if (cfg?.recordFile) {
-                fs.writeFileSync(cfg.recordFile, JSON.stringify({
-                  called: true, sameRole: aux.role === current?.role, sameTs: aux.timestamp === current?.timestamp,
-                  containsOriginal: Boolean(text) && aux.content.includes(text), strictEqual: aux.content === text,
-                }));
-              }
-              return { messages: [...request.messages.filter((m) => m !== current), aux] };
-            }
-            const cloned = JSON.parse(JSON.stringify(request.messages));
-            if (cfg?.injectBcSummary) {
-              const idx = cloned.findIndex((m) => m && m.role === 'assistant');
-              if (idx >= 0) cloned.splice(idx + 1, 0, { role: 'user', content: [{ type: 'text', text: 'BC summary block.' }], timestamp: 0, bcSummaryMaterial: true, summaryOfBlockId: 'blk_1' });
-            }
-            if (cfg?.injectBcNudge) cloned.push({ role: 'user', content: 'BC nudge: keep tool output concise.', timestamp: 0 });
-            return { messages: cloned };
+      const record = (event) => {
+        if (cfg?.recordFile) fs.appendFileSync(cfg.recordFile, event + '\\n');
+      };
+      const getHook = () => (cfg?.hookKey ? globalThis[cfg.hookKey] : null);
+      record('forBot');
+
+      const tools = [];
+      if (cfg?.enableProbeTool) {
+        tools.push(host.sdk.defineTool({
+          name: cfg?.toolName ?? 'ping_probe_tool',
+          description: 'Deferred probe tool.',
+          parameters: {
+            type: 'object',
+            properties: { query: { type: 'string' } },
+            required: ['query'],
+            additionalProperties: false,
           },
+          replay: 'safe',
+          deferred: true,
+          async execute(args) {
+            return { output: [{ type: 'text', text: 'probe:' + String(args?.query ?? '') }] };
+          },
+        }));
+      }
+      if (cfg?.enableModelOnlyImageProbe) {
+        tools.push(host.sdk.defineTool({
+          name: 'model_only_image_probe',
+          description: 'Model-only probe returning text and an image.',
+          parameters: {
+            type: 'object',
+            properties: { label: { type: 'string' } },
+            required: ['label'],
+            additionalProperties: false,
+          },
+          callers: ['model'],
+          deferred: true,
+          replay: 'safe',
+          async execute(args) {
+            return {
+              output: [
+                { type: 'text', text: 'image-probe:' + String(args?.label ?? '') },
+                { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+              ],
+            };
+          },
+        }));
+      }
+      if (cfg?.enableModelOnlyProbe) {
+        tools.push(host.sdk.defineTool({
+          name: 'model_only_probe',
+          description: 'Model-only probe with optional test gate.',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          callers: ['model'],
+          deferred: true,
+          replay: 'safe',
+          async execute(_args, _api, context) {
+            const h = getHook();
+            h?.onProbeStart?.();
+            if (h?.waitProbeRelease) {
+              await h.waitProbeRelease(context.abortSignal);
+            }
+            return { output: [{ type: 'text', text: 'model-only-ok' }] };
+          },
+        }));
+      }
+      if (cfg?.enableSlowBlockingTool) {
+        tools.push(host.sdk.defineTool({
+          name: 'slow_blocking_tool',
+          description: 'Blocks until aborted or released by the test.',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          callers: ['model'],
+          deferred: true,
+          replay: 'unsafe',
+          async execute(_args, _api, context) {
+            const h = getHook();
+            h?.onSlowStart?.();
+            await new Promise((resolve, reject) => {
+              const onAbort = () => {
+                h?.onSlowAborted?.();
+                const err = new Error('slow tool aborted');
+                err.name = 'AbortError';
+                reject(err);
+              };
+              if (context.abortSignal?.aborted) return onAbort();
+              context.abortSignal?.addEventListener('abort', onAbort, { once: true });
+              h?.releaseSlow?.then?.(resolve);
+            });
+            return { output: [{ type: 'text', text: 'slow-done' }] };
+          },
+        }));
+      }
+
+      const hooks = [];
+      if (cfg?.observeToolHooks) {
+        hooks.push(host.sdk.hook(host.sdk.ToolTask, {
+          beforeTool(call) {
+            getHook()?.onToolHook?.('beforeTool', call?.name ?? null);
+          },
+          afterTool(call) {
+            getHook()?.onToolHook?.('afterTool', call?.name ?? null);
+          },
+        }));
+      }
+
+      const requestContributions = cfg?.enablePrepareContext
+        ? {
+            async prepareContext(request) {
+              record('prepareContext');
+              return request;
+            },
+          }
+        : undefined;
+
+      const bot = {
+        durableContributions: {
+          ...(tools.length > 0 ? { tools } : {}),
+          ...(hooks.length > 0 ? { hooks } : {}),
         },
-        async prepare() {}, async activate() {}, async quiesce() {}, async close() { bots.delete(bot); },
+        ...(requestContributions ? { requestContributions } : {}),
+        async prepare() { record('prepare'); },
+        async activate() { record('activate'); },
+        async quiesce() {},
+        async close() { bots.delete(bot); },
       };
       bots.add(bot);
       return bot;
@@ -356,49 +289,160 @@ export function createPlugin({ host }) {
   };
 }
 `,
+    'utf8',
   );
 
   const installed = new Map([
-    ['test-bc-context', { version: '1.0.0', packageRoot: bcDir, dataDir: path.join(bcDir, 'data'), manifest: { id: 'test.bc-context', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } } }],
-    ['test-hindsight-recall', { version: hindsightManifest.version, packageRoot: hindsightRoot, dataDir: path.join(rootDir, 'hindsight-data'), manifest: hindsightManifest }],
+    [
+      'test-bc-context',
+      {
+        version: '1.0.0',
+        packageRoot: pluginDir,
+        dataDir: path.join(pluginDir, 'bc-data'),
+        manifest: { id: 'e-launcher.billion-context', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } },
+      },
+    ],
+    [
+      'test-context-rewriter',
+      {
+        version: '1.0.0',
+        packageRoot: pluginDir,
+        dataDir: path.join(pluginDir, 'rewriter-data'),
+        manifest: { id: 'test.context-rewriter', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } },
+      },
+    ],
+    [
+      'test-probe-tools',
+      {
+        version: '1.0.0',
+        packageRoot: pluginDir,
+        dataDir: path.join(pluginDir, 'probe-data'),
+        manifest: { id: 'test.probe-tools', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } },
+      },
+    ],
+    [
+      'test-hook-observer',
+      {
+        version: '1.0.0',
+        packageRoot: pluginDir,
+        dataDir: path.join(pluginDir, 'hook-data'),
+        manifest: { id: 'test.hook-observer', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } },
+      },
+    ],
+    [
+      'test-hindsight-recall',
+      {
+        version: hindsightManifest.version,
+        packageRoot: hindsightRoot,
+        dataDir: path.join(rootDir, 'hindsight-data'),
+        manifest: hindsightManifest,
+      },
+    ],
+    [
+      'test-questionnaire',
+      {
+        version: questionnaireManifest.version,
+        packageRoot: questionnaireRoot,
+        dataDir: path.join(rootDir, 'questionnaire-data'),
+        manifest: questionnaireManifest,
+      },
+    ],
   ]);
-  const questionnaireRoot = fileURLToPath(new URL('../../plugins/ask-user-question/', import.meta.url));
-  const questionnaireManifest = JSON.parse(fs.readFileSync(path.join(questionnaireRoot, 'capability.json'), 'utf8'));
-  installed.set('test-questionnaire', { version: questionnaireManifest.version, packageRoot: questionnaireRoot,
-    dataDir: path.join(rootDir, 'questionnaire-data'), manifest: questionnaireManifest });
-  return { async getInstalled(id, opts) { const e = installed.get(id); return !e || (opts?.version && e.version !== opts.version) ? null : e; } };
+
+  return {
+    async getInstalled(id, opts) {
+      const entry = installed.get(id);
+      return !entry || (opts?.version && entry.version !== opts.version) ? null : entry;
+    },
+  };
 }
 
-async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads, callOperation }) {
+async function openTestRuntime({
+  rootDir,
+  antigravityClient,
+  fixtureApi = null,
+  webhookHooks = null,
+}) {
   const installer = writeTestPlugins(rootDir);
   const hostDataRoot = path.join(rootDir, 'host-data');
   const meta = openHost({ dataRoot: hostDataRoot });
   const deviceId = meta.deviceId;
   meta.close();
 
-  let runtime = null;
+  const durableDbPath = path.join(hostDataRoot, 'durable.sqlite');
   let currentSnapshot = null;
 
   const centerClient = {
-    callOperation,
+    antigravity: antigravityClient,
     providerAuth: async () => ({ auth: { apiKey: 'center-managed' }, source: 'center' }),
-    streamAntigravity(payload, opts) {
-      capturedPayloads.push(JSON.parse(JSON.stringify(payload)));
-      return antigravity.stream(
-        {
-          deviceId,
-          sessionId: payload.sessionId,
-          modelId: payload.modelId,
-          messages: payload.messages,
-          ...(payload.reasoning !== undefined ? { reasoning: payload.reasoning } : {}),
-          ...(Object.hasOwn(payload, 'turnContext') ? { turnContext: payload.turnContext } : {}),
-        },
-        { signal: opts?.signal },
-      );
-    },
+    pollWebhookEvents: webhookHooks?.pollWebhookEvents ?? (async () => ({ items: [], nextCursor: null })),
+    reportWebhookEvent: webhookHooks?.reportWebhookEvent ?? (async () => ({ ok: true })),
+    stopWebhookEvents: webhookHooks?.stopWebhookEvents ?? (async ({ botId, stopEpoch }) => ({ botId, stopEpoch })),
   };
 
-  runtime = await openRuntime({
+  const makeSnapshot = (revision, bots) => ({
+    protocol: 1,
+    deviceId,
+    revision,
+    providers: [
+      {
+        id: ANTIGRAVITY_PROVIDER_ID,
+        name: 'Antigravity',
+        api: ANTIGRAVITY_API,
+        baseUrl: '',
+        enabled: true,
+        credentialRef: null,
+        native: true,
+        authMode: 'oauth',
+      },
+      ...(fixtureApi
+        ? [
+            {
+              id: 'fixture',
+              name: 'Fixture',
+              api: fixtureApi,
+              baseUrl: 'http://127.0.0.1:9',
+              enabled: true,
+              credentialRef: null,
+            },
+          ]
+        : []),
+    ],
+    models: {
+      [ANTIGRAVITY_PROVIDER_ID]: [MODEL_ID, SECOND_MODEL_ID].map((id) => ({
+        id,
+        name: id,
+        api: ANTIGRAVITY_API,
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+        input: ['text', 'image'],
+        reasoning: true,
+        enabled: true,
+        revision: 1,
+      })),
+      ...(fixtureApi
+        ? {
+            fixture: [
+              {
+                id: 'model',
+                name: 'Fixture',
+                api: fixtureApi,
+                contextWindow: 128_000,
+                maxTokens: 4096,
+                input: ['text'],
+                reasoning: false,
+                enabled: true,
+                revision: 1,
+              },
+            ],
+          }
+        : {}),
+    },
+    credentials: {},
+    bots,
+  });
+
+  const runtime = await openRuntime({
     dataRoot: hostDataRoot,
     nativeBridge: async () => ({}),
     centerRuntime: {
@@ -411,848 +455,1356 @@ async function openTestHostRuntime({ rootDir, antigravity, capturedPayloads, cal
     },
   });
 
-  const makeSnapshot = (revision, bots) => ({
-    protocol: 1,
-    deviceId,
-    revision,
-    providers: [{ id: ANTIGRAVITY_PROVIDER_ID, name: 'Antigravity', api: ANTIGRAVITY_API, baseUrl: '', enabled: true, credentialRef: null, native: true, authMode: 'oauth' }],
-    models: { [ANTIGRAVITY_PROVIDER_ID]: [{ id: MODEL_ID, name: 'Gemini 3 Pro', api: ANTIGRAVITY_API, contextWindow: 128_000, maxTokens: 8_192, input: ['text', 'image'], reasoning: true, enabled: true, revision: 1 }] },
-    credentials: {},
-    bots,
-  });
-
   const applySnapshot = async (snapshot) => {
     currentSnapshot = snapshot;
-    await waitUntil(async () => {
-      const res = await runtime.applyCenterSnapshot(snapshot);
-      if (res.status === 'failed') throw new Error(`applyCenterSnapshot failed: ${JSON.stringify(res)}`);
-      return res.status === 'applied';
-    }, { label: `applyCenterSnapshot rev=${snapshot.revision}` });
+    await waitUntil(
+      async () => {
+        const res = await runtime.applyCenterSnapshot(snapshot);
+        if (res.status === 'failed') {
+          throw new Error(`applyCenterSnapshot failed: ${JSON.stringify(res)}`);
+        }
+        return res.status === 'applied';
+      },
+      { label: `applyCenterSnapshot rev=${snapshot.revision}` },
+    );
   };
 
   const waitForSubmission = (botId, requestId) =>
-    waitUntil(async () => {
-      const sub = await runtime.getSubmission(botId, requestId);
-      return sub && !PENDING_STATUSES.has(sub.status) ? sub : null;
-    }, { label: `submission ${requestId}` });
+    waitUntil(
+      async () => {
+        const sub = await runtime.getSubmission(botId, requestId);
+        return sub && !PENDING_STATUSES.has(sub.status) ? sub : null;
+      },
+      { label: `submission ${requestId}` },
+    );
 
   try {
     await applySnapshot(makeSnapshot(1, []));
     await runtime.setCenterOnline(true);
     await runtime.restoreTurns();
     runtime.resume();
-    return { runtime, makeSnapshot, applySnapshot, waitForSubmission };
+    return {
+      runtime,
+      deviceId,
+      durableDbPath,
+      makeSnapshot,
+      applySnapshot,
+      setCurrentSnapshot: (snapshot) => { currentSnapshot = snapshot; },
+      waitForSubmission,
+    };
   } catch (err) {
-    try { await runtime.close(); } catch { /* preserve startup error */ }
+    try {
+      await runtime.close();
+    } catch {
+      /* preserve startup error */
+    }
     throw err;
   }
 }
 
-// 1. Real Host Runtime + pi-durable GenerationTask -> openAntigravity.stream (3 turns)
-test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (toolsAdded/toolsRemoved), BC deep-clone + recall, text+image & pure-image, and parked continuation', async (t) => {
-  const driverHarness = createControlledAcpDriverHarness(t);
-  const recallText = 'Verified tool probes.';
-  const recallQueries = [];
-  const recallServer = http.createServer(async (req, res) => {
-    let result = { items: [] };
-    if (req.method === 'POST' && req.url.endsWith('/memories/recall')) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      recallQueries.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).query);
-      result = { results: [{ id: 'qa-probe', text: recallText, type: 'observation' }], source_facts: {} };
-    }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(result));
-  });
-  await new Promise((resolve) => recallServer.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise((resolve) => {
-    recallServer.close(resolve);
-    recallServer.closeAllConnections();
-  }));
-  const recallBaseUrl = `http://127.0.0.1:${recallServer.address().port}`;
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-e2e-'));
-  const botCwd = path.join(rootDir, 'workspace');
-  fs.mkdirSync(botCwd, { recursive: true });
-
-  let antigravity = null;
-  let runtime = null;
-  let hadError = false;
-  try {
-    antigravity = openIsolatedAntigravity(rootDir);
-    const captured = [];
-    const env = await openTestHostRuntime({ rootDir, antigravity, capturedPayloads: captured });
-    runtime = env.runtime;
-
-    const bot = await runtime.createBot({ requestId: 'create-e2e-bot', role: 'AcpAssistant', cwd: botCwd, makePrimary: true });
-    await env.applySnapshot(env.makeSnapshot(2, [{ botId: bot.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [] }]));
-    const img = await runtime.uploadAttachment(bot.botId, { name: 'p.png', mimeType: 'image/png', data: PNG_1X1 });
-
-    let stage = 1;
-    let observedToolResult = null;
-    driverHarness.setOnRun(async (ctx) => {
-      if (stage === 1) {
-        ctx.emit({ type: 'text', delta: '第一轮已收到 ALPHA-7' });
-        ctx.finish({ conversationId: 'conv-e2e', status: 'OK', response: '第一轮已收到 ALPHA-7', finished: true, aborted: false });
-        return;
-      }
-      if (stage === 2) {
-        observedToolResult = await ctx.mcp.handler.onToolCall('call_e2e_1', 'ping_probe_tool', { query: 'acp-check' }, ctx.signal ?? new AbortController().signal);
-        const toolText = (observedToolResult?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-        const reply = `工具结果确认：${toolText}`;
-        ctx.emit({ type: 'text', delta: reply });
-        ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
-        return;
-      }
-      ctx.emit({ type: 'text', delta: '纯图第三轮已收到' });
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: '纯图第三轮已收到', finished: true, aborted: false });
-    });
-
-    // Turn 1: initial leading SystemEntry + ACP session bind
-    await runtime.submit(bot.botId, { requestId: 'e2e-t1', text: '第一轮请记住暗号 ALPHA-7', origin: USER_ORIGIN });
-    assert.equal((await env.waitForSubmission(bot.botId, 'e2e-t1')).status, 'done');
-    assert.equal(captured.length, 1);
-    assert.deepEqual(captured[0].turnContext.auxiliaryIndices, []);
-    assert.ok(messageText(captured[0].messages[captured[0].turnContext.inputIndex]).includes('第一轮请记住暗号 ALPHA-7'));
-
-    // Turn 2: update SOUL + add ping_probe_tool + BC deep-clone/summary/nudge + Hindsight recall + text+image + tool call
-    stage = 2;
-    const soul = await runtime.getBotSoul(bot.botId);
-    await runtime.setBotSoul(bot.botId, { expectedRevision: soul.revision, text: `${soul.text}\nTurn 2 rule: use ping_probe_tool.` });
-    const caps = (enableProbeTool, rev) => [
-      makeCapability('test-bc-context', { mode: 'bc', enableProbeTool, injectBcSummary: true, injectBcNudge: true }, rev),
-      { ...makeCapability('test-hindsight-recall', { baseUrl: recallBaseUrl, mode: 'read-only' }), targetVersion: hindsightManifest.version },
-    ];
-    await env.applySnapshot(env.makeSnapshot(3, [{ botId: bot.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: caps(true, 1) }]));
-    await runtime.submit(bot.botId, { requestId: 'e2e-t2', text: '第二轮请看图并使用新工具', attachments: [img.id], origin: USER_ORIGIN });
-    assert.equal((await env.waitForSubmission(bot.botId, 'e2e-t2')).status, 'done');
-
-    assert.equal(captured.length, 3); // T1, T2 Call 1, T2 Call 2 continuation
-    assert.equal(driverHarness.runs.length, 2); // Call 2 uses reentry(), no second driver.run
-    const tc2 = captured[1].turnContext;
-    assert.ok(messageText(captured[1].messages[tc2.inputIndex]).includes('第二轮请看图并使用新工具'));
-    assert.equal(hasImage(captured[1].messages[tc2.inputIndex]), true);
-    assert.ok(captured[1].messages.slice(tc2.inputIndex + 1).some((m) => m.role === 'system' && (m.toolsAdded ?? []).some((x) => x.name === 'ping_probe_tool')));
-    assert.ok(tc2.auxiliaryIndices.length >= 3);
-    for (let i = 0; i < tc2.auxiliaryIndices.length; i += 1) {
-      if (i > 0) assert.ok(tc2.auxiliaryIndices[i] > tc2.auxiliaryIndices[i - 1]);
-      assert.notEqual(tc2.auxiliaryIndices[i], tc2.inputIndex);
-      assert.equal(captured[1].messages[tc2.auxiliaryIndices[i]]?.role, 'user');
-    }
-
-    const run2 = driverHarness.runs[1];
-    assert.equal(run2.request.conversationId, null, 'SOUL and tool changes must rebuild the native context');
-    assert.ok(run2.request.contextBlock?.text.includes('第一轮请记住暗号 ALPHA-7'));
-    assert.ok(run2.request.contextBlock?.text.includes('第一轮已收到 ALPHA-7'));
-    assert.ok(run2.request.prompt.indexOf('BC nudge: keep tool output concise.') < run2.request.prompt.indexOf('第二轮请看图并使用新工具'));
-    const projectedRecall = captured[1].messages.find((m) => m.hindsightRecall === true);
-    assert.ok(projectedRecall && messageText(projectedRecall).includes(recallText));
-    assert.equal(run2.request.turnRecall, messageText(projectedRecall));
-    assert.ok(!run2.request.prompt.includes(recallText));
-    assert.ok(!(run2.request.contextBlock?.text ?? '').includes(recallText));
-    assert.ok(recallQueries.some((query) => query.includes('第二轮请看图并使用新工具')));
-    assert.deepEqual(run2.request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
-    assert.ok(!(run2.request.contextBlock?.text ?? '').includes('第二轮请看图并使用新工具'));
-    assert.ok(run2.mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
-    assert.equal(captured[2].messages[captured[2].turnContext.inputIndex]?.role, 'toolResult');
-    assert.ok(observedToolResult && run2.driverState.reentryCalls >= 1);
-    const durableHistory = JSON.stringify((await runtime.history(bot.botId, { limit: 50 })).items);
-    assert.ok(durableHistory.includes('工具结果确认：probe:acp-check'));
-    assert.ok(!durableHistory.includes(recallText));
-
-    // Turn 3: remove ping_probe_tool + pure-image user
-    stage = 3;
-    await env.applySnapshot(env.makeSnapshot(4, [{ botId: bot.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: caps(false, 2) }]));
-    await runtime.submit(bot.botId, { requestId: 'e2e-t3', text: '', attachments: [img.id], origin: USER_ORIGIN });
-    assert.equal((await env.waitForSubmission(bot.botId, 'e2e-t3')).status, 'done');
-
-    const tc3 = captured[3].turnContext;
-    assert.equal(messageText(captured[3].messages[tc3.inputIndex]), '');
-    assert.equal(hasImage(captured[3].messages[tc3.inputIndex]), true);
-    assert.ok(captured[3].messages.slice(tc3.inputIndex + 1).some((m) => m.role === 'system' && (m.toolsRemoved ?? []).some((x) => x.name === 'ping_probe_tool')));
-    assert.equal(driverHarness.runs[2].request.conversationId, null, 'removing a tool must rebuild the native context');
-    assert.deepEqual(driverHarness.runs[2].request.images, [
-      { data: PNG_1X1, mimeType: 'image/png' }, // Retained Turn 2 image.
-      { data: PNG_1X1, mimeType: 'image/png' }, // Current Turn 3 image.
-    ]);
-    assert.equal(driverHarness.runs[2].request.turnRecall, undefined);
-    assert.ok(!driverHarness.runs[2].mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ runtime, antigravity, rootDir, hadError });
-  }
-});
-
-test('ACP Code Mode only keeps the top-level catalog fixed while a nested deferred tool runs', async (t) => {
-  const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-codemode-'));
-  const antigravity = openIsolatedAntigravity(rootDir);
-  const captured = [];
-  const calls = [];
-  let runtime;
-  try {
-    const env = await openTestHostRuntime({
-      rootDir, antigravity, capturedPayloads: captured,
-      async callOperation(call) {
-        calls.push(call);
-        return { tasks: [], timeZone: 'Europe/Amsterdam' };
-      },
-    });
-    runtime = env.runtime;
-    const cwd = path.join(rootDir, 'workspace');
-    fs.mkdirSync(cwd);
-    const bot = await runtime.createBot({ requestId: 'create-code-mode', role: 'ACP Assistant', cwd, makePrimary: true });
-    await env.applySnapshot(env.makeSnapshot(2, [{
-      botId: bot.botId, cwd, model: { ...BASE_MODEL_SEL, codemodeOnly: true },
-      capabilities: [{ ...makeCapability('test-questionnaire', {}), targetVersion: '1.1.0' }],
-    }]));
-
-    driver.setOnRun(async (ctx) => {
-      const declared = toolsFromMessages(captured[0].messages);
-      assert.deepEqual(ctx.mcp.handler.listTools(), declared.map(({ name, description, parameters }) => ({
-        name, description, inputSchema: parameters,
-      })));
-      assert.ok(declared.some((tool) => tool.name === 'ask_user_question'));
-      assert.ok(declared.some((tool) => tool.name === 'bridge_poll_result'));
-      assert.ok(!declared.some((tool) => tool.name === 'tool_search' || tool.name === 'automation_schedule_list'));
-      const stale = await ctx.mcp.handler.onToolCall('stale', 'automation_schedule_list', {}, ctx.signal);
-      assert.equal(stale.isError, true);
-
-      const result = await ctx.mcp.handler.onToolCall('code-mode', 'codemode', {
-        code: `
-          const [match] = await searchTools("automation_schedule_list", { limit: 1 });
-          if (match?.name !== "automation_schedule_list") throw new Error("Missing deferred tool");
-          if (!(await describeTool(match.name))) throw new Error("Missing schema");
-          text(await tools[match.name]({}));
-        `,
-      }, ctx.signal);
-      assert.equal(result.isError, false, JSON.stringify(result));
-      const response = result.content.map((block) => block.text ?? '').join('');
-      assert.match(response, /Europe\/Amsterdam/);
-      ctx.emit({ type: 'text', delta: response });
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response, finished: true, aborted: false });
-    });
-
-    await runtime.submit(bot.botId, { requestId: 'nested-list', text: 'List my schedules with Code Mode.' });
-    const receipt = await env.waitForSubmission(bot.botId, 'nested-list');
-    if (driver.runs[0]?.error) throw driver.runs[0].error;
-    assert.equal(receipt.status, 'done', JSON.stringify(receipt));
-    assert.deepEqual(calls, [{ botId: bot.botId, name: 'automation_schedule_list', args: {} }]);
-    assert.equal(driver.runs.length, 1);
-    assert.equal(captured.length, 2);
-    assert.deepEqual(toolsFromMessages(captured[1].messages), toolsFromMessages(captured[0].messages));
-  } finally {
-    await closeAndRemove({ runtime, antigravity, rootDir });
-  }
-});
-
-test('Antigravity sends the detached questionnaire answer as a fresh authoritative input', async (t) => {
-  const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-wait-'));
+test('Real ToolTask executes model-only image tools and codemode, records final usage once, and keeps tool declarations stable', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-tools-usage-'));
   const cwd = path.join(rootDir, 'workspace');
   fs.mkdirSync(cwd, { recursive: true });
-  const antigravity = openIsolatedAntigravity(rootDir);
-  const captured = [];
-  let runtime;
-  let hadError = false;
-  try {
-    const env = await openTestHostRuntime({ rootDir, antigravity, capturedPayloads: captured });
-    runtime = env.runtime;
-    const bot = await runtime.createBot({ requestId: 'create-acp-wait', role: 'Acp Assistant', cwd, makePrimary: true });
-    await env.applySnapshot(env.makeSnapshot(2, [{ botId: bot.botId, cwd, model: BASE_MODEL_SEL, capabilities: [
-      { ...makeCapability('test-questionnaire', {}), targetVersion: '1.1.0' },
-    ] }]));
-    driver.setOnRun(async ctx => {
-      if (driver.runs.length === 1) {
-        await ctx.mcp.handler.onToolCall('wait-question', 'ask_user_question', {
-          questions: [{ header: 'Design', question: 'Pick a finish', options: [
-            { label: 'Copper', description: 'Warm' }, { label: 'Steel', description: 'Cool' },
-          ] }],
-        }, ctx.signal ?? new AbortController().signal);
-      }
-      ctx.emit({ type: 'text', delta: 'ack' });
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'ack', finished: true, aborted: false });
-    });
-    await runtime.submit(bot.botId, { requestId: 'acp-wait-input', text: 'Pick a finish first' });
-    assert.equal((await env.waitForSubmission(bot.botId, 'acp-wait-input')).status, 'done');
-    const history = (await runtime.history(bot.botId, { limit: 30 })).items;
-    const question = history.flatMap(entry => entry.model ?? []).find(message => message.durableWait === true)?.details.presentation;
-    assert.equal(question?.status, 'pending');
 
-    const { result } = await runtime.callCapabilityAction('test-questionnaire', 'answerQuestionnaire', {
-      requestId: 'acp-wait-answer', deviceId: (await runtime.getCurrentDevice()).deviceId, botId: bot.botId,
-      input: { conversationId: question.conversationId, requestId: question.requestId,
-        cancelled: false, answers: [{ questionIndex: 0, selectedOptions: [0] }] },
-    });
-    assert.equal(result.status, 'answered');
-    const key = createHash('sha256').update(JSON.stringify([
-      bot.primaryConversationId, question.installationId, question.conversationId, question.requestId,
-    ])).digest('hex');
-    const receipt = await env.waitForSubmission(bot.botId, `wait-${key.slice(0, 40)}`);
-    assert.equal(receipt.status, 'done', JSON.stringify(receipt));
-    assert.equal(driver.runs.length, 2, `Captured ACP requests: ${JSON.stringify(captured.map(p => p.turnContext))}`);
-    const resumed = captured.at(-1);
-    const liveInput = resumed.messages[resumed.turnContext.inputIndex];
-    assert.equal(liveInput.role, 'user');
-    assert.match(messageText(liveInput), /Pick a finish.*Copper/);
-    assert.doesNotMatch(messageText(liveInput), /Pick a finish first/);
-    assert.match(driver.runs[1].request.prompt, /Copper/);
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ runtime, antigravity, rootDir, hadError });
-  }
-});
+  const runCalls = [];
+  const toolResultCalls = [];
+  const toolResultResolvers = new Map();
 
-// 2. Host Fail-Closed Regressions (Real Runtime + Exact Narrow Provenance/Codec Helpers):
-//    - Real Host: deleted current input leaving earlier same-text user, or replaced by same-metadata containing auxiliary
-//    - Narrow helpers: exact same-timestamp A/B, in-place replace with older object, proven-earlier ref among deep-equal,
-//      sideband turnProvenance cannot alter toolResult role/toolCallId, BC native marked auxiliary + legitimate tag rewrite
-test('Host projection fail-closed: deleted current input (real runtime & exact provenance/codec helpers) never sends stale or spoofed input', async (t) => {
-  // 2a: Exact provenance & BC codec guards (deterministic, zero clock mocking)
-  const sys = { role: 'system', content: '', timestamp: 1 };
-  const prior = { role: 'user', content: 'prior', timestamp: 2 };
-  const reply = { role: 'assistant', content: [{ type: 'text', text: 'ack' }], timestamp: 3 };
-  const current = { role: 'user', content: 'new', timestamp: 4 };
-
-  // In-place delete current, replace with older object in beforeRequest stage
-  {
-    const raw = [sys, prior, reply, current];
-    const proj = structuredClone(raw);
-    const p = createTurnProvenanceFromCutoff(raw, raw, { messages: proj }, 10);
-    proj[3] = proj[1];
-    assert.throws(() => resolveAntigravityTurnContext(advanceTurnProvenance(p, proj, { allowAppendAuxiliaryUsers: true }), proj));
-  }
-
-  // Exact same-timestamp Branch A: known earlier ref or cloned earlier-only copy cannot stand in for deleted deep-equal current user
-  {
-    const newIdentical = { ...prior };
-    const rawDup = [sys, prior, reply, newIdentical];
-    assert.throws(() => createTurnProvenanceFromCutoff(rawDup, rawDup, { messages: [sys, prior, reply, prior] }, 10));
-    assert.throws(() => createTurnProvenanceFromCutoff(rawDup, rawDup, { messages: [sys, prior] }, 10));
-    assert.throws(() => createTurnProvenanceFromCutoff(rawDup, rawDup, { messages: [sys, structuredClone(prior)] }, 10));
-  }
-
-  // Exact same-timestamp Branch B: deleted current input replaced by same-metadata auxiliary merely containing original text
-  assert.throws(() =>
-    createTurnProvenanceFromCutoff(
-      [sys, current],
-      [sys, current],
-      { messages: [sys, { role: 'user', content: `辅助上下文包装：${current.content}（仅供参考）`, timestamp: current.timestamp }] },
-      10,
-    ),
-  );
-
-  // Sideband turnProvenance cannot alter toolResult role or toolCallId
-  {
-    const rawTool = [sys, { role: 'toolResult', toolCallId: 'call1', toolName: 'read', content: [{ type: 'text', text: 'result' }], timestamp: 4 }];
-    const proof = { cutoff: 10, inputIndex: 1, lostInput: false, auxiliaryIndices: [] };
-    assert.throws(() => createTurnProvenanceFromCutoff(rawTool, rawTool, { messages: [sys, current], turnProvenance: proof }, 10));
-    assert.throws(() => createTurnProvenanceFromCutoff(rawTool, rawTool, { messages: [sys, { ...rawTool[1], toolCallId: 'obsolete' }], turnProvenance: proof }, 10));
-  }
-
-  // BC native marked auxiliary survives codec as auxiliary after current, and legitimate BC tag rewrite resolves cleanly
-  {
-    const aux = { role: 'user', content: 'summary', bcContextMaterial: true, timestamp: 0 };
-    const msgs = [sys, current, aux];
-    const codec = createContextCodec({ messages: msgs, entries: msgs.map((_, id) => ({ id: id + 1 })), contributions: msgs.map((m) => [m]) });
-    const p = codec.restoreWithProvenance(codec.messages);
-    assert.equal(p.inputIndex, 1);
-    assert.deepEqual(p.auxiliaryIndices, [2]);
-
-    const bcBase = [sys, current];
-    const bcCodec = createContextCodec({ messages: bcBase, entries: bcBase.map((_, id) => ({ id: id + 1 })), contributions: bcBase.map((m) => [m]) });
-    const tagged = [
-      bcCodec.messages[0],
-      { ...bcCodec.messages[1], text: `[msg_id=e2:m0]\n${current.content}` },
-      { id: 'acp_summary_1', role: 'user', contentType: 'text', text: 'BC summary block.', summaryOfBlockId: 'blk_1' },
-    ];
-    const rewritten = bcCodec.restoreWithProvenance(tagged);
-    const rewrittenMsgs = rewritten.messages ?? bcCodec.restore(tagged);
-    assert.equal(rewritten.inputIndex, 1);
-    assert.deepEqual(rewritten.auxiliaryIndices, [2]);
-    const bcProv = createTurnProvenanceFromCutoff(
-      bcBase,
-      bcBase,
-      { messages: rewrittenMsgs, turnProvenance: { cutoff: 10, inputIndex: rewritten.inputIndex, lostInput: false, auxiliaryIndices: rewritten.auxiliaryIndices } },
-      10,
-    );
-    assert.deepEqual(resolveAntigravityTurnContext(bcProv, rewrittenMsgs), { inputIndex: 1, auxiliaryIndices: [2] });
-  }
-
-  // 2b: Real Host openRuntime + prepareContext fail-closed verification (no global Date.now mock)
-  const driverHarness = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-failclosed-'));
-  const botCwd = path.join(rootDir, 'workspace');
-  fs.mkdirSync(botCwd, { recursive: true });
-
-  let antigravity = null;
-  let runtime = null;
-  let hadError = false;
-  try {
-    antigravity = openIsolatedAntigravity(rootDir);
-    const captured = [];
-    const env = await openTestHostRuntime({ rootDir, antigravity, capturedPayloads: captured });
-    runtime = env.runtime;
-
-    const botA = await runtime.createBot({ requestId: 'fc-bot-a', role: 'FailClosedA', cwd: botCwd, makePrimary: true });
-    const botB = await runtime.createBot({ requestId: 'fc-bot-b', role: 'FailClosedB', cwd: botCwd });
-
-    // Real Host Branch A: Turn 2 drops current input leaving only earlier same-text user
-    await env.applySnapshot(env.makeSnapshot(2, [
-      { botId: botA.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [makeCapability('test-bc-context', { mode: 'passthrough' }, 1)] },
-      { botId: botB.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [] },
-    ]));
-    await runtime.submit(botA.botId, { requestId: 'fc-a-t1', text: '重复探针消息', origin: USER_ORIGIN });
-    assert.equal((await env.waitForSubmission(botA.botId, 'fc-a-t1')).status, 'done');
-    assert.equal(captured.length, 1);
-
-    const recFileA = path.join(rootDir, 'branch-a.json');
-    await env.applySnapshot(env.makeSnapshot(3, [
-      { botId: botA.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [makeCapability('test-bc-context', { mode: 'drop-current-leave-earlier-user', recordFile: recFileA }, 2)] },
-      { botId: botB.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [] },
-    ]));
-    await runtime.submit(botA.botId, { requestId: 'fc-a-t2', text: '重复探针消息', origin: USER_ORIGIN });
-    const subA = await env.waitForSubmission(botA.botId, 'fc-a-t2');
-
-    assert.deepEqual(JSON.parse(fs.readFileSync(recFileA, 'utf8')), { called: true, userCount: 2, distinctRef: true, sameRole: true, sameContent: true });
-    assert.notEqual(subA.status, 'done');
-    assert.equal(captured.length, 1, 'Branch A must fail closed before streamAntigravity');
-    assert.equal(driverHarness.runs.length, 1);
-
-    // Real Host Branch B: current input deleted and replaced by same-metadata auxiliary merely containing original text
-    const recFileB = path.join(rootDir, 'branch-b.json');
-    await env.applySnapshot(env.makeSnapshot(4, [
-      { botId: botA.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [] },
-      { botId: botB.botId, cwd: botCwd, model: BASE_MODEL_SEL, capabilities: [makeCapability('test-bc-context', { mode: 'drop-current-replace-with-containing-aux', recordFile: recFileB }, 1)] },
-    ]));
-    await runtime.submit(botB.botId, { requestId: 'fc-b-t1', text: '原输入关键词-BETA', origin: USER_ORIGIN });
-    const subB = await env.waitForSubmission(botB.botId, 'fc-b-t1');
-
-    assert.deepEqual(JSON.parse(fs.readFileSync(recFileB, 'utf8')), { called: true, sameRole: true, sameTs: true, containsOriginal: true, strictEqual: false });
-    assert.notEqual(subB.status, 'done');
-    assert.equal(captured.length, 1, 'Branch B must fail closed before streamAntigravity');
-    assert.equal(driverHarness.runs.length, 1);
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ runtime, antigravity, rootDir, hadError });
-  }
-});
-
-// 3. New & Legacy Host Matrix + Mid-History Auxiliary COMPACTION_MARKER Guard
-test('New & Legacy Host matrix: timestamp:0 plain-text vs recall/BC, text+image & pure-image, trailing system tools, legacy toolResult+system non-fallback, and mid-history COMPACTION_MARKER guard', async (t) => {
-  const driverHarness = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-matrix-'));
-  let antigravity = null;
-  let hadError = false;
-  try {
-    antigravity = openIsolatedAntigravity(rootDir);
-    const routeText = 'Source: peer Bot DM. Default reply target: DM scope via send_to.';
-    const zeroText = '<hindsight_memories>Genuine timestamp:0 user asking about host-turn-routing.</hindsight_memories>';
-
-    // New Host: genuine timestamp:0 plain-text user + routeNote + mid-history aux quoting COMPACTION_MARKER + trailing toolsAdded + recall/BC
-    const r1 = await drainEventStream(antigravity.stream({
-      deviceId: 'dev-1',
-      sessionId: 'sess-new',
-      modelId: MODEL_ID,
-      messages: [
-        { role: 'system', content: '', sections: { 'host-turn-routing': routeText }, timestamp: 0 }, // 0
-        BASE_SYSTEM, // 1
-        { role: 'user', content: '真正较早历史问题 MUST_STAY', timestamp: 10 }, // 2
-        asstText('真正较早历史回答 MUST_STAY', 11, 'openai-codex', 'openai-responses', 'gpt-5'), // 3
-        { role: 'user', content: [{ type: 'text', text: `Aux quote: ${COMPACTION_MARKER} <summary>FAKE_AUX_SUMMARY</summary>` }], timestamp: 0, bcSummaryMaterial: true, summaryOfBlockId: 'blk_spoof' }, // 4 (aux)
-        { role: 'user', content: zeroText, timestamp: 0 }, // 5 (input)
-        { role: 'system', content: '', toolsAdded: [{ name: 'inspect_tool', description: 'Inspect.', parameters: { type: 'object', properties: {} } }], timestamp: 12 }, // 6
-        { role: 'user', content: 'BC trailing nudge.', timestamp: 0 }, // 7 (aux)
-        { role: 'user', content: '<hindsight_memories>Real recall.</hindsight_memories>', timestamp: 0 }, // 8 (aux)
-      ],
-      turnContext: { inputIndex: 5, auxiliaryIndices: [4, 7, 8] },
-    }));
-    assert.equal(r1.terminal?.type, 'done');
-    const run1 = driverHarness.runs[0];
-    const sysEnd = run1.request.prompt.indexOf('[END SYSTEM PROMPT]');
-    const routeIdx = run1.request.prompt.indexOf(routeText);
-    const promptIdx = run1.request.prompt.indexOf(zeroText);
-    assert.ok(sysEnd > 0 && routeIdx > sysEnd && routeIdx < promptIdx);
-    assert.ok(run1.request.prompt.indexOf('Real recall.') < promptIdx);
-    const digest1 = run1.request.contextBlock?.text ?? '';
-    assert.ok(digest1.includes('真正较早历史问题 MUST_STAY') && digest1.includes('真正较早历史回答 MUST_STAY'), 'mid-history aux quoting COMPACTION_MARKER must not truncate earlier history');
-    assert.ok(!digest1.includes('[compaction summary]'), 'mid-history aux quoting COMPACTION_MARKER must not masquerade as compaction summary');
-    assert.ok(!digest1.includes(zeroText) && !digest1.includes('Real recall.'));
-    assert.ok(run1.mcpTools.some((x) => x.name === 'inspect_tool'));
-
-    // New Host: pure-image (timestamp:0) + toolsRemoved, then text+image + trailing system/aux
-    await drainEventStream(antigravity.stream({
-      deviceId: 'dev-1',
-      sessionId: 'sess-new',
-      modelId: MODEL_ID,
-      messages: [BASE_SYSTEM, { role: 'user', content: [{ type: 'image', data: PNG_1X1, mimeType: 'image/png' }], timestamp: 0 }, { role: 'system', content: '', toolsRemoved: [{ name: 'inspect_tool' }], timestamp: 20 }, { role: 'user', content: 'BC nudge.', timestamp: 0 }],
-      turnContext: { inputIndex: 1, auxiliaryIndices: [3] },
-    }));
-    assert.equal(driverHarness.runs[1].request.conversationId, null, 'removed history must not reuse the old native binding');
-    assert.deepEqual(driverHarness.runs[1].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
-    assert.ok(!driverHarness.runs[1].mcpTools.some((x) => x.name === 'inspect_tool'));
-
-    await drainEventStream(antigravity.stream({
-      deviceId: 'dev-1',
-      sessionId: 'sess-new',
-      modelId: MODEL_ID,
-      messages: [BASE_SYSTEM, { role: 'user', content: [{ type: 'text', text: '文图混合输入' }, { type: 'image', data: PNG_1X1, mimeType: 'image/png' }], timestamp: 0 }, { role: 'system', content: '', sections: { delta: 'ok' }, timestamp: 25 }, { role: 'user', content: '<hindsight_memories>Hint.</hindsight_memories>', timestamp: 0 }],
-      turnContext: { inputIndex: 1, auxiliaryIndices: [3] },
-    }));
-    assert.ok(driverHarness.runs[2].request.prompt.includes('文图混合输入'));
-    assert.deepEqual(driverHarness.runs[2].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
-    assert.ok(!(driverHarness.runs[2].request.contextBlock?.text ?? '').includes('文图混合输入'));
-
-    // Legacy Host (no turnContext): non-zero-ts user + toolsAdded; pure-image + toolsRemoved; unbound toolResult+system non-fallback; bound toolResult+system resume
-    await drainEventStream(antigravity.stream({
-      deviceId: 'dev-leg',
-      sessionId: 'sess-leg',
-      modelId: MODEL_ID,
-      messages: [
-        BASE_SYSTEM,
-        { role: 'user', content: '老历史问题', timestamp: 100 },
-        asstText('老历史回答', 101, 'openai-codex', 'openai-responses', 'gpt-5'),
-        { role: 'user', content: '老 Host 用户输入', timestamp: 102 },
-        { role: 'system', content: '', toolsAdded: [{ name: 'legacy_tool', description: 'L', parameters: { type: 'object', properties: {} } }], timestamp: 103 },
-        { role: 'user', content: 'BC legacy.', timestamp: 0, bcContextMaterial: true },
-        { role: 'user', content: '<hindsight_memories>Legacy recall.</hindsight_memories>', timestamp: 0 },
-      ],
-    }));
-    const runLeg1 = driverHarness.runs[3];
-    assert.ok(runLeg1.request.prompt.includes('老 Host 用户输入'));
-    assert.ok(!(runLeg1.request.contextBlock?.text ?? '').includes('老 Host 用户输入'));
-    assert.ok(runLeg1.mcpTools.some((x) => x.name === 'legacy_tool'));
-
-    await drainEventStream(antigravity.stream({
-      deviceId: 'dev-leg',
-      sessionId: 'sess-leg',
-      modelId: MODEL_ID,
-      messages: [BASE_SYSTEM, { role: 'user', content: [{ type: 'image', data: PNG_1X1, mimeType: 'image/png' }], timestamp: 0 }, { role: 'system', content: '', toolsRemoved: [{ name: 'legacy_tool' }], timestamp: 110 }, { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 }],
-    }));
-    assert.deepEqual(driverHarness.runs[4].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
-    assert.ok(!driverHarness.runs[4].mcpTools.some((x) => x.name === 'legacy_tool'));
-
-    const toolThenSys = [
-      BASE_SYSTEM,
-      { role: 'user', content: '绝不回退重发的旧输入', timestamp: 200 },
-      asstToolCall('tc_leg', 'read_file', { path: 'a' }, 201),
-      toolResult('tc_leg', 'read_file', 'ok', 202),
-      { role: 'system', content: '', sections: { delta: 'post-tool' }, timestamp: 203 },
-      { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 },
-    ];
-    const legUnbound = await drainEventStream(antigravity.stream({ deviceId: 'dev-leg', sessionId: 'sess-leg-unbound', modelId: MODEL_ID, messages: toolThenSys }));
-    assert.equal(legUnbound.terminal?.type, 'error');
-    assert.equal(driverHarness.runs.length, 5, 'legacy unbound toolResult+system must not fall back to older user');
-
-    const legBound = await drainEventStream(antigravity.stream({ deviceId: 'dev-leg', sessionId: 'sess-leg', modelId: MODEL_ID, messages: toolThenSys }));
-    assert.equal(legBound.terminal?.type, 'done');
-    assert.equal(driverHarness.runs[5].request.conversationId, null, 'rewritten legacy history requires a new native context');
-    assert.ok(driverHarness.runs[5].request.prompt.includes(RESUME_PROMPT));
-    assert.ok(!driverHarness.runs[5].request.prompt.includes('绝不回退重发的旧输入'));
-    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('绝不回退重发的旧输入'));
-    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('"toolCallId":"tc_leg"'));
-    assert.ok(driverHarness.runs[5].request.contextBlock?.text.includes('"text":"ok"'));
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ antigravity, rootDir, hadError });
-  }
-});
-
-// 4. Parked Tool Continuation (No Prompt Resend), Bound Resume & Device+Session Isolation
-test('Preserves parked tool continuation without resending prompt, bound assistant resume, and (deviceId, sessionId) isolation', async (t) => {
-  const driverHarness = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-cont-'));
-  let antigravity = null;
-  let hadError = false;
-  try {
-    antigravity = openIsolatedAntigravity(rootDir);
-    let parkedResult = null;
-    let parkedDriver = null;
-    driverHarness.setOnRun(async (ctx) => {
-      if (ctx.request.prompt.includes('TRIGGER_PARK')) {
-        parkedDriver = ctx.record.driver;
-        parkedResult = await ctx.mcp.handler.onToolCall('tc_1', 'read_file', { path: 'README.md' }, ctx.signal ?? new AbortController().signal);
-        const text = (parkedResult.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-        ctx.emit({ type: 'text', delta: `resumed:${text}` });
-        ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: `resumed:${text}`, finished: true, aborted: false });
-        return;
-      }
-      ctx.emit({ type: 'text', delta: `ok:${ctx.conversationId}` });
-      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: `ok:${ctx.conversationId}`, finished: true, aborted: false });
-    });
-
-    const call1 = await drainEventStream(antigravity.stream({
-      deviceId: 'dev-a',
-      sessionId: 'shared',
-      modelId: MODEL_ID,
-      messages: [
-        BASE_SYSTEM,
-        { role: 'user', content: 'TRIGGER_PARK: read README.md', timestamp: 10 },
-        { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 },
-      ],
-      turnContext: { inputIndex: 1, auxiliaryIndices: [2] },
-    }));
-    assert.equal(call1.terminal?.reason, 'toolUse');
-
-    const call2 = await drainEventStream(antigravity.stream({
-      deviceId: 'dev-a',
-      sessionId: 'shared',
-      modelId: MODEL_ID,
-      messages: [
-        BASE_SYSTEM,
-        { role: 'user', content: 'TRIGGER_PARK: read README.md', timestamp: 10 },
-        asstToolCall('tc_1', 'read_file', { path: 'README.md' }, 11),
-        toolResult('tc_1', 'read_file', [{ type: 'text', text: 'readme-ok' }, { type: 'image', data: PNG_1X1, mimeType: 'image/png' }], 12),
-        { role: 'system', content: '', timestamp: 13 },
-        { role: 'user', content: '<hindsight_memories>Recall.</hindsight_memories>', timestamp: 0 },
-      ],
-      turnContext: { inputIndex: 3, auxiliaryIndices: [5] },
-    }));
-    assert.equal(call2.terminal?.reason, 'stop');
-    assert.equal(driverHarness.runs.length, 1, 'continuation must not call driver.run again');
-    assert.ok(driverHarness.getDriverState(parkedDriver).reentryCalls >= 1);
-    assert.ok(parkedResult.content.some((b) => b.type === 'image' && b.data === PNG_1X1));
-    assert.ok(messageText(call2.terminal.message).includes('resumed:readme-ok'));
-
-    const boundResume = await drainEventStream(antigravity.stream({
-      deviceId: 'dev-a',
-      sessionId: 'shared',
-      modelId: MODEL_ID,
-      messages: [BASE_SYSTEM, { role: 'user', content: '不应重发的旧输入', timestamp: 10 }, asstText('partial', 15), { role: 'system', content: '', sections: { delta: 'ok' }, timestamp: 16 }],
-      turnContext: { inputIndex: 2, auxiliaryIndices: [] },
-    }));
-    assert.equal(boundResume.terminal?.type, 'done');
-    assert.equal(driverHarness.runs[1].request.conversationId, null, 'rewritten resume history must rebuild the native context');
-    assert.ok(driverHarness.runs[1].request.prompt.includes(RESUME_PROMPT) && !driverHarness.runs[1].request.prompt.includes('不应重发的旧输入'));
-    assert.ok(driverHarness.runs[1].request.contextBlock?.text.includes('不应重发的旧输入'));
-
-    await drainEventStream(antigravity.stream({ deviceId: 'dev-b', sessionId: 'shared', modelId: MODEL_ID, messages: [BASE_SYSTEM, { role: 'user', content: 'from dev-b', timestamp: 20 }], turnContext: { inputIndex: 1, auxiliaryIndices: [] } }));
-    await drainEventStream(antigravity.stream({ deviceId: 'dev-a', sessionId: 'other', modelId: MODEL_ID, messages: [BASE_SYSTEM, { role: 'user', content: 'from other', timestamp: 21 }], turnContext: { inputIndex: 1, auxiliaryIndices: [] } }));
-    assert.equal(driverHarness.runs[2].request.conversationId, null);
-    assert.equal(driverHarness.runs[3].request.conversationId, null);
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ antigravity, rootDir, hadError });
-  }
-});
-
-test('Migrates a pre-hook native binding once, restoring ordinary history without replaying automatic recall', async (t) => {
-  const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-recall-'));
-  const deviceId = 'dev-recall';
-  const sessionId = 'session-recall';
-  const sessionsPath = path.join(rootDir, 'center', 'antigravity', 'sessions.json');
-  fs.mkdirSync(path.dirname(sessionsPath), { recursive: true });
-  fs.writeFileSync(sessionsPath, JSON.stringify({
-    [makeSessionKey(deviceId, sessionId)]: { conversationId: 'legacy-conversation', lastStepIdx: -1, lastMessageCount: 4 },
-  }));
-
-  let antigravity = openIsolatedAntigravity(rootDir);
-  let hadError = false;
-  const history = [
-    BASE_SYSTEM,
-    { role: 'user', content: 'Ordinary earlier request', timestamp: 10 },
-    { role: 'user', content: 'Old automatic recall', hindsightRecall: true, timestamp: 0 },
-    asstText('Ordinary earlier answer', 11),
-  ];
-  const send = (messages, inputIndex, auxiliaryIndices) => drainEventStream(antigravity.stream({
-    deviceId, sessionId, modelId: MODEL_ID, messages, turnContext: { inputIndex, auxiliaryIndices },
-  }));
-  try {
-    const firstRecall = renderHindsightRecall([{
-      bankId: 'legacy-bank', target: { kind: 'primary' }, result: { results: [{ id: 'r1', text: 'Recall from an older Host' }] },
-    }]);
-    const firstInput = { role: 'user', content: 'First message after upgrading', timestamp: 12 };
-    const first = await send([...history, firstInput, firstRecall], 4, [2, 5]);
-    assert.equal(first.terminal?.reason, 'stop');
-    const migrated = driver.runs[0];
-    assert.equal(migrated.request.conversationId, null);
-    assert.equal(migrated.request.turnRecall, firstRecall.content);
-    assert.ok(migrated.request.prompt.includes('Base assistant instructions.'));
-    assert.ok(migrated.request.contextBlock?.text.includes('Ordinary earlier request'));
-    assert.ok(migrated.request.contextBlock?.text.includes('Ordinary earlier answer'));
-    for (const block of [migrated.request.prompt, migrated.request.contextBlock?.text ?? '']) {
-      assert.ok(!block.includes('Old automatic recall'));
-      assert.ok(!block.includes('Recall from an older Host'));
-    }
-
-    await antigravity.close();
-    antigravity = openIsolatedAntigravity(rootDir);
-    const genuineLookalike = { ...firstRecall, content: firstRecall.content.replace('Recall from an older Host', 'Real user text') };
-    const afterRestart = await send([...history, firstInput, first.terminal.message, genuineLookalike], 6, [2]);
-    assert.equal(afterRestart.terminal?.reason, 'stop');
-    const resumed = driver.runs[1];
-    assert.equal(resumed.request.conversationId, migrated.assignedConversationId);
-    assert.equal(resumed.request.turnRecall, undefined);
-    assert.ok(resumed.request.prompt.includes(genuineLookalike.content));
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ antigravity, rootDir, hadError });
-  }
-});
-
-test('Persists a second hook-enabled binding that arrives while another binding is being written', async (t) => {
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-bindings-'));
-  const sessionsPath = path.join(rootDir, 'sessions.json');
-  t.after(() => fs.rmSync(rootDir, { recursive: true, force: true }));
-  const store = new SessionStore(sessionsPath);
-  const { promise: writing, resolve: signalWrite } = Promise.withResolvers();
-  const { promise: release, resolve: releaseWrite } = Promise.withResolvers();
-  const writeFile = fs.promises.writeFile;
-  t.mock.method(fs.promises, 'writeFile', async (file, ...args) => {
-    if (String(file).startsWith(sessionsPath + '.')) {
-      signalWrite();
-      await release;
-    }
-    return writeFile(file, ...args);
-  });
-  const firstKey = makeSessionKey('device', 'first');
-  const secondKey = makeSessionKey('device', 'second');
-  store.set(firstKey, { conversationId: 'first-native', lastStepIdx: -1, turnRecallHook: true });
-  try {
-    await writing;
-    store.set(secondKey, { conversationId: 'second-native', lastStepIdx: -1, turnRecallHook: true });
-  } finally {
-    releaseWrite();
-    await store.flush();
-  }
-  const reopened = new SessionStore(sessionsPath);
-  assert.equal(reopened.get(firstKey)?.turnRecallHook, true);
-  assert.equal(reopened.get(secondKey)?.turnRecallHook, true);
-});
-
-// 5. No-Input / Unbound Non-User & Invalid turnContext Fail-Closed (registerAntigravityRoutes + openAntigravity.stream)
-test('No-input/unbound cases never start driver.run, and invalid turnContext fails closed in both registerAntigravityRoutes and openAntigravity.stream', async (t) => {
-  const driverHarness = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-reject-'));
-  let antigravity = null;
-  let routes = null;
-  let hadError = false;
-  try {
-    antigravity = openIsolatedAntigravity(rootDir);
-
-    const noStartCases = [
-      ['new pure system', [BASE_SYSTEM], { inputIndex: null, auxiliaryIndices: [] }],
-      ['legacy pure system', [BASE_SYSTEM], undefined],
-      ['system + aux only', [BASE_SYSTEM, { role: 'user', content: '<hindsight_memories>Aux only.</hindsight_memories>', timestamp: 0 }], { inputIndex: null, auxiliaryIndices: [1] }],
-      ['unbound toolResult', [BASE_SYSTEM, { role: 'user', content: 'old', timestamp: 10 }, asstToolCall('tc1', 'read_file', { path: 'x' }, 11), toolResult('tc1', 'read_file', 'r', 12)], { inputIndex: 3, auxiliaryIndices: [] }],
-      ['unbound assistant', [BASE_SYSTEM, { role: 'user', content: 'old', timestamp: 10 }, asstText('done', 11)], { inputIndex: 2, auxiliaryIndices: [] }],
-    ];
-    for (const [name, messages, turnContext] of noStartCases) {
-      const res = await drainEventStream(antigravity.stream({
-        deviceId: 'dev-no-input',
-        sessionId: name,
-        modelId: MODEL_ID,
-        messages,
-        ...(turnContext !== undefined ? { turnContext } : {}),
-      }));
-      assert.equal(res.terminal?.type, 'error', `${name} must terminate with error`);
-    }
-
-    const twoMsgs = [BASE_SYSTEM, { role: 'user', content: 'valid user', timestamp: 100 }];
-    const fourMsgs = [BASE_SYSTEM, { role: 'user', content: 'u1', timestamp: 100 }, { role: 'user', content: 'u2', timestamp: 101 }, { role: 'user', content: 'u3', timestamp: 0 }];
-    const asstMsgs = [BASE_SYSTEM, { role: 'user', content: 'u1', timestamp: 100 }, asstText('a', 101)];
-    const trMsgs = [BASE_SYSTEM, { role: 'user', content: 'u1', timestamp: 100 }, asstToolCall('tcx', 'read_file', { path: 'f' }, 101), toolResult('tcx', 'read_file', 'ok', 102)];
-
-    const invalidCases = [
-      ['null', twoMsgs, null],
-      ['array', twoMsgs, []],
-      ['extra key', twoMsgs, { inputIndex: 1, auxiliaryIndices: [], extra: 1 }],
-      ['missing auxiliaryIndices', twoMsgs, { inputIndex: 1 }],
-      ['missing inputIndex', twoMsgs, { auxiliaryIndices: [] }],
-      ['negative inputIndex', twoMsgs, { inputIndex: -1, auxiliaryIndices: [] }],
-      ['non-integer inputIndex', twoMsgs, { inputIndex: 1.5, auxiliaryIndices: [] }],
-      ['OOB inputIndex', twoMsgs, { inputIndex: 5, auxiliaryIndices: [] }],
-      ['inputIndex -> system', twoMsgs, { inputIndex: 0, auxiliaryIndices: [] }],
-      ['inputIndex -> automatic recall', [BASE_SYSTEM, { role: 'user', content: 'Automatic recall', hindsightRecall: true, timestamp: 0 }], { inputIndex: 1, auxiliaryIndices: [] }],
-      ['inputIndex in auxiliaryIndices', twoMsgs, { inputIndex: 1, auxiliaryIndices: [1] }],
-      ['contradictory null inputIndex', twoMsgs, { inputIndex: null, auxiliaryIndices: [] }],
-      ['non-last inputIndex', fourMsgs, { inputIndex: 1, auxiliaryIndices: [3] }],
-      ['duplicate auxiliaryIndices', fourMsgs, { inputIndex: 1, auxiliaryIndices: [2, 2] }],
-      ['unsorted auxiliaryIndices', fourMsgs, { inputIndex: 1, auxiliaryIndices: [3, 2] }],
-      ['auxiliary -> system', twoMsgs, { inputIndex: 1, auxiliaryIndices: [0] }],
-      ['auxiliary -> assistant', asstMsgs, { inputIndex: 1, auxiliaryIndices: [2] }],
-      ['auxiliary -> toolResult', trMsgs, { inputIndex: 2, auxiliaryIndices: [3] }],
-      ['OOB auxiliary index', twoMsgs, { inputIndex: 1, auxiliaryIndices: [9] }],
-      ['negative auxiliary index', twoMsgs, { inputIndex: 1, auxiliaryIndices: [-1] }],
-      ['non-number auxiliary index', fourMsgs, { inputIndex: 1, auxiliaryIndices: ['2'] }],
-    ];
-
-    const routeHandlers = new Map();
-    const forwarded = [];
-    routes = registerAntigravityRoutes({
-      store: {
-        getProvider: (id) => (id === ANTIGRAVITY_PROVIDER_ID ? { id, enabled: true } : null),
-        listDeviceBots: () => [{ botId: 'bot-1' }],
-        getBotModelConfig: () => ({ effective: { modelRef: MODEL_REF } }),
-        listModels: () => [{ id: MODEL_ID, enabled: true }],
-      },
-      bridge: { registry: { authenticate: () => true } },
-      catalog: { apply: async () => {} },
-      host: (method, url, handler) => routeHandlers.set(`${method} ${url}`, handler),
-      antigravity: { stream: (params, opts) => { forwarded.push(params); return antigravity.stream(params, opts); }, cancel: async () => {} },
-      changed: (x) => x,
-    });
-    const streamHandler = routeHandlers.get(`POST ${ANTIGRAVITY_STREAM_PATH}`);
-
-    for (const [label, messages, turnContext] of invalidCases) {
-      await assert.rejects(
-        () => streamHandler({ centerDevice: { deviceId: 'd', token: 't' }, body: { sessionId: `h-${label}`, modelId: MODEL_ID, messages, turnContext }, raw: { aborted: false, destroyed: false, on() {}, off() {} } }, { raw: { destroyed: false } }),
-        (err) => err?.code === 'INVALID_ARGUMENT',
-        `route must reject ${label}`,
-      );
-      const direct = await drainEventStream(antigravity.stream({ deviceId: 'd', sessionId: `s-${label}`, modelId: MODEL_ID, messages, turnContext }));
-      assert.equal(direct.terminal?.type, 'error', `direct stream must fail closed for ${label}`);
-    }
-    assert.equal(forwarded.length, 0);
-    assert.equal(driverHarness.runs.length, 0);
-
-    // Valid turnContext forwards through registerAntigravityRoutes intact
-    const lines = [];
-    await streamHandler(
-      { centerDevice: { deviceId: 'd', token: 't' }, body: { sessionId: 'valid-fwd', modelId: MODEL_ID, messages: twoMsgs, turnContext: { inputIndex: 1, auxiliaryIndices: [] } }, raw: { aborted: false, destroyed: false, on() {}, off() {} } },
-      { hijack() {}, raw: { destroyed: false, writableEnded: false, writeHead() {}, flushHeaders() {}, write(l) { lines.push(l); return true; }, end() { this.writableEnded = true; }, on() {}, off() {} } },
-    );
-    assert.equal(forwarded.length, 1);
-    assert.deepEqual(forwarded[0].turnContext, { inputIndex: 1, auxiliaryIndices: [] });
-    assert.equal(driverHarness.runs.length, 1);
-    assert.ok(lines.some((l) => JSON.parse(l).type === 'done'));
-  } catch (err) {
-    hadError = true;
-    throw err;
-  } finally {
-    await closeAndRemove({ routes, antigravity, rootDir, hadError });
-  }
-});
-
-// 6. Standalone createAntigravityProvider must not fabricate guessed turnContext
-test('Standalone createAntigravityProvider does not fabricate guessed turnContext without Host provenance', async () => {
-  const sent = [];
-  const provider = createAntigravityProvider({
-    provider: { id: ANTIGRAVITY_PROVIDER_ID, name: 'Antigravity', api: ANTIGRAVITY_API, baseUrl: '' },
-    models: [{ id: MODEL_ID, name: 'Gemini 3 Pro', api: ANTIGRAVITY_API, contextWindow: 128_000, maxTokens: 8_192, input: ['text', 'image'], reasoning: false }],
-    streamAntigravity(payload) {
-      sent.push(JSON.parse(JSON.stringify(payload)));
+  const antigravityClient = {
+    run(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      runCalls.push(cloned);
+      const turnNumber = runCalls.length;
       return (async function* () {
-        const msg = asstText('ok', Date.now());
-        yield { type: 'start', partial: msg };
-        yield { type: 'done', reason: 'stop', message: msg };
+        if (turnNumber === 1) {
+          yield { type: 'text_delta', delta: 'Inspecting image and running code.' };
+
+          const waitImg = Promise.withResolvers();
+          toolResultResolvers.set('tc-img-1', waitImg);
+          yield {
+            type: 'tool_request',
+            callId: 'tc-img-1',
+            name: 'model_only_image_probe',
+            args: { label: 'shot-1' },
+          };
+          const imgRes = await waitImg.promise;
+          assert.equal(imgRes.isError, false);
+          assert.deepEqual(imgRes.content, [
+            { type: 'text', text: 'image-probe:shot-1' },
+            { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+          ]);
+
+          const waitCode = Promise.withResolvers();
+          toolResultResolvers.set('tc-code-1', waitCode);
+          yield {
+            type: 'tool_request',
+            callId: 'tc-code-1',
+            name: 'codemode',
+            args: {
+              code: `
+                if ((await searchTools("model_only_image_probe", { limit: 20 })).some(t => t.name === "model_only_image_probe")) {
+                  throw new Error("model-only tool leaked into codemode");
+                }
+                const [probe] = await searchTools("ping_probe_tool", { limit: 1 });
+                if (probe?.name !== "ping_probe_tool") throw new Error("missing deferred ping_probe_tool");
+                text(await tools[probe.name]({ query: "native-turn" }));
+              `,
+            },
+          };
+          const codeRes = await waitCode.promise;
+          assert.equal(codeRes.isError, false, JSON.stringify(codeRes));
+          assert.match(JSON.stringify(codeRes.content), /probe:native-turn/);
+
+          yield { type: 'text_delta', delta: 'FINAL_TOOL_ANSWER' };
+          yield {
+            type: 'turn_done',
+            conversationId: 'native-conv-tools-1',
+            usage: { input: 320, output: 80, cacheRead: 10, cacheWrite: 5, totalTokens: 415 },
+          };
+        } else {
+          yield { type: 'text_delta', delta: 'SECOND_TURN_STABLE' };
+          yield {
+            type: 'turn_done',
+            conversationId: 'native-conv-tools-1',
+            usage: { input: 40, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 50 },
+          };
+        }
       })();
     },
+    async toolResult(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      toolResultCalls.push(cloned);
+      toolResultResolvers.get(cloned.callId)?.resolve(cloned);
+      return { ok: true };
+    },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    const bot = await env.runtime.createBot({ requestId: 'tools-bot', role: 'Tools Usage', cwd, makePrimary: true });
+    await env.applySnapshot(
+      env.makeSnapshot(2, [
+        {
+          botId: bot.botId,
+          cwd,
+          model: BASE_MODEL_SEL,
+          capabilities: [
+            makeCapability('test-probe-tools', {
+              enableProbeTool: true,
+              enableModelOnlyImageProbe: true,
+            }),
+          ],
+        },
+      ]),
+    );
+
+    await env.runtime.submit(bot.botId, { requestId: 'tools-t1', text: 'Run image probe and codemode', origin: USER_ORIGIN });
+    const receipt1 = await env.waitForSubmission(bot.botId, 'tools-t1');
+    assert.equal(receipt1.status, 'done', JSON.stringify(receipt1));
+    assert.equal(receipt1.answerText, 'FINAL_TOOL_ANSWER');
+
+    assert.equal(runCalls.length, 1, 'entire multi-tool turn runs inside one /run stream');
+    assert.equal(toolResultCalls.length, 2);
+
+    // Outer tools: codemode + model-only tools only; deferred non-model-only tools stay inside codemode.
+    const declaredNames = runCalls[0].tools.map((t) => t.name);
+    assert.ok(declaredNames.includes('codemode'));
+    assert.ok(declaredNames.includes('model_only_image_probe'));
+    assert.equal(declaredNames.includes('ping_probe_tool'), false);
+    assert.equal(declaredNames.includes('tool_search'), false);
+
+    // Real ToolTasks created with abandonOnRestart: true (model-issued calls; codemode also spawns nested ToolTask).
+    const nativeId = getPrimaryNativeId(env.durableDbPath, bot.primaryConversationId);
+    const allToolTasks = readDurableTasks(env.durableDbPath, nativeId).filter((t) => t.record.kind === 'pi.tool');
+    const modelToolTasks = allToolTasks.filter((t) => t.record.input?.kind === 'model');
+    assert.equal(modelToolTasks.length, 2);
+    assert.ok(allToolTasks.some((t) => t.record.input?.kind === 'nested'), 'codemode should spawn nested ToolTask for ping_probe_tool');
+    for (const task of modelToolTasks) {
+      assert.equal(task.record.abandonOnRestart, true);
+      assert.equal(task.status, 'terminal');
+    }
+
+    // Intermediate AssistantEntry records have zero usage; final answer records turn_done usage once.
+    const history = await env.runtime.history(bot.botId, { limit: 50 });
+    const assistants = history.items.flatMap((entry) => entry.model ?? []).filter((msg) => msg?.role === 'assistant');
+    const intermediate = assistants.filter((msg) => msg.stopReason === 'toolUse');
+    const finals = assistants.filter((msg) => msg.stopReason === 'stop');
+    assert.equal(intermediate.length, 2);
+    assert.equal(finals.length, 1);
+    for (const msg of intermediate) {
+      assert.equal(msg.usage.input, 0);
+      assert.equal(msg.usage.output, 0);
+      assert.equal(msg.usage.totalTokens, 0);
+    }
+    assert.equal(finals[0].usage.input, 320);
+    assert.equal(finals[0].usage.output, 80);
+    assert.equal(finals[0].usage.cacheRead, 10);
+    assert.equal(finals[0].usage.cacheWrite, 5);
+    assert.equal(finals[0].usage.totalTokens, 415);
+
+    const usageDoc = readDurableDoc(env.durableDbPath, UsageDoc, 'conversation', nativeId);
+    const modelBuckets = Object.values(usageDoc?.models ?? {});
+    assert.equal(modelBuckets.length, 1);
+    assert.equal(modelBuckets[0].input, 320);
+    assert.equal(modelBuckets[0].output, 80);
+    assert.equal(modelBuckets[0].cacheRead, 10);
+    assert.equal(modelBuckets[0].cacheWrite, 5);
+    assert.equal(modelBuckets[0].totalTokens, 415);
+
+    // Turn 2 keeps identical stable tool declarations.
+    await env.runtime.submit(bot.botId, { requestId: 'tools-t2', text: 'Follow up', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'tools-t2')).status, 'done');
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[1].sessionId, runCalls[0].sessionId);
+    assert.deepEqual(runCalls[1].tools, runCalls[0].tools);
+  } finally {
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Non-bridge native_tool_start/native_tool_end projects live.tools and history without ToolTask or tool hooks', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-native-tool-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const hookKey = `__agy_native_tool_hook_${path.basename(rootDir)}`;
+  const hookEvents = [];
+  globalThis[hookKey] = {
+    onToolHook(phase, name) {
+      hookEvents.push({ phase, name });
+    },
+  };
+
+  const releaseNativeToolEnd = Promise.withResolvers();
+  const toolResultCalls = [];
+  const antigravityClient = {
+    run() {
+      return (async function* () {
+        yield {
+          type: 'native_tool_start',
+          toolCallId: 'res-1',
+          name: 'read_resource',
+          args: { uri: 'file:///demo/spec.md' },
+        };
+        await releaseNativeToolEnd.promise;
+        yield {
+          type: 'native_tool_end',
+          toolCallId: 'res-1',
+          name: 'read_resource',
+          args: { uri: 'file:///demo/spec.md' },
+          output: 'NATIVE_RESOURCE_BODY_77',
+          isError: false,
+        };
+        yield { type: 'text_delta', delta: 'Read complete.' };
+        yield { type: 'turn_done', usage: { input: 20, output: 10, totalTokens: 30 } };
+      })();
+    },
+    async toolResult(payload) {
+      toolResultCalls.push(payload);
+      return { ok: true };
+    },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  let watch;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    const bot = await env.runtime.createBot({ requestId: 'native-tool-bot', role: 'Native Tool', cwd, makePrimary: true });
+    await env.applySnapshot(
+      env.makeSnapshot(2, [
+        {
+          botId: bot.botId,
+          cwd,
+          model: BASE_MODEL_SEL,
+          capabilities: [makeCapability('test-hook-observer', { observeToolHooks: true, hookKey })],
+        },
+      ]),
+    );
+
+    watch = await env.runtime.watch(bot.botId);
+    watch.start(() => {});
+
+    await env.runtime.submit(bot.botId, { requestId: 'native-t1', text: 'Read resource natively', origin: USER_ORIGIN });
+
+    // Observe running slot projected in live.tools before native_tool_end arrives.
+    const liveSlot = await waitUntil(
+      () =>
+        watch.value.state.tools.find(
+          (slot) => slot.callId === 'agy-native:res-1' && slot.name === 'read_resource' && slot.status === 'running',
+        ),
+      { label: 'native_tool_start projection in live.tools' },
+    );
+    assert.equal(liveSlot.callId, 'agy-native:res-1');
+    assert.equal(liveSlot.name, 'read_resource');
+    assert.equal(liveSlot.status, 'running');
+
+    releaseNativeToolEnd.resolve();
+    const receipt = await env.waitForSubmission(bot.botId, 'native-t1');
+    assert.equal(receipt.status, 'done', JSON.stringify(receipt));
+
+    await waitUntil(() => watch.value.state.tools.length === 0, { label: 'live.tools cleared after native_tool_end' });
+
+    // History projects both the synthetic toolCall and toolResult.
+    const historyMsgs = (await env.runtime.history(bot.botId, { limit: 30 })).items.flatMap((e) => e.model ?? []);
+    const callBlock = historyMsgs
+      .filter((m) => m?.role === 'assistant')
+      .flatMap((m) => m.content ?? [])
+      .find((b) => b?.type === 'toolCall' && b.id === 'agy-native:res-1');
+    assert.ok(callBlock);
+    assert.equal(callBlock.name, 'read_resource');
+    assert.deepEqual(callBlock.arguments, { uri: 'file:///demo/spec.md' });
+
+    const resMsg = historyMsgs.find((m) => m?.role === 'toolResult' && m.toolCallId === 'agy-native:res-1');
+    assert.ok(resMsg);
+    assert.equal(resMsg.isError, false);
+    assert.match(JSON.stringify(resMsg.content), /NATIVE_RESOURCE_BODY_77/);
+
+    // No ToolTask created, no toolResult callback, and no ToolTask hooks fired.
+    const nativeId = getPrimaryNativeId(env.durableDbPath, bot.primaryConversationId);
+    const toolTasks = readDurableTasks(env.durableDbPath, nativeId).filter((t) => t.record.kind === 'pi.tool');
+    assert.equal(toolTasks.length, 0);
+    assert.equal(toolResultCalls.length, 0);
+    assert.deepEqual(hookEvents, []);
+  } finally {
+    delete globalThis[hookKey];
+    try {
+      await watch?.stop();
+    } catch {
+      /* ignore watch close */
+    }
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Real-time steer advances cursor and settles with active run while followUp queues; 409 INVALID_STATE rolls back cursor and retries as next turn', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-steer-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const runCalls = [];
+  const steerCalls = [];
+  const run1Started = Promise.withResolvers();
+  const releaseRun1 = Promise.withResolvers();
+  const run3Started = Promise.withResolvers();
+  const releaseRun3 = Promise.withResolvers();
+  const steerAcceptedObserved = Promise.withResolvers();
+
+  let env;
+  let bot;
+  let steerMode = 'accept';
+  let cursorAtAcceptedSteer = null;
+  let liveAtAcceptedSteer = null;
+  let cursorAtRejectedSteer = null;
+
+  const waitOrAbort = (promise, signal) =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      const onAbort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      signal?.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (v) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(v);
+        },
+        (e) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(e);
+        },
+      );
+    });
+
+  const antigravityClient = {
+    run(payload, opts) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      runCalls.push(cloned);
+      const turn = runCalls.length;
+      return (async function* () {
+        if (turn === 1) {
+          run1Started.resolve();
+          await waitOrAbort(releaseRun1.promise, opts?.signal);
+          yield { type: 'text_delta', delta: 'TURN_1_SETTLED_WITH_STEER' };
+          yield { type: 'turn_done', usage: { input: 30, output: 10, totalTokens: 40 } };
+        } else if (turn === 2) {
+          yield { type: 'text_delta', delta: 'TURN_2_FOLLOWUP_DONE' };
+          yield { type: 'turn_done', usage: { input: 15, output: 5, totalTokens: 20 } };
+        } else if (turn === 3) {
+          run3Started.resolve();
+          await waitOrAbort(releaseRun3.promise, opts?.signal);
+          yield { type: 'text_delta', delta: 'TURN_3_ORIGINAL_DONE' };
+          yield { type: 'turn_done', usage: { input: 20, output: 5, totalTokens: 25 } };
+        } else {
+          yield { type: 'text_delta', delta: 'TURN_4_RECOVERED_STEER' };
+          yield { type: 'turn_done', usage: { input: 25, output: 8, totalTokens: 33 } };
+        }
+      })();
+    },
+    async toolResult() { return { ok: true }; },
+    async steer(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      steerCalls.push(cloned);
+      const nativeId = getPrimaryNativeId(env.durableDbPath, bot.primaryConversationId);
+      if (steerMode === 'accept') {
+        cursorAtAcceptedSteer = readDurableDoc(env.durableDbPath, AntigravityCursorDoc, 'conversation', nativeId);
+        liveAtAcceptedSteer = readDurableDoc(env.durableDbPath, LiveDoc, 'conversation', nativeId);
+        steerAcceptedObserved.resolve();
+        return { ok: true };
+      }
+      cursorAtRejectedSteer = readDurableDoc(env.durableDbPath, AntigravityCursorDoc, 'conversation', nativeId);
+      throw Object.assign(new Error('Run already finishing'), { statusCode: 409, code: 'INVALID_STATE' });
+    },
+    async cancel() { return { ok: true }; },
+  };
+
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    bot = await env.runtime.createBot({ requestId: 'steer-bot', role: 'Steer Test', cwd, makePrimary: true });
+    await env.applySnapshot(env.makeSnapshot(2, [{ botId: bot.botId, cwd, model: BASE_MODEL_SEL, capabilities: [] }]));
+
+    // Part A: Active Turn 1 receives queued followUp + real-time steer.
+    await env.runtime.submit(bot.botId, { requestId: 'turn-1', text: 'Initial long turn', origin: USER_ORIGIN });
+    await run1Started.promise;
+
+    const nativeId = getPrimaryNativeId(env.durableDbPath, bot.primaryConversationId);
+    const cursorAtRun1Start = readDurableDoc(env.durableDbPath, AntigravityCursorDoc, 'conversation', nativeId);
+    assert.ok(cursorAtRun1Start?.dispatchedThrough > 0);
+
+    await env.runtime.submit(bot.botId, {
+      requestId: 'followup-1',
+      text: 'Queued followUp message',
+      delivery: 'followUp',
+      origin: USER_ORIGIN,
+    });
+    await env.runtime.submit(bot.botId, {
+      requestId: 'steer-1',
+      text: 'Urgent mid-turn steer',
+      delivery: 'steer',
+      origin: USER_ORIGIN,
+    });
+
+    await steerAcceptedObserved.promise;
+    assert.equal(steerCalls.length, 1);
+    assert.equal(steerCalls[0].sessionId, runCalls[0].sessionId);
+    assert.equal(steerCalls[0].runId, runCalls[0].runId);
+    assert.deepEqual(steerCalls[0].inputs, [{ text: 'Urgent mid-turn steer' }]);
+    assert.ok(
+      cursorAtAcceptedSteer.dispatchedThrough > cursorAtRun1Start.dispatchedThrough,
+      'cursor must advance durably BEFORE antigravityClient.steer is invoked',
+    );
+    assert.equal(liveAtAcceptedSteer?.run?.inputs?.length, 2, 'steer submission must join live.run.inputs');
+    assert.equal(runCalls.length, 1, 'followUp must stay queued until turn 1 ends');
+
+    releaseRun1.resolve();
+    const [rTurn1, rSteer1, rFollowUp1] = await Promise.all([
+      env.waitForSubmission(bot.botId, 'turn-1'),
+      env.waitForSubmission(bot.botId, 'steer-1'),
+      env.waitForSubmission(bot.botId, 'followup-1'),
+    ]);
+    assert.equal(rTurn1.status, 'done');
+    assert.equal(rTurn1.answerText, 'TURN_1_SETTLED_WITH_STEER');
+    assert.equal(rSteer1.status, 'done');
+    assert.equal(rSteer1.answerText, 'TURN_1_SETTLED_WITH_STEER');
+    assert.equal(rFollowUp1.status, 'done');
+    assert.equal(rFollowUp1.answerText, 'TURN_2_FOLLOWUP_DONE');
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[1].sessionId, runCalls[0].sessionId);
+    assert.deepEqual(runCalls[1].inputs, [{ text: 'Queued followUp message' }]);
+
+    // Part B: Center returns 409 INVALID_STATE for steer -> cursor rolls back and message runs as next turn without loss.
+    steerMode = 'reject-409';
+    await env.runtime.submit(bot.botId, { requestId: 'turn-3', text: 'Turn racing with steer', origin: USER_ORIGIN });
+    await run3Started.promise;
+
+    const cursorBeforeRace = readDurableDoc(env.durableDbPath, AntigravityCursorDoc, 'conversation', nativeId);
+    await env.runtime.submit(bot.botId, {
+      requestId: 'steer-race',
+      text: 'Late steer during finish race',
+      delivery: 'steer',
+      origin: USER_ORIGIN,
+    });
+
+    await waitUntil(
+      () => {
+        if (steerCalls.length < 2) return false;
+        const cur = readDurableDoc(env.durableDbPath, AntigravityCursorDoc, 'conversation', nativeId);
+        return cur?.dispatchedThrough === cursorBeforeRace.dispatchedThrough;
+      },
+      { label: 'cursor rollback after 409 INVALID_STATE steer rejection' },
+    );
+    assert.ok(
+      cursorAtRejectedSteer?.dispatchedThrough > cursorBeforeRace.dispatchedThrough,
+      'steer must advance cursor before Center call and roll it back on 409 INVALID_STATE',
+    );
+
+    releaseRun3.resolve();
+    const [rTurn3, rSteerRace] = await Promise.all([
+      env.waitForSubmission(bot.botId, 'turn-3'),
+      env.waitForSubmission(bot.botId, 'steer-race'),
+    ]);
+    assert.equal(rTurn3.status, 'done');
+    assert.equal(rTurn3.answerText, 'TURN_3_ORIGINAL_DONE');
+    assert.equal(rSteerRace.status, 'done');
+    assert.equal(rSteerRace.answerText, 'TURN_4_RECOVERED_STEER');
+    assert.equal(runCalls.length, 4);
+    assert.equal(runCalls[3].sessionId, runCalls[0].sessionId);
+    assert.deepEqual(runCalls[3].inputs, [{ text: 'Late steer during finish race' }]);
+  } finally {
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('runtime.abort during active tool cancels local ToolTask and Center run while keeping ProviderDoc.sessionId intact', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-abort-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const hookKey = `__agy_abort_hook_${path.basename(rootDir)}`;
+  const slowStarted = Promise.withResolvers();
+  let slowAborted = false;
+  globalThis[hookKey] = {
+    onSlowStart() {
+      slowStarted.resolve();
+    },
+    onSlowAborted() {
+      slowAborted = true;
+    },
+  };
+
+  const runCalls = [];
+  const cancelCalls = [];
+
+  const antigravityClient = {
+    run(payload, opts) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      runCalls.push(cloned);
+      const turn = runCalls.length;
+      return (async function* () {
+        if (turn === 1) {
+          yield { type: 'tool_request', callId: 'slow-1', name: 'slow_blocking_tool', args: {} };
+          await new Promise((resolve) => {
+            if (opts?.signal?.aborted) return resolve();
+            opts?.signal?.addEventListener('abort', resolve, { once: true });
+          });
+        } else {
+          yield { type: 'text_delta', delta: 'CONTINUED_SAME_SESSION' };
+          yield { type: 'turn_done', usage: { input: 15, output: 5, totalTokens: 20 } };
+        }
+      })();
+    },
+    async toolResult() { return { ok: true }; },
+    async steer() { return { ok: true }; },
+    async cancel(payload) {
+      cancelCalls.push(JSON.parse(JSON.stringify(payload)));
+      return { ok: true };
+    },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    const bot = await env.runtime.createBot({ requestId: 'abort-bot', role: 'Abort Test', cwd, makePrimary: true });
+    await env.applySnapshot(
+      env.makeSnapshot(2, [
+        {
+          botId: bot.botId,
+          cwd,
+          model: BASE_MODEL_SEL,
+          capabilities: [makeCapability('test-probe-tools', { enableSlowBlockingTool: true, hookKey })],
+        },
+      ]),
+    );
+
+    await env.runtime.submit(bot.botId, { requestId: 'abort-t1', text: 'Start slow tool', origin: USER_ORIGIN });
+    await slowStarted.promise;
+
+    const nativeId = getPrimaryNativeId(env.durableDbPath, bot.primaryConversationId);
+    const sessionIdBefore = readDurableDoc(env.durableDbPath, ProviderDoc, 'conversation', nativeId)?.sessionId;
+    assert.equal(sessionIdBefore, runCalls[0].sessionId);
+
+    await env.runtime.abort(bot.botId);
+
+    const abortedReceipt = await env.waitForSubmission(bot.botId, 'abort-t1');
+    assert.equal(abortedReceipt.status, 'unanswered');
+    assert.equal(abortedReceipt.reason, 'aborted');
+    assert.equal(slowAborted, true, 'local ToolTask must receive abort signal');
+    assert.ok(
+      cancelCalls.some((c) => c.sessionId === runCalls[0].sessionId && c.runId === runCalls[0].runId),
+      `expected cancel call for active run, got: ${JSON.stringify(cancelCalls)}`,
+    );
+
+    const sessionIdAfter = readDurableDoc(env.durableDbPath, ProviderDoc, 'conversation', nativeId)?.sessionId;
+    assert.equal(sessionIdAfter, sessionIdBefore, 'abort must preserve ProviderDoc.sessionId');
+
+    await env.runtime.submit(bot.botId, { requestId: 'abort-t2', text: 'Continue after cancel', origin: USER_ORIGIN });
+    const nextReceipt = await env.waitForSubmission(bot.botId, 'abort-t2');
+    assert.equal(nextReceipt.status, 'done', JSON.stringify(nextReceipt));
+    assert.equal(nextReceipt.answerText, 'CONTINUED_SAME_SESSION');
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[1].sessionId, sessionIdBefore);
+    assert.deepEqual(runCalls[1].inputs, [{ text: 'Continue after cancel' }]);
+  } finally {
+    delete globalThis[hookKey];
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('ask_user_question creates DurableWait even with concurrent sibling tools in primary chat and terminates immediately on non-primary turns', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-questionnaire-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const hookKey = `__agy_q_hook_${path.basename(rootDir)}`;
+  const siblingStarted = Promise.withResolvers();
+  const siblingRelease = Promise.withResolvers();
+  globalThis[hookKey] = {
+    onProbeStart() {
+      siblingStarted.resolve();
+    },
+    waitProbeRelease(signal) {
+      return new Promise((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', resolve, { once: true });
+        siblingRelease.promise.then(resolve);
+      });
+    },
+  };
+
+  const runCalls = [];
+  const toolResultResolvers = new Map();
+  const deliveredToolResults = [];
+
+  const antigravityClient = {
+    run(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      runCalls.push(cloned);
+      const turn = runCalls.length;
+      return (async function* () {
+        if (turn === 1) {
+          // Primary chat: sibling tool + ask_user_question concurrently in one turn.
+          const waitSibling = Promise.withResolvers();
+          const waitQuestion = Promise.withResolvers();
+          toolResultResolvers.set('sibling-1', waitSibling);
+          toolResultResolvers.set('ask-primary-1', waitQuestion);
+
+          yield { type: 'tool_request', callId: 'sibling-1', name: 'model_only_probe', args: {} };
+          await siblingStarted.promise;
+          yield {
+            type: 'tool_request',
+            callId: 'ask-primary-1',
+            name: 'ask_user_question',
+            args: {
+              questions: [
+                {
+                  header: 'Design',
+                  question: 'Pick a finish',
+                  options: [
+                    { label: 'Copper', description: 'Warm' },
+                    { label: 'Steel', description: 'Cool' },
+                  ],
+                },
+              ],
+            },
+          };
+
+          // ask_user_question must finish and return terminate hint WHILE sibling-1 is still running.
+          const qRes = await waitQuestion.promise;
+          assert.equal(qRes.isError, false, JSON.stringify(qRes));
+          assert.match(JSON.stringify(qRes.content), /End this turn now without further tool calls/);
+
+          siblingRelease.resolve();
+          const sibRes = await waitSibling.promise;
+          assert.equal(sibRes.isError, false);
+
+          // Spurious post-terminate text must be ignored by finishExternalTerminate (no forged second assistant reply).
+          yield { type: 'text_delta', delta: 'FORGED_SECOND_REPLY_MUST_NOT_COMMIT' };
+          yield { type: 'turn_done', usage: { input: 20, output: 10, totalTokens: 30 } };
+        } else if (turn === 2) {
+          yield { type: 'text_delta', delta: 'COPPER_CHOICE_CONFIRMED' };
+          yield { type: 'turn_done', usage: { input: 15, output: 5, totalTokens: 20 } };
+        } else {
+          // Non-primary task_dispatch turn where waits.open returns null.
+          const waitNonPrimary = Promise.withResolvers();
+          toolResultResolvers.set('ask-nonprimary-1', waitNonPrimary);
+          yield {
+            type: 'tool_request',
+            callId: 'ask-nonprimary-1',
+            name: 'ask_user_question',
+            args: {
+              questions: [
+                {
+                  header: 'Mode',
+                  question: 'Select execution mode',
+                  options: [
+                    { label: 'Fast', description: 'Quick' },
+                    { label: 'Careful', description: 'Thorough' },
+                  ],
+                },
+              ],
+            },
+          };
+          const npRes = await waitNonPrimary.promise;
+          assert.equal(npRes.isError, false, JSON.stringify(npRes));
+          assert.match(JSON.stringify(npRes.content), /End this turn now/);
+          yield { type: 'text_delta', delta: 'IGNORED_NONPRIMARY_AFTER_TERMINATE' };
+          yield { type: 'turn_done', usage: { input: 10, output: 5, totalTokens: 15 } };
+        }
+      })();
+    },
+    async toolResult(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      deliveredToolResults.push(cloned);
+      toolResultResolvers.get(cloned.callId)?.resolve(cloned);
+      return { ok: true };
+    },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    const bot = await env.runtime.createBot({ requestId: 'q-bot', role: 'Questionnaire', cwd, makePrimary: true });
+    await env.applySnapshot(
+      env.makeSnapshot(2, [
+        {
+          botId: bot.botId,
+          cwd,
+          model: BASE_MODEL_SEL,
+          capabilities: [
+            makeCapability('test-probe-tools', { enableModelOnlyProbe: true, hookKey }),
+            makeCapability('test-questionnaire', {}, { targetVersion: questionnaireManifest.version }),
+          ],
+        },
+      ]),
+    );
+
+    // Part A: Primary chat with concurrent sibling tool.
+    await env.runtime.submit(bot.botId, { requestId: 'q-primary-input', text: 'Pick a finish first', origin: USER_ORIGIN });
+    const r1 = await env.waitForSubmission(bot.botId, 'q-primary-input');
+    assert.equal(r1.status, 'done', JSON.stringify(r1));
+
+    const historyItems = (await env.runtime.history(bot.botId, { limit: 30 })).items;
+    assert.equal(
+      JSON.stringify(historyItems).includes('FORGED_SECOND_REPLY_MUST_NOT_COMMIT'),
+      false,
+      'finishExternalTerminate must not commit a forged second assistant reply',
+    );
+    const pendingMsg = historyItems
+      .flatMap((entry) => entry.model ?? [])
+      .find((msg) => msg?.durableWait === true);
+    const question = pendingMsg?.details?.presentation;
+    assert.equal(question?.status, 'pending');
+
+    const { result } = await env.runtime.callCapabilityAction('test-questionnaire', 'answerQuestionnaire', {
+      requestId: 'q-primary-answer',
+      deviceId: env.deviceId,
+      botId: bot.botId,
+      input: {
+        conversationId: question.conversationId,
+        requestId: question.requestId,
+        cancelled: false,
+        answers: [{ questionIndex: 0, selectedOptions: [0] }],
+      },
+    });
+    assert.equal(result.status, 'answered');
+
+    const waitKey = createHash('sha256')
+      .update(JSON.stringify([bot.primaryConversationId, question.installationId, question.conversationId, question.requestId]))
+      .digest('hex');
+    const rContinuation = await env.waitForSubmission(bot.botId, `wait-${waitKey.slice(0, 40)}`);
+    assert.equal(rContinuation.status, 'done', JSON.stringify(rContinuation));
+    assert.equal(rContinuation.answerText, 'COPPER_CHOICE_CONFIRMED');
+
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[1].sessionId, runCalls[0].sessionId);
+    assert.match(runCalls[1].inputs[0].text, /Pick a finish.*Copper/);
+    assert.doesNotMatch(runCalls[1].inputs[0].text, /Pick a finish first/);
+
+    // Part B: Non-primary task_dispatch turn where waits.open returns null -> terminates without blocking.
+    const activeWaitsBeforeNonPrimary = new Set(
+      Object.keys(
+        readDurableDoc(
+          env.durableDbPath,
+          DurableWaitIndex,
+          'session',
+          0,
+          bot.primaryConversationId,
+        )?.active ?? {},
+      ),
+    );
+    await env.runtime.submitTaskDispatch(bot.botId, {
+      requestId: 'q-nonprimary-td',
+      text: 'Task step needs confirmation',
+    });
+    const rNonPrimary = await env.waitForSubmission(bot.botId, 'q-nonprimary-td');
+    assert.equal(rNonPrimary.status, 'done', JSON.stringify(rNonPrimary));
+    assert.equal(runCalls.length, 3);
+
+    const waitIndex = readDurableDoc(
+      env.durableDbPath,
+      DurableWaitIndex,
+      'session',
+      0,
+      bot.primaryConversationId,
+    );
+    const newlyOpenedWaits = Object.keys(waitIndex?.active ?? {}).filter(
+      (waitId) => !activeWaitsBeforeNonPrimary.has(waitId),
+    );
+    assert.deepEqual(newlyOpenedWaits, [], 'non-primary AGY questionnaire must not open a DurableWait');
+    const historyItemsAfterNonPrimary = (await env.runtime.history(bot.botId, { limit: 50 })).items;
+    const nonPrimaryToolResult = historyItemsAfterNonPrimary
+      .flatMap((entry) => entry.model ?? [])
+      .find((msg) => msg?.role === 'toolResult' && msg.toolCallId === 'ask-nonprimary-1');
+    assert.ok(nonPrimaryToolResult);
+    assert.notEqual(nonPrimaryToolResult.durableWait, true);
+    assert.equal(JSON.stringify(historyItemsAfterNonPrimary).includes('IGNORED_NONPRIMARY_AFTER_TERMINATE'), false);
+  } finally {
+    delete globalThis[hookKey];
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Model switching is always allowed; Host rejects continuing incompatible cross-provider conversations until /clear or switching back', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-model-switch-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const agyRunCalls = [];
+  const ordinaryCalls = [];
+  const fixtureApi = `agy-switch-fixture-${path.basename(rootDir)}`;
+  const ordinaryStream = (model, context) => {
+    ordinaryCalls.push(structuredClone(context));
+    const events = createAssistantMessageEventStream();
+    queueMicrotask(() => {
+      const message = {
+        role: 'assistant',
+        provider: model.provider,
+        api: model.api,
+        model: model.id,
+        content: [{ type: 'text', text: 'ordinary reply' }],
+        usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop',
+        timestamp: Date.now(),
+      };
+      events.push({ type: 'done', reason: 'stop', message });
+      events.end(message);
+    });
+    return events;
+  };
+  registerApiProvider({ api: fixtureApi, stream: ordinaryStream, streamSimple: ordinaryStream }, fixtureApi);
+
+  const antigravityClient = {
+    run(payload) {
+      agyRunCalls.push(JSON.parse(JSON.stringify(payload)));
+      return (async function* () {
+        yield { type: 'text_delta', delta: `agy:${payload.modelId}` };
+        yield { type: 'turn_done', usage: { input: 10, output: 5, totalTokens: 15 } };
+      })();
+    },
+    async toolResult() { return { ok: true }; },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient, fixtureApi });
+    const bot = await env.runtime.createBot({ requestId: 'switch-bot', role: 'Model Switch', cwd, makePrimary: true });
+    const ordinarySel = { modelRef: 'fixture/model', thinkingLevel: 'off', codemode: false, codemodeOnly: false };
+    const agyModelB = { ...BASE_MODEL_SEL, modelRef: SECOND_MODEL_REF };
+    const snap = (rev, model) => env.makeSnapshot(rev, [{ botId: bot.botId, cwd, model, capabilities: [] }]);
+    const isHistoryChanged = (err) => err?.code === AGY_HISTORY_CHANGED && /\/clear/.test(err.message);
+
+    // 1. Non-empty non-AGY -> AGY: model switch itself succeeds; continuing the original conversation errors.
+    await env.applySnapshot(snap(2, ordinarySel));
+    await env.runtime.submit(bot.botId, { requestId: 'ord-1', text: 'Ordinary turn 1', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'ord-1')).status, 'done');
+    assert.equal(ordinaryCalls.length, 1);
+
+    assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, MODEL_REF), { botId: bot.botId, allowed: true });
+    await env.applySnapshot(snap(3, BASE_MODEL_SEL));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-enter-1', text: 'Continue ordinary on AGY', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
+    assert.equal(agyRunCalls.length, 0);
+
+    // 2. Switching back to non-AGY without /clear still allows continuing the original non-AGY conversation.
+    await env.applySnapshot(snap(4, ordinarySel));
+    await env.runtime.submit(bot.botId, { requestId: 'ord-back-1', text: 'Continue original ordinary chat', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'ord-back-1')).status, 'done');
+    assert.equal(ordinaryCalls.length, 2);
+
+    // 3. Switch to AGY again, reject continuing, then /clear allows starting a fresh AGY session.
+    await env.applySnapshot(snap(5, BASE_MODEL_SEL));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-enter-2', text: 'Still blocked until clear', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
+    assert.equal(agyRunCalls.length, 0);
+
+    await env.runtime.clearHistory(bot.botId);
+    await env.runtime.submit(bot.botId, { requestId: 'agy-a-1', text: 'Run on AGY model A', origin: USER_ORIGIN });
+    const rA = await env.waitForSubmission(bot.botId, 'agy-a-1');
+    assert.equal(rA.status, 'done');
+    assert.equal(rA.answerText, `agy:${MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 1);
+    assert.equal(agyRunCalls[0].modelId, MODEL_ID);
+
+    // 4. Same-session AGY Model A -> AGY Model B is ALLOWED (same sessionId, new modelId).
+    await env.applySnapshot(snap(6, agyModelB));
+    await env.runtime.submit(bot.botId, { requestId: 'agy-b-1', text: 'Continue on AGY model B', origin: USER_ORIGIN });
+    const rB = await env.waitForSubmission(bot.botId, 'agy-b-1');
+    assert.equal(rB.status, 'done');
+    assert.equal(rB.answerText, `agy:${SECOND_MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 2);
+    assert.equal(agyRunCalls[1].modelId, SECOND_MODEL_ID);
+    assert.equal(agyRunCalls[1].sessionId, agyRunCalls[0].sessionId);
+
+    // 5. Non-empty AGY -> non-AGY: model switch itself succeeds; continuing the original AGY conversation errors.
+    assert.deepEqual(await env.runtime.assertModelSelectionAllowed(bot.botId, 'fixture/model'), { botId: bot.botId, allowed: true });
+    await env.applySnapshot(snap(7, ordinarySel));
+    await assert.rejects(
+      () => env.runtime.submit(bot.botId, { requestId: 'blocked-leave-1', text: 'Continue AGY on ordinary', origin: USER_ORIGIN }),
+      isHistoryChanged,
+    );
+    await assert.rejects(() => env.runtime.compact(bot.botId), isHistoryChanged);
+    assert.equal(ordinaryCalls.length, 2);
+
+    // 6. Switching back to AGY without /clear still continues the original AGY session.
+    await env.applySnapshot(snap(8, BASE_MODEL_SEL));
+    await env.runtime.submit(bot.botId, { requestId: 'agy-back-1', text: 'Resume original AGY session', origin: USER_ORIGIN });
+    const rBack = await env.waitForSubmission(bot.botId, 'agy-back-1');
+    assert.equal(rBack.status, 'done');
+    assert.equal(rBack.answerText, `agy:${MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 3);
+    assert.equal(agyRunCalls[2].sessionId, agyRunCalls[0].sessionId);
+
+    // 7. Switch to non-AGY + /clear allows starting a fresh non-AGY session.
+    await env.applySnapshot(snap(9, ordinarySel));
+    await env.runtime.clearHistory(bot.botId);
+    await env.runtime.submit(bot.botId, { requestId: 'ord-2', text: 'Back on ordinary provider', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'ord-2')).status, 'done');
+    assert.equal(ordinaryCalls.length, 3);
+
+    // 8. Late admission guard (queued before Host applies snapshot): fails with AGY_HISTORY_CHANGED and /clear unblocks cleanly.
+    const lateAgySnap = snap(10, BASE_MODEL_SEL);
+    env.setCurrentSnapshot(lateAgySnap);
+    const queuedReceipt = await env.runtime.submit(bot.botId, {
+      requestId: 'late-race-1',
+      text: 'Sent right as Center switched to AGY',
+      origin: USER_ORIGIN,
+    });
+    assert.equal(queuedReceipt.status, 'queued');
+    const failedAdmission = await waitUntil(
+      async () => {
+        const sub = await env.runtime.getSubmission(bot.botId, 'late-race-1');
+        return sub?.admission?.phase === 'failed' ? sub : null;
+      },
+      { label: 'late admission AGY_HISTORY_CHANGED failure' },
+    );
+    assert.equal(failedAdmission.admission.error.code, AGY_HISTORY_CHANGED);
+    assert.equal(agyRunCalls.length, 3, 'late admission rejection must not call AGY');
+
+    // /clear must succeed despite the AGY_HISTORY_CHANGED failed item in TurnQueue.
+    await env.applySnapshot(lateAgySnap);
+    await env.runtime.clearHistory(bot.botId);
+    await env.runtime.submit(bot.botId, { requestId: 'agy-after-late-clear', text: 'Fresh AGY after clear', origin: USER_ORIGIN });
+    const rFresh = await env.waitForSubmission(bot.botId, 'agy-after-late-clear');
+    assert.equal(rFresh.status, 'done');
+    assert.equal(rFresh.answerText, `agy:${MODEL_ID}`);
+    assert.equal(agyRunCalls.length, 4);
+    assert.notEqual(agyRunCalls[3].sessionId, agyRunCalls[0].sessionId);
+
+    // 9. Work decision (DM/room) after cross-provider switch settles cleanly with AGY_HISTORY_CHANGED without crashing the work engine.
+    const peer = await env.runtime.createBot({ requestId: 'switch-peer', role: 'Peer Bot', cwd });
+    await env.applySnapshot(env.makeSnapshot(11, [
+      { botId: bot.botId, cwd, model: ordinarySel, capabilities: [] },
+      { botId: peer.botId, cwd, model: ordinarySel, capabilities: [] },
+    ]));
+    const createdRoom = await env.runtime.createScope({
+      requestId: 'room-agy-switch-guard',
+      kind: 'room',
+      title: 'Switch Guard Room',
+      members: [
+        { deviceId: env.deviceId, botId: bot.botId },
+        { deviceId: env.deviceId, botId: peer.botId },
+      ],
+    });
+    const scopeId = createdRoom.scope.scopeId;
+    await env.runtime.stopWork(peer.botId, scopeId);
+    await env.runtime.publishUserMessage(scopeId, {
+      messageId: 'msg-room-switch-1',
+      text: `@${bot.role} Please respond in room after cross-provider switch`,
+    });
+    const settledWork = await waitUntil(
+      async () => {
+        const act = await env.runtime.getWorkActivity(bot.botId, scopeId);
+        return act?.lastError?.code === AGY_HISTORY_CHANGED && !act.pending ? act : null;
+      },
+      { label: 'work decision settled with AGY_HISTORY_CHANGED' },
+    );
+    assert.equal(settledWork.lastError.code, AGY_HISTORY_CHANGED);
+    assert.equal(settledWork.error, null);
+    assert.equal(
+      (await env.runtime.history(bot.botId, { limit: 20 })).items.some((entry) =>
+        (entry.model ?? []).some((m) => m?.role === 'assistant' && m?.provider === 'fixture'),
+      ),
+      false,
+      'work decision must not execute an ordinary assistant reply inside an AGY conversation',
+    );
+  } finally {
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('AGY disables Billion Context, Hindsight autoRecall, Pi threshold/overflow compaction, compact(), and editMessage() while keeping autoRetain and explicit recall', async (t) => {
+  const recalledText = 'Verified memory GAMMA-42.';
+  const memoryRequests = [];
+  const retained = [];
+  const banks = new Set();
+  const operations = new Set();
+
+  const memoryServer = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null;
+    const url = new URL(req.url, 'http://localhost');
+    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    const bank = parts[3];
+    memoryRequests.push({ method: req.method, path: url.pathname, body });
+    let status = 200;
+    let result;
+    if (req.method === 'GET' && url.pathname.endsWith('/banks')) {
+      result = { banks: [...banks].map((bank_id) => ({ bank_id })), total: banks.size };
+    } else if (req.method === 'PUT' && parts.length === 4) {
+      banks.add(bank);
+      result = { bank_id: bank };
+    } else if (req.method === 'GET' && parts[4] === 'operations') {
+      result = { operation_id: parts[5], status: operations.has(parts[5]) ? 'completed' : 'not_found' };
+    } else if (req.method === 'POST' && parts[4] === 'memories' && parts.length === 5) {
+      retained.push({ bank, body });
+      operations.add(body.operation_id);
+      result = { success: true, bank_id: bank, async: true, operation_id: body.operation_id };
+    } else if (req.method === 'POST' && url.pathname.endsWith('/memories/recall')) {
+      result = { results: [{ id: 'mem-gamma', text: recalledText, type: 'observation' }], source_facts: {} };
+    } else {
+      status = 404;
+      result = { error: 'Unexpected fixture request' };
+    }
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(result));
   });
-  const { terminal } = await drainEventStream(provider.streamSimple(provider.getModels()[0], { messages: [BASE_SYSTEM, { role: 'user', content: 'standalone', timestamp: 0 }] }, { sessionId: 's-1' }));
-  assert.equal(terminal?.type, 'done');
-  assert.equal(sent.length, 1);
-  assert.equal(Object.hasOwn(sent[0], 'turnContext'), false);
+  await new Promise((resolve) => memoryServer.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => {
+    memoryServer.close(resolve);
+    memoryServer.closeAllConnections();
+  }));
+
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-disabled-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+  const bcRecord = path.join(rootDir, 'bc-activity.txt');
+  const rewriterRecord = path.join(rootDir, 'rewriter-activity.txt');
+
+  const runCalls = [];
+  const toolResultResolvers = new Map();
+  let memoryToolName = '';
+
+  const antigravityClient = {
+    run(payload) {
+      runCalls.push(JSON.parse(JSON.stringify(payload)));
+      const turn = runCalls.length;
+      return (async function* () {
+        if (turn === 1) {
+          // Cross Pi's threshold compaction limit (127_000 on 128_000 context window).
+          yield { type: 'text_delta', delta: 'Noted GAMMA-42.' };
+          yield { type: 'turn_done', usage: { input: 127_000, output: 20, totalTokens: 127_020 } };
+        } else if (turn === 2) {
+          const waitCode = Promise.withResolvers();
+          toolResultResolvers.set('mem-code-1', waitCode);
+          yield {
+            type: 'tool_request',
+            callId: 'mem-code-1',
+            name: 'codemode',
+            args: {
+              code: `
+                if ((await searchTools("bc_probe_tool", { limit: 20 })).some(tool => tool.name === "bc_probe_tool")) {
+                  throw new Error("BC tool must not be exposed");
+                }
+                if (!(await describeTool(${JSON.stringify(memoryToolName)}))) {
+                  throw new Error("Missing explicit Hindsight recall tool");
+                }
+                text(await tools[${JSON.stringify(memoryToolName)}]({ query: "GAMMA-42" }));
+              `,
+            },
+          };
+          const codeRes = await waitCode.promise;
+          assert.equal(codeRes.isError, false, JSON.stringify(codeRes));
+          assert.match(JSON.stringify(codeRes.content), /Verified memory GAMMA-42/);
+          yield { type: 'text_delta', delta: 'Recalled explicitly.' };
+          yield { type: 'turn_done', usage: { input: 127_100, output: 20, totalTokens: 127_120 } };
+        } else {
+          // Simulate provider context overflow error -> Pi must NOT run overflow compaction.
+          yield { type: 'error', code: 'CONTEXT_OVERFLOW', message: 'maximum context length exceeded' };
+        }
+      })();
+    },
+    async toolResult(payload) {
+      toolResultResolvers.get(payload.callId)?.resolve(JSON.parse(JSON.stringify(payload)));
+      return { ok: true };
+    },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({ rootDir, antigravityClient });
+    const bot = await env.runtime.createBot({ requestId: 'disabled-bot', role: 'Disabled Checks', cwd, makePrimary: true });
+    memoryToolName =
+      'hindsight_' +
+      createHash('sha256').update(JSON.stringify(['test-hindsight-recall', bot.botId])).digest('hex').slice(0, 32) +
+      '_recall';
+
+    await env.applySnapshot(
+      env.makeSnapshot(2, [
+        {
+          botId: bot.botId,
+          cwd,
+          model: BASE_MODEL_SEL,
+          capabilities: [
+            makeCapability('test-bc-context', {
+              recordFile: bcRecord,
+              enableProbeTool: true,
+              toolName: 'bc_probe_tool',
+              enablePrepareContext: true,
+            }),
+            makeCapability('test-context-rewriter', {
+              recordFile: rewriterRecord,
+              enablePrepareContext: true,
+            }),
+            makeCapability(
+              'test-hindsight-recall',
+              { baseUrl: `http://127.0.0.1:${memoryServer.address().port}`, mode: 'read-write' },
+              { targetVersion: hindsightManifest.version },
+            ),
+          ],
+        },
+      ]),
+    );
+
+    // Turn 1: BC disabled, non-BC prepareContext skipped, Hindsight autoRecall disabled, autoRetain still active.
+    await env.runtime.submit(bot.botId, { requestId: 'dis-1', text: 'Remember codeword GAMMA-42', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'dis-1')).status, 'done');
+
+    assert.equal(fs.existsSync(bcRecord), false, 'Billion Context must not instantiate or run prepareContext for AGY');
+    assert.match(fs.readFileSync(rewriterRecord, 'utf8'), /activate/);
+    assert.doesNotMatch(fs.readFileSync(rewriterRecord, 'utf8'), /prepareContext/);
+    assert.equal(runCalls[0].tools.some((tool) => tool.name === 'bc_probe_tool'), false);
+    assert.equal(memoryRequests.filter((r) => r.path.endsWith('/memories/recall')).length, 0, 'Hindsight autoRecall must be disabled');
+    await waitUntil(() => retained.some((r) => JSON.stringify(r.body).includes('GAMMA-42')), {
+      label: 'Hindsight autoRetain still runs for AGY',
+    });
+
+    const firstAssistant = (await env.runtime.history(bot.botId, { limit: 30 })).items
+      .flatMap((e) => e.model ?? [])
+      .find((m) => m?.role === 'assistant');
+    assert.equal(firstAssistant?.usage?.input, 127_000, 'Turn 1 must cross Pi threshold compaction watermark');
+
+    // Turn 2: threshold compaction did NOT trigger; explicit recall via codemode succeeds and bc_probe_tool stays absent.
+    await env.runtime.submit(bot.botId, { requestId: 'dis-2', text: 'Explicitly recall GAMMA-42', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'dis-2')).status, 'done');
+    assert.equal(runCalls.length, 2, 'threshold compaction must not execute');
+    assert.equal(memoryRequests.filter((r) => r.path.endsWith('/memories/recall')).length, 1);
+
+    // Turn 3: provider overflow does NOT trigger Pi overflow compaction.
+    await env.runtime.submit(bot.botId, { requestId: 'dis-3', text: 'Trigger overflow', origin: USER_ORIGIN });
+    const overflowReceipt = await env.waitForSubmission(bot.botId, 'dis-3');
+    assert.equal(overflowReceipt.status, 'unanswered');
+    assert.equal(overflowReceipt.reason, 'model_error');
+    assert.equal(runCalls.length, 3, 'overflow compaction must not retry or summarize');
+
+    // Manual compact() and editMessage() throw AGY_HISTORY_CHANGED and leave history intact.
+    const historyBefore = await env.runtime.history(bot.botId, { limit: 100 });
+    const historyJson = JSON.stringify(historyBefore.items);
+    assert.match(historyJson, /Remember codeword GAMMA-42/);
+    assert.doesNotMatch(historyJson, /compacted into the following summary/);
+
+    const isHistoryChanged = (err) => err?.code === AGY_HISTORY_CHANGED && /\/clear/.test(err.message);
+    await assert.rejects(() => env.runtime.compact(bot.botId), isHistoryChanged);
+
+    const editableEntry = historyBefore.items.find((entry) => entry.data?.requestId === 'dis-1');
+    assert.ok(editableEntry);
+    await assert.rejects(
+      () => env.runtime.editMessage(bot.botId, { entryId: editableEntry.id, requestId: 'edit-dis-1', text: 'Rewritten' }),
+      isHistoryChanged,
+    );
+    assert.deepEqual((await env.runtime.history(bot.botId, { limit: 100 })).items, historyBefore.items);
+  } finally {
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Scheduled turns forward transient routeNote and isolated mcp-dispatch runs with zero tools and no turnContext', async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-route-mcp-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const runCalls = [];
+  const pendingWebhookEvents = new Map();
+  const webhookReceipts = [];
+
+  const antigravityClient = {
+    run(payload) {
+      const cloned = JSON.parse(JSON.stringify(payload));
+      runCalls.push(cloned);
+      const isMcp = cloned.inputs.some((i) => i.text.includes('MCP_ISOLATED_QUERY_99'));
+      return (async function* () {
+        yield {
+          type: 'text_delta',
+          delta: isMcp ? 'MCP_ISOLATED_ANSWER_99' : `primary-ack-${runCalls.length}`,
+        };
+        yield { type: 'turn_done', usage: { input: 10, output: 5, totalTokens: 15 } };
+      })();
+    },
+    async toolResult() { return { ok: true }; },
+    async steer() { return { ok: true }; },
+    async cancel() { return { ok: true }; },
+  };
+
+  let env;
+  try {
+    env = await openTestRuntime({
+      rootDir,
+      antigravityClient,
+      webhookHooks: {
+        async pollWebhookEvents() {
+          return {
+            items: [...pendingWebhookEvents.values()].map((evt) => ({ ...evt })),
+            nextCursor: null,
+          };
+        },
+        async reportWebhookEvent(eventId, receipt) {
+          webhookReceipts.push({ eventId, receipt: JSON.parse(JSON.stringify(receipt)) });
+          const current = pendingWebhookEvents.get(eventId);
+          if (current) {
+            if (receipt.status === 'succeeded' || receipt.status === 'failed' || receipt.status === 'cancelled') {
+              pendingWebhookEvents.delete(eventId);
+            } else {
+              current.status = receipt.status;
+            }
+          }
+          return { ok: true };
+        },
+      },
+    });
+
+    const bot = await env.runtime.createBot({ requestId: 'route-bot', role: 'Route and MCP', cwd, makePrimary: true });
+    await env.applySnapshot(env.makeSnapshot(2, [{ botId: bot.botId, cwd, model: BASE_MODEL_SEL, capabilities: [] }]));
+
+    // 1. Human primary turn: no routeNote, no turnContext.
+    await env.runtime.submit(bot.botId, {
+      requestId: 'human-1',
+      text: 'Private note: PRIVATE_PRIMARY_SECRET_88',
+      origin: USER_ORIGIN,
+    });
+    assert.equal((await env.waitForSubmission(bot.botId, 'human-1')).status, 'done');
+    assert.equal(runCalls[0].routeNote, undefined);
+    assert.equal(Object.hasOwn(runCalls[0], 'turnContext'), false);
+
+    // 2. Scheduled turn: forwards transient routeNote and source='schedule' without leaking into sections.
+    const fence = await env.runtime.getScheduleFence(bot.botId);
+    await env.runtime.submitScheduled(bot.botId, {
+      requestId: 'sched-1',
+      text: 'Run periodic health check',
+      stopEpoch: fence.stopEpoch,
+    });
+    assert.equal((await env.waitForSubmission(bot.botId, 'sched-1')).status, 'done');
+    assert.equal(runCalls.length, 2);
+    assert.equal(runCalls[1].sessionId, runCalls[0].sessionId);
+    assert.match(runCalls[1].routeNote, /Host scheduled run or signal/);
+    assert.equal(runCalls[1].inputs[0].source, 'schedule');
+    assert.equal((runCalls[1].sections ?? []).some((s) => s.key === 'host-turn-routing'), false);
+    assert.equal(Object.hasOwn(runCalls[1], 'turnContext'), false);
+
+    // 3. Subsequent human turn: routeNote is cleared.
+    await env.runtime.submit(bot.botId, { requestId: 'human-2', text: 'Back to human chat', origin: USER_ORIGIN });
+    assert.equal((await env.waitForSubmission(bot.botId, 'human-2')).status, 'done');
+    assert.equal(runCalls[2].routeNote, undefined);
+
+    // 4. Isolated mcp-dispatch: separate sessionId, strictly 0 tools, no turnContext, no primary history leakage.
+    pendingWebhookEvents.set('evt-mcp-iso-1', {
+      id: 'evt-mcp-iso-1',
+      botId: bot.botId,
+      deviceId: env.deviceId,
+      requestId: 'mcp-iso-req-1',
+      status: 'dispatching',
+      routeName: 'External MCP',
+      instruction: 'Answer directly without using tools.',
+      payload: { query: 'MCP_ISOLATED_QUERY_99' },
+      trustedSource: 'mcp-dispatch',
+      toolPolicy: 'mcp-safe',
+      sessionIsolation: 'isolated',
+    });
+    env.runtime.notifyWebhookReady();
+
+    const succeeded = await waitUntil(
+      () => webhookReceipts.find((r) => r.eventId === 'evt-mcp-iso-1' && r.receipt.status === 'succeeded'),
+      { label: 'isolated mcp-dispatch succeeded receipt' },
+    );
+    assert.equal(succeeded.receipt.result?.answerText, 'MCP_ISOLATED_ANSWER_99');
+
+    assert.equal(runCalls.length, 4);
+    const mcpRun = runCalls[3];
+    assert.notEqual(mcpRun.sessionId, runCalls[0].sessionId, 'isolated mcp-dispatch must use its own sessionId');
+    assert.deepEqual(mcpRun.tools, [], 'isolated mcp-dispatch must declare strictly 0 tools');
+    assert.equal(Object.hasOwn(mcpRun, 'turnContext'), false);
+    assert.equal(mcpRun.routeNote, undefined);
+    assert.match(mcpRun.inputs[0].text, /MCP_ISOLATED_QUERY_99/);
+    assert.equal(JSON.stringify(mcpRun).includes('PRIVATE_PRIMARY_SECRET_88'), false);
+
+    const primaryHistory = JSON.stringify((await env.runtime.history(bot.botId, { limit: 50 })).items);
+    assert.equal(primaryHistory.includes('MCP_ISOLATED_QUERY_99'), false);
+    assert.equal(primaryHistory.includes('MCP_ISOLATED_ANSWER_99'), false);
+  } finally {
+    try {
+      await env?.runtime?.close();
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
 });

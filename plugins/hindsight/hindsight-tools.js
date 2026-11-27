@@ -222,7 +222,10 @@ const DURABLE_CORE_TOOL_NAMES = new Set([
   'hindsight_retry',
 ]);
 
-function isMutatingCatalogCall(toolName, args = {}) {
+export function isMutatingCatalogCall(toolName, args = {}) {
+  if (toolName === 'hindsight_scope' || toolName === 'hindsight_status') {
+    return false;
+  }
   if (
     toolName === 'hindsight_retain_global' ||
     toolName === 'hindsight_seed_git' ||
@@ -230,20 +233,22 @@ function isMutatingCatalogCall(toolName, args = {}) {
   ) {
     return true;
   }
-  const action = typeof args?.action === 'string' ? args.action.trim() : '';
+  // Fail-closed untrimmed read-only allowlist matching operation-catalog.js / memory-control-operations.js:
+  // any padded (' get '), empty, or unknown action falls through as mutating.
+  const rawAction = typeof args?.action === 'string' ? args.action : '';
   if (toolName === 'hindsight_config') {
-    return ['set', 'unset', 'init'].includes(action);
+    return rawAction !== 'get';
   }
   if (toolName === 'hindsight_bank') {
-    return ['import_template', 'set_config', 'reset_config', 'apply_strategy'].includes(action);
+    return rawAction !== 'get';
   }
   if (toolName === 'hindsight_mental_model') {
-    return ['create', 'update', 'refresh', 'delete'].includes(action);
+    return rawAction !== 'list' && rawAction !== 'get';
   }
   if (toolName === 'hindsight_knowledge') {
-    return ['create_folder', 'create_page', 'update', 'delete', 'seed_taxonomy'].includes(action);
+    return !['tree', 'search', 'get', 'export'].includes(rawAction);
   }
-  return false;
+  return true;
 }
 
 function buildPiCatalogTools(controller, defineTool, namespace) {

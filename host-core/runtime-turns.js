@@ -53,6 +53,7 @@ const RETRYABLE_TURN_ERROR_CODES = new Set([
 const PRESERVED_TURN_ERROR_CODES = new Set([
   ...RETRYABLE_TURN_ERROR_CODES,
   'MODEL_NO_VISION',
+  'AGY_HISTORY_CHANGED',
   'INVALID_ARGUMENT',
   'ATTACHMENT_NOT_FOUND',
 ]);
@@ -81,7 +82,7 @@ function boundedTurnError(err) {
 export function createTurnAdmission(deps) {
   const {
     host, getHarness, context, centerRuntime, plugins, models,
-    getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
+    getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd, assertModelSelectionAllowed,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
     trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
     preemptWork, canAdmit = () => true,
@@ -343,6 +344,13 @@ export function createTurnAdmission(deps) {
     return (await readQueue(bot.primaryConversationId)).filter((entry) => entry.phase !== 'cancelled').length;
   }
 
+  /** 是否存在会阻塞 /clear 的队列项（仅因 AGY_HISTORY_CHANGED 失败的条目允许由 /clear 原子清理）。 */
+  async function hasBlockingQueueItems(bot) {
+    return (await readQueue(bot.primaryConversationId)).some(
+      (entry) => entry.phase !== 'cancelled' && !(entry.phase === 'failed' && entry.error?.code === 'AGY_HISTORY_CHANGED'),
+    );
+  }
+
   /** Passive board bootstrap: restore the same admission projection without pumping. */
   async function refreshActivity(botId) {
     const bot = host.getBot(botId);
@@ -507,6 +515,7 @@ export function createTurnAdmission(deps) {
     // 目录校验在任何模型/插件/cwd 状态变化之前完成；非法 set 即同步失败。
     const pinnedCwd = typeof target?.cwd === 'string' && target.cwd !== bot.cwd ? target.cwd : null;
     if (pinnedCwd !== null) host.assertBotCwd({ cwd: pinnedCwd });
+    await assertModelSelectionAllowed?.(bot, selection);
     if (selection) {
       const nextModels = { ...getBotModels() };
       nextModels[bot.botId] = selection;
@@ -1118,11 +1127,24 @@ export function createTurnAdmission(deps) {
     if (attachmentBytes > MAX_ATTACHMENTS_TOTAL_BYTES) {
       throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
     }
-    // 能在真正受理入队前判断模型能力时尽早拒绝，以便前端保留正文和附件；
+    // 能在真正受理入队前判断模型能力/跨服务商会话不兼容时尽早拒绝，以便前端保留正文和附件；
     // 模型未知（如离线未同步）或后续切换模型时，仍由 admitItem 保留 Host 最终检查。
     const earlyModelRecord = attachmentMeta.length > 0
       ? await resolveModelRecordForBot(botId, bot, conversation0)
       : null;
+    const configuredSelection = typeof getBotModels === 'function' ? getBotModels()?.[botId] : null;
+    const earlySelection = configuredSelection?.modelRef
+      ? configuredSelection
+      : (bot?.modelRef ? { modelRef: bot.modelRef } : null);
+    let earlyCrossProviderError = null;
+    if (earlySelection?.modelRef && assertModelSelectionAllowed) {
+      try {
+        await assertModelSelectionAllowed(bot, earlySelection);
+      } catch (err) {
+        if (err?.code === 'AGY_HISTORY_CHANGED') earlyCrossProviderError = err;
+        else if (err?.code !== 'INVALID_ARGUMENT') throw err;
+      }
+    }
     const now = new Date().toISOString();
     // 回执在事务内投影为普通元数据；浅拷贝会让 origin/附件保留已结算的 overlay。
     const receipt = await harness().commit(async (tx) => {
@@ -1168,6 +1190,7 @@ export function createTurnAdmission(deps) {
           existing.updatedAt = now;
         }
         if (existing.phase === 'failed') {
+          if (earlyCrossProviderError) throw earlyCrossProviderError;
           if (earlyModelRecord) assertModelSupportsAttachments(earlyModelRecord, attachmentMeta);
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
           // 避免这次显式尝试再失败后静默失去自动恢复。
@@ -1178,8 +1201,9 @@ export function createTurnAdmission(deps) {
         }
         return toQueuedReceipt(existing);
       }
-      if (!stale && earlyModelRecord) {
-        assertModelSupportsAttachments(earlyModelRecord, attachmentMeta);
+      if (!stale) {
+        if (earlyCrossProviderError) throw earlyCrossProviderError;
+        if (earlyModelRecord) assertModelSupportsAttachments(earlyModelRecord, attachmentMeta);
       }
       const next = {
         requestId,
@@ -1826,12 +1850,23 @@ export function createTurnAdmission(deps) {
           return null;
         }
       }
-      // 提交前最后一次 gate 复核：上述 sync/restore 全部 await 之后，排队用户
+      let conversation = null;
+      if (unifiedExecution) {
+        conversation = await h.conversation(executionNativeId, context);
+        if (conversation) {
+          try {
+            await live?.bind?.(bot.botId, conversation);
+          } catch {
+            /* live 观察附着失败不阻断工作决策提交 */
+          }
+        }
+      }
+      // 提交前最后一次 gate 复核：上述 sync/restore/bind 全部 await 之后，排队用户
       // 输入或原生工作可能已先到；忙即保持 pending，绝不在 grant 后硬塞 submit。
       if (!(await canRunWork(bot.botId))) return null;
       // submit 前最后一次核对 pending 身份/标记：gate 复核与提交之间不得插入已取消工作。
       if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
-      const conversation = await h.conversation(executionNativeId, context);
+      conversation ??= await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
       if (!canAdmit()) return null;
       const submission = await conversation.submit(input, context);
@@ -1868,6 +1903,7 @@ export function createTurnAdmission(deps) {
     pump: nudge,
     nudgeAll,
     queuedCount,
+    hasBlockingQueueItems,
     queuedReceipt,
     withdrawInboxUserItems,
     withdrawQueued,

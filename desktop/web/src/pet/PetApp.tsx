@@ -1,28 +1,109 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  ArrowUp, ChevronDown, ChevronUp, ExternalLink, Mic, RefreshCw, Settings2, Square, Volume2, VolumeX, X,
+  AlertTriangle,
+  ArrowUp,
+  Bell,
+  ExternalLink,
+  History,
+  Mic,
+  RefreshCw,
+  Settings2,
+  ShieldAlert,
+  Square,
+  Volume2,
+  VolumeX,
+  X,
 } from 'lucide-react';
-import { GrokBotAnimatedMark, resolveBotAvatarPreset } from '../../../../web/src/GrokBotAvatar';
-import { botActivityText, isBotActivityBusy } from '../../../../web/src/botActivity';
+import type { QuestionnairePresentation } from '../../../../host-core/index.js';
+import {
+  GrokBotAnimatedMark,
+  getDefaultBotAvatarPreset,
+  resolveBotAvatarPreset,
+} from '../../../../web/src/GrokBotAvatar';
+import { isBotActivityBusy } from '../../../../web/src/botActivity';
+import type { GrokMascotState } from '../../../../web/src/grokMascotEngine';
 import { classifyMarkdownLink } from '../../../../web/src/markdownLink';
+import {
+  ToolPresentationCard,
+  type QuestionnaireSubmitPayload,
+} from '../../../../web/src/ToolPresentation';
 import { useText } from '../../../../web/src/ui';
 import {
-  INITIAL_PET_SNAPSHOT, PET_EVENTS,
-  type DesktopPetAction, type DesktopPetResult, type DesktopPetSnapshot,
-  type DesktopPetWindowState, type PetDockSide, type PetPanelSide,
+  INITIAL_PET_SNAPSHOT,
+  PET_EVENTS,
+  type DesktopPetAction,
+  type DesktopPetResult,
+  type DesktopPetSnapshot,
+  type DesktopPetWindowState,
+  type PetProactiveAlert,
+  type PetWindowHitRect,
 } from './protocol';
+import {
+  PET_LAYOUT_CONSTANTS,
+  ackComposerOpenNative,
+  beginComposerClose,
+  beginComposerOpen,
+  canCommitComposerOpen,
+  commitComposerOpen,
+  completeComposerClose,
+  createInitialComposerState,
+  doesViewportMatchLayout,
+  evaluateComposerFocusEvent,
+  forceCloseComposer,
+  mergePetOrientation,
+  planComposerCloseLayout,
+  planComposerOpenLayout,
+  shouldHoldOrientationUpdate,
+  shouldRenderComposer,
+  shouldSyncNormalNativeLayout,
+  type ComposerPhase,
+  type ComposerState,
+  type PetOrientation,
+  type ViewportSize,
+} from './composerLayout';
+import {
+  INITIAL_RESOLVED_PET_AVATAR_STATE,
+  resolvePetAvatarState,
+  type ResolvedPetAvatarState,
+} from './avatarReady';
+import {
+  captureDismissedStream,
+  reconcileDismissedStream,
+  canAutoShowLatestReply,
+  planMascotTransition,
+  type DismissedStreamState,
+} from './petPresentation';
 import { resolvePetTheme } from './theme';
 import { createPetVoice, voiceError, type PetVoiceStatus } from './voice';
 import { VoiceSettings } from './VoiceSettings';
 import { petWindow } from './windowApi';
 
 const AUTO_READ_KEY = 'pibot-desktop-pet-auto-read:v1';
+const AUTO_FADE_KEY = 'pibot-desktop-pet-auto-fade:v1';
+const DND_KEY = 'pibot-desktop-pet-dnd:v1';
+const AUTO_FADE_MS = 10_000;
+const PROACTIVE_AUTO_TUCK_MS = 15_000;
+
+function layoutRectRelativeTo(node: HTMLElement, ancestor: HTMLElement) {
+  let left = 0;
+  let top = 0;
+  let el: HTMLElement | null = node;
+  while (el && el !== ancestor) {
+    left += el.offsetLeft - el.scrollLeft;
+    top += el.offsetTop - el.scrollTop;
+    el = el.offsetParent as HTMLElement | null;
+  }
+  return { left, top, width: node.offsetWidth, height: node.offsetHeight };
+}
+
 const targetKey = (state: DesktopPetSnapshot) =>
   state.deviceId && state.botId ? state.deviceId + ':' + state.botId : '';
 const draftKey = (key: string) => 'pibot-desktop-pet-draft:v1:' + key;
+
 function readLocal(key: string): string {
   try { return localStorage.getItem(key) ?? ''; } catch { return ''; }
 }
@@ -32,10 +113,42 @@ function writeLocal(key: string, text: string): void {
     else localStorage.removeItem(key);
   } catch { /* The current editor remains usable when local storage is unavailable. */ }
 }
+
 const postAction = (action: DesktopPetAction) => emitTo('main', PET_EVENTS.action, action);
+
+const PET_AVATAR_RESOLVER = {
+  resolvePreset: resolveBotAvatarPreset,
+  getDefaultPreset: getDefaultBotAvatarPreset,
+};
+
 type SendFlight = { id: string; key: string; text: string; assistantIds: Set<string> };
 type Recording = { key: string; start: Promise<void>; released: boolean };
-type WindowLayout = { dockSide: PetDockSide; panelSide: PetPanelSide; composited: boolean };
+type PendingRpc = { resolve: (result: DesktopPetResult) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+
+type BubbleDescriptor =
+  | { kind: 'menu'; id: 'menu' }
+  | { kind: 'settings'; id: 'settings' }
+  | { kind: 'voice'; id: string; text: string }
+  | {
+      kind: 'question';
+      id: string;
+      presentation: QuestionnairePresentation;
+      interactive: boolean;
+      interrupted?: boolean;
+      settledReceipt?: boolean;
+    }
+  | {
+      kind: 'handoff';
+      id: string;
+      title: string;
+      detail: string;
+      tone: 'attention' | 'info' | 'danger';
+      badge: string;
+      actionLabel?: string;
+      showRefresh?: boolean;
+    }
+  | { kind: 'speech'; id: string; text: string; streaming: boolean; promptQuote?: string; messageId?: string }
+  | { kind: 'proactive-alert'; id: string; alert: PetProactiveAlert };
 
 const PetMarkdown = memo(function PetMarkdown({
   text,
@@ -80,19 +193,35 @@ export function PetApp() {
   const t = useText();
   const [snapshot, setSnapshot] = useState(INITIAL_PET_SNAPSHOT);
   const snapshotRef = useRef(snapshot);
-  const [expanded, setExpanded] = useState(false);
-  const [layout, setLayout] = useState<WindowLayout>({
+  const [avatarState, setAvatarState] = useState<ResolvedPetAvatarState>(INITIAL_RESOLVED_PET_AVATAR_STATE);
+  const avatarStateRef = useRef<ResolvedPetAvatarState>(INITIAL_RESOLVED_PET_AVATAR_STATE);
+  const windowRevealedRef = useRef(false);
+  const resolvedAvatar = avatarState.avatar;
+  const hasResolvedAvatar = resolvedAvatar !== null;
+  const [layout, setLayout] = useState<PetOrientation>({
     dockSide: 'right',
     panelSide: 'top',
     composited: true,
   });
+  const [composerPhase, setComposerPhase] = useState<ComposerPhase>('closed');
+  const composerStateRef = useRef<ComposerState>(
+    createInitialComposerState({
+      domFocused: typeof document !== 'undefined' ? document.hasFocus() : false,
+    }),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [ctxMenuOpen, setCtxMenuOpen] = useState(false);
+  const [hoveringDock, setHoveringDock] = useState(false);
+  const [hoveringBubble, setHoveringBubble] = useState(false);
+  const [bubbleFocused, setBubbleFocused] = useState(false);
   const [draft, setDraft] = useState('');
   const draftRef = useRef('');
   const [notice, setNotice] = useState('');
   const [sendFlight, setSendFlight] = useState<SendFlight | null>(null);
   const sendFlightRef = useRef<SendFlight | null>(null);
   const [autoRead, setAutoRead] = useState(() => readLocal(AUTO_READ_KEY) === 'true');
+  const [autoFade, setAutoFade] = useState(() => readLocal(AUTO_FADE_KEY) === 'true');
+  const [dndMode, setDndMode] = useState(() => readLocal(DND_KEY) === 'true');
   const [replyToRead, setReplyToRead] = useState<SendFlight | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const speakTokenRef = useRef(0);
@@ -100,21 +229,191 @@ export function PetApp() {
   const [voice] = useState(() => createPetVoice({ onState: setVoiceStatus }));
   const recordingRef = useRef<Recording | null>(null);
   const [pageVisible, setPageVisible] = useState(!document.hidden);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
-  const pinnedRef = useRef(true);
+
+  // Bubble visibility & settlement tracking
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set());
+  const [dismissedStream, setDismissedStream] = useState<DismissedStreamState | null>(null);
+  const dismissedStreamRef = useRef<DismissedStreamState | null>(null);
+  const [tuckedProactiveIds, setTuckedProactiveIds] = useState<Set<string>>(() => new Set());
+  const [revealedProactiveId, setRevealedProactiveId] = useState<string | null>(null);
+  const [forcedReplyId, setForcedReplyId] = useState<string | null>(null);
+  const [recentQuestionId, setRecentQuestionId] = useState<string | null>(null);
+  const initialReplyCapturedRef = useRef<string | null>(null);
+  const pendingRpcRef = useRef<Map<string, PendingRpc>>(new Map());
+  const [displayedMascotState, setDisplayedMascotState] = useState<GrokMascotState>(INITIAL_PET_SNAPSHOT.mascotState);
+  const displayedMascotStateRef = useRef<GrokMascotState>(INITIAL_PET_SNAPSHOT.mascotState);
+  const mascotDwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mascotTargetKeyRef = useRef<string>(targetKey(INITIAL_PET_SNAPSHOT));
+
+  const stageRef = useRef<HTMLElement | null>(null);
+  const envelopeRef = useRef<HTMLDivElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const composerAreaRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const pointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
-  const headerPointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const avatarPressValidRef = useRef(false);
+  const lastLayoutKeyRef = useRef('');
+  const focusPendingRef = useRef(false);
+  const activeBubbleRef = useRef<BubbleDescriptor | null>(null);
+  const canRecallReplyRef = useRef(false);
+  const openReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openIpcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeRafRef = useRef<number | null>(null);
+  const avatarPressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showComposer = shouldRenderComposer(composerPhase, settingsOpen);
+  const composerRequested = composerPhase === 'opening' || composerPhase === 'open';
+  const dockCompact = composerPhase === 'open' || composerPhase === 'closing';
 
   const report = useCallback((error: unknown) => setNotice(voiceError(error)), []);
-  const applyWindowState = useCallback((state: DesktopPetWindowState) => {
-    setExpanded(state.expanded);
-    setLayout((prev) => ({
-      dockSide: state.dockSide ?? prev.dockSide,
-      panelSide: state.panelSide ?? prev.panelSide,
-      composited: state.composited ?? prev.composited,
+
+  const clearMascotDwellTimer = useCallback(() => {
+    if (mascotDwellTimerRef.current !== null) {
+      clearTimeout(mascotDwellTimerRef.current);
+      mascotDwellTimerRef.current = null;
+    }
+  }, []);
+
+  const clearDismissedStream = useCallback(() => {
+    dismissedStreamRef.current = null;
+    setDismissedStream(null);
+  }, []);
+
+  const stopBotTask = useCallback(() => {
+    const state = snapshotRef.current;
+    if (state.deviceId && state.botId) {
+      void postAction({
+        id: crypto.randomUUID(),
+        kind: 'stop',
+        deviceId: state.deviceId,
+        botId: state.botId,
+      }).catch(report);
+    }
+  }, [report]);
+
+  const clearAvatarPressResetTimer = useCallback(() => {
+    if (avatarPressResetTimerRef.current !== null) {
+      clearTimeout(avatarPressResetTimerRef.current);
+      avatarPressResetTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleAvatarPressReset = useCallback(() => {
+    clearAvatarPressResetTimer();
+    avatarPressResetTimerRef.current = setTimeout(() => {
+      avatarPressResetTimerRef.current = null;
+      if (!pointerRef.current) {
+        avatarPressValidRef.current = false;
+      }
+    }, 0);
+  }, [clearAvatarPressResetTimer]);
+
+  const updateComposerState = useCallback((next: ComposerState) => {
+    const prev = composerStateRef.current;
+    composerStateRef.current = next;
+    if (prev.phase !== next.phase) {
+      setComposerPhase(next.phase);
+    }
+  }, []);
+
+  const clearComposerTimers = useCallback(() => {
+    if (openReadyTimerRef.current !== null) {
+      clearTimeout(openReadyTimerRef.current);
+      openReadyTimerRef.current = null;
+    }
+    if (openIpcTimerRef.current !== null) {
+      clearTimeout(openIpcTimerRef.current);
+      openIpcTimerRef.current = null;
+    }
+    if (closeRafRef.current !== null) {
+      cancelAnimationFrame(closeRafRef.current);
+      closeRafRef.current = null;
+    }
+  }, []);
+
+  const resetStageScroll = useCallback(() => {
+    const stage = stageRef.current;
+    if (stage) {
+      if (stage.scrollLeft !== 0) stage.scrollLeft = 0;
+      if (stage.scrollTop !== 0) stage.scrollTop = 0;
+    }
+    const env = envelopeRef.current;
+    if (env) {
+      if (env.scrollLeft !== 0) env.scrollLeft = 0;
+      if (env.scrollTop !== 0) env.scrollTop = 0;
+    }
+    if (typeof document !== 'undefined') {
+      const scrolling = document.scrollingElement;
+      if (scrolling) {
+        if (scrolling.scrollLeft !== 0) scrolling.scrollLeft = 0;
+        if (scrolling.scrollTop !== 0) scrolling.scrollTop = 0;
+      }
+      if (document.documentElement.scrollLeft !== 0) document.documentElement.scrollLeft = 0;
+      if (document.documentElement.scrollTop !== 0) document.documentElement.scrollTop = 0;
+      if (document.body) {
+        if (document.body.scrollLeft !== 0) document.body.scrollLeft = 0;
+        if (document.body.scrollTop !== 0) document.body.scrollTop = 0;
+      }
+    }
+    if (typeof window !== 'undefined' && (window.scrollX !== 0 || window.scrollY !== 0)) {
+      window.scrollTo(0, 0);
+    }
+  }, []);
+
+  const focusComposerNoScroll = useCallback(() => {
+    const el = composerRef.current;
+    if (!el || el.disabled) return;
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      el.focus();
+    }
+    resetStageScroll();
+  }, [resetStageScroll]);
+
+  const readViewportSize = useCallback((): ViewportSize => {
+    const stage = stageRef.current;
+    if (stage && stage.clientWidth > 0 && stage.clientHeight > 0) {
+      return { width: stage.clientWidth, height: stage.clientHeight };
+    }
+    return {
+      width: typeof window !== 'undefined' ? window.innerWidth : PET_LAYOUT_CONSTANTS.COLLAPSED_W,
+      height: typeof window !== 'undefined' ? window.innerHeight : PET_LAYOUT_CONSTANTS.COLLAPSED_H,
+    };
+  }, []);
+
+  const measureNonComposerContent = useCallback(() => {
+    const env = envelopeRef.current;
+    if (!env) {
+      return { baseContentWidth: 0, baseContentHeight: PET_LAYOUT_CONSTANTS.DOCK_HEIGHT };
+    }
+    let maxW = 0;
+    let totalH = 0;
+    for (let i = 0; i < env.children.length; i += 1) {
+      const child = env.children[i] as HTMLElement;
+      if (child.classList.contains('pet-composer-area')) continue;
+      if (child.offsetWidth > maxW) maxW = child.offsetWidth;
+      const style = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(child)
+        : null;
+      const marginTop = style ? parseFloat(style.marginTop) || 0 : 0;
+      const marginBottom = style ? parseFloat(style.marginBottom) || 0 : 0;
+      totalH += child.offsetHeight + marginTop + marginBottom;
+    }
+    return {
+      baseContentWidth: maxW,
+      baseContentHeight: Math.max(PET_LAYOUT_CONSTANTS.DOCK_HEIGHT, Math.ceil(totalH)),
+    };
+  }, []);
+
+  const applyWindowState = useCallback((state: DesktopPetWindowState, forceOrientation = false) => {
+    if (!forceOrientation && shouldHoldOrientationUpdate(composerStateRef.current.phase)) {
+      return;
+    }
+    setLayout((prev) => mergePetOrientation(prev, {
+      dockSide: state.dockSide,
+      panelSide: state.panelSide,
+      composited: state.composited,
     }));
   }, []);
 
@@ -137,6 +436,150 @@ export function PetApp() {
     recordingRef.current = null;
     voice.cancelRecording();
   }, [voice]);
+
+  const tryCommitComposerOpen = useCallback((timedOut = false): boolean => {
+    const current = composerStateRef.current;
+    const viewport = readViewportSize();
+    const check = canCommitComposerOpen(current, viewport, timedOut);
+    if (!check.ready) return false;
+
+    clearComposerTimers();
+    const domFocused = typeof document !== 'undefined' ? document.hasFocus() : false;
+    const { state: nextState, orientation } = commitComposerOpen(current, Date.now(), domFocused);
+    flushSync(() => {
+      if (orientation) {
+        setLayout((prev) => mergePetOrientation(prev, orientation));
+      }
+      updateComposerState(nextState);
+    });
+    resetStageScroll();
+    return true;
+  }, [clearComposerTimers, readViewportSize, resetStageScroll, updateComposerState]);
+
+  const requestOpenComposer = useCallback((options?: { ignoreCurrentBubble?: boolean }) => {
+    const current = composerStateRef.current;
+    if (current.phase === 'opening' || current.phase === 'open') return;
+
+    clearComposerTimers();
+    const { baseContentWidth, baseContentHeight } = options?.ignoreCurrentBubble
+      ? { baseContentWidth: 0, baseContentHeight: PET_LAYOUT_CONSTANTS.DOCK_HEIGHT }
+      : measureNonComposerContent();
+    const target = planComposerOpenLayout({
+      baseContentWidth,
+      baseContentHeight,
+      canRecallReply: canRecallReplyRef.current,
+      draft: draftRef.current,
+    });
+
+    const next = beginComposerOpen(current, target);
+    const token = next.token;
+    updateComposerState(next);
+    lastLayoutKeyRef.current = '';
+
+    openIpcTimerRef.current = setTimeout(() => {
+      if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+        tryCommitComposerOpen(true);
+      }
+    }, PET_LAYOUT_CONSTANTS.OPEN_IPC_TIMEOUT_MS);
+
+    void petWindow('set-layout', undefined, {
+      width: target.width,
+      height: target.height,
+      composerHeight: target.composerHeight,
+      focus: true,
+      hitRects: [],
+    })
+      .then((nextWindowState) => {
+        if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'opening') {
+          return;
+        }
+        const acked = ackComposerOpenNative(composerStateRef.current, token, {
+          dockSide: nextWindowState.dockSide,
+          panelSide: nextWindowState.panelSide,
+          composited: nextWindowState.composited,
+          focused: nextWindowState.focused,
+          width: nextWindowState.width,
+          height: nextWindowState.height,
+        });
+        updateComposerState(acked);
+
+        if (tryCommitComposerOpen(false)) return;
+
+        if (openReadyTimerRef.current !== null) clearTimeout(openReadyTimerRef.current);
+        openReadyTimerRef.current = setTimeout(() => {
+          if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+            tryCommitComposerOpen(true);
+          }
+        }, PET_LAYOUT_CONSTANTS.OPEN_READY_TIMEOUT_MS);
+      })
+      .catch(() => {
+        if (composerStateRef.current.token === token && composerStateRef.current.phase === 'opening') {
+          tryCommitComposerOpen(true);
+        }
+      });
+  }, [clearComposerTimers, measureNonComposerContent, tryCommitComposerOpen, updateComposerState]);
+
+  const requestCloseComposer = useCallback((options?: { immediate?: boolean }) => {
+    const current = composerStateRef.current;
+    if (current.phase === 'closed') return;
+    if (current.phase === 'closing' && !options?.immediate) return;
+
+    clearComposerTimers();
+    cancelRecording();
+
+    if (options?.immediate) {
+      updateComposerState(forceCloseComposer(current));
+      lastLayoutKeyRef.current = '';
+      return;
+    }
+
+    const next = beginComposerClose(current);
+    const token = next.token;
+    updateComposerState(next);
+    lastLayoutKeyRef.current = '';
+
+    // Wait one paint frame so `.pet-composer-area` unmounts cleanly before shrinking native window.
+    closeRafRef.current = requestAnimationFrame(() => {
+      closeRafRef.current = null;
+      if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'closing') {
+        return;
+      }
+      const hasBubble = Boolean(activeBubbleRef.current);
+      const { baseContentWidth, baseContentHeight } = measureNonComposerContent();
+      const target = planComposerCloseLayout({
+        hasBubble,
+        baseContentWidth,
+        baseContentHeight,
+      });
+      lastLayoutKeyRef.current = JSON.stringify([target.width, target.height, 0, false, []]);
+
+      void petWindow('set-layout', undefined, {
+        width: target.width,
+        height: target.height,
+        composerHeight: 0,
+        focus: false,
+        hitRects: [],
+      })
+        .then((nextWindowState) => {
+          if (composerStateRef.current.token !== token || composerStateRef.current.phase !== 'closing') {
+            return;
+          }
+          setLayout((prev) => mergePetOrientation(prev, {
+            dockSide: nextWindowState.dockSide,
+            panelSide: nextWindowState.panelSide,
+            composited: nextWindowState.composited,
+          }));
+          resetStageScroll();
+          updateComposerState(completeComposerClose(composerStateRef.current, token));
+        })
+        .catch(() => {
+          if (composerStateRef.current.token === token && composerStateRef.current.phase === 'closing') {
+            resetStageScroll();
+            updateComposerState(completeComposerClose(composerStateRef.current, token));
+          }
+        });
+    });
+  }, [cancelRecording, clearComposerTimers, measureNonComposerContent, resetStageScroll, updateComposerState]);
 
   const speakMessage = useCallback((id: string, text: string) => {
     cancelRecording();
@@ -165,6 +608,45 @@ export function PetApp() {
     }
   }, [t]);
 
+  const dismissBubble = useCallback((id: string) => {
+    if (id.startsWith('stream:')) {
+      const next = captureDismissedStream(
+        snapshotRef.current.messages,
+        snapshotRef.current.generationId,
+      );
+      dismissedStreamRef.current = next;
+      setDismissedStream(next);
+      return;
+    }
+    setDismissedIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    if (forcedReplyId === id) setForcedReplyId(null);
+    if (id.startsWith('q:')) setRecentQuestionId(null);
+    if (id === 'notice') setNotice('');
+  }, [forcedReplyId]);
+
+  const sendActionAwait = useCallback((action: DesktopPetAction): Promise<DesktopPetResult> => {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingRpcRef.current.delete(action.id);
+        reject(new Error(t('操作超时，请检查主窗口状态。', 'Action timed out. Check the main window.')));
+      }, 30_000);
+      pendingRpcRef.current.set(action.id, { resolve, reject, timer });
+      void postAction(action).catch((error) => {
+        const entry = pendingRpcRef.current.get(action.id);
+        if (entry) {
+          clearTimeout(entry.timer);
+          pendingRpcRef.current.delete(action.id);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+    });
+  }, [t]);
+
+  // Listen to host state/result/window events
   useEffect(() => {
     let disposed = false;
     const unsubscribe: Array<() => void> = [];
@@ -176,15 +658,32 @@ export function PetApp() {
         const sessionChanged = Boolean(previousSession && payload.hostSessionId && previousSession !== payload.hostSessionId);
         const nextKey = targetKey(payload);
         snapshotRef.current = payload;
+
+        if (payload.questionnaire?.presentation.requestId) {
+          setRecentQuestionId(payload.questionnaire.presentation.requestId);
+        }
+
         if (previousKey !== nextKey) {
+          clearDismissedStream();
           cancelRecording();
           stopReading();
           setReplyToRead(null);
+          setRecentQuestionId(null);
+          setForcedReplyId(null);
+          initialReplyCapturedRef.current = null;
           const text = nextKey ? readLocal(draftKey(nextKey)) : '';
           draftRef.current = text;
           setDraft(text);
         }
+
+        // Capture existing latest assistant message ID on the first ready snapshot for each
+        // target bot so opening the pet stays calm & ambient instead of popping old history.
+        if (initialReplyCapturedRef.current === null && payload.connection === 'ready') {
+          const lastAsst = [...payload.messages].reverse().find((m) => m.role === 'assistant');
+          initialReplyCapturedRef.current = lastAsst ? `speech:${lastAsst.id}` : '';
+        }
         if (sessionChanged) {
+          clearDismissedStream();
           cancelRecording();
           stopReading();
           setReplyToRead(null);
@@ -194,12 +693,46 @@ export function PetApp() {
           sendFlightRef.current = null;
           setSendFlight(null);
         }
+
+        const reconciled = reconcileDismissedStream({
+          dismissed: dismissedStreamRef.current,
+          streamingText: payload.streamingText,
+          generationId: payload.generationId,
+          messages: payload.messages,
+        });
+        if (reconciled.dismissed !== dismissedStreamRef.current) {
+          dismissedStreamRef.current = reconciled.dismissed;
+          setDismissedStream(reconciled.dismissed);
+        }
+        if (reconciled.dismissSpeechId) {
+          const speechId = reconciled.dismissSpeechId;
+          setDismissedIds((prev) => {
+            if (prev.has(speechId)) return prev;
+            const next = new Set(prev);
+            next.add(speechId);
+            return next;
+          });
+        }
+
+        const nextAvatarState = resolvePetAvatarState(payload, avatarStateRef.current, PET_AVATAR_RESOLVER);
+        if (nextAvatarState !== avatarStateRef.current) {
+          avatarStateRef.current = nextAvatarState;
+          setAvatarState(nextAvatarState);
+        }
         setSnapshot(payload);
       });
       if (disposed) { stateListener(); return; }
       unsubscribe.push(stateListener);
+
       const resultListener = await listen<DesktopPetResult>(PET_EVENTS.result, ({ payload }) => {
         if (disposed) return;
+        const rpc = pendingRpcRef.current.get(payload.id);
+        if (rpc) {
+          clearTimeout(rpc.timer);
+          pendingRpcRef.current.delete(payload.id);
+          if (payload.ok) rpc.resolve(payload);
+          else rpc.reject(new Error(payload.message || t('操作未完成，请打开主窗口查看。', 'Action failed. Check the main window.')));
+        }
         const queued = payload.queuedDraft;
         if (queued) {
           const key = queued.deviceId + ':' + queued.botId;
@@ -214,7 +747,6 @@ export function PetApp() {
           sendFlightRef.current = null;
           setSendFlight(null);
           if (payload.ok || payload.pendingId) {
-            // Clear only the exact draft that was queued; preserve subsequent editing.
             if (readLocal(draftKey(flight.key)) === flight.text) writeLocal(draftKey(flight.key), '');
             if (targetKey(snapshotRef.current) === flight.key && draftRef.current === flight.text) {
               draftRef.current = '';
@@ -223,28 +755,74 @@ export function PetApp() {
             if (payload.ok) setReplyToRead(flight);
           }
         }
-        if (payload.message) setNotice(payload.message);
-        else if (!payload.ok) setNotice(t('操作未完成，请打开主窗口查看。', 'Open the main window to check this action.'));
+        if (!rpc) {
+          if (payload.message) setNotice(payload.message);
+          else if (!payload.ok) setNotice(t('操作未完成，请打开主窗口查看。', 'Open the main window to check this action.'));
+        }
       });
       if (disposed) { resultListener(); return; }
       unsubscribe.push(resultListener);
+
       const windowListener = await listen<DesktopPetWindowState>(PET_EVENTS.window, ({ payload }) => {
         if (disposed) return;
         applyWindowState(payload);
-        if (!payload.visible) { cancelRecording(); stopReading(); }
+        if (typeof payload.focused === 'boolean') {
+          const result = evaluateComposerFocusEvent(composerStateRef.current, {
+            kind: 'native-focus',
+            focused: payload.focused,
+            documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+            now: Date.now(),
+            isRecording: Boolean(recordingRef.current),
+            isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+          });
+          updateComposerState(result.state);
+          if (result.shouldDismiss) {
+            requestCloseComposer();
+          }
+        }
+        if (!payload.visible) {
+          windowRevealedRef.current = false;
+          cancelRecording();
+          stopReading();
+          requestCloseComposer({ immediate: true });
+          setSettingsOpen(false);
+          setCtxMenuOpen(false);
+        }
       });
       if (disposed) { windowListener(); return; }
       unsubscribe.push(windowListener);
+
       const windowState = await petWindow('status');
       if (disposed) return;
-      applyWindowState(windowState);
+      applyWindowState(windowState, true);
+      if (typeof windowState.focused === 'boolean') {
+        composerStateRef.current = {
+          ...composerStateRef.current,
+          nativeFocused: windowState.focused,
+        };
+      }
       await postAction({ id: crypto.randomUUID(), kind: 'ready' });
     };
     void install().catch(report);
-    return () => { disposed = true; unsubscribe.forEach((stop) => stop()); };
-  }, [applyWindowState, cancelRecording, report, stopReading, t]);
+    return () => {
+      disposed = true;
+      unsubscribe.forEach((stop) => stop());
+      pendingRpcRef.current.forEach((entry) => {
+        clearTimeout(entry.timer);
+        entry.reject(new Error('Disposed'));
+      });
+      pendingRpcRef.current.clear();
+    };
+  }, [applyWindowState, cancelRecording, clearDismissedStream, report, requestCloseComposer, stopReading, t, updateComposerState]);
 
-  useEffect(() => () => { voice.dispose(); }, [voice]);
+  useEffect(() => () => {
+    clearComposerTimers();
+    clearAvatarPressResetTimer();
+    clearMascotDwellTimer();
+    voice.dispose();
+  }, [clearAvatarPressResetTimer, clearComposerTimers, clearMascotDwellTimer, voice]);
+
+  // Theme & page visibility sync
   useEffect(() => {
     const visibility = () => setPageVisible(!document.hidden);
     const mql = typeof window.matchMedia === 'function'
@@ -269,32 +847,100 @@ export function PetApp() {
     };
   }, []);
 
-  const setWindowExpanded = useCallback(async (next: boolean) => {
-    if (!next) { cancelRecording(); setSettingsOpen(false); }
-    const state = await petWindow('set-expanded', next);
-    applyWindowState(state);
-    if (state.expanded) await postAction({ id: crypto.randomUUID(), kind: 'refresh' });
-  }, [applyWindowState, cancelRecording]);
-
+  // Esc dismisses active transient layer cleanly
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
       if (recordingRef.current || voiceStatus.phase === 'transcribing') cancelRecording();
       else if (voiceStatus.phase === 'speaking') stopReading();
+      else if (ctxMenuOpen) setCtxMenuOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
-      else if (expanded) void setWindowExpanded(false).catch(report);
+      else if (composerPhase === 'open' || composerPhase === 'opening') requestCloseComposer();
+      else if (revealedProactiveId) {
+        const tuckedId = revealedProactiveId;
+        setRevealedProactiveId(null);
+        setTuckedProactiveIds((prev) => {
+          if (prev.has(tuckedId)) return prev;
+          const next = new Set(prev);
+          next.add(tuckedId);
+          return next;
+        });
+      }
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
-  }, [cancelRecording, expanded, report, setWindowExpanded, settingsOpen, stopReading, voiceStatus.phase]);
+  }, [cancelRecording, composerPhase, ctxMenuOpen, requestCloseComposer, revealedProactiveId, settingsOpen, stopReading, voiceStatus.phase]);
+
+  // Auto-focus composer textarea without scrolling overflow-clipped containers
   useEffect(() => {
-    if (expanded && !settingsOpen) composerRef.current?.focus();
-  }, [expanded, settingsOpen]);
+    if (!showComposer) return;
+    focusComposerNoScroll();
+    const raf = requestAnimationFrame(() => {
+      if (composerStateRef.current.phase === 'open' && document.activeElement !== composerRef.current) {
+        focusComposerNoScroll();
+      }
+    });
+    const timer = setTimeout(() => {
+      if (composerStateRef.current.phase === 'open' && document.activeElement !== composerRef.current) {
+        focusComposerNoScroll();
+      }
+    }, 40);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+    };
+  }, [focusComposerNoScroll, showComposer]);
+
+  // Dismiss quick composer automatically when the pet window genuinely loses OS focus
   useEffect(() => {
-    const panel = transcriptRef.current;
-    if (panel && pinnedRef.current) panel.scrollTop = panel.scrollHeight;
-  }, [snapshot.messages, snapshot.streamingText, expanded]);
+    const onWindowFocus = () => {
+      const result = evaluateComposerFocusEvent(composerStateRef.current, {
+        kind: 'window-focus',
+        now: Date.now(),
+      });
+      updateComposerState(result.state);
+    };
+    const onWindowBlur = () => {
+      const result = evaluateComposerFocusEvent(composerStateRef.current, {
+        kind: 'window-blur',
+        documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+        now: Date.now(),
+        isRecording: Boolean(recordingRef.current),
+        isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+      });
+      updateComposerState(result.state);
+      if (result.shouldDismiss) {
+        requestCloseComposer();
+      }
+    };
+    window.addEventListener('focus', onWindowFocus);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, [requestCloseComposer, updateComposerState]);
+
+  // Auto-grow composer textarea (1–3 lines) before layout measurement
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, PET_LAYOUT_CONSTANTS.COMPOSER_TEXTAREA_MAX_HEIGHT) + 'px';
+  }, [draft, showComposer]);
+
+  // Close context menu when clicking outside
+  useEffect(() => {
+    if (!ctxMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement | null)?.closest('.pet-ctx-menu')) {
+        setCtxMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [ctxMenuOpen]);
 
   const sendText = useCallback(async (text: string, expectedKey = targetKey(snapshotRef.current)) => {
     const state = snapshotRef.current;
@@ -310,6 +956,9 @@ export function PetApp() {
     sendFlightRef.current = flight;
     setSendFlight(flight);
     setNotice('');
+    setForcedReplyId(null);
+    clearDismissedStream();
+    requestCloseComposer();
     stopReading();
     try {
       await postAction({ id: flight.id, kind: 'send', text, deviceId: state.deviceId, botId: state.botId });
@@ -317,8 +966,26 @@ export function PetApp() {
       if (sendFlightRef.current === flight) { sendFlightRef.current = null; setSendFlight(null); }
       report(error);
     }
-  }, [report, stopReading, t]);
+  }, [clearDismissedStream, report, requestCloseComposer, stopReading, t]);
 
+  const submitQuestionnaire = useCallback(async (input: QuestionnaireSubmitPayload): Promise<unknown> => {
+    const state = snapshotRef.current;
+    const activeQ = state.questionnaire;
+    if (!state.deviceId || !state.botId || !activeQ) {
+      throw new Error(t('问卷已失效或主助手尚未连接。', 'Questionnaire is no longer active.'));
+    }
+    const result = await sendActionAwait({
+      id: crypto.randomUUID(),
+      kind: 'answer-questionnaire',
+      deviceId: state.deviceId,
+      botId: state.botId,
+      installationId: activeQ.presentation.installationId,
+      input,
+    });
+    return result.data;
+  }, [sendActionAwait, t]);
+
+  // Auto-read TTS for completed replies initiated from pet
   useEffect(() => {
     if (!replyToRead) return;
     if (!autoRead || targetKey(snapshot) !== replyToRead.key) { setReplyToRead(null); return; }
@@ -346,6 +1013,7 @@ export function PetApp() {
       if (recordingRef.current === recording) { recordingRef.current = null; report(error); }
     });
   };
+
   const finishRecording = async () => {
     const recording = recordingRef.current;
     if (!recording || recording.released) return;
@@ -372,218 +1040,1172 @@ export function PetApp() {
   const recording = voiceStatus.phase === 'recording';
   const transcribing = voiceStatus.phase === 'transcribing';
   const speaking = voiceStatus.phase === 'speaking';
-  const connectionText = snapshot.connection === 'ready' ? botActivityText(snapshot.activity, t)
-    : snapshot.connection === 'connecting' ? t('连接中', 'Connecting')
-    : snapshot.connection === 'unconfigured' ? t('请先连接本机主助手', 'Connect the local main bot')
-    : t('已离线', 'Offline');
-  const statusText = recording ? t('正在听，松开发送', 'Listening · release to send')
-    : transcribing ? t('正在转写', 'Transcribing')
-    : speaking ? t('正在朗读', 'Speaking') : connectionText;
-  const avatar = snapshot.avatar ?? resolveBotAvatarPreset(targetKey(snapshot), snapshot.botName, true);
-  const mascotState = recording ? 'listening' : transcribing ? 'thinking' : speaking ? 'dictating' : snapshot.mascotState;
-  const message = notice || voiceStatus.error || snapshot.error;
   const canSend = snapshot.connection === 'ready' && !sendFlight && !snapshot.sending && !recording && !transcribing;
+
+  const latestReply = useMemo(() => {
+    for (let i = snapshot.messages.length - 1; i >= 0; i -= 1) {
+      const item = snapshot.messages[i];
+      if (item.role === 'assistant' && item.text.trim()) {
+        const prev = i > 0 && snapshot.messages[i - 1]?.role === 'user' ? snapshot.messages[i - 1].text : undefined;
+        return { message: item, promptQuote: prev };
+      }
+    }
+    return null;
+  }, [snapshot.messages]);
+
+  const latestUserText = useMemo(() => {
+    for (let i = snapshot.messages.length - 1; i >= 0; i -= 1) {
+      if (snapshot.messages[i].role === 'user' && snapshot.messages[i].text.trim()) {
+        return snapshot.messages[i].text;
+      }
+    }
+    return undefined;
+  }, [snapshot.messages]);
+
+  // Clear temporary settled questionnaire receipt automatically once Bot moves on or after 2.6s
+  const matchingSettledQuestion = useMemo(() => {
+    if (!recentQuestionId || snapshot.questionnaire) return null;
+    if (snapshot.settledQuestionnaire?.requestId === recentQuestionId) {
+      return snapshot.settledQuestionnaire;
+    }
+    return null;
+  }, [recentQuestionId, snapshot.questionnaire, snapshot.settledQuestionnaire]);
+
+  useEffect(() => {
+    if (!matchingSettledQuestion) return;
+    if (snapshot.streamingText) {
+      setRecentQuestionId(null);
+      return;
+    }
+    const timer = setTimeout(() => setRecentQuestionId(null), 2600);
+    return () => clearTimeout(timer);
+  }, [matchingSettledQuestion, snapshot.streamingText]);
+
+  // Polymorphic bubble priority arbitration (single clean bubble at a time)
+  const activeBubble = useMemo<BubbleDescriptor | null>(() => {
+    if (!hasResolvedAvatar) {
+      return null;
+    }
+    if (ctxMenuOpen) {
+      return { kind: 'menu', id: 'menu' };
+    }
+    if (settingsOpen) {
+      return { kind: 'settings', id: 'settings' };
+    }
+    if (recording) {
+      return { kind: 'voice', id: 'voice:rec', text: t('正在听你说话…松开发送', 'Listening… release to send') };
+    }
+    if (transcribing) {
+      return { kind: 'voice', id: 'voice:stt', text: t('正在转写语音…', 'Transcribing…') };
+    }
+
+    // Priority 1: Active pending questionnaire (always pops up, even in DND)
+    if (snapshot.questionnaire) {
+      const qId = `q:${snapshot.questionnaire.presentation.requestId}`;
+      if (!dismissedIds.has(qId)) {
+        return {
+          kind: 'question',
+          id: qId,
+          presentation: snapshot.questionnaire.presentation,
+          interactive: snapshot.questionnaire.interactive,
+          interrupted: snapshot.questionnaire.interrupted,
+        };
+      }
+    }
+
+    // Priority 1b: Brief settled receipt right after answering (in pet or main window)
+    if (matchingSettledQuestion) {
+      const qId = `q-done:${matchingSettledQuestion.requestId}`;
+      if (!dismissedIds.has(qId)) {
+        return {
+          kind: 'question',
+          id: qId,
+          presentation: matchingSettledQuestion,
+          interactive: false,
+          settledReceipt: true,
+        };
+      }
+    }
+
+    // Priority 2: Security / browser / account handoff card (always pops up)
+    if (snapshot.handoff && !dismissedIds.has(`handoff:${snapshot.handoff.id}`)) {
+      const h = snapshot.handoff;
+      return {
+        kind: 'handoff',
+        id: `handoff:${h.id}`,
+        title: h.title,
+        detail: h.detail,
+        tone: h.tone,
+        badge: h.kind === 'vault-unlock' ? t('安全接力', 'Security') : t('主窗口接力', 'Handoff'),
+        actionLabel: h.actionLabel,
+      };
+    }
+
+    // Priority 2b: Local error notice, or offline/unconfigured state after user clicks mascot
+    const connError = snapshot.connection === 'ready' || showComposer ? snapshot.error : null;
+    const errText = notice || voiceStatus.error || connError;
+    if (errText && !dismissedIds.has(`err:${errText}`)) {
+      return {
+        kind: 'handoff',
+        id: `err:${errText}`,
+        title: snapshot.connection === 'offline'
+          ? t('本机主助手离线', 'Local main bot offline')
+          : snapshot.connection === 'unconfigured'
+            ? t('请先连接本机主助手', 'Connect local main bot')
+            : t('提示', 'Notice'),
+        detail: errText,
+        tone: snapshot.connection === 'ready' ? 'attention' : 'danger',
+        badge: snapshot.connection === 'ready' ? t('提示', 'Notice') : t('连接状态', 'Connection'),
+        actionLabel: t('打开主窗口', 'Open main window'),
+        showRefresh: snapshot.connection !== 'ready',
+      };
+    }
+
+    const suppressingCurrentStream = Boolean(
+      dismissedStream && snapshot.streamingText && snapshot.generationId === dismissedStream.generationId,
+    );
+
+    // Priority 3: Live streaming reply
+    if (snapshot.streamingText && !dndMode && !suppressingCurrentStream) {
+      return {
+        kind: 'speech',
+        id: `stream:${snapshot.generationId ?? 'live'}`,
+        text: snapshot.streamingText,
+        streaming: true,
+        promptQuote: latestUserText,
+      };
+    }
+
+    // Priority 4: Latest assistant reply (only for newly arrived replies or user-recalled reply)
+    if (latestReply) {
+      const rid = `speech:${latestReply.message.id}`;
+      if (
+        canAutoShowLatestReply({
+          replyId: rid,
+          initialReplyId: initialReplyCapturedRef.current,
+          hasPendingUserTurn: snapshot.hasPendingUserTurn,
+          forcedReplyId,
+          dndMode,
+          dismissedIds,
+          suppressingStream: suppressingCurrentStream,
+        })
+      ) {
+        return {
+          kind: 'speech',
+          id: rid,
+          text: latestReply.message.text,
+          streaming: false,
+          promptQuote: latestReply.promptQuote,
+          messageId: latestReply.message.id,
+        };
+      }
+    }
+
+    // Priority 5: Proactive Google assistant Board alert (below all active chat/handoff/speech bubbles)
+    if (snapshot.proactiveAlert) {
+      const alert = snapshot.proactiveAlert;
+      const isRevealed = revealedProactiveId === alert.resultId;
+      const isTucked = tuckedProactiveIds.has(alert.resultId);
+      if (isRevealed || (!dndMode && !isTucked)) {
+        return {
+          kind: 'proactive-alert',
+          id: `proactive:${alert.resultId}`,
+          alert,
+        };
+      }
+    }
+
+    return null;
+  }, [
+    ctxMenuOpen,
+    dismissedIds,
+    dismissedStream,
+    dndMode,
+    forcedReplyId,
+    hasResolvedAvatar,
+    latestReply,
+    latestUserText,
+    matchingSettledQuestion,
+    notice,
+    recording,
+    revealedProactiveId,
+    settingsOpen,
+    showComposer,
+    snapshot,
+    t,
+    transcribing,
+    tuckedProactiveIds,
+    voiceStatus.error,
+  ]);
+  activeBubbleRef.current = activeBubble;
+
+  // Clear revealed proactive alert state when alert clears or rotates to a newer resultId
+  useEffect(() => {
+    if (revealedProactiveId && snapshot.proactiveAlert?.resultId !== revealedProactiveId) {
+      setRevealedProactiveId(null);
+    }
+  }, [revealedProactiveId, snapshot.proactiveAlert]);
+
+  useEffect(() => {
+    if (!activeBubble) setBubbleFocused(false);
+  }, [activeBubble]);
+
+  // Auto-fade completed speech bubbles when user enabled auto-fade
+  const autoFadeSpeechId =
+    activeBubble?.kind === 'speech' && !activeBubble.streaming ? activeBubble.id : null;
+  useEffect(() => {
+    if (!autoFade || !autoFadeSpeechId || busy || hoveringBubble || speaking) return;
+    const timer = setTimeout(() => dismissBubble(autoFadeSpeechId), AUTO_FADE_MS);
+    return () => clearTimeout(timer);
+  }, [autoFade, autoFadeSpeechId, busy, dismissBubble, hoveringBubble, speaking]);
+
+  // Auto-tuck auto-opened proactive alert back into the mascot badge after 15s without hover/focus.
+  // Auto-tuck is NOT dismissal: never dispatch dismiss-proactive-alert here.
+  const activeProactiveAlertId =
+    activeBubble?.kind === 'proactive-alert' ? activeBubble.alert.resultId : null;
+  useEffect(() => {
+    if (!activeProactiveAlertId) return;
+    if (revealedProactiveId === activeProactiveAlertId || hoveringBubble || bubbleFocused) return;
+    const timer = setTimeout(() => {
+      setTuckedProactiveIds((prev) => {
+        if (prev.has(activeProactiveAlertId)) return prev;
+        const next = new Set(prev);
+        next.add(activeProactiveAlertId);
+        return next;
+      });
+    }, PROACTIVE_AUTO_TUCK_MS);
+    return () => clearTimeout(timer);
+  }, [activeProactiveAlertId, bubbleFocused, hoveringBubble, revealedProactiveId]);
+
+  // Measure visible stage envelope & hit-test rectangles and sync to Rust native window.
+  const syncNativeLayoutRef = useRef<() => void>(() => {});
+  const syncNativeLayout = useCallback(() => {
+    if (!avatarStateRef.current.avatar) return;
+    if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
+    const env = envelopeRef.current;
+    const stage = stageRef.current;
+    if (!env || !stage) return;
+    resetStageScroll();
+
+    // Use unscaled offset dimensions (immune to CSS transform animations and LTR left-overflow).
+    let contentW = env.offsetWidth;
+    const contentH = env.offsetHeight;
+    for (let i = 0; i < env.children.length; i += 1) {
+      const child = env.children[i] as HTMLElement;
+      if (child.offsetWidth > contentW) contentW = child.offsetWidth;
+    }
+
+    const envW = Math.ceil(contentW + PET_LAYOUT_CONSTANTS.STAGE_PAD * 2);
+    const envH = Math.ceil(contentH + PET_LAYOUT_CONSTANTS.STAGE_PAD * 2);
+    const hasOverlay = Boolean(activeBubble || showComposer || ctxMenuOpen);
+    const width = hasOverlay
+      ? Math.min(PET_LAYOUT_CONSTANTS.MAX_STAGE_W, Math.max(PET_LAYOUT_CONSTANTS.COLLAPSED_W, envW))
+      : PET_LAYOUT_CONSTANTS.COLLAPSED_W;
+    const height = hasOverlay
+      ? Math.min(PET_LAYOUT_CONSTANTS.MAX_STAGE_H, Math.max(PET_LAYOUT_CONSTANTS.COLLAPSED_H, envH))
+      : PET_LAYOUT_CONSTANTS.COLLAPSED_H;
+    const composerEl = composerAreaRef.current;
+    const composerHeight = showComposer && composerEl
+      ? Math.ceil(composerEl.offsetHeight + PET_LAYOUT_CONSTANTS.COMPOSER_GAP)
+      : 0;
+
+    // Only include hit-rects once the viewport has caught up to the target size,
+    // preventing stale clipped regions while the window is still growing.
+    const sizeMatches = doesViewportMatchLayout(
+      { width: stage.clientWidth, height: stage.clientHeight },
+      { width, height },
+    );
+
+    const hitRects: PetWindowHitRect[] = [];
+    if (sizeMatches) {
+      const nodes = stage.querySelectorAll<HTMLElement>('[data-pet-hit="true"]');
+      nodes.forEach((node) => {
+        const r = layoutRectRelativeTo(node, stage);
+        if (r.width <= 1 || r.height <= 1) return;
+        const pad = Number(node.dataset.petHitPad ?? '6');
+        const radius = Number(node.dataset.petHitRadius ?? '16');
+        const x = Math.max(0, Math.floor(r.left - pad));
+        const y = Math.max(0, Math.floor(r.top - pad));
+        const right = Math.min(stage.clientWidth, Math.ceil(r.left + r.width + pad));
+        const bottom = Math.min(stage.clientHeight, Math.ceil(r.top + r.height + pad));
+        if (right > x && bottom > y) {
+          hitRects.push({ x, y, width: right - x, height: bottom - y, radius });
+        }
+      });
+    }
+
+    const shouldFocus = focusPendingRef.current;
+    focusPendingRef.current = false;
+
+    const key = JSON.stringify([
+      width,
+      height,
+      composerHeight,
+      shouldFocus,
+      hitRects.map((r) => [r.x, r.y, r.width, r.height]),
+    ]);
+    if (key === lastLayoutKeyRef.current) return;
+    lastLayoutKeyRef.current = key;
+
+    void petWindow('set-layout', undefined, { width, height, composerHeight, focus: shouldFocus, hitRects })
+      .then((nextState) => {
+        applyWindowState(nextState);
+        if (!sizeMatches && shouldSyncNormalNativeLayout(composerStateRef.current.phase)) {
+          requestAnimationFrame(() => syncNativeLayoutRef.current());
+        }
+      })
+      .catch(() => { /* Window may be closing */ });
+  }, [activeBubble, applyWindowState, ctxMenuOpen, resetStageScroll, showComposer]);
+
+  syncNativeLayoutRef.current = syncNativeLayout;
+
+  useLayoutEffect(() => {
+    if (!hasResolvedAvatar) return;
+    if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
+    syncNativeLayout();
+  }, [syncNativeLayout, hasResolvedAvatar, hoveringDock, activeBubble, composerPhase, ctxMenuOpen, settingsOpen, draft, layout.dockSide, layout.panelSide]);
+
+  // Keep the native pet window hidden until the real avatar has been resolved
+  // and mounted into the DOM (child GrokBotAnimatedMark useEffect runs first).
+  useEffect(() => {
+    if (!hasResolvedAvatar || windowRevealedRef.current) return;
+    let cancelled = false;
+    void petWindow('reveal')
+      .then((nextState) => {
+        if (cancelled) return;
+        windowRevealedRef.current = true;
+        applyWindowState(nextState);
+        setPageVisible(!document.hidden);
+        lastLayoutKeyRef.current = '';
+        syncNativeLayoutRef.current();
+      })
+      .catch(() => { /* Window may be closing */ });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyWindowState, hasResolvedAvatar]);
+
+  useEffect(() => {
+    const env = envelopeRef.current;
+    const stage = stageRef.current;
+    if (!env || typeof ResizeObserver !== 'function') return;
+    let raf = 0;
+    const handleViewportOrContentChange = () => {
+      if (composerStateRef.current.phase === 'opening') {
+        tryCommitComposerOpen(false);
+        return;
+      }
+      if (!shouldSyncNormalNativeLayout(composerStateRef.current.phase)) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => syncNativeLayoutRef.current());
+    };
+    const observer = new ResizeObserver(handleViewportOrContentChange);
+    observer.observe(env);
+    if (stage) observer.observe(stage);
+    window.addEventListener('resize', handleViewportOrContentChange);
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      window.removeEventListener('resize', handleViewportOrContentChange);
+    };
+  }, [tryCommitComposerOpen]);
+
+  const currentTargetKey = targetKey(snapshot);
+  const localMascotOverride: GrokMascotState | null = recording
+    ? 'listening'
+    : transcribing
+      ? 'thinking'
+      : speaking
+        ? 'dictating'
+        : null;
+  const rawMascotState: GrokMascotState = localMascotOverride ?? snapshot.mascotState;
+  const hasLocalMascotOverride = localMascotOverride !== null;
+
+  useEffect(() => {
+    if (mascotTargetKeyRef.current !== currentTargetKey) {
+      mascotTargetKeyRef.current = currentTargetKey;
+      clearMascotDwellTimer();
+      if (displayedMascotStateRef.current !== rawMascotState) {
+        displayedMascotStateRef.current = rawMascotState;
+        setDisplayedMascotState(rawMascotState);
+      }
+      return;
+    }
+
+    const plan = planMascotTransition({
+      displayed: displayedMascotStateRef.current,
+      target: rawMascotState,
+      hasLocalOverride: hasLocalMascotOverride,
+    });
+
+    if (plan.kind === 'noop') {
+      clearMascotDwellTimer();
+      return;
+    }
+
+    if (plan.kind === 'immediate') {
+      clearMascotDwellTimer();
+      displayedMascotStateRef.current = plan.state;
+      setDisplayedMascotState(plan.state);
+      return;
+    }
+
+    if (mascotDwellTimerRef.current === null) {
+      const nextState = plan.state;
+      mascotDwellTimerRef.current = setTimeout(() => {
+        mascotDwellTimerRef.current = null;
+        displayedMascotStateRef.current = nextState;
+        setDisplayedMascotState(nextState);
+      }, plan.delayMs);
+    }
+  }, [clearMascotDwellTimer, currentTargetKey, hasLocalMascotOverride, rawMascotState]);
+  const showDotBadge =
+    hasResolvedAvatar && (
+      snapshot.connection !== 'ready' ||
+      recording ||
+      Boolean(snapshot.questionnaire?.interactive) ||
+      Boolean(snapshot.handoff) ||
+      Boolean(snapshot.proactiveAlert)
+    );
+  const dotTone = recording || snapshot.connection === 'offline'
+    ? 'danger'
+    : snapshot.questionnaire?.interactive
+      ? 'primary'
+      : 'attention';
+
+  const canRecallReply = Boolean(latestReply && (!activeBubble || activeBubble.kind !== 'speech'));
+  canRecallReplyRef.current = canRecallReply;
 
   return (
     <main
+      ref={stageRef}
       className="pet-stage"
-      data-expanded={expanded ? 'true' : 'false'}
+      data-avatar-ready={hasResolvedAvatar ? 'true' : 'false'}
       data-dock-side={layout.dockSide}
       data-panel-side={layout.panelSide}
+      data-composer-open={showComposer ? 'true' : 'false'}
+      data-composer-phase={composerPhase}
       data-composited={layout.composited ? 'true' : 'false'}
       aria-label={t('PiBot 桌宠', 'PiBot desktop pet')}
     >
-      {expanded && (
-        <section className="pet-chat" aria-label={t('与本机主助手对话', "Chat with this computer's main bot")}>
-          {settingsOpen ? <VoiceSettings onClose={() => setSettingsOpen(false)} /> : <>
-            <header
-              className="pet-header"
-              onPointerDown={(event) => {
-                if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
-                headerPointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
-                event.currentTarget.setPointerCapture(event.pointerId);
-              }}
-              onPointerMove={(event) => {
-                const pointer = headerPointerRef.current;
-                if (!pointer || pointer.id !== event.pointerId) return;
-                if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
-                headerPointerRef.current = null;
-                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                  event.currentTarget.releasePointerCapture(event.pointerId);
-                }
-                void petWindow('drag').catch(report);
-              }}
-              onPointerUp={() => { headerPointerRef.current = null; }}
-              onPointerCancel={() => { headerPointerRef.current = null; }}
-              onLostPointerCapture={() => { headerPointerRef.current = null; }}
+      <div className="pet-envelope" ref={envelopeRef}>
+        {/* 1. POLYMORPHIC BUBBLE SLOT */}
+        {activeBubble ? (
+          <div
+            className="pet-bubble-wrap"
+            onPointerEnter={() => setHoveringBubble(true)}
+            onPointerLeave={() => setHoveringBubble(false)}
+            onFocus={() => setBubbleFocused(true)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setBubbleFocused(false);
+              }
+            }}
+          >
+            <section
+              className="pet-bubble"
+              data-variant={activeBubble.kind}
+              data-tone={activeBubble.kind === 'handoff' ? activeBubble.tone : undefined}
+              data-pet-hit="true"
+              data-pet-hit-pad={activeBubble.kind === 'voice' ? '18' : '14'}
+              data-pet-hit-radius={activeBubble.kind === 'voice' ? '24' : '18'}
+              aria-label={t('桌宠气泡', 'Pet bubble')}
             >
-              <div className="pet-heading">
-                <strong>{snapshot.botName}</strong>
-                <span>{t('本机主助手', 'Local main bot')}</span>
-              </div>
-              <button type="button" className="pet-icon" title={t('打开主窗口', 'Open main window')} aria-label={t('打开主窗口', 'Open main window')}
-                onClick={() => void petWindow('show-main').catch(report)}><ExternalLink size={16} /></button>
-              <button type="button" className="pet-icon" title={t('语音设置', 'Voice settings')} aria-label={t('语音设置', 'Voice settings')}
-                onClick={() => { cancelRecording(); stopReading(); setSettingsOpen(true); }}><Settings2 size={16} /></button>
-              <button type="button" className="pet-icon" title={t('收起对话', 'Collapse chat')} aria-label={t('收起对话', 'Collapse chat')}
-                onClick={() => void setWindowExpanded(false).catch(report)}>
-                {layout.panelSide === 'bottom' ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-              </button>
-            </header>
-            <div className="pet-transcript" ref={transcriptRef} role="log" aria-live="off"
-              onScroll={(event) => { const el = event.currentTarget; pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
-              {!snapshot.messages.length && !snapshot.streamingText && (
-                <div className="pet-empty">
-                  <strong>{t('随时说两句', 'A small place to talk')}</strong>
-                  <p>{snapshot.connection === 'ready'
-                    ? t('输入消息，或按住麦克风说话。', 'Type a message, or hold the microphone to speak.')
-                    : t('连接本机主助手后即可对话。', "Connect this computer's main bot to start chatting.")}</p>
+              {activeBubble.kind === 'menu' ? (
+                <div className="pet-ctx-menu" role="menu">
+                  {snapshot.canStop ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="pet-ctx-item is-danger"
+                      onClick={() => {
+                        setCtxMenuOpen(false);
+                        stopBotTask();
+                      }}
+                    >
+                      <span>{t('停止当前任务', 'Stop current task')}</span>
+                      <Square size={10} fill="currentColor" aria-hidden="true" />
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      if (composerStateRef.current.phase === 'open' || composerStateRef.current.phase === 'opening') {
+                        requestCloseComposer();
+                      } else {
+                        setSettingsOpen(false);
+                        requestOpenComposer({ ignoreCurrentBubble: true });
+                      }
+                    }}
+                  >
+                    <span>{composerRequested ? t('收起输入条', 'Close prompt') : t('唤出输入条', 'Quick prompt')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      void petWindow('show-main').catch(report);
+                    }}
+                  >
+                    <span>{t('打开主窗口', 'Open main window')}</span>
+                    <ExternalLink size={12} aria-hidden="true" />
+                  </button>
+                  <div className="pet-ctx-sep" />
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={autoRead}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !autoRead;
+                      setAutoRead(next);
+                      writeLocal(AUTO_READ_KEY, String(next));
+                      if (!next) stopReading();
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('自动朗读回复', 'Auto-read replies')}</span>
+                    <span className="pet-ctx-val">{autoRead ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={autoFade}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !autoFade;
+                      setAutoFade(next);
+                      writeLocal(AUTO_FADE_KEY, String(next));
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('回复 10 秒自动淡出', 'Auto-fade replies (10s)')}</span>
+                    <span className="pet-ctx-val">{autoFade ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={dndMode}
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      const next = !dndMode;
+                      setDndMode(next);
+                      writeLocal(DND_KEY, String(next));
+                      setCtxMenuOpen(false);
+                    }}
+                  >
+                    <span>{t('勿扰（暂停主动冒泡）', 'Quiet mode')}</span>
+                    <span className="pet-ctx-val">{dndMode ? t('开', 'On') : t('关', 'Off')}</span>
+                  </button>
+                  <div className="pet-ctx-sep" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      cancelRecording();
+                      stopReading();
+                      requestCloseComposer({ immediate: true });
+                      focusPendingRef.current = true;
+                      setSettingsOpen(true);
+                    }}
+                  >
+                    <span>{t('语音设置…', 'Voice settings…')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pet-ctx-item is-danger"
+                    onClick={() => {
+                      setCtxMenuOpen(false);
+                      cancelRecording();
+                      stopReading();
+                      void petWindow('hide').catch(report);
+                    }}
+                  >
+                    <span>{t('隐藏桌宠', 'Hide pet')}</span>
+                  </button>
                 </div>
-              )}
-              {snapshot.messages.map((item) => {
-                const isReadingThis = speaking && speakingMessageId === item.id;
-                return (
-                  <article className={'pet-message pet-message-' + item.role} key={item.id}>
-                    {item.role === 'assistant'
-                      ? <PetMarkdown text={item.text} onCopyLink={copyMarkdownLink} />
-                      : <div className="pet-message-text">{item.text}</div>}
-                    {item.role === 'assistant' && (
+              ) : activeBubble.kind === 'settings' ? (
+                <div className="pet-bubble-settings">
+                  <VoiceSettings onClose={() => setSettingsOpen(false)} />
+                </div>
+              ) : activeBubble.kind === 'voice' ? (
+                <div className="pet-thought-row">
+                  <span className="pet-thought-dots" aria-hidden="true">
+                    <span /><span /><span />
+                  </span>
+                  <span className="pet-thought-text">{activeBubble.text}</span>
+                </div>
+              ) : activeBubble.kind === 'question' ? (
+                <ToolPresentationCard
+                  key={`${activeBubble.presentation.requestId}:${activeBubble.presentation.status}`}
+                  presentation={activeBubble.presentation}
+                  active={activeBubble.interactive}
+                  disabled={snapshot.connection !== 'ready'}
+                  questionnaireInterrupted={activeBubble.interrupted}
+                  variant="pet-bubble"
+                  onSubmit={activeBubble.interactive ? submitQuestionnaire : undefined}
+                  onDismissBubble={() => dismissBubble(activeBubble.id)}
+                />
+              ) : activeBubble.kind === 'handoff' ? (
+                <div className="pet-handoff-wrap">
+                  <div className="pet-handoff-head">
+                    <span className={`pet-handoff-badge is-${activeBubble.tone}`}>
+                      {activeBubble.tone === 'danger'
+                        ? <AlertTriangle size={12} aria-hidden="true" />
+                        : <ShieldAlert size={12} aria-hidden="true" />}
+                      <span>{activeBubble.badge}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="pet-mini-icon"
+                      title={t('收起', 'Dismiss')}
+                      aria-label={t('收起', 'Dismiss')}
+                      onClick={() => dismissBubble(activeBubble.id)}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                  <div className="pet-handoff-title">{activeBubble.title}</div>
+                  <p className="pet-handoff-desc">{activeBubble.detail}</p>
+                  <div className="pet-handoff-actions">
+                    {activeBubble.showRefresh ? (
                       <button
                         type="button"
-                        className={'pet-read' + (isReadingThis ? ' active' : '')}
-                        title={isReadingThis ? t('停止朗读', 'Stop reading') : t('朗读这条回复', 'Read this reply')}
-                        aria-label={isReadingThis ? t('停止朗读', 'Stop reading') : t('朗读这条回复', 'Read this reply')}
-                        aria-pressed={isReadingThis}
-                        onClick={() => {
-                          if (isReadingThis) stopReading();
-                          else speakMessage(item.id, item.text);
-                        }}
+                        className="pet-handoff-ghost"
+                        onClick={() => void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(report)}
                       >
-                        {isReadingThis ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                        <RefreshCw size={12} aria-hidden="true" />
+                        <span>{t('刷新', 'Refresh')}</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="pet-handoff-ghost"
+                        onClick={() => dismissBubble(activeBubble.id)}
+                      >
+                        {t('稍后', 'Later')}
                       </button>
                     )}
-                  </article>
-                );
-              })}
-              {snapshot.streamingText && (
-                <article className="pet-message pet-message-assistant pet-streaming">
-                  <PetMarkdown text={snapshot.streamingText} onCopyLink={copyMarkdownLink} />
-                </article>
+                    {activeBubble.actionLabel ? (
+                      <button
+                        type="button"
+                        className="pet-handoff-primary"
+                        onClick={() => {
+                          void petWindow('show-main').catch(report);
+                          dismissBubble(activeBubble.id);
+                        }}
+                      >
+                        <span>{activeBubble.actionLabel}</span>
+                        <ExternalLink size={12} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : activeBubble.kind === 'proactive-alert' ? (
+                <div className="pet-proactive-wrap">
+                  <div
+                    className="pet-proactive-line"
+                    title={`${activeBubble.alert.botName} · ${activeBubble.alert.summary}`}
+                  >
+                    <span className="pet-proactive-icon" aria-hidden="true">
+                      <Bell size={13} />
+                    </span>
+                    <span className="pet-proactive-bot">{activeBubble.alert.botName}</span>
+                    <span className="pet-proactive-sep" aria-hidden="true">·</span>
+                    <span className="pet-proactive-summary">{activeBubble.alert.summary}</span>
+                  </div>
+                  <div className="pet-proactive-actions">
+                    <button
+                      type="button"
+                      className="pet-handoff-ghost"
+                      onClick={() => {
+                        const alert = activeBubble.alert;
+                        setRevealedProactiveId(null);
+                        void postAction({
+                          id: crypto.randomUUID(),
+                          kind: 'dismiss-proactive-alert',
+                          resultId: alert.resultId,
+                        }).catch(report);
+                      }}
+                    >
+                      {t('忽略', 'Dismiss')}
+                    </button>
+                    <button
+                      type="button"
+                      className="pet-handoff-primary"
+                      onClick={() => {
+                        const alert = activeBubble.alert;
+                        setRevealedProactiveId(null);
+                        void postAction({
+                          id: crypto.randomUUID(),
+                          kind: 'open-bot',
+                          deviceId: alert.deviceId,
+                          botId: alert.botId,
+                        }).catch(report);
+                        void petWindow('show-main').catch(report);
+                      }}
+                    >
+                      <span>{t('查看', 'View')}</span>
+                      <ExternalLink size={12} aria-hidden="true" />
+                    </button>
+                  </div>
+                  {revealedProactiveId !== activeBubble.alert.resultId && !hoveringBubble && !bubbleFocused ? (
+                    <div className="pet-autofade-bar" aria-hidden="true">
+                      <div className="pet-autofade-fill is-proactive" />
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                /* Speech reply bubble */
+                <div className="pet-speech-wrap">
+                  {activeBubble.promptQuote ? (
+                    <div className="pet-speech-quote" title={activeBubble.promptQuote}>
+                      <span>{t('你：', 'You: ')}{activeBubble.promptQuote}</span>
+                    </div>
+                  ) : null}
+                  <div className={`pet-speech-body${activeBubble.streaming ? ' pet-streaming' : ''}`}>
+                    <PetMarkdown text={activeBubble.text} onCopyLink={copyMarkdownLink} />
+                  </div>
+                  <div className="pet-bubble-foot">
+                    <span className="pet-bubble-meta">
+                      {activeBubble.streaming ? t('正在回复…', 'Replying…') : snapshot.botName}
+                    </span>
+                    <div className="pet-bubble-actions">
+                      {!activeBubble.streaming && activeBubble.messageId ? (
+                        <button
+                          type="button"
+                          className={`pet-mini-btn${speaking && speakingMessageId === activeBubble.messageId ? ' is-active' : ''}`}
+                          title={speaking && speakingMessageId === activeBubble.messageId ? t('停止朗读', 'Stop reading') : t('朗读', 'Read aloud')}
+                          onClick={() => {
+                            if (speaking && speakingMessageId === activeBubble.messageId) stopReading();
+                            else speakMessage(activeBubble.messageId!, activeBubble.text);
+                          }}
+                        >
+                          {speaking && speakingMessageId === activeBubble.messageId
+                            ? <VolumeX size={12} aria-hidden="true" />
+                            : <Volume2 size={12} aria-hidden="true" />}
+                          <span>{speaking && speakingMessageId === activeBubble.messageId ? t('停读', 'Mute') : t('朗读', 'Read')}</span>
+                        </button>
+                      ) : null}
+                      {snapshot.canStop ? (
+                        <button
+                          type="button"
+                          className="pet-thought-stop"
+                          title={t('停止当前任务', 'Stop current task')}
+                          onClick={stopBotTask}
+                        >
+                          <Square size={9} fill="currentColor" aria-hidden="true" />
+                          <span>{t('停止', 'Stop')}</span>
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="pet-mini-btn"
+                        title={t('在主窗口继续', 'Continue in main window')}
+                        onClick={() => void petWindow('show-main').catch(report)}
+                      >
+                        <ExternalLink size={12} aria-hidden="true" />
+                        <span>{t('主窗口', 'Main')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="pet-mini-icon"
+                        title={t('收起气泡', 'Dismiss bubble')}
+                        aria-label={t('收起气泡', 'Dismiss bubble')}
+                        onClick={() => dismissBubble(activeBubble.id)}
+                      >
+                        <X size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                  {autoFade && !activeBubble.streaming && !busy && !hoveringBubble && !speaking ? (
+                    <div className="pet-autofade-bar" aria-hidden="true">
+                      <div className="pet-autofade-fill" />
+                    </div>
+                  ) : null}
+                </div>
               )}
+
+              <span className="pet-bubble-tail" aria-hidden="true" />
+            </section>
+          </div>
+        ) : null}
+
+        {/* 2. MASCOT ACTOR DOCK */}
+        <div
+          ref={dockRef}
+          className={`pet-dock${dockCompact ? ' is-composer-open' : ''}`}
+          onPointerEnter={() => setHoveringDock(true)}
+          onPointerLeave={() => setHoveringDock(false)}
+        >
+          {/* Hover micro action rail (hidden when idle; zero permanent clutter) */}
+          {!dockCompact ? (
+            <div
+              className={`pet-hover-rail${hoveringDock && composerPhase === 'closed' ? ' is-shown' : ''}`}
+              data-pet-hit={hoveringDock && composerPhase === 'closed' ? 'true' : undefined}
+              data-pet-hit-pad="6"
+              data-pet-hit-radius="16"
+              aria-label={t('桌宠快捷操作', 'Quick pet actions')}
+            >
+              <button
+                type="button"
+                className={`pet-rail-btn${recording ? ' is-recording' : ''}`}
+                disabled={!canSend && !recording}
+                title={t('按住直接说话', 'Hold to talk')}
+                aria-label={t('按住直接说话', 'Hold to talk')}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  beginRecording();
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  }
+                  void finishRecording();
+                }}
+                onPointerCancel={cancelRecording}
+              >
+                <Mic size={13} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="pet-rail-btn"
+                title={t('打开主窗口', 'Open main window')}
+                aria-label={t('打开主窗口', 'Open main window')}
+                onClick={() => void petWindow('show-main').catch(report)}
+              >
+                <ExternalLink size={12.5} aria-hidden="true" />
+              </button>
+              {snapshot.canStop ? (
+                <button
+                  type="button"
+                  className="pet-rail-btn is-stop"
+                  title={t('停止当前任务', 'Stop current task')}
+                  aria-label={t('停止当前任务', 'Stop current task')}
+                  onClick={stopBotTask}
+                >
+                  <Square size={10} fill="currentColor" aria-hidden="true" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="pet-rail-btn"
+                  title={t('语音设置', 'Voice settings')}
+                  aria-label={t('语音设置', 'Voice settings')}
+                  onClick={() => {
+                    cancelRecording();
+                    stopReading();
+                    requestCloseComposer({ immediate: true });
+                    focusPendingRef.current = true;
+                    setSettingsOpen((v) => !v);
+                  }}
+                >
+                  <Settings2 size={12.5} aria-hidden="true" />
+                </button>
+              )}
+              <button
+                type="button"
+                className="pet-rail-btn"
+                title={t('隐藏桌宠', 'Hide pet')}
+                aria-label={t('隐藏桌宠', 'Hide pet')}
+                onClick={() => {
+                  cancelRecording();
+                  stopReading();
+                  void petWindow('hide').catch(report);
+                }}
+              >
+                <X size={12.5} aria-hidden="true" />
+              </button>
             </div>
-            {message && <div className="pet-notice" role="status">{message}</div>}
-            {snapshot.connection !== 'ready' && <div className="pet-reconnect">
-              <button type="button" onClick={() => void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(report)}><RefreshCw size={13} />{t('刷新', 'Refresh')}</button>
-              <button type="button" onClick={() => void petWindow('show-main').catch(report)}>{t('打开主窗口', 'Open main window')}</button>
-            </div>}
-            <form className="pet-composer" onSubmit={(event) => { event.preventDefault(); if (canSend) void sendText(draft); }}>
-              <textarea ref={composerRef} rows={2} value={draft}
+          ) : null}
+
+          {/* Mascot Avatar Button */}
+          <button
+            type="button"
+            className="pet-avatar"
+            data-pet-hit="true"
+            data-pet-hit-pad="10"
+            data-pet-hit-radius="26"
+            aria-expanded={showComposer}
+            aria-label={t('单击对话，拖动移动，右键菜单', 'Click to chat, drag to move, right-click for menu') + ' · ' + snapshot.botName}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              focusPendingRef.current = true;
+              setCtxMenuOpen((open) => !open);
+            }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              setCtxMenuOpen(false);
+              clearAvatarPressResetTimer();
+              avatarPressValidRef.current = true;
+              pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const pointer = pointerRef.current;
+              if (!pointer || pointer.id !== event.pointerId) return;
+              if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
+              clearAvatarPressResetTimer();
+              pointerRef.current = null;
+              avatarPressValidRef.current = false;
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+              void petWindow('drag').catch(report);
+            }}
+            onPointerUp={() => {
+              pointerRef.current = null;
+              scheduleAvatarPressReset();
+            }}
+            onPointerCancel={() => {
+              clearAvatarPressResetTimer();
+              pointerRef.current = null;
+              avatarPressValidRef.current = false;
+            }}
+            onLostPointerCapture={() => {
+              pointerRef.current = null;
+              scheduleAvatarPressReset();
+            }}
+            onClick={(event) => {
+              if (event.detail > 0 && !avatarPressValidRef.current) return;
+              clearAvatarPressResetTimer();
+              avatarPressValidRef.current = false;
+              if (settingsOpen) {
+                setSettingsOpen(false);
+                return;
+              }
+              const pendingAlert = snapshotRef.current.proactiveAlert;
+              const alertHidden = Boolean(
+                pendingAlert &&
+                (dndMode || tuckedProactiveIds.has(pendingAlert.resultId)) &&
+                revealedProactiveId !== pendingAlert.resultId,
+              );
+              if (alertHidden && pendingAlert && !activeBubble) {
+                setTuckedProactiveIds((prev) => {
+                  if (!prev.has(pendingAlert.resultId)) return prev;
+                  const next = new Set(prev);
+                  next.delete(pendingAlert.resultId);
+                  return next;
+                });
+                setRevealedProactiveId(pendingAlert.resultId);
+                focusPendingRef.current = true;
+                return;
+              }
+              const isOpenOrOpening =
+                composerStateRef.current.phase === 'open' || composerStateRef.current.phase === 'opening';
+              if (!isOpenOrOpening) {
+                if (snapshotRef.current.connection !== 'ready') {
+                  setDismissedIds((prev) => {
+                    const cleaned = new Set<string>();
+                    prev.forEach((item) => { if (!item.startsWith('err:')) cleaned.add(item); });
+                    return cleaned;
+                  });
+                }
+                void postAction({ id: crypto.randomUUID(), kind: 'refresh' }).catch(() => {});
+                requestOpenComposer();
+              } else {
+                requestCloseComposer();
+              }
+            }}
+          >
+            {resolvedAvatar ? (
+              <GrokBotAnimatedMark
+                seedId={avatarState.seedKey || targetKey(snapshot) || 'desktop-pet'}
+                shape={resolvedAvatar.shape}
+                color={resolvedAvatar.color}
+                state={displayedMascotState}
+                size={88}
+                maxFrameRate={busy || recording || transcribing || speaking ? 30 : 18}
+                isPlaying={pageVisible}
+                isStatic={false}
+              />
+            ) : null}
+            {showDotBadge ? <span className={`pet-badge-dot is-${dotTone}`} aria-hidden="true" /> : null}
+          </button>
+        </div>
+
+        {/* 3. FLOATING QUICK COMPOSER PILL (DIRECTLY BELOW MASCOT) */}
+        {showComposer ? (
+          <div
+            className="pet-composer-area"
+            ref={composerAreaRef}
+            onFocus={() => {
+              const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                kind: 'composer-focus',
+                now: Date.now(),
+              });
+              updateComposerState(result.state);
+            }}
+            onBlur={(event) => {
+              if (recordingRef.current) return;
+              const next = event.relatedTarget as Node | null;
+              if (next && event.currentTarget.contains(next)) return;
+              if (next && dockRef.current?.contains(next)) return;
+              if (next) {
+                const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                  kind: 'composer-blur',
+                  targetInComposer: false,
+                  targetInDock: false,
+                  hasRelatedTarget: true,
+                  documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+                  now: Date.now(),
+                  isRecording: Boolean(recordingRef.current),
+                  isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+                });
+                updateComposerState(result.state);
+                if (result.shouldDismiss) requestCloseComposer();
+                return;
+              }
+              requestAnimationFrame(() => {
+                if (composerStateRef.current.phase !== 'open' || recordingRef.current) return;
+                if (avatarPressValidRef.current || pointerRef.current) return;
+                const active = document.activeElement;
+                const targetInComposer = Boolean(
+                  composerAreaRef.current && active && composerAreaRef.current.contains(active),
+                );
+                const targetInDock = Boolean(active && dockRef.current?.contains(active));
+                const result = evaluateComposerFocusEvent(composerStateRef.current, {
+                  kind: 'composer-blur',
+                  targetInComposer,
+                  targetInDock,
+                  hasRelatedTarget: false,
+                  documentHasFocus: typeof document !== 'undefined' ? document.hasFocus() : false,
+                  now: Date.now(),
+                  isRecording: Boolean(recordingRef.current),
+                  isAvatarPressing: Boolean(avatarPressValidRef.current || pointerRef.current),
+                });
+                updateComposerState(result.state);
+                if (result.shouldDismiss) requestCloseComposer();
+              });
+            }}
+          >
+            <form
+              className="pet-composer-pill"
+              data-pet-hit="true"
+              data-pet-hit-pad="12"
+              data-pet-hit-radius="24"
+              onMouseDown={(event) => {
+                const target = event.target as HTMLElement | null;
+                if (target && target.closest('textarea, button')) return;
+                event.preventDefault();
+                focusComposerNoScroll();
+              }}
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (canSend) void sendText(draft);
+              }}
+            >
+              <textarea
+                ref={composerRef}
+                rows={1}
+                className="pet-composer-input"
+                value={draft}
                 aria-label={t('发送给本机主助手的消息', 'Message to the local main bot')}
-                placeholder={t('聊点什么…', 'Say something…')} disabled={!snapshot.botId}
+                placeholder={snapshot.connection === 'ready'
+                  ? t(`和 ${snapshot.botName} 说点什么…`, `Ask ${snapshot.botName}…`)
+                  : t('本机主助手未连接…', 'Local main bot offline…')}
+                disabled={!snapshot.botId}
                 onChange={(event) => changeDraft(event.target.value)}
                 onCompositionStart={() => { composingRef.current = true; }}
                 onCompositionEnd={() => { composingRef.current = false; }}
                 onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey && !composingRef.current && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                    event.preventDefault(); if (canSend) void sendText(draft);
+                  if (
+                    event.key === 'Enter' &&
+                    !event.shiftKey &&
+                    !composingRef.current &&
+                    !event.nativeEvent.isComposing &&
+                    event.nativeEvent.keyCode !== 229
+                  ) {
+                    event.preventDefault();
+                    if (canSend) void sendText(draft);
                   }
-                }} />
-              <div className="pet-composer-actions">
-                <button type="button" className={'pet-mic' + (recording ? ' active' : '')}
-                  disabled={!canSend && !recording} aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
-                  title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
-                  onPointerDown={(event) => {
-                    if (event.button !== 0) return;
-                    event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); beginRecording();
+                }}
+              />
+              <button
+                type="button"
+                className={`pet-pill-mic${recording ? ' is-listening' : ''}`}
+                disabled={!canSend && !recording}
+                title={t('按住说话，松开发送；Esc 取消', 'Hold to speak, release to send; Esc cancels')}
+                aria-label={t('按住说话，松开发送', 'Hold to speak, release to send')}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  beginRecording();
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  }
+                  void finishRecording();
+                }}
+                onPointerCancel={cancelRecording}
+                onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
+              >
+                <Mic size={15} aria-hidden="true" />
+              </button>
+              {snapshot.canStop && !draft.trim() ? (
+                <button
+                  type="button"
+                  className="pet-pill-stop"
+                  title={t('停止当前任务', 'Stop task')}
+                  aria-label={t('停止当前任务', 'Stop task')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    stopBotTask();
+                    focusComposerNoScroll();
                   }}
-                  onPointerUp={(event) => {
-                    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-                    void finishRecording();
-                  }}
-                  onPointerCancel={cancelRecording}
-                  onBlur={() => { if (recordingRef.current && !recordingRef.current.released) cancelRecording(); }}
-                  onKeyDown={(event) => {
-                    if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { event.preventDefault(); beginRecording(); }
-                  }}
-                  onKeyUp={(event) => {
-                    if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); void finishRecording(); }
-                  }}><Mic size={16} /><span>{recording ? t('松开发送', 'Release') : t('按住说话', 'Hold to talk')}</span></button>
-                <button type="button" className={'pet-icon' + (autoRead ? ' selected' : '')}
-                  aria-pressed={autoRead} aria-label={t('自动朗读桌宠回复', 'Read pet replies aloud')}
-                  title={t('自动朗读桌宠回复', 'Read pet replies aloud')}
-                  onClick={() => { const next = !autoRead; setAutoRead(next); writeLocal(AUTO_READ_KEY, String(next)); if (!next) stopReading(); }}>
-                  {autoRead ? <Volume2 size={16} /> : <VolumeX size={16} />}
+                >
+                  <Square size={11} fill="currentColor" aria-hidden="true" />
                 </button>
-                {speaking && (
-                  <button type="button" className="pet-stop-audio" title={t('停止朗读', 'Stop reading')}
-                    aria-label={t('停止朗读', 'Stop reading')} onClick={stopReading}>
-                    <VolumeX size={13} /><span>{t('停读', 'Mute')}</span>
-                  </button>
-                )}
-                <span className="pet-action-spacer" />
-                {snapshot.canStop && (
-                  <button type="button" className="pet-stop"
-                    title={t('停止 Bot 当前任务', 'Stop bot task')} aria-label={t('停止 Bot 当前任务', 'Stop bot task')}
-                    onClick={() => {
-                      const state = snapshotRef.current;
-                      if (state.deviceId && state.botId) void postAction({
-                        id: crypto.randomUUID(), kind: 'stop', deviceId: state.deviceId, botId: state.botId,
-                      }).catch(report);
-                    }}>
-                    <Square size={10} fill="currentColor" /><span>{t('停止', 'Stop')}</span>
-                  </button>
-                )}
-                <button type="submit" className="pet-send" disabled={!canSend || !draft.trim()}
-                  title={t('发送', 'Send')} aria-label={t('发送', 'Send')}><ArrowUp size={18} /></button>
-              </div>
+              ) : (
+                <button
+                  type="submit"
+                  className="pet-pill-send"
+                  disabled={!canSend || !draft.trim()}
+                  title={t('发送', 'Send')}
+                  aria-label={t('发送', 'Send')}
+                  onMouseDown={(event) => event.preventDefault()}
+                >
+                  <ArrowUp size={16} aria-hidden="true" />
+                </button>
+              )}
             </form>
-          </>}
-        </section>
-      )}
-      <div className="pet-dock">
-        {!expanded && (
-          <button type="button" className="pet-close" title={t('隐藏桌宠', 'Hide pet')} aria-label={t('隐藏桌宠', 'Hide pet')}
-            onClick={() => { cancelRecording(); stopReading(); void petWindow('hide').catch(report); }}>
-            <X size={13} />
-          </button>
-        )}
-        <button type="button" className="pet-avatar" aria-expanded={expanded}
-          aria-label={t('点击对话，拖动移动桌宠', 'Click to chat, drag to move pet') + ' · ' + snapshot.botName + ' · ' + statusText}
-          onPointerDown={(event) => {
-            if (event.button !== 0) return;
-            avatarPressValidRef.current = true;
-            pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
-            event.currentTarget.setPointerCapture(event.pointerId);
-          }}
-          onPointerMove={(event) => {
-            const pointer = pointerRef.current;
-            if (!pointer || pointer.id !== event.pointerId) return;
-            if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 6) return;
-            pointerRef.current = null;
-            avatarPressValidRef.current = false;
-            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }
-            void petWindow('drag').catch(report);
-          }}
-          onPointerUp={() => { pointerRef.current = null; }}
-          onPointerCancel={() => { pointerRef.current = null; avatarPressValidRef.current = false; }}
-          onLostPointerCapture={() => { pointerRef.current = null; }}
-          onClick={(event) => {
-            // Require a non-dragged press for pointer clicks; keyboard/AT-SPI clicks have detail === 0.
-            if (event.detail > 0 && !avatarPressValidRef.current) return;
-            avatarPressValidRef.current = false;
-            void setWindowExpanded(!expanded).catch(report);
-          }}>
-          <GrokBotAnimatedMark seedId={targetKey(snapshot) || 'desktop-pet'} shape={avatar.shape} color={avatar.color}
-            state={mascotState} size={94} maxFrameRate={30}
-            isPlaying={pageVisible && (busy || recording || transcribing || speaking)}
-            isStatic={!busy && !recording && !transcribing && !speaking} />
-        </button>
-        <div className={'pet-status' + (busy ? ' busy' : '')} title={statusText} role="status">
-          <span className={'pet-status-dot ' + snapshot.connection} />
-          <span className="pet-status-text">{statusText}</span>
-        </div>
+            {canRecallReply ? (
+              <div className="pet-composer-sub" data-pet-hit="true" data-pet-hit-pad="4" data-pet-hit-radius="12">
+                <button
+                  type="button"
+                  className="pet-recall-chip"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    if (!latestReply) return;
+                    const rid = `speech:${latestReply.message.id}`;
+                    setDismissedIds((prev) => {
+                      const next = new Set(prev);
+                      next.delete(rid);
+                      return next;
+                    });
+                    setForcedReplyId(rid);
+                    focusComposerNoScroll();
+                  }}
+                >
+                  <History size={11} aria-hidden="true" />
+                  <span>{t('查看上一条回复', 'Last reply')}</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </main>
   );

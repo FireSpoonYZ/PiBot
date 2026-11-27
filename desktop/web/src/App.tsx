@@ -110,6 +110,8 @@ interface AppProps {
   /** 全局统一通知层（useNotice / NoticeProvider）。 */
   notice: NoticeContextValue;
   t: (zh: string, en: string) => string;
+  /** 桌宠点击主动提醒时由宿主桥接切换到目标 Bot 会话。 */
+  onRegisterOpenBot?: (handler: ((deviceId: string, botId: string) => void) | null) => void;
 }
 
 function runId(): string {
@@ -531,6 +533,10 @@ class App extends Component<AppProps, AppState> {
     });
   }
 
+  private handleOpenBotFromPet = (deviceId: string, botId: string): void => {
+    this.handleOpenBotConversation(deviceId, botId);
+  };
+
   private handleOpenBotConversation = (
     deviceId: string,
     botId: string,
@@ -641,6 +647,7 @@ class App extends Component<AppProps, AppState> {
       this.pushErrorNotice('desktop-runtime-error', message);
     });
     this.unsubPending = this.props.api.subscribePending(this.schedulePendingRefresh);
+    this.props.onRegisterOpenBot?.(this.handleOpenBotFromPet);
     window.addEventListener('keydown', this.handleWorkspaceKeyDown);
     void this.refreshProfiles();
     void this.loadDevices();
@@ -650,6 +657,7 @@ class App extends Component<AppProps, AppState> {
   componentWillUnmount(): void {
     this.devicesMounted = false;
     this.workspaceReturnFocusEl = null;
+    this.props.onRegisterOpenBot?.(null);
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
     if (this.unsubPending) this.unsubPending();
@@ -662,6 +670,10 @@ class App extends Component<AppProps, AppState> {
   }
 
   componentDidUpdate(prev: AppProps, prevState: AppState): void {
+    if (prev.onRegisterOpenBot !== this.props.onRegisterOpenBot) {
+      prev.onRegisterOpenBot?.(null);
+      this.props.onRegisterOpenBot?.(this.handleOpenBotFromPet);
+    }
     if (
       prevState.globalError !== this.state.globalError ||
       prevState.globalErrorSeq !== this.state.globalErrorSeq
@@ -1533,7 +1545,15 @@ class App extends Component<AppProps, AppState> {
 }
 
 /** CenterGate 就绪后注入 hook 状态到 class App；App 保持类组件（大量既有生命周期逻辑）。 */
-function AppShell({ api, pageActive }: { api: DesktopPanelApi; pageActive?: boolean }) {
+function AppShell({
+  api,
+  pageActive,
+  onRegisterOpenBot,
+}: {
+  api: DesktopPanelApi;
+  pageActive?: boolean;
+  onRegisterOpenBot?: (handler: ((deviceId: string, botId: string) => void) | null) => void;
+}) {
   const centerConnection = useCenterConnection();
   const { theme, setTheme } = useDesktopTheme();
   const notice = useNotice();
@@ -1547,13 +1567,21 @@ function AppShell({ api, pageActive }: { api: DesktopPanelApi; pageActive?: bool
       setTheme={setTheme}
       notice={notice}
       t={t}
+      onRegisterOpenBot={onRegisterOpenBot}
     />
   );
 }
 
 /** 应用装配 ErrorBoundary：
  * 加载失败显示明确错误，提供只读重试。 */
-export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: boolean }, { failed: string | null }> {
+export class DesktopApp extends Component<
+  {
+    api: DesktopPanelApi;
+    pageActive?: boolean;
+    onRegisterOpenBot?: (handler: ((deviceId: string, botId: string) => void) | null) => void;
+  },
+  { failed: string | null }
+> {
   state = { failed: null as string | null };
 
   private centerInterrupted = () => {
@@ -1587,7 +1615,11 @@ export class DesktopApp extends Component<{ api: DesktopPanelApi; pageActive?: b
     }
     return (
       <CenterGate onInterrupted={this.centerInterrupted} onDisconnected={this.centerDisconnected}>
-        <AppShell api={this.props.api} pageActive={this.props.pageActive} />
+        <AppShell
+          api={this.props.api}
+          pageActive={this.props.pageActive}
+          onRegisterOpenBot={this.props.onRegisterOpenBot}
+        />
       </CenterGate>
     );
   }

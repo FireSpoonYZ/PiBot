@@ -25,8 +25,8 @@ interface IClipboardSyncShizukuService {
     /**
      * Reads the current primary clipboard ONLY if the listener is active, the device/user is
      * unlocked, the profile matches, the clip timestamp is strictly newer than the pre-online
-     * baseline, and the clip passes {@code ClipboardSyncController} strict plain-text,
-     * non-sensitive, non-own, non-Shower, non-URI/Intent/HTML, <= 64 KiB UTF-8 filtering.
+     * baseline, and the clip passes {@code ClipboardSyncController} filtering: plain-text
+     * representation only, no own/controlled-display clips or URI/Intent items, <= 64 KiB UTF-8.
      * Returns null otherwise.
      */
     String readFilteredPlainText() = 3;

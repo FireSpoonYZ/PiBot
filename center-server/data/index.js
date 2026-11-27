@@ -428,6 +428,22 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     // Shared built-in Center-hosted Google Workspace MCP: visible to every existing
     // and future Bot without per-Bot bindings, toggles, or user grants in Host snapshots.
     if (!capabilities.some((capability) => capability.installationId === GOOGLE_WORKSPACE_INSTALLATION_ID)) {
+      const assistant = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+      const isProactiveTarget = Boolean(
+        assistant
+        && assistant.enabled
+        && assistant.deviceId === deviceId
+        && assistant.botId === bot.botId,
+      );
+      const effectiveConfig = isProactiveTarget
+        ? {
+          proactiveAssistant: {
+            role: assistant.mode,
+            accounts: [...assistant.accounts],
+            hindsightPrivateMemory: Boolean(assistant.hindsightPrivateMemory),
+          },
+        }
+        : {};
       capabilities.push({
         installationId: GOOGLE_WORKSPACE_INSTALLATION_ID,
         kind: 'mcp',
@@ -435,8 +451,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         targetVersion: GOOGLE_WORKSPACE_VERSION,
         enabled: true,
         authorized: true,
-        revision: 1,
-        effectiveConfig: {},
+        revision: isProactiveTarget ? Math.max(1, assistant.revision) : 1,
+        effectiveConfig,
         credentialRefs: [],
         credentialRevisions: {},
       });
@@ -857,10 +873,14 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       };
     };
 
-    const { _delivery: googleRuleDelivery, ...googleRuleMethods } = googleRulesStore(db, transaction);
+    const {
+      _delivery: googleRuleDelivery,
+      _assistantDelivery: googleAssistantDelivery,
+      ...googleRuleMethods
+    } = googleRulesStore(db, transaction, { onAssistantChanged: bump });
     const { _delivery: dispatchDelivery, ...dispatchMethods } = dispatchStore(db, transaction);
     store = {
-      ...webhookStore(db, transaction, { extraDeliveries: [googleRuleDelivery, dispatchDelivery] }),
+      ...webhookStore(db, transaction, { extraDeliveries: [googleRuleDelivery, googleAssistantDelivery, dispatchDelivery] }),
       ...googleRuleMethods,
       ...dispatchMethods,
       ...pairingStore(db, transaction),
@@ -1121,6 +1141,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               insertEventStmt.run(seq, deviceId, normalized.botId, 'upsert', serialized, nowIso);
             }
             if (oldSerialized === undefined && initializeBotDefaults(normalized)) defaultsAdded = true;
+            if (normalized.archivedAt) {
+              store.pauseGoogleAssistantForBot(deviceId, normalized.botId, 'BOT_ARCHIVED', 'Target Bot is archived.');
+            }
             existingMap.delete(normalized.botId);
           }
           const deleteBotStmt = db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?');
@@ -1130,6 +1153,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
             store.cancelWebhookEventsForBot(deviceId, removedBotId);
+            store.pauseGoogleAssistantForBot(deviceId, removedBotId, 'BOT_UNAVAILABLE', 'Target Bot was removed.');
             store.cancelTaskDispatchesForBot(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
@@ -1234,6 +1258,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (!existingRow || executionChanged) bump();
           }
           if (!existingRow) initializeBotDefaults(merged);
+          if (merged.archivedAt) {
+            store.pauseGoogleAssistantForBot(deviceId, merged.botId, 'BOT_ARCHIVED', 'Target Bot is archived.');
+          }
           return { ...merged, seq: targetSeq };
         });
       },
@@ -1246,6 +1273,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           store.cancelWebhookEventsForBot(deviceId, botId);
+          store.pauseGoogleAssistantForBot(deviceId, botId, 'BOT_UNAVAILABLE', 'Target Bot was removed.');
           store.cancelTaskDispatchesForBot(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);

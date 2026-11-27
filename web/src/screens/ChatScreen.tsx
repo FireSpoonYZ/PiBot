@@ -48,10 +48,13 @@ import { isBotActivityBusy, type BotActivity } from '../botActivity';
 import { ChatTurnMeta } from '../ChatTurnMeta';
 import {
   hasAssistantVisibleContent,
+  isBotDmTurn,
+  resolveAssistantCopyText,
   resolveAssistantFailureDetail,
   type ChatTurn,
-  type ChatTurnBlock,
 } from '../chatTurnModel';
+import { AssistantTurnBody } from '../TurnProcessRail';
+import { BotDmFoldCard, resolveBotDmTurnSummary } from '../BotDmCard';
 import {
   isEditablePrimaryUserTurn,
   type UnifiedQueuedStripItem,
@@ -82,7 +85,6 @@ import {
 } from '../tasks';
 import {
   PlatformLogoIcon,
-  TurnToolCallsSection,
   formatArchivedRemainingDays,
   type SlashCommandName,
   type TurnAdmissionStatus,
@@ -124,6 +126,7 @@ export interface ChatScreenProps {
   inTauriUi: boolean;
   collapseToolOutput: boolean;
   hideToolOutput: boolean;
+  collapseBotDm: boolean;
   botPanelConnected: boolean;
   toolScopeKey: string;
   action: ActionController;
@@ -298,6 +301,7 @@ export function ChatScreen({
   inTauriUi,
   collapseToolOutput,
   hideToolOutput,
+  collapseBotDm,
   botPanelConnected,
   toolScopeKey,
   action,
@@ -1134,6 +1138,18 @@ export function ChatScreen({
   const voiceOnlyMessage = t('语音输入仅支持本机 Bot', 'Voice input is only available for local Bots');
   const remoteDisconnectedImageMessage = t('远端服务未连接，暂不可发送图片', 'Remote host disconnected; image upload unavailable');
 
+  const handleTopBarBack = useCallback(() => {
+    if (chatSearchOpen) {
+      onCloseChatSearch();
+      return;
+    }
+    if (activeEditing) {
+      if (!editSubmitting) onCancelEditTurn();
+      return;
+    }
+    onBack();
+  }, [chatSearchOpen, onCloseChatSearch, activeEditing, editSubmitting, onCancelEditTurn, onBack]);
+
   return (
     <main
       className={`bot-chat-view grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}
@@ -1146,7 +1162,7 @@ export function ChatScreen({
           type="button"
           className="grok-floating-circle-btn grok-chat-header-back"
           aria-label={t('返回', 'Back')}
-          onClick={onBack}
+          onClick={handleTopBarBack}
         >
           <ArrowLeft size={20} aria-hidden="true" />
         </button>
@@ -1216,7 +1232,7 @@ export function ChatScreen({
         )}
 
         <PopoverMenu
-          open={chatTopMenuOpen}
+          open={visible && chatTopMenuOpen}
           onOpenChange={next => {
             if (next) {
               if (!chatTopMenuOpen) onToggleChatTopMenu();
@@ -1325,10 +1341,11 @@ export function ChatScreen({
                   turn.durationMs > 0 &&
                   !(isLastAssistantTurn && isBotBusy);
                 const attribution = turn.attribution;
+                const isDmTurn = isBotDmTurn(turn);
                 const isEditingTarget = editingTargetIdx === turnIdx;
                 const isAfterEditingTarget = editingTargetIdx !== -1 && turnIdx > editingTargetIdx;
                 const turnEditable = canEditHistoryTurn && isEditablePrimaryUserTurn(turn);
-                const copyText = turn.text;
+                const copyText = resolveAssistantCopyText(turn);
                 const isAssistantFailure = turn.role === 'assistant' && Boolean(turn.error);
                 const canRetryTurn = isLastTurn && chatTurnAdmission?.phase === 'failed';
                 const showArticle = !isAssistantFailure || hasAssistantVisibleContent(turn);
@@ -1338,6 +1355,83 @@ export function ChatScreen({
                   t,
                 ) : '';
                 const hasBubbleActions = Boolean(copyText.trim() || turnEditable || canRetryTurn);
+                const renderAssistantBody = (insideDm: boolean) => (
+                  <AssistantTurnBody
+                    turn={turn}
+                    isLive={isLastAssistantTurn && (isBotBusy || Boolean(displayGeneratingText))}
+                    insideDm={insideDm}
+                    collapseToolOutput={collapseToolOutput}
+                    hideToolOutput={hideToolOutput}
+                    collapseBotDm={collapseBotDm}
+                    forceExpand={chatSearchActive}
+                    scopeKey={toolScopeKey}
+                    active={isBotBusy && !activeBot.archivedAt}
+                    disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
+                    variant="mobile"
+                    googleContext={googleContext}
+                    onSubmitQuestionnaire={onSubmitQuestionnaire}
+                    onSubmitVaultUnlock={onSubmitVaultUnlock}
+                    onOpenTask={onOpenTaskDetail}
+                    onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
+                    onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
+                    t={t}
+                  />
+                );
+
+                if (isDmTurn) {
+                  const dmSummary = resolveBotDmTurnSummary(turn, visibleTurns, turnIdx, t);
+                  return (
+                    <div
+                      key={turn.id}
+                      data-turn-id={turn.id}
+                      className={`bot-chat-turn is-bot-dm${isStreamingTurn ? ' is-streaming' : ''}`}
+                    >
+                      <BotDmFoldCard
+                        direction={dmSummary.direction}
+                        peerLabel={dmSummary.peerLabel}
+                        tag={dmSummary.tag}
+                        preview={dmSummary.preview}
+                        meta={dmSummary.meta}
+                        status={dmSummary.status}
+                        silent={dmSummary.silent}
+                        defaultCollapsed={collapseBotDm}
+                        forceExpand={chatSearchActive}
+                      >
+                        {turn.role === 'assistant' ? (
+                          <>
+                            {showArticle ? renderAssistantBody(true) : null}
+                            {isAssistantFailure ? (
+                              <GrokBotFailureRow
+                                botKey={activeBot.key}
+                                preset={activeBotPreset}
+                                detail={failureDetail || undefined}
+                                inline
+                                t={t}
+                              />
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            {turn.attachments && turn.attachments.length > 0 ? (
+                              <SentAttachments
+                                attachments={turn.attachments}
+                                fetcher={turnAttachmentFetcher}
+                              />
+                            ) : null}
+                            {turn.text && <Markdown text={turn.text} />}
+                          </>
+                        )}
+                        <ChatTurnMeta
+                          role={turn.role}
+                          timestamp={turn.timestamp}
+                          durationMs={showTurnDuration ? turn.durationMs : undefined}
+                          copyText={dmSummary.copyText}
+                        />
+                      </BotDmFoldCard>
+                    </div>
+                  );
+                }
+
                 return (
                   <div
                     key={turn.id}
@@ -1378,64 +1472,7 @@ export function ChatScreen({
                             className="bot-chat-attribution"
                           />
                         )}
-                        {turn.role === 'assistant' ? (
-                          turn.blocks ? (
-                            turn.blocks.map((block: ChatTurnBlock) =>
-                              block.kind === 'thinking' ? (
-                                <details key={block.id} className="bot-chat-thinking">
-                                  <summary>{t('思考过程', 'Thinking')}</summary>
-                                  <pre>{block.text}</pre>
-                                </details>
-                              ) : block.kind === 'tools' ? (
-                                <TurnToolCallsSection
-                                  key={block.id}
-                                  tools={block.tools}
-                                  collapseOutput={collapseToolOutput}
-                                  presentationOnly={hideToolOutput}
-                                  scopeKey={toolScopeKey}
-                                  active={isBotBusy && !activeBot.archivedAt}
-                                  disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
-                                  googleContext={googleContext}
-                                  onSubmitQuestionnaire={onSubmitQuestionnaire}
-                                  onSubmitVaultUnlock={onSubmitVaultUnlock}
-                                  onOpenTask={onOpenTaskDetail}
-                                  onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
-                                  onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
-                                  t={t}
-                                />
-                              ) : (
-                                <Markdown key={block.id} text={block.text} />
-                              ),
-                            )
-                          ) : (
-                            <>
-                              {turn.thinking && (
-                                <details className="bot-chat-thinking">
-                                  <summary>{t('思考过程', 'Thinking')}</summary>
-                                  <pre>{turn.thinking}</pre>
-                                </details>
-                              )}
-                              {turn.tools && turn.tools.length > 0 && (
-                                <TurnToolCallsSection
-                                  tools={turn.tools}
-                                  collapseOutput={collapseToolOutput}
-                                  presentationOnly={hideToolOutput}
-                                  scopeKey={toolScopeKey}
-                                  active={isBotBusy && !activeBot.archivedAt}
-                                  disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
-                                  googleContext={googleContext}
-                                  onSubmitQuestionnaire={onSubmitQuestionnaire}
-                                  onSubmitVaultUnlock={onSubmitVaultUnlock}
-                                  onOpenTask={onOpenTaskDetail}
-                                  onConfirmTaskPlan={onConfirmTaskPlanFromTurn}
-                                  onAnswerTaskPrompt={onAnswerTaskPromptFromTurn}
-                                  t={t}
-                                />
-                              )}
-                              {turn.text && <Markdown text={turn.text} />}
-                            </>
-                          )
-                        ) : null}
+                        {turn.role === 'assistant' ? renderAssistantBody(false) : null}
                         {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
                           <SentAttachments
                             attachments={turn.attachments}
@@ -1558,7 +1595,7 @@ export function ChatScreen({
             onSubmitEditTurn={onSubmitEditedTurn}
             online={remoteConnected && activeBot.online !== false}
             onOffline={() => onShowOfflineNotice(t('目标离线，草稿已保留。', 'Target offline; draft retained.'))}
-            composerMenuOpen={composerMenuOpen}
+            composerMenuOpen={visible && composerMenuOpen}
             onToggleComposerMenu={onToggleComposerMenu}
             onRunCommand={onRunSlashCommand}
             commandBusy={Boolean(slashBusy)}
@@ -1594,7 +1631,7 @@ export function ChatScreen({
         ) : (
           <>
             <ComposerSlashPopover
-              open={slash.open}
+              open={visible && slash.open}
               query={effectiveLocalDraft}
               listboxId={slash.listboxId}
               matches={slash.matches}
@@ -1657,7 +1694,7 @@ export function ChatScreen({
 
             <div ref={localComposerRowRef} className="grok-composer-row">
               <ComposerPlusMenu
-                open={composerMenuOpen}
+                open={visible && composerMenuOpen}
                 onOpenChange={next => {
                   if (next) {
                     if (!composerMenuOpen) onToggleComposerMenu();

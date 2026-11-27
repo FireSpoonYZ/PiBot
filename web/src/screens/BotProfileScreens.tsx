@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type Dispatch, type KeyboardEvent, type RefObject, type SetStateAction } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type Dispatch, type KeyboardEvent, type RefObject, type SetStateAction } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -8,6 +8,7 @@ import {
   Cpu,
   Globe,
   LockKeyhole,
+  MessagesSquare,
   Monitor,
   Pencil,
   Plus,
@@ -47,6 +48,7 @@ import {
   type UnifiedBotItem,
 } from '../hub/shared';
 import { Button, ConfirmDialog, InlineBanner, Skeleton as UiSkeleton, Switch } from '../components/ui';
+import { registerOverlayBackHandler } from '../components/ui/overlayStack';
 import type { ActionController, MobileBotItem } from './types';
 
 export interface BotProfileScreenProps {
@@ -67,6 +69,7 @@ export interface BotProfileScreenProps {
   onBack(): void;
   onSave(): void;
   onOpenAvatarPicker(preset: GrokAvatarPreset): void;
+  onOpenBotDms(): void;
   onOpenModelSettings(): void;
   onOpenSoul(): void;
   onOpenSkills(): void;
@@ -96,6 +99,7 @@ export function BotProfileScreen({
   onBack,
   onSave,
   onOpenAvatarPicker,
+  onOpenBotDms,
   onOpenModelSettings,
   onOpenSoul,
   onOpenSkills,
@@ -109,6 +113,32 @@ export function BotProfileScreen({
   const t = useText();
   const modelSummary = activeBotModelSummary ?? formatBotModelSummary(activeBot, { connectedToCenter });
   const avatarPreset = resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary);
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  const profileDirty =
+    editName.trim() !== activeBot.role.trim() ||
+    editSubtitle.trim() !== (activeBot.description ?? '').trim();
+
+  useEffect(() => {
+    if (!profileDirty) setDiscardConfirmOpen(false);
+  }, [profileDirty]);
+
+  const handleRequestBack = useCallback(() => {
+    if (actionBusy) return;
+    if (profileDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    onBack();
+  }, [actionBusy, profileDirty, onBack]);
+
+  const handleBackRef = useRef(handleRequestBack);
+  handleBackRef.current = handleRequestBack;
+  const interceptBack = Boolean(profileDirty || actionBusy);
+
+  useEffect(() => {
+    if (!interceptBack) return;
+    return registerOverlayBackHandler(() => handleBackRef.current());
+  }, [interceptBack]);
 
   return (
     <main className="grok-subpage grok-page-enter bot-profile-page">
@@ -117,7 +147,8 @@ export function BotProfileScreen({
           type="button"
           className="grok-floating-circle-btn"
           aria-label={t('返回', 'Back')}
-          onClick={onBack}
+          disabled={actionBusy}
+          onClick={handleRequestBack}
         >
           <ArrowLeft size={20} />
         </button>
@@ -175,6 +206,28 @@ export function BotProfileScreen({
         <ReservedSlot minHeight={44} align="start">
           <ErrorNotice error={profileError} stale={actionBusy} compact onDismiss={onDismissProfileError} />
         </ReservedSlot>
+        <section className="grok-field-section">
+          <h3 className="grok-section-label">{t('Bot 协作', 'Bot collaboration')}</h3>
+          <div className="grok-card-group">
+            <button
+              type="button"
+              className="grok-card-row bot-profile-dm-row"
+              onClick={onOpenBotDms}
+            >
+              <span className="bot-profile-dm-icon" aria-hidden="true">
+                <MessagesSquare size={18} />
+              </span>
+              <span className="bot-profile-dm-text">
+                <span className="grok-row-label">{t('查看该 Bot 的私聊', 'View this bot’s private chats')}</span>
+                <span className="bot-profile-dm-sub">
+                  {t('查看与其他 Bot 的收发私聊记录', 'Browse incoming & outgoing DMs with other bots')}
+                </span>
+              </span>
+              <ChevronRight size={18} className="grok-row-chevron" aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+
         <section className="grok-field-section">
           <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
           <div className="grok-card-group">
@@ -286,6 +339,26 @@ export function BotProfileScreen({
           </div>
         </section>
       </div>
+      <ConfirmDialog
+        open={discardConfirmOpen && profileDirty}
+        title={t('放弃未保存的资料修改？', 'Discard unsaved profile changes?')}
+        description={t('当前 Bot 的名称或用途有未保存的修改，返回将丢弃这些更改。', 'Your edits to this Bot’s name or purpose have not been saved. Going back will discard them.')}
+        danger
+        busy={actionBusy}
+        confirmLabel={t('放弃修改', 'Discard')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => {
+          if (!actionBusy) setDiscardConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (actionBusy) return;
+          setDiscardConfirmOpen(false);
+          onChangeEditName(activeBot.role);
+          onChangeEditSubtitle(activeBot.description ?? '');
+          onDismissProfileError();
+          onBack();
+        }}
+      />
     </main>
   );
 }
@@ -300,6 +373,7 @@ export interface BotProfileManageScreenProps {
   editCwdSaved: boolean;
   cwdSaveError?: string;
   onChangeEditCwd(next: string): void;
+  onDiscardEditCwd?: () => void;
   onReloadEditCwd(): void;
   onSaveEditCwd(): void;
   onDismissCwdSaveError(): void;
@@ -322,6 +396,7 @@ export function BotProfileManageScreen({
   editCwdSaved,
   cwdSaveError,
   onChangeEditCwd,
+  onDiscardEditCwd,
   onReloadEditCwd,
   onSaveEditCwd,
   onDismissCwdSaveError,
@@ -335,6 +410,30 @@ export function BotProfileManageScreen({
 }: BotProfileManageScreenProps) {
   const t = useText();
   const localOfflineCwd = activeBot.hostKind === 'local' && !connectedToCenter;
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  const cwdDirty = !localOfflineCwd && editCwdRevision !== null && editCwd.trim() !== editCwdBaseline.trim();
+
+  useEffect(() => {
+    if (!cwdDirty) setDiscardConfirmOpen(false);
+  }, [cwdDirty]);
+
+  const handleRequestBack = useCallback(() => {
+    if (action.busy) return;
+    if (cwdDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    onBack();
+  }, [action.busy, cwdDirty, onBack]);
+
+  const handleBackRef = useRef(handleRequestBack);
+  handleBackRef.current = handleRequestBack;
+  const interceptBack = Boolean(cwdDirty || action.busy);
+
+  useEffect(() => {
+    if (!interceptBack) return;
+    return registerOverlayBackHandler(() => handleBackRef.current());
+  }, [interceptBack]);
 
   return (
     <main className="grok-subpage grok-page-enter bot-profile-page">
@@ -343,7 +442,8 @@ export function BotProfileManageScreen({
           type="button"
           className="grok-floating-circle-btn"
           aria-label={t('返回 Bot 资料', 'Back to bot profile')}
-          onClick={onBack}
+          disabled={action.busy}
+          onClick={handleRequestBack}
         >
           <ArrowLeft size={20} />
         </button>
@@ -499,6 +599,29 @@ export function BotProfileManageScreen({
           </ReservedSlot>
         </section>
       </div>
+      <ConfirmDialog
+        open={discardConfirmOpen && cwdDirty}
+        title={t('放弃未保存的工作目录修改？', 'Discard unsaved working directory changes?')}
+        description={t('工作目录有未保存的修改，返回将丢弃这些更改。', 'Your working directory edits have not been saved. Going back will discard them.')}
+        danger
+        busy={action.busy}
+        confirmLabel={t('放弃修改', 'Discard')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => {
+          if (!action.busy) setDiscardConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (action.busy) return;
+          setDiscardConfirmOpen(false);
+          if (onDiscardEditCwd) {
+            onDiscardEditCwd();
+          } else {
+            onChangeEditCwd(editCwdBaseline);
+            onDismissCwdSaveError();
+          }
+          onBack();
+        }}
+      />
     </main>
   );
 }
@@ -752,6 +875,7 @@ export interface BotSoulScreenProps {
   onRetryLoad?: () => void;
   action: ActionController;
   onBack(): void;
+  onDiscardAndBack?: () => void;
   onSave(): void;
   onReload(bot: UnifiedBotItem): void;
 }
@@ -770,13 +894,37 @@ export function BotSoulScreen({
   onRetryLoad,
   action,
   onBack,
+  onDiscardAndBack,
   onSave,
   onReload,
 }: BotSoulScreenProps) {
   const t = useText();
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const initialLoading = soulLoading && !soulDraft && !soulDirty;
   const initialLoadFailed = Boolean(soulError) && !soulDraft && !soulDirty && !soulLoading;
+
+  useEffect(() => {
+    if (!soulDirty) setDiscardConfirmOpen(false);
+  }, [soulDirty]);
+
+  const handleRequestBack = useCallback(() => {
+    if (action.busy) return;
+    if (soulDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    onBack();
+  }, [action.busy, soulDirty, onBack]);
+
+  const handleBackRef = useRef(handleRequestBack);
+  handleBackRef.current = handleRequestBack;
+  const interceptBack = Boolean(soulDirty || action.busy);
+
+  useEffect(() => {
+    if (!interceptBack) return;
+    return registerOverlayBackHandler(() => handleBackRef.current());
+  }, [interceptBack]);
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -785,7 +933,8 @@ export function BotSoulScreen({
           type="button"
           className="grok-floating-circle-btn"
           aria-label={t('返回', 'Back')}
-          onClick={onBack}
+          disabled={action.busy}
+          onClick={handleRequestBack}
         >
           <ArrowLeft size={20} aria-hidden="true" />
         </button>
@@ -933,6 +1082,29 @@ export function BotSoulScreen({
           setSoulDirty(true);
         }}
       />
+      <ConfirmDialog
+        open={discardConfirmOpen && soulDirty}
+        title={t('放弃未保存的人设修改？', 'Discard unsaved persona changes?')}
+        description={t('当前人设内容有未保存的修改，返回将丢弃这些更改。', 'Your persona edits have not been saved. Going back will discard them.')}
+        danger
+        busy={action.busy}
+        confirmLabel={t('放弃修改', 'Discard')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => {
+          if (!action.busy) setDiscardConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (action.busy) return;
+          setDiscardConfirmOpen(false);
+          if (onDiscardAndBack) {
+            onDiscardAndBack();
+          } else {
+            setSoulDirty(false);
+            action.setError('');
+            onBack();
+          }
+        }}
+      />
     </main>
   );
 }
@@ -950,6 +1122,7 @@ export interface BotSchedulesScreenProps {
   scheduleFilter: 'all' | 'enabled' | 'paused';
   onChangeScheduleFilter(next: 'all' | 'enabled' | 'paused'): void;
   scheduleEditing: 'new' | 'edit' | null;
+  scheduleDirty?: boolean;
   onCancelEditing(): void;
   scheduleDraft: BotScheduleDraft;
   setScheduleDraft: Dispatch<SetStateAction<BotScheduleDraft>>;
@@ -980,6 +1153,7 @@ export function BotSchedulesScreen({
   scheduleFilter,
   onChangeScheduleFilter,
   scheduleEditing,
+  scheduleDirty = false,
   onCancelEditing,
   scheduleDraft,
   setScheduleDraft,
@@ -999,9 +1173,36 @@ export function BotSchedulesScreen({
   const t = useText();
   const schedulePromptId = useId();
   const scheduleRepeatId = useId();
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const hasLoadedBotSchedules = botScheduleState.botKey === activeBot.key;
   const initialSchedulesLoading = schedulesLoading && !hasLoadedBotSchedules;
   const initialSchedulesFailed = Boolean(schedulesLoadError) && !hasLoadedBotSchedules && !schedulesLoading;
+
+  useEffect(() => {
+    if (!scheduleEditing || !scheduleDirty) setDiscardConfirmOpen(false);
+  }, [scheduleEditing, scheduleDirty]);
+
+  const handleRequestBack = useCallback(() => {
+    if (scheduleEditing !== null) {
+      if (action.busy) return;
+      if (scheduleDirty) {
+        setDiscardConfirmOpen(true);
+        return;
+      }
+      onCancelEditing();
+      return;
+    }
+    onBack();
+  }, [scheduleEditing, action.busy, scheduleDirty, onCancelEditing, onBack]);
+
+  const handleBackRef = useRef(handleRequestBack);
+  handleBackRef.current = handleRequestBack;
+  const interceptBack = scheduleEditing !== null;
+
+  useEffect(() => {
+    if (!interceptBack) return;
+    return registerOverlayBackHandler(() => handleBackRef.current());
+  }, [interceptBack]);
 
   return (
     <main className="grok-subpage grok-page-enter">
@@ -1010,13 +1211,8 @@ export function BotSchedulesScreen({
           type="button"
           className="grok-floating-circle-btn"
           aria-label={t('返回', 'Back')}
-          onClick={() => {
-            if (scheduleEditing) {
-              onCancelEditing();
-            } else {
-              onBack();
-            }
-          }}
+          disabled={Boolean(scheduleEditing && action.busy)}
+          onClick={handleRequestBack}
         >
           <ArrowLeft size={20} aria-hidden="true" />
         </button>
@@ -1482,6 +1678,7 @@ export function BotSchedulesScreen({
             : ''
         }
         danger
+        busy={action.busy}
         confirmLabel={t('删除定时任务', 'Delete schedule')}
         cancelLabel={t('取消', 'Cancel')}
         onCancel={() => {
@@ -1493,6 +1690,24 @@ export function BotSchedulesScreen({
           const target = scheduleDeleteTarget;
           setScheduleDeleteTarget(null);
           onDeleteSchedule(target);
+        }}
+      />
+      <ConfirmDialog
+        open={discardConfirmOpen && scheduleEditing !== null && scheduleDirty}
+        title={t('放弃未保存的定时任务修改？', 'Discard unsaved schedule changes?')}
+        description={t('当前定时任务有未保存的修改，返回将丢弃这些更改。', 'Your schedule edits have not been saved. Going back will discard them.')}
+        danger
+        busy={action.busy}
+        confirmLabel={t('放弃修改', 'Discard')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => {
+          if (!action.busy) setDiscardConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (action.busy) return;
+          setDiscardConfirmOpen(false);
+          action.setError('');
+          onCancelEditing();
         }}
       />
     </main>

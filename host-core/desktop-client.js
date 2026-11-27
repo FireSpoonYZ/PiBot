@@ -503,6 +503,14 @@ export function openDesktopClient(options) {
             failCenter(error, myGeneration);
           },
           onChange: () => {},
+          onClientReleasePublished: () => {
+            if (closed || !client || centerClient !== client || myGeneration !== centerGeneration || centerState !== 'ready') return;
+            try {
+              void Promise.resolve(emitEvent({ type: 'center_event', event: 'client-release-published' })).catch(() => {});
+            } catch {
+              /* ignore event listener errors */
+            }
+          },
         });
         if (closed || myGeneration !== centerGeneration || attempt.controller.signal.aborted) {
           await client.close();

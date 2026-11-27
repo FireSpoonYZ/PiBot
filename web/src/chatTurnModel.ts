@@ -16,7 +16,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
-  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule' | 'google-workspace-assistant';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -79,7 +79,7 @@ export interface ChatToolCallItem {
  * 消息缺有序信息（旧 Host live 投影）时按文本→工具回退顺序追加，不宣称恢复已丢失交错。
  */
 export type ChatTurnBlock =
-  | { id: string; kind: 'text'; text: string; entryId?: string }
+  | { id: string; kind: 'text'; text: string; entryId?: string; interim?: true }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tools'; tools: ChatToolCallItem[] };
 
@@ -104,6 +104,8 @@ export interface ChatTurn {
   createdAt?: string;
   /** 该轮真实来源（用户/对端 Bot/Host 触发器、DM/群聊/主聊、原始 messageId/replyTo）。 */
   attribution?: MessageAttribution;
+  /** 当后端未带 attribution 但由 1v1 Bot 私聊（dm）触发器派生时标记，确保过滤与折叠不漏网。 */
+  dmChannel?: true;
   /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）；
    *  普通聊天经 parseHistoryEntries 过滤不返回此类轮。 */
   collaborative?: boolean;
@@ -203,7 +205,11 @@ function mergeToolChildren(parent: ChatToolCallItem, incoming: ChatToolCallItem[
 }
 
 /** Read only codemode's bounded summaries; child output is not part of this durable contract. */
-function readNestedCalls(parent: ChatToolCallItem, entry: Record<string, unknown>) {
+function readNestedCalls(
+  parent: ChatToolCallItem,
+  entry: Record<string, unknown>,
+  enrichCtx?: CodemodeEnrichContext,
+) {
   if (parent.name !== 'codemode') return;
   if (entry.nestedCallsTruncated === true) parent.nestedCallsTruncated = true;
   const projected = Array.isArray(entry.nestedCalls);
@@ -211,6 +217,7 @@ function readNestedCalls(parent: ChatToolCallItem, entry: Record<string, unknown
   const source = projected ? entry.nestedCalls : details.calls;
   if (!Array.isArray(source)) return;
   const children: ChatToolCallItem[] = [];
+  const rawArgsById = new Map<string, unknown>();
   // Host 投影已把 details.nestedPresentationsTruncated 并入 nestedCallsTruncated；
   // raw 历史直接读该标志（装饰器丢 presentation 预算耗尽时写入）。
   let truncated = entry.nestedCallsTruncated === true ||
@@ -229,6 +236,7 @@ function readNestedCalls(parent: ChatToolCallItem, entry: Record<string, unknown
       continue;
     }
     const args = projected ? call.argsPreview : call.args;
+    if (args !== undefined) rawArgsById.set(id, args);
     const argSummary = typeof args === 'string' ? args.slice(0, 1024) : undefined;
     const error = typeof call.error === 'string' ? call.error.slice(0, 2048) : undefined;
     truncated ||= name.length > 256 || (typeof args === 'string' && args.length > 1024) ||
@@ -253,6 +261,9 @@ function readNestedCalls(parent: ChatToolCallItem, entry: Record<string, unknown
   }
   mergeToolChildren(parent, children);
   parent.nestedCallsTruncated = truncated;
+  if (enrichCtx) {
+    enrichCodemodeChildren(parent, { ...enrichCtx, rawArgsById });
+  }
 }
 
 function shortenPath(rawPath: string, maxLen = 44): string {
@@ -416,6 +427,8 @@ interface AssistantTurnAccumulator {
    *  不同触发/频道的生成绝不合并。无归属条目同为 ''，沿用原有连续合并。 */
   originKey: string;
   channel: MessageAttribution['channel'];
+  /** 当前 DM/群聊轮对应的 scopeId（即使条目本身缺 attribution 也可从 work-trigger 继承）。 */
+  dmScopeId?: string;
   turn: ChatTurn;
   textParts: string[];
   thinkingParts: string[];
@@ -466,20 +479,432 @@ function enrichAttributionName(
   return resolved ? { ...attr, name: resolved } : attr;
 }
 
+interface KnownScopeContext {
+  kinds: Map<string, 'dm' | 'room'>;
+  dmPeerNames: Map<string, string>;
+}
+
+function recordScopeHint(
+  ctx: KnownScopeContext,
+  scopeId: string | undefined,
+  kind: 'dm' | 'room' | undefined,
+  peerName?: string,
+): void {
+  if (!scopeId) return;
+  if (kind === 'dm' || kind === 'room') {
+    ctx.kinds.set(scopeId, kind);
+  }
+  if (kind === 'dm' && peerName) {
+    ctx.dmPeerNames.set(scopeId, peerName);
+  }
+}
+
+interface PartialJsonField {
+  value: unknown;
+  complete: boolean;
+  fields?: Map<string, PartialJsonField>;
+}
+
+interface PartialJsonReadResult {
+  value: unknown;
+  complete: boolean;
+  nextIndex: number;
+  fields?: Map<string, PartialJsonField>;
+}
+
+function skipJsonWhitespace(src: string, index: number): number {
+  let i = index;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') i += 1;
+    else break;
+  }
+  return i;
+}
+
+function stripDanglingHighSurrogate(value: string): string {
+  if (value.length === 0) return value;
+  const code = value.charCodeAt(value.length - 1);
+  return code >= 0xd800 && code <= 0xdbff ? value.slice(0, -1) : value;
+}
+
+function cleanTruncatedJsonString(value: string): string {
+  if (value.endsWith('…')) {
+    return `${stripDanglingHighSurrogate(value.slice(0, -1))}…`;
+  }
+  return stripDanglingHighSurrogate(value);
+}
+
+function readPartialJsonString(
+  src: string,
+  start: number,
+): { value: string; complete: boolean; nextIndex: number } | undefined {
+  if (src[start] !== '"') return undefined;
+  let i = start + 1;
+  let out = '';
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"') {
+      return { value: out, complete: true, nextIndex: i + 1 };
+    }
+    if (ch === '\\') {
+      if (i + 1 >= src.length) {
+        return { value: cleanTruncatedJsonString(out), complete: false, nextIndex: src.length };
+      }
+      const esc = src[i + 1];
+      if (esc === '…' && i + 2 === src.length) {
+        return { value: cleanTruncatedJsonString(`${out}…`), complete: false, nextIndex: src.length };
+      }
+      switch (esc) {
+        case '"': out += '"'; i += 2; break;
+        case '\\': out += '\\'; i += 2; break;
+        case '/': out += '/'; i += 2; break;
+        case 'b': out += '\b'; i += 2; break;
+        case 'f': out += '\f'; i += 2; break;
+        case 'n': out += '\n'; i += 2; break;
+        case 'r': out += '\r'; i += 2; break;
+        case 't': out += '\t'; i += 2; break;
+        case 'u': {
+          const hex = src.slice(i + 2, i + 6);
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 6;
+          } else {
+            const rem = src.slice(i + 2);
+            if (/^[0-9a-fA-F]{0,3}$/.test(rem) || /^[0-9a-fA-F]{0,3}…$/.test(rem)) {
+              const tail = rem.endsWith('…') ? '…' : '';
+              return { value: cleanTruncatedJsonString(`${out}${tail}`), complete: false, nextIndex: src.length };
+            }
+            return undefined;
+          }
+          break;
+        }
+        default:
+          return undefined;
+      }
+      continue;
+    }
+    if (ch.charCodeAt(0) < 0x20) return undefined;
+    out += ch;
+    i += 1;
+  }
+  return { value: cleanTruncatedJsonString(out), complete: false, nextIndex: src.length };
+}
+
+function readPartialJsonObject(
+  src: string,
+  start: number,
+  depth: number,
+): PartialJsonReadResult | undefined {
+  if (depth > 4 || src[start] !== '{') return undefined;
+  const fields = new Map<string, PartialJsonField>();
+  const record: Record<string, unknown> = {};
+  let i = skipJsonWhitespace(src, start + 1);
+  if (i >= src.length) return { value: record, fields, complete: false, nextIndex: i };
+  if (src[i] === '}') return { value: record, fields, complete: true, nextIndex: i + 1 };
+  while (i < src.length) {
+    i = skipJsonWhitespace(src, i);
+    if (i >= src.length) return { value: record, fields, complete: false, nextIndex: i };
+    const key = readPartialJsonString(src, i);
+    if (!key || !key.complete) {
+      return { value: record, fields, complete: false, nextIndex: src.length };
+    }
+    i = skipJsonWhitespace(src, key.nextIndex);
+    if (i >= src.length || src[i] !== ':') {
+      return { value: record, fields, complete: false, nextIndex: src.length };
+    }
+    i = skipJsonWhitespace(src, i + 1);
+    if (i >= src.length) {
+      return { value: record, fields, complete: false, nextIndex: src.length };
+    }
+    const val = readPartialJsonValue(src, i, depth + 1);
+    if (!val) {
+      return { value: record, fields, complete: false, nextIndex: src.length };
+    }
+    fields.set(key.value, { value: val.value, complete: val.complete, fields: val.fields });
+    record[key.value] = val.value;
+    if (!val.complete) {
+      return { value: record, fields, complete: false, nextIndex: src.length };
+    }
+    i = skipJsonWhitespace(src, val.nextIndex);
+    if (i >= src.length) return { value: record, fields, complete: false, nextIndex: i };
+    if (src[i] === ',') {
+      i += 1;
+      continue;
+    }
+    if (src[i] === '}') {
+      return { value: record, fields, complete: true, nextIndex: i + 1 };
+    }
+    return { value: record, fields, complete: false, nextIndex: src.length };
+  }
+  return { value: record, fields, complete: false, nextIndex: src.length };
+}
+
+function readPartialJsonValue(
+  src: string,
+  start: number,
+  depth: number,
+): PartialJsonReadResult | undefined {
+  if (depth > 4) return undefined;
+  const i = skipJsonWhitespace(src, start);
+  if (i >= src.length) return undefined;
+  const ch = src[i];
+  if (ch === '"') return readPartialJsonString(src, i);
+  if (ch === '{') return readPartialJsonObject(src, i, depth);
+  if (ch === '[') {
+    const arr: unknown[] = [];
+    let pos = skipJsonWhitespace(src, i + 1);
+    if (pos >= src.length) return { value: arr, complete: false, nextIndex: pos };
+    if (src[pos] === ']') return { value: arr, complete: true, nextIndex: pos + 1 };
+    while (pos < src.length) {
+      pos = skipJsonWhitespace(src, pos);
+      if (pos >= src.length) return { value: arr, complete: false, nextIndex: pos };
+      const elem = readPartialJsonValue(src, pos, depth + 1);
+      if (!elem) return { value: arr, complete: false, nextIndex: src.length };
+      if (elem.complete || (typeof elem.value === 'string' && elem.value !== '' && elem.value !== '…')) {
+        arr.push(elem.value);
+      }
+      if (!elem.complete) return { value: arr, complete: false, nextIndex: src.length };
+      pos = skipJsonWhitespace(src, elem.nextIndex);
+      if (pos >= src.length) return { value: arr, complete: false, nextIndex: pos };
+      if (src[pos] === ',') {
+        pos += 1;
+        continue;
+      }
+      if (src[pos] === ']') return { value: arr, complete: true, nextIndex: pos + 1 };
+      return { value: arr, complete: false, nextIndex: src.length };
+    }
+    return { value: arr, complete: false, nextIndex: src.length };
+  }
+  if (src.startsWith('true', i)) return { value: true, complete: true, nextIndex: i + 4 };
+  if (src.startsWith('false', i)) return { value: false, complete: true, nextIndex: i + 5 };
+  if (src.startsWith('null', i)) return { value: null, complete: true, nextIndex: i + 4 };
+  const numMatch = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(src.slice(i));
+  if (numMatch) {
+    const nextIndex = i + numMatch[0].length;
+    const hitEof = nextIndex >= src.length || (nextIndex === src.length - 1 && src[nextIndex] === '…');
+    return { value: Number(numMatch[0]), complete: !hitEof, nextIndex };
+  }
+  return undefined;
+}
+
+interface ParsedNestedSendToArgs {
+  args: Record<string, unknown>;
+  textTruncated: boolean;
+  scopeIdTruncated: boolean;
+}
+
+/** 安全解析 codemode 嵌套 send_to 的 JSON 参数（兼容完整 JSON 与截断的 argsPreview，绝不抛错或臆造字段）。 */
+function parseNestedSendToArgs(raw: unknown): ParsedNestedSendToArgs | undefined {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return { args: raw as Record<string, unknown>, textTruncated: false, scopeIdTruncated: false };
+  }
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { args: parsed as Record<string, unknown>, textTruncated: false, scopeIdTruncated: false };
+    }
+    return undefined;
+  } catch {
+    const partial = readPartialJsonObject(trimmed, 0, 0);
+    if (!partial?.fields) return undefined;
+    const out: Record<string, unknown> = {};
+    let textTruncated = false;
+    let scopeIdTruncated = false;
+    const scopeField = partial.fields.get('scopeId');
+    if (scopeField && typeof scopeField.value === 'string') {
+      if (scopeField.complete) {
+        if (scopeField.value.trim()) out.scopeId = scopeField.value;
+      } else {
+        scopeIdTruncated = true;
+      }
+    }
+    const textField = partial.fields.get('text');
+    if (textField && typeof textField.value === 'string') {
+      out.text = textField.value;
+      if (!textField.complete) textTruncated = true;
+    }
+    const filesField = partial.fields.get('files');
+    if (filesField && Array.isArray(filesField.value)) {
+      const files = filesField.value.filter(
+        (entry): entry is string => typeof entry === 'string' && entry.trim() !== '',
+      );
+      if (files.length > 0) out.files = files;
+    }
+    if (Object.keys(out).length === 0 && !scopeIdTruncated) return undefined;
+    return { args: out, textTruncated, scopeIdTruncated };
+  }
+}
+
+/** 安全解析 codemode 嵌套 ensure_dm 的 peer 参数（要求 botId/deviceId 完整未截断）。 */
+function parseNestedEnsureDmPeer(raw: unknown): { deviceId?: string; botId: string } | undefined {
+  const fromObject = (obj: Record<string, unknown>): { deviceId?: string; botId: string } | undefined => {
+    const peer = asRecord(obj.peer);
+    const target = Object.keys(peer).length > 0 ? peer : obj;
+    const botId = readString(target.botId);
+    if (!botId) return undefined;
+    const deviceId = readString(target.deviceId);
+    return deviceId ? { deviceId, botId } : { botId };
+  };
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return fromObject(raw as Record<string, unknown>);
+  }
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? fromObject(parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    const partial = readPartialJsonObject(trimmed, 0, 0);
+    if (!partial?.fields) return undefined;
+    const peerFields = partial.fields.get('peer')?.fields ?? partial.fields;
+    const botIdField = peerFields.get('botId');
+    if (!botIdField?.complete || typeof botIdField.value !== 'string') return undefined;
+    const botId = readString(botIdField.value);
+    if (!botId) return undefined;
+    const deviceIdField = peerFields.get('deviceId');
+    const deviceId =
+      deviceIdField?.complete && typeof deviceIdField.value === 'string'
+        ? readString(deviceIdField.value)
+        : undefined;
+    return deviceId ? { deviceId, botId } : { botId };
+  }
+}
+
+function recordScopeHintsFromToolOutput(
+  ctx: KnownScopeContext,
+  toolName: string,
+  outputJsonText: string | undefined,
+  selfBotId: string | undefined,
+  knownBots: readonly KnownBotSummary[] | undefined,
+): void {
+  if (!outputJsonText) return;
+  if (
+    toolName !== 'ensure_dm' &&
+    toolName !== 'list_scopes' &&
+    toolName !== 'create_room' &&
+    toolName !== 'send_to' &&
+    toolName !== 'codemode'
+  ) {
+    return;
+  }
+  try {
+    const parsedRoot: unknown = JSON.parse(outputJsonText);
+    const pickPeerName = (membersRaw: unknown): string | undefined => {
+      const members = asArray<unknown>(membersRaw);
+      for (const memberRaw of members) {
+        const member = asRecord(memberRaw);
+        const botId = readString(member.botId);
+        const deviceId = readString(member.deviceId);
+        if (!botId || (selfBotId && botId === selfBotId)) continue;
+        return resolveBotDisplayName(knownBots, botId, deviceId);
+      }
+      return undefined;
+    };
+    if (toolName === 'codemode') {
+      let visited = 0;
+      const walk = (node: unknown, depth: number) => {
+        if (depth > 4 || visited >= 64 || !node || typeof node !== 'object') return;
+        visited += 1;
+        if (Array.isArray(node)) {
+          for (const item of node) walk(item, depth + 1);
+          return;
+        }
+        const obj = node as Record<string, unknown>;
+        const scopeId = readString(obj.scopeId);
+        if (scopeId) {
+          const explicitKind =
+            obj.scopeKind === 'dm' || obj.scopeKind === 'room' ? obj.scopeKind : undefined;
+          if (explicitKind) {
+            const peerName =
+              readString(obj.targetName) ??
+              resolveBotDisplayName(knownBots, readString(obj.peerBotId));
+            recordScopeHint(ctx, scopeId, explicitKind, peerName);
+          } else if ((obj.kind === 'dm' || obj.kind === 'room') && Array.isArray(obj.members)) {
+            recordScopeHint(
+              ctx,
+              scopeId,
+              obj.kind,
+              obj.kind === 'dm' ? pickPeerName(obj.members) : undefined,
+            );
+          }
+        }
+        for (const val of Object.values(obj)) {
+          if (val && typeof val === 'object') walk(val, depth + 1);
+        }
+      };
+      walk(parsedRoot, 0);
+      return;
+    }
+    const parsed = asRecord(parsedRoot);
+    if (toolName === 'send_to') {
+      const scopeId = readString(parsed.scopeId);
+      const kind = parsed.scopeKind === 'dm' || parsed.scopeKind === 'room' ? parsed.scopeKind : undefined;
+      const peerName = readString(parsed.targetName) ?? resolveBotDisplayName(knownBots, readString(parsed.peerBotId));
+      recordScopeHint(ctx, scopeId, kind, peerName);
+      return;
+    }
+    if (toolName === 'ensure_dm' || toolName === 'create_room') {
+      const scopeObj = asRecord(parsed.scope);
+      const target = Object.keys(scopeObj).length > 0 ? scopeObj : parsed;
+      const scopeId = readString(target.scopeId) ?? readString(parsed.scopeId);
+      const kind =
+        target.kind === 'dm' || target.kind === 'room'
+          ? target.kind
+          : toolName === 'ensure_dm'
+            ? 'dm'
+            : 'room';
+      recordScopeHint(ctx, scopeId, kind, kind === 'dm' ? pickPeerName(target.members) : undefined);
+      return;
+    }
+    if (toolName === 'list_scopes') {
+      for (const entryRaw of asArray<unknown>(parsed.scopes ?? parsed.items)) {
+        const entry = asRecord(entryRaw);
+        const scopeObj = asRecord(entry.scope);
+        const target = Object.keys(scopeObj).length > 0 ? scopeObj : entry;
+        const scopeId = readString(target.scopeId);
+        const kind = target.kind === 'dm' || target.kind === 'room' ? target.kind : undefined;
+        recordScopeHint(ctx, scopeId, kind, kind === 'dm' ? pickPeerName(target.members) : undefined);
+      }
+    }
+  } catch {
+    // Ignore non-JSON tool output.
+  }
+}
+
+interface ApplySendToOptions {
+  scopeCtx?: KnownScopeContext;
+  fallbackScopeKind?: 'dm' | 'room';
+  fallbackScopeId?: string;
+  hintScopeKind?: 'dm' | 'room';
+  hintTargetName?: string;
+  textTruncated?: boolean;
+  scopeIdTruncated?: boolean;
+}
+
 function applySendToMetadata(
   tool: ChatToolCallItem,
   args: Record<string, unknown> | undefined,
   outputJsonText: string | undefined,
   knownBots: readonly KnownBotSummary[] | undefined,
+  options?: ApplySendToOptions,
 ): void {
   if (tool.name !== 'send_to') return;
   const current: SendToToolPreview = { ...(tool.sendTo ?? {}) };
+  let argScopeId: string | undefined;
   if (args) {
+    argScopeId = readString(args.scopeId);
     const rawText = typeof args.text === 'string' ? args.text.trim() : '';
     const files = Array.isArray(args.files) ? args.files.length : 0;
     if (files > 0) current.fileCount = files;
     if (rawText) {
-      if (files === 0 && isSilentPassText(rawText)) {
+      if (files === 0 && !options?.textTruncated && isSilentPassText(rawText)) {
         current.silentPass = true;
       } else {
         current.text = rawText;
@@ -490,6 +915,7 @@ function applySendToMetadata(
   if (outputJsonText) {
     try {
       const parsed = asRecord(JSON.parse(outputJsonText));
+      if (!argScopeId) argScopeId = readString(parsed.scopeId);
       const scopeKind = parsed.scopeKind;
       if (scopeKind === 'dm' || scopeKind === 'room') current.scopeKind = scopeKind;
       const category = parsed.category;
@@ -519,6 +945,34 @@ function applySendToMetadata(
       // Non-JSON error output leaves existing args preview intact.
     }
   }
+  const matchesTurnScope =
+    (!argScopeId && !options?.scopeIdTruncated) ||
+    (argScopeId !== undefined && options?.fallbackScopeId !== undefined && argScopeId === options.fallbackScopeId);
+  if (!current.scopeKind && argScopeId && options?.scopeCtx?.kinds.has(argScopeId)) {
+    current.scopeKind = options.scopeCtx.kinds.get(argScopeId);
+  }
+  if (!current.scopeKind && matchesTurnScope && options?.fallbackScopeKind) {
+    current.scopeKind = options.fallbackScopeKind;
+  }
+  if (!current.scopeKind && options?.hintScopeKind) {
+    current.scopeKind = options.hintScopeKind;
+  }
+  const lookupScopeId = argScopeId ?? (!options?.scopeIdTruncated ? options?.fallbackScopeId : undefined);
+  if (!current.targetName && lookupScopeId && options?.scopeCtx?.dmPeerNames.has(lookupScopeId)) {
+    current.targetName = options.scopeCtx.dmPeerNames.get(lookupScopeId);
+  }
+  if (!current.targetName && options?.hintTargetName) {
+    current.targetName = options.hintTargetName;
+  }
+  if (
+    current.category === undefined &&
+    !current.silentPass &&
+    current.scopeKind === 'dm' &&
+    options?.fallbackScopeKind === 'dm' &&
+    matchesTurnScope
+  ) {
+    current.category = 'reply';
+  }
   if (Object.keys(current).length > 0) {
     tool.sendTo = current;
     if (current.targetName) {
@@ -529,6 +983,136 @@ function applySendToMetadata(
           : '';
       tool.argSummary = snippet ? `→ ${current.targetName}: ${snippet}` : `→ ${current.targetName}`;
     }
+  }
+}
+
+interface CodemodeEnrichContext {
+  knownBots: readonly KnownBotSummary[] | undefined;
+  scopeCtx: KnownScopeContext;
+  fallbackScopeKind?: 'dm' | 'room';
+  fallbackScopeId?: string;
+  rawArgsById?: ReadonlyMap<string, unknown>;
+}
+
+function extractCodemodeSendToReceipts(outputJsonText: string | undefined): Map<string, string> {
+  const receipts = new Map<string, string>();
+  if (!outputJsonText) return receipts;
+  try {
+    const parsed: unknown = JSON.parse(outputJsonText);
+    let visited = 0;
+    const walk = (node: unknown, depth: number) => {
+      if (depth > 4 || visited >= 64 || !node || typeof node !== 'object') return;
+      visited += 1;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item, depth + 1);
+        return;
+      }
+      const obj = node as Record<string, unknown>;
+      const scopeId = readString(obj.scopeId);
+      if (
+        scopeId &&
+        (obj.scopeKind === 'dm' || obj.scopeKind === 'room') &&
+        (obj.status === 'stored' ||
+          obj.status === 'silent_pass' ||
+          obj.category === 'request' ||
+          obj.category === 'reply' ||
+          obj.category === 'public' ||
+          obj.category === 'notice')
+      ) {
+        if (!receipts.has(scopeId)) {
+          receipts.set(scopeId, JSON.stringify(obj));
+        }
+      }
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === 'object') walk(val, depth + 1);
+      }
+    };
+    walk(parsed, 0);
+  } catch {
+    // Ignore non-JSON codemode output.
+  }
+  return receipts;
+}
+
+/** 按执行顺序为 codemode 的嵌套 send_to 补齐元数据与前置 ensure_dm 推导的对端信息。 */
+function enrichCodemodeChildren(
+  parent: ChatToolCallItem,
+  ctx: CodemodeEnrichContext,
+): void {
+  if (parent.name !== 'codemode' || !parent.children?.length) return;
+  const outputReceipts = extractCodemodeSendToReceipts(parent.output);
+  let pendingEnsureDms: Array<{ peerName?: string }> = [];
+  let lastScopeProducer: 'dm' | 'room' | 'unknown' | null = null;
+
+  for (const child of parent.children) {
+    const rawArgs = ctx.rawArgsById?.get(child.id) ?? child.args ?? child.argSummary;
+    const childFailed =
+      child.status === 'error' ||
+      child.status === 'cancelled' ||
+      child.status === 'interrupted' ||
+      child.outcome === 'error' ||
+      child.outcome === 'cancelled' ||
+      child.outcome === 'interrupted';
+
+    if (child.name === 'ensure_dm' && !childFailed) {
+      const peer = parseNestedEnsureDmPeer(rawArgs);
+      const peerName = peer ? resolveBotDisplayName(ctx.knownBots, peer.botId, peer.deviceId) : undefined;
+      if (lastScopeProducer !== 'dm') pendingEnsureDms = [];
+      pendingEnsureDms.push({ peerName });
+      lastScopeProducer = 'dm';
+      continue;
+    }
+    if (child.name === 'create_room' && !childFailed) {
+      pendingEnsureDms = [];
+      lastScopeProducer = 'room';
+      continue;
+    }
+    if (child.name === 'list_scopes' && !childFailed) {
+      pendingEnsureDms = [];
+      lastScopeProducer = 'unknown';
+      continue;
+    }
+    if (child.name !== 'send_to') continue;
+
+    const parsed = parseNestedSendToArgs(rawArgs);
+    const argScopeId = parsed ? readString(parsed.args.scopeId) : undefined;
+    const knownKind = argScopeId ? ctx.scopeCtx.kinds.get(argScopeId) : undefined;
+    let hintScopeKind: 'dm' | 'room' | undefined;
+    let hintTargetName: string | undefined;
+
+    if ((!knownKind || knownKind === 'dm') && lastScopeProducer === 'dm' && pendingEnsureDms.length > 0) {
+      const existingPeerName = argScopeId ? ctx.scopeCtx.dmPeerNames.get(argScopeId) : undefined;
+      if (!knownKind) hintScopeKind = 'dm';
+      if (pendingEnsureDms.length === 1) {
+        const candidatePeer = pendingEnsureDms[0].peerName;
+        if (!existingPeerName) {
+          hintTargetName = candidatePeer;
+          if (argScopeId) {
+            recordScopeHint(ctx.scopeCtx, argScopeId, 'dm', hintTargetName);
+          }
+          pendingEnsureDms.shift();
+        } else if (candidatePeer && candidatePeer === existingPeerName) {
+          pendingEnsureDms.shift();
+        }
+      } else if (!knownKind && argScopeId) {
+        recordScopeHint(ctx.scopeCtx, argScopeId, 'dm', undefined);
+      }
+    }
+
+    const receiptLookupScopeId = argScopeId ?? (!parsed?.scopeIdTruncated ? ctx.fallbackScopeId : undefined);
+    const matchedOutput =
+      child.output ||
+      (receiptLookupScopeId ? outputReceipts.get(receiptLookupScopeId) : undefined);
+
+    applySendToMetadata(child, parsed?.args, matchedOutput, ctx.knownBots, {
+      scopeCtx: ctx.scopeCtx,
+      fallbackScopeKind: ctx.fallbackScopeKind,
+      fallbackScopeId: ctx.fallbackScopeId,
+      hintScopeKind,
+      hintTargetName,
+      textTruncated: parsed?.textTruncated,
+      scopeIdTruncated: parsed?.scopeIdTruncated,
+    });
   }
 }
 
@@ -556,7 +1140,8 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
     (raw.sourceType === 'schedule' ||
       raw.sourceType === 'webhook' ||
       raw.sourceType === 'task_dispatch' ||
-      raw.sourceType === 'google-workspace-rule')
+      raw.sourceType === 'google-workspace-rule' ||
+      raw.sourceType === 'google-workspace-assistant')
   ) {
     out.sourceType = raw.sourceType;
   }
@@ -922,6 +1507,22 @@ function extractCompletedTaskReply(tools: readonly ChatToolCallItem[]): string {
   return '';
 }
 
+const SILENT_PROACTIVE_PASS_RE = /^\(?\s*pass\s*\)?\.?$/i;
+
+function isSilentProactiveAssistantText(text: string | undefined): boolean {
+  const trimmed = typeof text === 'string' ? text.trim() : '';
+  return trimmed === '' || SILENT_PROACTIVE_PASS_RE.test(trimmed);
+}
+
+function isProactiveGoogleAssistantTrigger(turn: ChatTurn | null | undefined): boolean {
+  return Boolean(
+    turn &&
+      turn.role === 'user' &&
+      turn.attribution?.kind === 'host' &&
+      turn.attribution?.sourceType === 'google-workspace-assistant',
+  );
+}
+
 export function parseHistoryEntries(
   items: Array<Record<string, unknown>>,
   clearedAfterEntryId = 0,
@@ -931,8 +1532,43 @@ export function parseHistoryEntries(
   let activeUserStartMs: number | undefined;
   let currentAssistant: AssistantTurnAccumulator | null = null;
   let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
+  let lastBoundaryScopeId: string | undefined;
+  let lastUserTriggerTurn: ChatTurn | null = null;
+  const silentEmptyTriggerIds = new Set<string>();
+  const silentEmptyReplyTos = new Set<string>();
 
+  const selfBotId = typeof options?.selfBotId === 'string' ? options.selfBotId : undefined;
   const knownBots = options?.knownBots;
+  const scopeCtx: KnownScopeContext = {
+    kinds: new Map(),
+    dmPeerNames: new Map(),
+  };
+  // 预扫历史中的权威 scope 边界（host.scope-message / host.work-trigger），
+  // 让先于 selfEcho 或对端回信发生的 codemode 嵌套 send_to 也能准确识别 scopeKind 与对端名称。
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === 'pi.compaction') continue;
+    const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
+    if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
+      continue;
+    }
+    if (item.kind === 'host.work-trigger') {
+      const target = asRecord(asRecord(asRecord(item.data).turn).replyTarget);
+      const targetKind = target.kind === 'dm' || target.kind === 'room' ? target.kind : undefined;
+      const targetScopeId = readString(target.scopeId);
+      const targetPeerName =
+        targetKind === 'dm'
+          ? resolveBotDisplayName(knownBots, readString(target.botId), readString(target.deviceId))
+          : undefined;
+      recordScopeHint(scopeCtx, targetScopeId, targetKind, targetPeerName);
+    } else if (item.kind === 'host.scope-message') {
+      const itemAttr = enrichAttributionName(entryAttribution(item, selfBotId), knownBots);
+      const isSelfEcho = asRecord(item.data).selfEcho === true || itemAttr?.direction === 'outgoing';
+      if (itemAttr?.scopeId && (itemAttr.channel === 'dm' || itemAttr.channel === 'room')) {
+        recordScopeHint(scopeCtx, itemAttr.scopeId, itemAttr.channel, !isSelfEcho ? itemAttr.name : undefined);
+      }
+    }
+  }
   const hasDurableWaitsOption = options !== undefined && Object.prototype.hasOwnProperty.call(options, 'durableWaits');
   const activeDurableWaits = hasDurableWaitsOption ? parseActiveDurableWaits(options?.durableWaits) : null;
   const isAuthorizedWait = (presentation: Record<string, unknown> | null): boolean => {
@@ -966,6 +1602,9 @@ export function parseHistoryEntries(
     if (currentAssistant) return currentAssistant;
     const startMs = activeUserStartMs ?? fallbackStartMs;
     const effectiveChannel: MessageAttribution['channel'] = attribution?.channel ?? lastBoundaryChannel;
+    const effectiveScopeId =
+      attribution?.scopeId ??
+      (effectiveChannel === 'dm' || effectiveChannel === 'room' ? lastBoundaryScopeId : undefined);
     // 仅群聊（room）生成作为隐藏协作过程处理；1v1 用户主聊（primary）与 1v1 Bot 私聊（dm）
     // 均在当前 Bot 的 1v1 对话页内可见执行。
     const collaborative = effectiveChannel === 'room';
@@ -976,12 +1615,14 @@ export function parseHistoryEntries(
       text: '',
       startedAt: startMs,
       ...(attribution ? { attribution } : {}),
+      ...(effectiveChannel === 'dm' && attribution?.channel !== 'dm' ? { dmChannel: true as const } : {}),
       ...(collaborative ? { collaborative: true } : {}),
     };
     turns.push(turn);
     currentAssistant = {
       originKey: attribution ? attributionKey(attribution) : '',
       channel: effectiveChannel,
+      ...(effectiveScopeId ? { dmScopeId: effectiveScopeId } : {}),
       turn,
       textParts: [],
       thinkingParts: [],
@@ -1040,11 +1681,17 @@ export function parseHistoryEntries(
     joinAdjacent: boolean,
   ): ChatToolCallItem => {
     const summary = summarizeToolArgs(name, args);
+    const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+    const fallbackScopeId = acc.turn.attribution?.scopeId ?? acc.dmScopeId;
     const existing = acc.tools.find((itemTool) => itemTool.id === toolId);
     if (existing) {
       if (args && !existing.args) existing.args = args;
       if (summary && !existing.argSummary) existing.argSummary = summary;
-      applySendToMetadata(existing, args, existing.output, knownBots);
+      applySendToMetadata(existing, args, existing.output, knownBots, {
+        scopeCtx,
+        fallbackScopeKind,
+        fallbackScopeId,
+      });
       return existing;
     }
     const tool: ChatToolCallItem = {
@@ -1054,7 +1701,11 @@ export function parseHistoryEntries(
       ...(args ? { args } : {}),
       ...(summary ? { argSummary: summary } : {}),
     };
-    applySendToMetadata(tool, args, undefined, knownBots);
+    applySendToMetadata(tool, args, undefined, knownBots, {
+      scopeCtx,
+      fallbackScopeKind,
+      fallbackScopeId,
+    });
     acc.tools.push(tool);
     accPushTool(acc, tool, joinAdjacent);
     return tool;
@@ -1168,10 +1819,23 @@ export function parseHistoryEntries(
         ...(entryId !== undefined ? { entryId } : {}),
       });
     }
+    let lastToolIdx = -1;
+    for (let idx = out.length - 1; idx >= 0; idx -= 1) {
+      if (out[idx].kind === 'tools') {
+        lastToolIdx = idx;
+        break;
+      }
+    }
+    if (lastToolIdx > 0) {
+      for (let idx = 0; idx < lastToolIdx; idx += 1) {
+        const block = out[idx];
+        if (block.kind === 'text') {
+          block.interim = true;
+        }
+      }
+    }
     acc.turn.blocks = out.length > 0 ? out : undefined;
   };
-
-  const selfBotId = typeof options?.selfBotId === 'string' ? options.selfBotId : undefined;
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -1189,7 +1853,18 @@ export function parseHistoryEntries(
     // 产生的生成文本绝不并入上一条回答。
     if (item.kind === 'host.work-trigger') {
       const c = entryChannel(item, selfBotId);
-      if (c !== undefined) lastBoundaryChannel = c;
+      const target = asRecord(asRecord(asRecord(item.data).turn).replyTarget);
+      const targetKind = target.kind === 'dm' || target.kind === 'room' ? target.kind : undefined;
+      const targetScopeId = readString(target.scopeId);
+      if (c !== undefined) {
+        lastBoundaryChannel = c;
+        lastBoundaryScopeId = c === 'dm' || c === 'room' ? targetScopeId : undefined;
+      }
+      const targetPeerName =
+        targetKind === 'dm'
+          ? resolveBotDisplayName(knownBots, readString(target.botId), readString(target.deviceId))
+          : undefined;
+      recordScopeHint(scopeCtx, targetScopeId, targetKind, targetPeerName);
       finalizeCurrentAssistant(false);
       continue;
     }
@@ -1200,6 +1875,9 @@ export function parseHistoryEntries(
     if (item.kind === 'host.scope-message') {
       finalizeCurrentAssistant(false);
       const isSelfEcho = asRecord(item.data).selfEcho === true || itemAttr?.direction === 'outgoing';
+      if (itemAttr?.scopeId && (itemAttr.channel === 'dm' || itemAttr.channel === 'room')) {
+        recordScopeHint(scopeCtx, itemAttr.scopeId, itemAttr.channel, !isSelfEcho ? itemAttr.name : undefined);
+      }
       if (itemAttr?.channel === 'dm' && !isSelfEcho) {
         const rawMsg = asRecord(asRecord(item.data).message);
         const projectedFirst = asRecord(asArray<unknown>(item.messages)[0]);
@@ -1236,7 +1914,11 @@ export function parseHistoryEntries(
     }
     // 最新执行来源 channel：真实用户消息/生成归属/host 触发边界，scope 导入跳过。
     const itemChannel = entryChannel(item, selfBotId);
-    if (itemChannel !== undefined) lastBoundaryChannel = itemChannel;
+    if (itemChannel !== undefined) {
+      lastBoundaryChannel = itemChannel;
+      lastBoundaryScopeId =
+        itemChannel === 'dm' || itemChannel === 'room' ? itemAttr?.scopeId : undefined;
+    }
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
     const itemData = asRecord(item.data);
@@ -1316,7 +1998,7 @@ export function parseHistoryEntries(
 
         finalizeCurrentAssistant(false);
         activeUserStartMs = msgTimestamp;
-        turns.push({
+        const userTurn: ChatTurn = {
           id: `${String(item.id ?? i)}-${mIdx}`,
           role: 'user',
           entryId: Number.isFinite(numericId) ? numericId : 0,
@@ -1325,7 +2007,9 @@ export function parseHistoryEntries(
           startedAt: msgTimestamp,
           timestamp: msgTimestamp,
           ...(itemAttr ? { attribution: itemAttr } : {}),
-        });
+        };
+        turns.push(userTurn);
+        lastUserTriggerTurn = userTurn;
         continue;
       }
 
@@ -1448,6 +2132,11 @@ export function parseHistoryEntries(
           (entry.stopReason === 'error' || entry.isError === true ? 'model_error' : undefined);
 
         if (!messageHasDisplay && !error) {
+          if (itemAttr?.replyTo) {
+            silentEmptyReplyTos.add(itemAttr.replyTo);
+          } else if (isProactiveGoogleAssistantTrigger(lastUserTriggerTurn)) {
+            silentEmptyTriggerIds.add(lastUserTriggerTurn!.id);
+          }
           continue;
         }
 
@@ -1568,12 +2257,13 @@ export function parseHistoryEntries(
           presentationStatus === 'pending' &&
           isAuthorizedWait(projectedPresentation);
         const matched = toolCallId ? acc.tools.find((t) => t.id === toolCallId) : undefined;
+        const fallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+        const fallbackScopeId = acc.turn.attribution?.scopeId ?? acc.dmScopeId;
         if (matched) {
           matched.status = resolvedStatus;
           matched.outcome = outcome;
           matched.presentationLive = durableWait;
           matched.durableWait = durableWait;
-          readNestedCalls(matched, entry);
           acc.settledToolIds.add(matched.id);
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
           if (resultOutput) matched.output = resultOutput;
@@ -1582,7 +2272,18 @@ export function parseHistoryEntries(
             matched.presentation = projectedPresentation;
             matched.presentationLive = durableWait;
           }
-          applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots);
+          recordScopeHintsFromToolOutput(scopeCtx, matched.name, resultOutput || undefined, selfBotId, knownBots);
+          applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots, {
+            scopeCtx,
+            fallbackScopeKind,
+            fallbackScopeId,
+          });
+          readNestedCalls(matched, entry, {
+            knownBots,
+            scopeCtx,
+            fallbackScopeKind,
+            fallbackScopeId,
+          });
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
           const tool: ChatToolCallItem = {
@@ -1595,8 +2296,18 @@ export function parseHistoryEntries(
             ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: durableWait, durableWait } : {}),
           };
-          applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots);
-          readNestedCalls(tool, entry);
+          recordScopeHintsFromToolOutput(scopeCtx, toolName, resultOutput || undefined, selfBotId, knownBots);
+          applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots, {
+            scopeCtx,
+            fallbackScopeKind,
+            fallbackScopeId,
+          });
+          readNestedCalls(tool, entry, {
+            knownBots,
+            scopeCtx,
+            fallbackScopeKind,
+            fallbackScopeId,
+          });
           acc.settledToolIds.add(id);
           acc.tools.push(tool);
           // 孤立 toolResult（分页窗口内未见调用侧）在轮尾追加展示组；
@@ -1652,6 +2363,9 @@ export function parseHistoryEntries(
       const callId = typeof rec.callId === 'string' ? rec.callId : '';
       if (callId) slotByCallId.set(callId, rec);
     }
+    const liveRawArgsById = new Map<string, unknown>();
+    const liveFallbackScopeKind = acc.channel === 'dm' || acc.channel === 'room' ? acc.channel : undefined;
+    const liveFallbackScopeId = acc.turn.attribution?.scopeId ?? acc.dmScopeId;
     const makeLiveTool = (
       id: string,
       name: string,
@@ -1671,6 +2385,9 @@ export function parseHistoryEntries(
         slotPresentation.kind === 'questionnaire' &&
         slotPresentation.status === 'pending' &&
         isAuthorizedWait(slotPresentation);
+      if (typeof slot?.argsPreview === 'string') {
+        liveRawArgsById.set(id, slot.argsPreview);
+      }
       const liveItem: ChatToolCallItem = {
         id,
         name,
@@ -1686,7 +2403,15 @@ export function parseHistoryEntries(
         presentationLive: hasPresentation && (status === 'running' || slotDurableWait),
         durableWait: slotDurableWait,
       };
-      applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
+      recordScopeHintsFromToolOutput(scopeCtx, name, slotOutput || undefined, selfBotId, knownBots);
+      const parsedSendTo = name === 'send_to' ? parseNestedSendToArgs(slot?.argsPreview) : undefined;
+      applySendToMetadata(liveItem, parsedSendTo?.args, slotOutput || undefined, knownBots, {
+        scopeCtx,
+        fallbackScopeKind: liveFallbackScopeKind,
+        fallbackScopeId: liveFallbackScopeId,
+        textTruncated: parsedSendTo?.textTruncated,
+        scopeIdTruncated: parsedSendTo?.scopeIdTruncated,
+      });
       return liveItem;
     };
     const isPlaced = (callId: string) =>
@@ -1762,6 +2487,7 @@ export function parseHistoryEntries(
     for (const child of nested) {
       if (!toolsById.has(child.id)) toolsById.set(child.id, child);
     }
+    const touchedCodemodeParents = new Set<ChatToolCallItem>();
     for (const child of nested) {
       const parent = toolsById.get(child.parentCallId!);
       if (!parent) continue;
@@ -1775,6 +2501,16 @@ export function parseHistoryEntries(
         if (child.status === 'running') child.status = 'done';
       }
       mergeToolChildren(parent, [child]);
+      if (parent.name === 'codemode') touchedCodemodeParents.add(parent);
+    }
+    for (const parent of touchedCodemodeParents) {
+      enrichCodemodeChildren(parent, {
+        knownBots,
+        scopeCtx,
+        fallbackScopeKind: liveFallbackScopeKind,
+        fallbackScopeId: liveFallbackScopeId,
+        rawArgsById: liveRawArgsById,
+      });
     }
 
     // Earlier slots are no longer running; without a result their outcome remains unknown.
@@ -1801,10 +2537,67 @@ export function parseHistoryEntries(
 
   finalizeCurrentAssistant(isBusy);
 
+  // Suppress settled silent `(pass)` / empty proactive Google Workspace assistant sweeps
+  // (both host trigger bubble and assistant bubble) so background no-op checks do not clutter
+  // chat, while keeping durable audit entries untouched and never hiding positive alerts,
+  // errors, pending interactive prompts, or in-flight runs.
+  const suppressedTurnIds = new Set<string>();
+  const lastTurn = turns.at(-1) ?? null;
+  const isAssistantTurnInFlight = (turn: ChatTurn): boolean =>
+    Boolean(
+      turn.isStreaming === true ||
+        (turn.tools ?? []).some((tool) => tool.status === 'running') ||
+        (isBusy && turn === lastTurn),
+    );
+  for (let idx = 0; idx < turns.length; idx++) {
+    const trigger = turns[idx];
+    if (!isProactiveGoogleAssistantTrigger(trigger)) continue;
+    const triggerMessageId = trigger.attribution?.messageId;
+    const matchedAssistants: ChatTurn[] = [];
+    if (triggerMessageId) {
+      for (const candidate of turns) {
+        if (candidate.role === 'assistant' && candidate.attribution?.replyTo === triggerMessageId) {
+          matchedAssistants.push(candidate);
+        }
+      }
+    }
+    if (matchedAssistants.length === 0) {
+      const next = turns[idx + 1];
+      if (
+        next &&
+        next.role === 'assistant' &&
+        (!next.attribution?.replyTo || next.attribution.replyTo === triggerMessageId)
+      ) {
+        matchedAssistants.push(next);
+      }
+    }
+    if (matchedAssistants.length > 0) {
+      const hasNonSilentOrActive = matchedAssistants.some(
+        (assistant) =>
+          isAssistantTurnInFlight(assistant) ||
+          Boolean(assistant.error) ||
+          pendingToolPrompts(assistant.tools ?? []).length > 0 ||
+          !isSilentProactiveAssistantText(assistant.text),
+      );
+      if (!hasNonSilentOrActive) {
+        suppressedTurnIds.add(trigger.id);
+        for (const assistant of matchedAssistants) suppressedTurnIds.add(assistant.id);
+      }
+    } else if (!(isBusy && idx === turns.length - 1)) {
+      if (
+        silentEmptyTriggerIds.has(trigger.id) ||
+        (triggerMessageId !== undefined && silentEmptyReplyTos.has(triggerMessageId))
+      ) {
+        suppressedTurnIds.add(trigger.id);
+      }
+    }
+  }
+
   // 1v1 对话页显示 primary（用户主聊）与 dm（1v1 Bot 私聊任务执行）轮；
   // 群聊（room）轮保持隔离在群聊页面内，不在各 Bot 的 1v1 对话页中刷屏。
   return turns.filter(
     (turn) =>
+      !suppressedTurnIds.has(turn.id) &&
       turn.collaborative !== true &&
       (turn.attribution === undefined || turn.attribution.channel !== 'room') &&
       (turn.role === 'user' ||
@@ -1878,26 +2671,172 @@ export function pendingToolPrompts(tools: readonly ChatToolCallItem[], parentRun
   });
 }
 
-export function chatTurnsWithoutToolOutput(turns: readonly ChatTurn[]): ChatTurn[] {
+export function isBotDmTurn(turn: Pick<ChatTurn, 'attribution' | 'dmChannel'> | null | undefined): boolean {
+  return Boolean(turn && (turn.attribution?.channel === 'dm' || turn.dmChannel === true));
+}
+
+export function isBotDmSendToTool(
+  tool: ChatToolCallItem,
+  parentTurn?: Pick<ChatTurn, 'attribution' | 'dmChannel'>,
+): boolean {
+  if (tool.name !== 'send_to') return false;
+  if (tool.sendTo?.scopeKind === 'dm') return true;
+  if (tool.sendTo?.scopeKind === 'room') return false;
+  return Boolean(parentTurn && isBotDmTurn(parentTurn));
+}
+
+/** 递归收集本轮顶层与 codemode 子调用中所有发往 Bot 私聊（DM）的 send_to 工具，保持执行顺序。 */
+export function collectBotDmSendToTools(
+  tools: readonly ChatToolCallItem[],
+  parentTurn?: Pick<ChatTurn, 'attribution' | 'dmChannel'>,
+): ChatToolCallItem[] {
+  const result: ChatToolCallItem[] = [];
+  const visit = (list: readonly ChatToolCallItem[]) => {
+    for (const tool of list) {
+      if (isBotDmSendToTool(tool, parentTurn)) {
+        result.push(tool);
+      }
+      if (tool.children && tool.children.length > 0) {
+        visit(tool.children);
+      }
+    }
+  };
+  visit(tools);
+  return result;
+}
+
+/** 统计除 DM send_to（及 codemode 内仅做 DM 通信的 ensure_dm/send_to）之外的实际工具步数。 */
+export function countNonBotDmSendTools(
+  tools: readonly ChatToolCallItem[],
+  parentTurn?: Pick<ChatTurn, 'attribution' | 'dmChannel'>,
+): number {
+  let count = 0;
+  for (const tool of tools) {
+    if (isBotDmSendToTool(tool, parentTurn)) continue;
+    if (tool.name === 'codemode' && tool.children && tool.children.length > 0) {
+      for (const child of tool.children) {
+        if (child.name === 'ensure_dm' || isBotDmSendToTool(child, parentTurn)) continue;
+        count += 1;
+      }
+      continue;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function filterToolWithoutBotDm(
+  tool: ChatToolCallItem,
+  turn: Pick<ChatTurn, 'attribution' | 'dmChannel'>,
+): { tool: ChatToolCallItem | null; changed: boolean } {
+  if (isBotDmSendToTool(tool, turn)) {
+    return { tool: null, changed: true };
+  }
+  if (tool.name === 'codemode' && tool.children && tool.children.length > 0) {
+    let anyChanged = false;
+    const keptChildren: ChatToolCallItem[] = [];
+    for (const child of tool.children) {
+      if (child.name === 'ensure_dm' || isBotDmSendToTool(child, turn)) {
+        anyChanged = true;
+        continue;
+      }
+      const sub = filterToolWithoutBotDm(child, turn);
+      if (sub.changed) anyChanged = true;
+      if (sub.tool) keptChildren.push(sub.tool);
+    }
+    if (!anyChanged) return { tool, changed: false };
+    if (keptChildren.length === 0) return { tool: null, changed: true };
+    return { tool: { ...tool, children: keptChildren }, changed: true };
+  }
+  return { tool, changed: false };
+}
+
+/** 过滤主对话框里与其他 Bot 的私聊内容（含入站 DM、DM 触发执行轮及主聊内发往 DM 的顶层/嵌套 send_to）。 */
+export function chatTurnsWithoutBotDm(turns: readonly ChatTurn[]): ChatTurn[] {
+  return turns.flatMap(turn => {
+    if (isBotDmTurn(turn)) return [];
+    if (turn.role !== 'assistant') return [turn];
+    let anyChanged = false;
+    const filteredCache = new Map<ChatToolCallItem, ChatToolCallItem | null>();
+    const mapTool = (tool: ChatToolCallItem): ChatToolCallItem | null => {
+      if (filteredCache.has(tool)) return filteredCache.get(tool) ?? null;
+      const res = filterToolWithoutBotDm(tool, turn);
+      if (res.changed) anyChanged = true;
+      filteredCache.set(tool, res.tool);
+      return res.tool;
+    };
+    const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
+      if (block.kind !== 'tools') return [block];
+      const kept: ChatToolCallItem[] = [];
+      for (const tool of block.tools) {
+        const next = mapTool(tool);
+        if (next) kept.push(next);
+      }
+      return kept.length > 0 ? [{ ...block, tools: kept }] : [];
+    });
+    const tools = turn.tools?.flatMap<ChatToolCallItem>(tool => {
+      const next = mapTool(tool);
+      return next ? [next] : [];
+    });
+    if (!anyChanged) return [turn];
+    const hasTools = Boolean(tools && tools.length > 0);
+    const hasBlocks = Boolean(blocks && blocks.length > 0);
+    if (!turn.text.trim() && !turn.thinking?.trim() && !turn.error && !hasTools && !hasBlocks) {
+      return [];
+    }
+    return [{
+      ...turn,
+      blocks: hasBlocks ? blocks : undefined,
+      tools: hasTools ? tools : undefined,
+      toolSummary: hasTools ? tools!.map(tool => tool.name) : undefined,
+    }];
+  });
+}
+
+export function chatTurnsWithoutToolOutput(
+  turns: readonly ChatTurn[],
+  options?: { preserveBotDmSendTo?: boolean },
+): ChatTurn[] {
+  const preserveDmSendTo = options?.preserveBotDmSendTo === true;
   return turns.flatMap(turn => {
     if (turn.role !== 'assistant') return [turn];
+    const keepTools = (list: readonly ChatToolCallItem[]): ChatToolCallItem[] => {
+      const prompts = pendingToolPrompts(list);
+      if (!preserveDmSendTo) return prompts;
+      const promptIds = new Set(prompts.map(item => item.id));
+      const seen = new Set<string>();
+      const kept: ChatToolCallItem[] = [];
+      const visit = (items: readonly ChatToolCallItem[]) => {
+        for (const item of items) {
+          if ((isBotDmSendToTool(item, turn) || promptIds.has(item.id)) && !seen.has(item.id)) {
+            seen.add(item.id);
+            kept.push(item);
+          }
+          if (item.children && item.children.length > 0) {
+            visit(item.children);
+          }
+        }
+      };
+      visit(list);
+      return kept;
+    };
     // Keep pending prompts (including nested ones) without showing their tool calls.
     const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
       if (block.kind === 'text') return [block];
       if (block.kind === 'thinking') return [];
-      const prompts = pendingToolPrompts(block.tools);
-      return prompts.length > 0 ? [{ ...block, tools: prompts }] : [];
+      const kept = keepTools(block.tools);
+      return kept.length > 0 ? [{ ...block, tools: kept }] : [];
     });
-    const prompts = blocks
+    const keptTools = blocks
       ? blocks.flatMap(block => block.kind === 'tools' ? block.tools : [])
-      : pendingToolPrompts(turn.tools ?? []);
-    if (!turn.text.trim() && !turn.error && prompts.length === 0) return [];
+      : keepTools(turn.tools ?? []);
+    if (!turn.text.trim() && !turn.error && keptTools.length === 0) return [];
     return [{
       ...turn,
       blocks: blocks?.length ? blocks : undefined,
       thinking: undefined,
       toolSummary: undefined,
-      tools: prompts.length > 0 ? prompts : undefined,
+      tools: keptTools.length > 0 ? keptTools : undefined,
     }];
   });
 }
@@ -1922,4 +2861,99 @@ export function resolveAssistantFailureDetail(
     return t('模型生成失败。', 'Model generation failed.');
   }
   return trimmed;
+}
+
+export type AssistantTurnSegment =
+  | { id: string; kind: 'process'; blocks: ChatTurnBlock[] }
+  | { id: string; kind: 'block'; block: ChatTurnBlock };
+
+export interface PartitionAssistantBlocksOptions {
+  isLive?: boolean;
+  isPromotedToolBlock?: (tools: readonly ChatToolCallItem[]) => boolean;
+}
+
+export function partitionAssistantTurnBlocks(
+  blocks: readonly ChatTurnBlock[] | undefined,
+  options?: PartitionAssistantBlocksOptions,
+): AssistantTurnSegment[] {
+  if (!blocks || blocks.length === 0) return [];
+  const isTopLevel = blocks.map((block) => {
+    if (block.kind === 'thinking') return false;
+    if (block.kind === 'tools') return Boolean(options?.isPromotedToolBlock?.(block.tools));
+    return block.interim !== true;
+  });
+  if (!options?.isLive && !isTopLevel.some(Boolean)) {
+    for (let idx = blocks.length - 1; idx >= 0; idx -= 1) {
+      if (blocks[idx].kind === 'text') {
+        isTopLevel[idx] = true;
+        break;
+      }
+    }
+  }
+  const segments: AssistantTurnSegment[] = [];
+  let processGroup: ChatTurnBlock[] = [];
+  const flushProcess = () => {
+    if (processGroup.length === 0) return;
+    segments.push({
+      id: `${processGroup[0].id}-process`,
+      kind: 'process',
+      blocks: processGroup,
+    });
+    processGroup = [];
+  };
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx];
+    if (isTopLevel[idx]) {
+      flushProcess();
+      segments.push({ id: block.id, kind: 'block', block });
+    } else {
+      processGroup.push(block);
+    }
+  }
+  flushProcess();
+  return segments;
+}
+
+export interface ProcessTimelineStep {
+  id: string;
+  text?: string;
+  entryId?: string;
+  blocks: ChatTurnBlock[];
+}
+
+export function groupProcessTimelineSteps(
+  blocks: readonly ChatTurnBlock[],
+): ProcessTimelineStep[] {
+  const steps: ProcessTimelineStep[] = [];
+  for (const block of blocks) {
+    if (block.kind === 'text') {
+      steps.push({
+        id: block.id,
+        text: block.text,
+        ...(block.entryId !== undefined ? { entryId: block.entryId } : {}),
+        blocks: [],
+      });
+      continue;
+    }
+    const prev = steps.at(-1);
+    if (prev) {
+      prev.blocks.push(block);
+    } else {
+      steps.push({ id: block.id, blocks: [block] });
+    }
+  }
+  return steps;
+}
+
+export function resolveAssistantCopyText(
+  turn: Pick<ChatTurn, 'role' | 'text' | 'blocks'>,
+): string {
+  if (turn.role !== 'assistant' || !turn.blocks?.length) return turn.text;
+  const finalParts: string[] = [];
+  for (const block of turn.blocks) {
+    if (block.kind !== 'text' || block.interim) continue;
+    const trimmed = block.text.trim();
+    if (trimmed) finalParts.push(trimmed);
+  }
+  return finalParts.length > 0 ? finalParts.join('\n\n') : turn.text;
 }

@@ -6,7 +6,7 @@
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { ResetEntry } from '@earendil-works/pi-durable';
 import { getPrimaryConversation } from './runtime-docs.js';
-import { BotSessionState, questionnaireWaitKey } from './bot-session-context.js';
+import { BotSessionState, augmentSessionTurnByTask, questionnaireWaitKey } from './bot-session-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { normalizeBotBoardParams } from './bot-board-protocol.js';
 import { readBotBoardDetails, projectBotBoardItem } from './runtime-bot-board.js';
@@ -46,6 +46,43 @@ const MAX_TURN_ERROR_CHARS = 256;
 const CONTROL_PHASES = new Set(['interrupting', 'stopping', 'stopped']);
 const WORK_PENDING_KINDS = new Set(['primary', 'room', 'dm']);
 const MAX_ACTIVITY_CHARS = 256;
+// 与 runtime-live-projection.js 的 50 条可见历史窗口一致：仅解析窗口尾部条目的
+// tool task.owner 链归属，并用每 watch 有界 LRU 缓存避免流式帧重复查任务表。
+const MAX_LIVE_ATTRIBUTION_ENTRIES = 50;
+const MAX_LIVE_ATTRIBUTION_SCAN = 200;
+const MAX_LIVE_TASK_OWNER_CACHE = 512;
+
+function isDisplayableLiveEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.kind === 'host.work-trigger' || entry.kind === 'pi.compaction') return false;
+  if (entry.kind === 'host.scope-message') {
+    return typeof entry.data?.message?.text === 'string';
+  }
+  return Array.isArray(entry.model) && entry.model.some((m) => (
+    m && (m.role === 'user' || m.role === 'assistant' || m.role === 'toolResult')
+  ));
+}
+
+function collectLiveAttributionEntries(entries, effectiveResetId) {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  const tail = [];
+  let displayable = 0;
+  let scanned = 0;
+  for (
+    let i = entries.length - 1;
+    i >= 0 && displayable < MAX_LIVE_ATTRIBUTION_ENTRIES && scanned < MAX_LIVE_ATTRIBUTION_SCAN;
+    i--
+  ) {
+    const entry = entries[i];
+    scanned++;
+    if (entry?.kind === ResetEntry.kind) break;
+    if (effectiveResetId > 0 && Number.isSafeInteger(entry?.id) && entry.id <= effectiveResetId) break;
+    if (!isDisplayableLiveEntry(entry)) continue;
+    displayable++;
+    tail.push(entry);
+  }
+  return tail;
+}
 
 function boundText(value, max) {
   return truncatePrefix(value, max).text;
@@ -439,6 +476,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
       // BotSessionState 快照后投影；首个快照落地前不发布任何帧——
       // 不先把无来源的 peer 正文当作用户消息推给客户端。
       sessionState: null,
+      taskOwnerCache: new Map(),
       fallbackResetEntryId: 0,
       fallbackResetLoaded: false,
       pendingView: null,
@@ -457,6 +495,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
       state.kind = 'ended';
       state.removeAbort?.();
       state.removeAbort = null;
+      state.taskOwnerCache.clear();
       watches.delete(watch);
       const key = work ? workKey(botId, work.scopeId) : botId;
       const pending = work ? pendingByWork.get(key) : pendingByBot.get(key);
@@ -489,6 +528,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
         while (state.dirty) {
           state.dirty = false;
           if (state.endReason !== null || !state.started) break;
+          if (state.nativeId !== null && !state.initialized) break;
           let frame;
           if (state.delivered === null || state.forceFrame || (work && state.current !== state.delivered)) {
             frame = {
@@ -570,7 +610,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
     // 单飞行归属装载：对最新 pendingView 先取已提交的 BotSessionState 快照再投影，
     // 保证生成/peer 条目的归属索引覆盖被投影的 view。快照期间到达的新 view 只保留
     // 最新一份，loop 再取一次快照覆盖它（新快照可归属旧帧，反向不行）。
-    // 快照失败停在原地——下一次 view 重新进入装载；不在 finally 里立即重试。
+    // 首次快照失败直接以 session_failed 结束，避免已附着会话永远卡在初始化门控后；
+    // 初始化之后的快照失败停在原地——下一次 view 重新进入装载；不在 finally 里立即重试。
     async function processAttribution() {
       try {
         while (state.endReason === null) {
@@ -580,8 +621,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
           let doc;
           try {
             doc = await getHarness().snapshot(BotSessionState, state.nativeId, CTX);
-          } catch {
-            return; // 等下一次 view 重试；Session 失败由 native.closed 收尾
+          } catch (err) {
+            if (!state.initialized) {
+              end('session_failed', err);
+              void stopNative().catch(() => {});
+            }
+            return; // 已初始化后等下一次 view 重试；Session 失败由 native.closed 收尾
           }
           if (state.endReason !== null) return;
           state.sessionState = doc ?? null;
@@ -619,6 +664,18 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
               effectiveResetId = entry.id;
               break;
             }
+          }
+          if (state.sessionState !== null) {
+            const tailEntries = collectLiveAttributionEntries(viewEntries, effectiveResetId);
+            const resolvedSessionState = await augmentSessionTurnByTask(tailEntries, state.sessionState, {
+              harness: getHarness(),
+              context: CTX,
+              cache: state.taskOwnerCache,
+              conversationId: state.nativeId,
+              maxCacheSize: MAX_LIVE_TASK_OWNER_CACHE,
+            });
+            if (state.endReason !== null) return;
+            state.sessionState = resolvedSessionState;
           }
           // contract B：runFailure 的真实终态失败读取 Host 失败诊断族文档；
           // 空闲/手动压缩读取各压缩任务的持久 startedAt。同一装载循环内完成，
@@ -791,18 +848,20 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
         return;
       }
       const previous = state.current;
+      const wasInitialized = state.initialized;
       state.current = deepFreeze(next);
       state.initialized = true;
       if (board) {
         state.boardView = view;
         state.boardDetails = extras?.boardDetails ?? null;
       }
-      if (diffLiveState(previous, next) !== null) {
+      const changed = diffLiveState(previous, next) !== null;
+      if (changed) {
         state.seq++;
-        if (state.started) {
-          state.dirty = true;
-          kick();
-        }
+      }
+      if (state.started && (changed || !wasInitialized)) {
+        state.dirty = true;
+        kick();
       }
     }
 
@@ -907,6 +966,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWai
       state.pendingView = null;
       state.latestView = null;
       state.sessionState = null;
+      state.taskOwnerCache.clear();
       state.fallbackResetEntryId = 0;
       state.fallbackResetLoaded = false;
       state.runActivity = null;

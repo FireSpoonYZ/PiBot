@@ -1,7 +1,7 @@
 // 模块 2：Pi Durable 本机主私聊的只读 helper。
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
 import { ResetEntry, StorageRequestError } from '@earendil-works/pi-durable';
-import { BotSessionState, deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
+import { BotSessionState, augmentSessionTurnByTask, deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
 import { stripLegacyAttachmentPromptBlocks } from './attachments.js';
 
 const DEFAULT_LIMIT = 50;
@@ -60,7 +60,8 @@ export async function latestResetEntryId(conversation, context) {
  * sessionState 为可选的 BotSessionState 快照；缺省且提供 harness 时自行按 conversation.id
  * 快照该 doc（doc 不存在为 null，归属回退既有 data.attribution；存储错误沿原错误路径上抛）。
  * 提供 sessionState 时每页所有条目的 data.attribution 由同一次 deriveEntryAttribution 冻结
- * （byTaskId 精确归属），同一会话跨页/续页的归属输出稳定，不逐页重造。
+ * （byTaskId 精确归属；有 harness.getTask 时沿 task.owner 链解析 pi.tool-result 等工具任务），
+ * 同一会话跨页/续页的归属输出稳定，不逐页重造，也不修改传入 sessionState。
  * 返回的条目是新对象，原始 EntryRecord 不被改写。
  */
 export async function readPrimaryHistory(conversation, options = {}, context, { afterReset = false, sessionState, harness = null, waits = null, botId = null } = {}) {
@@ -83,15 +84,24 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
     const resetId = afterReset ? await latestResetEntryId(conversation, context) : 0;
     const query = resetId > 0 ? { order: 'ascending', minEntryId: resetId + 1 } : { order: 'ascending' };
     const read = (count) => conversation.entries(query, count, position, context);
-    // 一次投影：host.user-message 先剥掉 image.data 再写冻结归属，后续预算/序列化/
-    // 返回都用投影结果；durable 存储原内容不动，绝不把图片字节放进传输/日志，
-    // 归属也不因剥字节而丢失。
-    const project = (items) => sessionState === null
-      ? items.map(stripAttachmentData)
-      : items.map((entry) => withAttribution(stripAttachmentData(entry), sessionState));
+    // 一次投影：host.user-message 先剥掉 image.data 再写冻结归属（含沿 task.owner 链
+    // 解析的工具任务 byTaskId），后续预算/序列化/续片都用投影结果；durable 存储原内容不动，
+    // 绝不把图片字节放进传输/日志，归属也不因剥字节或分片而丢失。
+    const taskOwnerCache = new Map();
+    const project = async (items) => {
+      if (sessionState === null) return items.map(stripAttachmentData);
+      const resolvedSessionState = await augmentSessionTurnByTask(items, sessionState, {
+        harness,
+        context,
+        cache: taskOwnerCache,
+        conversationId: conversation.id,
+      });
+      return items.map((entry) => withAttribution(stripAttachmentData(entry), resolvedSessionState));
+    };
     const readPage = async (count) => {
       const result = await read(count);
-      const items = await Promise.all(project(result.items).map(async (entry) => {
+      const projectedItems = await project(result.items);
+      const items = await Promise.all(projectedItems.map(async (entry) => {
         if (!chunked) {
           return overlayHistoryWaits(entry, {
             waits, botId, conversationId: conversation.id, context, allowOverlay: true,

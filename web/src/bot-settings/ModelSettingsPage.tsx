@@ -2,6 +2,7 @@
 // 所有修改点击即存（乐观更新 + CAS 串行提交），无保存草稿栏与密码墙。
 import { ExternalLink } from 'lucide-react';
 import type { ModelCatalogEntry } from '../../../host-core/index.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { ActionBar } from '../components/ui';
 import { openCenterManagement } from '../native';
@@ -107,7 +108,8 @@ export function ModelSettingsPage({
       ? draft.thinkingLevel
       : INHERIT;
 
-  const currentToolMode = toolModeFromSelection(draft);
+  const isAntigravity = effectiveModelRef?.startsWith(ANTIGRAVITY_PROVIDER_ID + '/') === true;
+  const currentToolMode = isAntigravity ? 'codemode_only' : toolModeFromSelection(draft);
   const globalToolMode = toolModeFromSelection(config?.global);
   const resolvedGlobalToolMode: Exclude<ToolMode, 'inherit'> =
     globalToolMode === 'inherit' ? 'standard' : globalToolMode;
@@ -298,7 +300,7 @@ export function ModelSettingsPage({
               key={option.mode}
               radio
               selected={currentToolMode === option.mode}
-              disabled={busy}
+              disabled={busy || isAntigravity}
               title={option.title}
               subtitle={option.subtitle}
               onClick={() => void state.selectToolMode(option.mode)}
@@ -316,6 +318,8 @@ export function ModelSettingsPage({
       <ErrorNotice error={state.error} onDismiss={state.dismissError} />
       {renderReadinessSummary()}
       {renderModelSection()}
+      {isAntigravity ? <p className="bs-muted">{t('Antigravity 会话内可直接切换其他 Antigravity 模型；跨服务商切换模型后无法继续原对话，需先 /clear 开启新会话。工具调用固定使用代码编排，历史不能编辑。',
+        'You can switch between Antigravity models within the same session. After switching across providers, continuing the previous conversation will fail until you run /clear. Tool calling uses Code Mode and history cannot be edited.')}</p> : null}
       {renderThinkingSection()}
       {renderToolModeSection()}
     </>

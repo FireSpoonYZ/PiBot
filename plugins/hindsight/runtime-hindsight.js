@@ -27,6 +27,7 @@ const FAILED_POLL_MS = 60_000;
 
 const SHARED_TARGET = { kind: 'shared' };
 const CLOSED_CODE = 'HINDSIGHT_CLOSED';
+const GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE = 'GOOGLE_WORKSPACE_PRIVACY_BLOCKED';
 const STORE_FATAL_CODES = new Set([
   'UNSUPPORTED_SCHEMA',
   'HINDSIGHT_STORE_FAILED',
@@ -198,7 +199,56 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     };
   }
 
+  function markPrivacyBlocked(localStore, job) {
+    localStore.setJob(job.operationId, {
+      state: 'failed',
+      attempts: job.attempts + 1,
+      nextAttemptAt: Number.MAX_SAFE_INTEGER,
+      lastErrorCode: GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
+    });
+  }
+
+  async function isOutboxJobAllowedByPrivacy(job) {
+    if (!dataPrivacy) return true;
+    const source = job.source;
+    const nativeId = source?.nativeId;
+    const flaggedByException = source?.privacyException === 'proactive-private-hindsight';
+    let tainted = flaggedByException;
+    if (!tainted && source?.kind === 'tool-note' && !Number.isSafeInteger(nativeId)) {
+      return false;
+    }
+    if (!tainted && Number.isSafeInteger(nativeId) && typeof dataPrivacy.isConversationTainted === 'function') {
+      const throughEntryId = Number.isSafeInteger(source?.entryId) ? source.entryId : undefined;
+      try {
+        tainted = await dataPrivacy.isConversationTainted(nativeId, {
+          ...(throughEntryId !== undefined ? { throughEntryId } : {}),
+          callContext: context,
+        });
+      } catch {
+        return false;
+      }
+    }
+    if (!tainted) return true;
+    if (source?.kind !== 'tool-note') return false;
+    if (job.target?.kind !== 'primary') return false;
+    if (config?.sharedMemory === true) return false;
+    if (typeof dataPrivacy.canUsePrivateHindsightBank !== 'function') return false;
+    try {
+      return dataPrivacy.canUsePrivateHindsightBank(job.botId) === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function processOneJob(store, job) {
+    // 尚未发往远端的 pending 作业先复核 Google Workspace 隐私授权，吊销后直接终态拦截、零外发。
+    if (job.state === 'pending' && job.attempts === 0) {
+      if (!(await isOutboxJobAllowedByPrivacy(job))) {
+        markPrivacyBlocked(store, job);
+        return;
+      }
+    }
+
     // 每个到期 job（含 pending/崩溃恢复）先查原 operation；仅 404/not_found 才重发同一冻结报文。
     let operation;
     let notFound = false;
@@ -225,11 +275,20 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     if (notFound || operation?.status === 'not_found') {
       // 等待期间 Bot 可被关闭/切只读：尚未发送的建 bank/retain 不再发出，保留原 job 行与 ID。
       if (!canWriteFor(job.botId)) return;
+      // 派发前复查 Google Workspace 隐私边界与主动助手绑定：解绑或开启 sharedMemory 则终态拦截。
+      if (!(await isOutboxJobAllowedByPrivacy(job))) {
+        markPrivacyBlocked(store, job);
+        return;
+      }
       try {
         // 建 bank 被暂停时立即返回：保留原 job 状态/ID，不随后直接 retain。
         if (!await ensureBank(job.bankId, job.botId)) return;
-        // 建 bank 也是网络等待：已发送的请求不回滚，但随后尚未发出的 retain 需重读策略。
+        // 建 bank 也是网络等待：已发送的请求不回滚，但随后尚未发出的 retain 需重读策略与隐私授权。
         if (!canWriteFor(job.botId)) return;
+        if (!(await isOutboxJobAllowedByPrivacy(job))) {
+          markPrivacyBlocked(store, job);
+          return;
+        }
         await client.retain(job.bankId, retainInput(job), undefined);
       } catch (err) {
         if (err?.code === 'HINDSIGHT_UNAVAILABLE' || err?.code === CLOSED_CODE || isAbortLike(err)) throw err;
@@ -537,6 +596,8 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
       assertOpen();
       callContext.abortSignal?.throwIfAborted();
 
+      // Keep source registration and auto-retain above; ACP history only receives explicit memory tool results.
+      if (policyFor(capture.identity.botId)?.autoRecall === false) return undefined;
       if (typeof capture.query !== 'string' || capture.query.length === 0) return undefined;
 
       const recall = await computeRecall(contextRow, capture, api, callContext);
@@ -643,6 +704,7 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
     context,
     sources,
     documents,
+    dataPrivacy,
   });
 
   return {

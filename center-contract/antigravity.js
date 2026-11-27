@@ -1,9 +1,13 @@
 // Browser-safe shared constants for the Center-backed Antigravity ACP provider.
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity-acp';
 export const ANTIGRAVITY_API = 'pibot-antigravity-acp';
-export const ANTIGRAVITY_STREAM_PATH = '/api/host/antigravity/stream';
+export const ANTIGRAVITY_RUN_PATH = '/api/host/antigravity/run';
+export const ANTIGRAVITY_TOOL_RESULT_PATH = '/api/host/antigravity/tool-result';
+export const ANTIGRAVITY_STEER_PATH = '/api/host/antigravity/steer';
 export const ANTIGRAVITY_CANCEL_PATH = '/api/host/antigravity/cancel';
 export const ANTIGRAVITY_MAX_FRAME_BYTES = 33554432;
+export const ANTIGRAVITY_ESCALATE_AFTER_MS = 150_000;
+export const AGY_HISTORY_CHANGED = 'AGY_HISTORY_CHANGED';
 
 export const ANTIGRAVITY_POLL_TOOL = {
   name: 'bridge_poll_result',

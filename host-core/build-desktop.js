@@ -1132,7 +1132,7 @@ function collectHostRuntimeSources() {
   const pluginsDir = path.join(ROOT, 'plugins');
   const contractDir = path.join(ROOT, 'center-contract');
   const operationsDir = path.join(contractDir, 'operations');
-  const antigravityContract = path.join(contractDir, 'antigravity.js');
+  const antigravityContracts = new Set(['antigravity.js'].map((name) => path.join(contractDir, name)));
   const pluginRoots = new Set();
   while (queue.length > 0) {
     const file = queue.pop();
@@ -1147,7 +1147,7 @@ function collectHostRuntimeSources() {
       if (!isInsideDir(HERE, target)) {
         if (isInsideDir(pluginsDir, target)) {
           pluginRoots.add(path.join(pluginsDir, path.relative(pluginsDir, target).split(path.sep)[0]));
-        } else if (isInsideDir(operationsDir, target) || target === antigravityContract) {
+        } else if (isInsideDir(operationsDir, target) || antigravityContracts.has(target)) {
           files.add(path.join(contractDir, 'package.json'));
         } else {
           throw fail(`host runtime module ${display} imports ${spec} outside the allowed source roots`);

@@ -904,16 +904,32 @@ export function TurnToolCallsSection({
   t,
   collapseOutput,
   presentationOnly = false,
+  autoExpandSendTo = true,
   ...cardProps
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
   t: (zh: string, en: string) => string;
 }) {
-  const hasPresentationOrSendTo = tools.some(
-    tool =>
-      Boolean(readToolPresentation(tool.presentation)) ||
-      (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
-  ) || pendingToolPrompts(tools).length > 0;
+  const hasVisibleSendTo = (item: ChatToolCallItem): boolean => {
+    if (
+      item.name === 'send_to' &&
+      (item.sendTo?.scopeKind === 'dm' ||
+        cardProps.insideBotDmTurn === true ||
+        Boolean(
+          item.sendTo &&
+            (item.sendTo.text || item.sendTo.silentPass || (item.sendTo.fileCount && item.sendTo.fileCount > 0)),
+        ))
+    ) {
+      return true;
+    }
+    return Boolean(item.children?.some(hasVisibleSendTo));
+  };
+  const hasPresentationOrSendTo =
+    tools.some(
+      tool =>
+        Boolean(readToolPresentation(tool.presentation)) ||
+        (autoExpandSendTo && hasVisibleSendTo(tool)),
+    ) || pendingToolPrompts(tools).length > 0;
   const shouldAggregate = !presentationOnly && (tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo));
   // 初始展开态与自动展开均在渲染期同步推导，不再使用 post-paint useEffect；
   // 用户手动点击分组标题后锁定其选择，后续工具追加或完成不再自动覆盖。
@@ -927,7 +943,14 @@ export function TurnToolCallsSection({
   const showCards = !shouldAggregate || groupOpen;
 
   const renderCards = () => tools.map(tool => (
-    <ToolCallCard key={tool.id} tool={tool} collapseOutput={collapseOutput} presentationOnly={presentationOnly} {...cardProps} />
+    <ToolCallCard
+      key={tool.id}
+      tool={tool}
+      collapseOutput={collapseOutput}
+      presentationOnly={presentationOnly}
+      autoExpandSendTo={autoExpandSendTo}
+      {...cardProps}
+    />
   ));
 
   const totalDurationMs = shouldAggregate

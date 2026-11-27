@@ -48,6 +48,7 @@ const OPERATION_ERRORS = Object.freeze({
   CONTEXT_LIMIT: Object.freeze({ status: 409, message: 'Context limit exceeded' }),
   MODEL_REQUIRED: Object.freeze({ status: 409, message: 'Model is required' }),
   MODEL_NOT_FOUND: Object.freeze({ status: 409, message: 'Model not available' }),
+  AGY_HISTORY_CHANGED: Object.freeze({ status: 409, message: 'Cannot continue this conversation after switching between Antigravity and another provider, upgrading a legacy Antigravity session, or losing the native session. Use /clear to start a new session; history editing and Pi compaction are unavailable.' }),
   MODEL_NO_VISION: Object.freeze({ status: 409, message: 'Model does not support vision' }),
   PACKAGE_NOT_READY: Object.freeze({ status: 409, message: 'Package not ready' }),
   CANCELLED: Object.freeze({ status: 409, message: 'Operation cancelled' }),

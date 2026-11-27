@@ -11,11 +11,29 @@ if (!container) {
   throw new Error('root container missing');
 }
 const api = createDesktopClient();
-void startDesktopPetHost(api).then((stop) => {
+let openBotHandler: ((deviceId: string, botId: string) => void) | null = null;
+let pendingOpenBot: { deviceId: string; botId: string } | null = null;
+const registerOpenBot = (handler: ((deviceId: string, botId: string) => void) | null): void => {
+  openBotHandler = handler;
+  if (handler && pendingOpenBot) {
+    const queued = pendingOpenBot;
+    pendingOpenBot = null;
+    handler(queued.deviceId, queued.botId);
+  }
+};
+void startDesktopPetHost(api, {
+  onOpenBot: (deviceId, botId) => {
+    if (openBotHandler) {
+      openBotHandler(deviceId, botId);
+    } else {
+      pendingOpenBot = { deviceId, botId };
+    }
+  },
+}).then((stop) => {
   window.addEventListener('beforeunload', stop, { once: true });
 }).catch((error: unknown) => api.reportError(error));
 createRoot(container).render(
   <NoticeProvider>
-    <DesktopApp api={api} />
+    <DesktopApp api={api} onRegisterOpenBot={registerOpenBot} />
   </NoticeProvider>,
 );

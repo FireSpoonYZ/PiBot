@@ -192,7 +192,7 @@ async fn pick_images_from_files(app: AppHandle) -> Result<Vec<PickedImageData>, 
       .dialog()
       .file()
       .add_filter("Images", IMAGE_FILE_EXTENSIONS);
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
       dialog = dialog.set_parent(&window);
     }
     let Some(picked) = dialog.blocking_pick_files() else {

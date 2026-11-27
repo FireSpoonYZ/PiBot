@@ -1,33 +1,20 @@
 // Per-(deviceId, sessionId) persisted ACP session store.
 //
-// Adapted from @estebanforge/pi-antigravity-bridge `src/sessions.ts`:
-// keys are composite `(deviceId, sessionId)` strings so distinct devices and
+// Keys are composite `(deviceId, sessionId)` strings so distinct devices and
 // sessions stay strictly isolated while sharing atomic merge-on-write persistence.
 
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ContextSnapshot } from "./context-sync.ts";
 
 export interface AgySession {
 	conversationId: string;
-	lastStepIdx: number;
-	lastMessageCount?: number;
-	turnRecallHook?: true;
-	/** Native configuration acknowledged with this context; absent legacy values rebuild. */
-	modelId?: string;
-	reasoning?: string | null;
-	/** Only a ready checkpoint authorizes loading a native conversation as-is. */
-	phase?: "ready" | "parked" | "uncertain";
-	checkpoint?: ContextSnapshot;
-	/** Trailing, non-recall context sent outside the authoritative input prefix. */
-	auxiliaryHashes?: string[];
-	/** Calls exposed to Host whose results may arrive after a Center restart. */
-	pendingToolCallIds?: string[];
+	agentName: string;
+	toolImageHook?: boolean;
+	legacy?: true;
 }
 
 type StoreMap = Record<string, AgySession>;
-const HASH_RE = /^[a-f0-9]{64}$/;
 
 async function syncDirectory(directory: string): Promise<void> {
 	const handle = await fs.promises.open(directory, "r");
@@ -45,26 +32,13 @@ async function durableRename(tmp: string, destination: string): Promise<void> {
 	if (process.platform !== "win32") await syncDirectory(path.dirname(destination));
 }
 
-function readCheckpoint(value: unknown): ContextSnapshot | undefined {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-	const candidate = value as Partial<ContextSnapshot>;
-	if (candidate.version !== 1 || typeof candidate.systemHash !== "string" ||
-		!HASH_RE.test(candidate.systemHash) || !Array.isArray(candidate.messageHashes) ||
-		!Array.from(candidate.messageHashes).every((item) => typeof item === "string" && HASH_RE.test(item))) {
-		return undefined;
-	}
-	return { version: 1, systemHash: candidate.systemHash, messageHashes: [...candidate.messageHashes] };
-}
-
 function copySession(session: AgySession): AgySession {
-	return {
-		...session,
-		...(session.checkpoint ? { checkpoint: {
-			...session.checkpoint, messageHashes: [...session.checkpoint.messageHashes],
-		} } : {}),
-		...(session.pendingToolCallIds ? { pendingToolCallIds: [...session.pendingToolCallIds] } : {}),
-		...(session.auxiliaryHashes ? { auxiliaryHashes: [...session.auxiliaryHashes] } : {}),
-	};
+	if (session.legacy) {
+		return { conversationId: session.conversationId, agentName: session.agentName, legacy: true };
+	}
+	return session.toolImageHook === true
+		? { conversationId: session.conversationId, agentName: session.agentName, toolImageHook: true }
+		: { conversationId: session.conversationId, agentName: session.agentName };
 }
 
 export function makeSessionKey(deviceId: string, sessionId: string): string {
@@ -75,35 +49,16 @@ function narrowStoreMap(parsed: unknown): StoreMap {
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 	const clean: StoreMap = {};
 	for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-		if (!value || typeof value !== "object") continue;
-		const conversationId = (value as { conversationId?: unknown }).conversationId;
-		if (typeof conversationId !== "string") continue;
-		const idx = (value as { lastStepIdx?: unknown }).lastStepIdx;
-		const mc = (value as { lastMessageCount?: unknown }).lastMessageCount;
-		const turnRecallHook = (value as { turnRecallHook?: unknown }).turnRecallHook;
-		const modelId = (value as { modelId?: unknown }).modelId;
-		const reasoning = (value as { reasoning?: unknown }).reasoning;
-		const phase = (value as { phase?: unknown }).phase;
-		const checkpoint = readCheckpoint((value as { checkpoint?: unknown }).checkpoint);
-		const auxiliary = (value as { auxiliaryHashes?: unknown }).auxiliaryHashes;
-		const auxiliaryHashes = Array.isArray(auxiliary) && Array.from(auxiliary)
-			.every((hash) => typeof hash === "string" && HASH_RE.test(hash)) ? [...auxiliary] : undefined;
-		const pending = (value as { pendingToolCallIds?: unknown }).pendingToolCallIds;
-		const pendingToolCallIds = Array.isArray(pending) &&
-			pending.every((id) => typeof id === "string" && id.length > 0)
-			? [...new Set(pending as string[])] : undefined;
-		clean[key] = {
-			conversationId,
-			lastStepIdx: typeof idx === "number" && Number.isFinite(idx) ? idx : -1,
-			lastMessageCount: typeof mc === "number" && Number.isFinite(mc) ? mc : 0,
-			...(turnRecallHook === true ? { turnRecallHook } : {}),
-			...(typeof modelId === "string" && modelId.length > 0 ? { modelId } : {}),
-			...(reasoning === null || typeof reasoning === "string" ? { reasoning } : {}),
-			...(phase === "ready" || phase === "parked" || phase === "uncertain" ? { phase } : {}),
-			...(checkpoint ? { checkpoint } : {}),
-			...(auxiliaryHashes ? { auxiliaryHashes } : {}),
-			...(pendingToolCallIds ? { pendingToolCallIds } : {}),
-		};
+		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+		const rec = value as { conversationId?: unknown; agentName?: unknown; toolImageHook?: unknown };
+		if (typeof rec.conversationId !== "string" || rec.conversationId.length === 0) continue;
+		if (typeof rec.agentName === "string" && rec.agentName.length > 0) {
+			clean[key] = rec.toolImageHook === true
+				? { conversationId: rec.conversationId, agentName: rec.agentName, toolImageHook: true }
+				: { conversationId: rec.conversationId, agentName: rec.agentName };
+		} else {
+			clean[key] = { conversationId: rec.conversationId, agentName: "", legacy: true };
+		}
 	}
 	return clean;
 }
@@ -132,7 +87,7 @@ export class SessionStore {
 
 	get(key: string): AgySession | null {
 		const s = this.#cache[key];
-		if (!s || typeof s.conversationId !== "string") return null;
+		if (!s || typeof s.conversationId !== "string" || s.conversationId.length === 0) return null;
 		return copySession(s);
 	}
 
@@ -140,8 +95,12 @@ export class SessionStore {
 		// Keep the background chain handled, but retain failures for the caller's
 		// persistence barrier. A later successful write retries all dirty entries.
 		this.#writeChain = this.#writeChain.then(write).then(
-			() => { this.#writeError = undefined; },
-			(error: unknown) => { this.#writeError = error; },
+			() => {
+				this.#writeError = undefined;
+			},
+			(error: unknown) => {
+				this.#writeError = error;
+			},
 		);
 	}
 
@@ -182,9 +141,16 @@ export class SessionStore {
 			delete merged[key];
 		}
 
+		const serialized: Record<string, { conversationId: string; agentName: string; toolImageHook?: true }> = {};
+		for (const [key, entry] of Object.entries(merged)) {
+			serialized[key] = entry.toolImageHook === true
+				? { conversationId: entry.conversationId, agentName: entry.agentName, toolImageHook: true }
+				: { conversationId: entry.conversationId, agentName: entry.agentName };
+		}
+
 		const tmp = `${this.#path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 		try {
-			await fs.promises.writeFile(tmp, JSON.stringify(merged, null, 2) + "\n", {
+			await fs.promises.writeFile(tmp, JSON.stringify(serialized, null, 2) + "\n", {
 				mode: 0o600,
 				flush: true,
 			});

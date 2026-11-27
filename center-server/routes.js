@@ -181,7 +181,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       else stream.reply.write(`event: ${event}\ndata: {}\n\n`);
     }
   }
-  function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
+  function notifyAll(event = 'config-changed') { for (const deviceId of streams.keys()) notify(deviceId, event); }
   function notifyInstallation(id) { for (const deviceId of new Set(store.listBotBindings({ installationId: id }).map(b => b.deviceId))) notify(deviceId); }
   setOwnerOAuthVerifier(app, (token) => {
     const grant = store.verifyOAuthAdminToken(sha256(token));
@@ -216,6 +216,21 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   const listOwnerDevices = () => bridge.listDevices().map(presentDevice);
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
+
+  function putBotModelConfig(req) {
+    const { deviceId, botId } = req.params;
+    const body = object(req.body);
+    return changed(
+      store.putBotModelConfig(deviceId, botId, body.expectedRevision, validate(selectionSchema, body.value)),
+      deviceId,
+    );
+  }
+
+  function putGlobalModelConfig(req) {
+    const body = object(req.body);
+    return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value)));
+  }
+
   const providerInput = async (id, overrides = {}) => {
     const stored = required(store.getProvider(id), 'Provider');
     const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim() ? stored.custom.baseUrl : stored.baseUrl;
@@ -371,7 +386,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(result);
   }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
-  route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
+  route('PUT', '/api/model-config', putGlobalModelConfig, true);
   route('GET', '/api/devices', () => listOwnerDevices());
   // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
@@ -540,7 +555,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
   }, true);
   route('GET', '/api/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
-  route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); }, true);
+  route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', putBotModelConfig, true);
   const credentialId = assertPublicCredentialId;
   route('GET', '/api/credentials/:id', req => required(store.getCredential(credentialId(req.params.id)), 'Credential'));
   route('PUT', '/api/credentials/:id', req => changed(store.putCredential(credentialId(req.params.id), object(req.body))), true);
@@ -897,7 +912,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return { status: 'approved', authenticated: true, csrfToken: reply.generateCsrf() };
   });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
-  if (google) registerGoogleWorkspaceRoutes(app, { route, store, bridge, publicUrl, google });
+  if (google) registerGoogleWorkspaceRoutes(app, { route, store, bridge, notifyDevice: notify, learning, publicUrl, google });
   const taskCoordinator = registerTaskRoutes({
     route,
     host,
@@ -958,9 +973,20 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   if (google?.accounts) {
     // The setup wizard reads readiness; configuring clients and grants remains owner-only.
-    host('GET', '/api/host/google/status', (_req, reply) => {
+    host('GET', '/api/host/google/status', async (_req, reply) => {
       reply.header('Cache-Control', 'no-store');
-      return google.accounts.status();
+      const status = await google.accounts.status();
+      const assistant = typeof store?.getGoogleAssistant === 'function' ? store.getGoogleAssistant() : null;
+      return {
+        ...status,
+        assistant: assistant ? {
+          enabled: Boolean(assistant.enabled),
+          deviceId: assistant.deviceId,
+          botId: assistant.botId,
+          mode: assistant.mode,
+          accounts: Array.isArray(assistant.accounts) ? [...assistant.accounts] : [],
+        } : null,
+      };
     });
   }
   host('GET', '/api/host/model-picker', modelPicker);
@@ -989,7 +1015,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
   });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
-  host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', putBotModelConfig);
   host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities', req => {
     const { deviceId, botId } = req.params;
     if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
@@ -1083,8 +1109,23 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef)));
   });
-  host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
-  host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); }, GOOGLE_TOOL_CALL_BODY_LIMIT);
+  host('POST', '/api/host/capabilities/:installationId/tools/list', req => {
+    const body = object(req.body);
+    if (body.backgroundProactive !== undefined && typeof body.backgroundProactive !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'backgroundProactive must be boolean');
+    }
+    return execution.listTools(req.centerDevice.deviceId, req.params.installationId, body);
+  });
+  host('POST', '/api/host/capabilities/:installationId/tools/call', req => {
+    const body = object(req.body);
+    text(body.callId, 'callId');
+    text(body.name, 'name');
+    object(body.args);
+    if (body.backgroundProactive !== undefined && typeof body.backgroundProactive !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'backgroundProactive must be boolean');
+    }
+    return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body);
+  }, GOOGLE_TOOL_CALL_BODY_LIMIT);
   const operations = createOperations?.({
     store, packages, bridge, execution, skills, learning, botManagement, catalog, notify, notifyAll, notifyInstallation, publicUrl, action,
     // Invoke the same domain callback, not a synthetic HTTP request or an owner session.

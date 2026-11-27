@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -794,4 +795,169 @@ test('F4 scope conversations cache isolates partitions, distinguishes miss vs em
   assert.deepEqual(readCachedScopeConversations(partA, failingStorage), []);
   assert.equal(writeCachedScopeConversations(partA, [roomOlder], failingStorage), false);
   assert.equal(removeCachedScopeConversation(partA, 'room-old', failingStorage), false);
+});
+
+test('center-admin scrollable flex column items do not shrink or collapse to zero min-height', () => {
+  const css = readFileSync(new URL('../src/center-admin/center-admin.css', import.meta.url), 'utf8');
+  for (const selector of ['.ca-model-option', '.ca-menu-item', '.ca-google-choice', '.ca-google-assistant-option']) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    const body = match[1];
+    assert.match(body, /flex-shrink\s*:\s*0\s*;/, `${selector} must set flex-shrink: 0 to prevent squishing inside scrollable flex columns`);
+    assert.doesNotMatch(body, /min-height\s*:\s*0\s*;/, `${selector} must not set min-height: 0 inside flex columns`);
+  }
+});
+
+test('assistant replies stay left-aligned and span full chat width across desktop, mobile, and scope surfaces', () => {
+  const extractRule = (css, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  const transcriptCss = readFileSync(new URL('../../desktop/web/src/ChatTranscript.css', import.meta.url), 'utf8');
+  const desktopBubble = extractRule(transcriptCss, '.desktop-shell .desktop-transcript .bot-chat-bubble');
+  assert.match(desktopBubble, /align-self\s*:\s*stretch\s*;/);
+  assert.match(desktopBubble, /width\s*:\s*100%\s*;/);
+  assert.match(desktopBubble, /max-width\s*:\s*100%\s*;/);
+  assert.match(desktopBubble, /text-align\s*:\s*left\s*;/);
+  assert.doesNotMatch(desktopBubble, /max-width\s*:[^;]*\bch\b/);
+
+  for (const relPath of ['../../desktop/web/src/app.css', '../src/hub/chat.css', '../src/styles.css']) {
+    const css = readFileSync(new URL(relPath, import.meta.url), 'utf8');
+    const assistantBubble = extractRule(css, '.bot-chat-bubble.assistant');
+    assert.match(assistantBubble, /width\s*:\s*100%\s*;/, `${relPath} .bot-chat-bubble.assistant must span 100% width`);
+    assert.match(assistantBubble, /max-width\s*:\s*100%\s*;/, `${relPath} .bot-chat-bubble.assistant must not cap max-width below 100%`);
+    assert.match(assistantBubble, /align-self\s*:\s*stretch\s*;/, `${relPath} .bot-chat-bubble.assistant must stretch across turn`);
+    assert.match(assistantBubble, /text-align\s*:\s*left\s*;/, `${relPath} .bot-chat-bubble.assistant must stay left-aligned`);
+  }
+
+  const markdownCss = readFileSync(new URL('../src/Markdown.css', import.meta.url), 'utf8');
+  assert.doesNotMatch(markdownCss, /max-width\s*:[^;]*\bch\b/, 'Markdown.css must not cap prose width with ch units');
+
+  const scopeChatCss = readFileSync(new URL('../src/gbot-ui/conversation-chat.css', import.meta.url), 'utf8');
+  const scopeMsg = extractRule(scopeChatCss, '.conversation-chat-message');
+  assert.match(scopeMsg, /width\s*:\s*100%\s*;/);
+  assert.match(scopeMsg, /max-width\s*:\s*100%\s*;/);
+  const scopeBotBubble = extractRule(
+    scopeChatCss,
+    '.conversation-chat-message:not(.conversation-chat-message--user) .conversation-chat-message__bubble',
+  );
+  assert.match(scopeBotBubble, /width\s*:\s*100%\s*;/);
+  assert.match(scopeBotBubble, /text-align\s*:\s*left\s*;/);
+});
+
+test('desktop bot list lets hub-list-scroll own wheel scrolling and avoids scrollbar-width overriding webkit scrollbars', () => {
+  const extractRule = (css, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = css.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  const desktopAppCss = readFileSync(new URL('../../desktop/web/src/app.css', import.meta.url), 'utf8');
+  const appHubBotList = extractRule(desktopAppCss, '.hub-bot-list');
+  assert.doesNotMatch(
+    appHubBotList,
+    /overflow(?:-y)?\s*:\s*(?:auto|scroll)\b/,
+    'app.css .hub-bot-list must not create a nested scroll container inside .hub-list-scroll',
+  );
+  assert.doesNotMatch(
+    appHubBotList,
+    /overscroll-behavior(?:-y)?\s*:\s*(?:contain|none)\b/,
+    'app.css .hub-bot-list must not trap wheel scroll chaining inside .hub-list-scroll',
+  );
+
+  const botChatsCss = readFileSync(new URL('../../desktop/web/src/BotChats.css', import.meta.url), 'utf8');
+  const listScroll = extractRule(botChatsCss, '.hub-list-scroll');
+  assert.match(listScroll, /overflow-y\s*:\s*auto\s*;/);
+  assert.match(listScroll, /overscroll-behavior\s*:\s*contain\s*;/);
+
+  const botList = extractRule(botChatsCss, '.hub-bot-list');
+  assert.match(botList, /overflow\s*:\s*visible\s*;/);
+  assert.match(botList, /overscroll-behavior\s*:\s*auto\s*;/);
+
+  const tokensCss = readFileSync(new URL('../src/design-system/tokens.css', import.meta.url), 'utf8');
+  assert.match(
+    tokensCss,
+    /@supports\s+not\s+selector\(::-webkit-scrollbar\)\s*\{[\s\S]*?scrollbar-width\s*:\s*thin\s*;[\s\S]*?scrollbar-color\s*:/,
+    'tokens.css must guard scrollbar-width/scrollbar-color so WebKitGTK and Chromium keep custom ::-webkit-scrollbar styles',
+  );
+  const tokensWithoutGuard = tokensCss.replace(
+    /@supports\s+not\s+selector\(::-webkit-scrollbar\)\s*\{[\s\S]*?\}\s*\}/,
+    '',
+  );
+  assert.doesNotMatch(
+    tokensWithoutGuard,
+    /scrollbar-(?:width|color)\s*:/,
+    'tokens.css must not emit unguarded scrollbar-width/scrollbar-color rules',
+  );
+
+  for (const relPath of [
+    '../../desktop/web/src/app.css',
+    '../../desktop/web/src/pet/pet.css',
+    '../../desktop/web/src/pet/voice.css',
+  ]) {
+    const css = readFileSync(new URL(relPath, import.meta.url), 'utf8');
+    assert.doesNotMatch(
+      css,
+      /scrollbar-width\s*:\s*thin\b/,
+      `${relPath} must not set scrollbar-width: thin directly (breaks ::-webkit-scrollbar in WebKitGTK/Chromium)`,
+    );
+  }
+});
+
+test('center-admin discover models modal pins its save footer and prevents vertical search input inflation', () => {
+  const css = readFileSync(new URL('../src/center-admin/center-admin.css', import.meta.url), 'utf8');
+  const primitives = readFileSync(new URL('../src/center-admin/primitives.tsx', import.meta.url), 'utf8');
+  const providers = readFileSync(new URL('../src/center-admin/ProvidersTab.tsx', import.meta.url), 'utf8');
+
+  const extractRule = (source, selector) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = source.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+    assert.ok(match, `Expected CSS rule for ${selector}`);
+    return match[1];
+  };
+
+  assert.match(extractRule(css, '.ca-dialog-header'), /flex-shrink\s*:\s*0\s*;/);
+  assert.match(extractRule(css, '.ca-dialog-footer'), /flex-shrink\s*:\s*0\s*;/);
+  assert.match(extractRule(css, '.ca-discover-list'), /flex\s*:\s*1\s+1\s+auto\s*;/);
+
+  // Extract @container (max-width: 520px) block and verify .ca-discover-bar is not trapped inside it
+  // (a 540px modal's .ca-dialog-body content box is 502px wide, which would always trigger <= 520px on desktop).
+  const container520Start = css.indexOf('@container (max-width: 520px)');
+  assert.notEqual(container520Start, -1, 'Expected @container (max-width: 520px) block');
+  const container420Start = css.indexOf('@container (max-width: 420px)', container520Start);
+  assert.notEqual(container420Start, -1, 'Expected @container (max-width: 420px) block');
+  const container520Block = css.slice(container520Start, container420Start);
+  assert.doesNotMatch(container520Block, /\.ca-discover-bar\b/);
+  assert.doesNotMatch(container520Block, /\.ca-discover-device\b/);
+
+  // Both narrow-container and mobile column layouts must reset flex-basis on stacked discover controls
+  // so .ca-discover-search (flex: 1 1 140px in row mode) never inflates to 140px height.
+  const media1024Start = css.indexOf('@media (max-width: 1024px)', container420Start);
+  assert.notEqual(media1024Start, -1);
+  const container420Block = css.slice(container420Start, media1024Start);
+  assert.match(container420Block, /\.ca-discover-bar\s*>\s*\.ca-discover-search,\s*[\r\n]+\s*\.ca-discover-bar\s*>\s*\.ca-discover-device\s*\{[^}]*flex\s*:\s*0\s+0\s+auto\s*;/);
+
+  const media640Start = css.indexOf('@media (max-width: 640px)');
+  assert.notEqual(media640Start, -1);
+  const coarseStart = css.indexOf('@media (pointer: coarse)', media640Start);
+  assert.notEqual(coarseStart, -1);
+  const media640Block = css.slice(media640Start, coarseStart);
+  assert.match(media640Block, /\.ca-discover-bar\s*>\s*\.ca-discover-search,\s*[\r\n]+\s*\.ca-discover-bar\s*>\s*\.ca-discover-device\s*\{[^}]*flex\s*:\s*0\s+0\s+auto\s*;/);
+
+  // CaModal renders .ca-dialog-footer as a sibling after .ca-dialog-body, not inside the scroll area.
+  assert.match(
+    primitives,
+    /<div className=\{`ca-dialog-body\$\{bodyClassName \? ` \$\{bodyClassName\}` : ''\}`\}>\{children\}<\/div>\s*[\r\n]+\s*\{footer \? <div className="ca-dialog-footer">\{footer\}<\/div> : null\}/,
+  );
+
+  // Discover modal mounts its Save action in the pinned CaModal footer slot.
+  assert.match(
+    providers,
+    /open=\{discoverModalOpen\}[\s\S]*?bodyClassName="ca-dialog-body-flex"[\s\S]*?footer=\{[\s\S]*?confirmBatchModels\(\)/,
+  );
 });

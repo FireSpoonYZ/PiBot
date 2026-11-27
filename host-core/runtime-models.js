@@ -482,7 +482,7 @@ function createApiKeyAuth(apiKeyEnv) {
 }
 
 /** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
-export function applyCenterModels(snapshot, existingModels, authResolver, streamAntigravity) {
+export function applyCenterModels(snapshot, existingModels, authResolver, antigravityClient) {
   const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -514,17 +514,19 @@ export function applyCenterModels(snapshot, existingModels, authResolver, stream
     normalizeCodemodeFlag(selection.codemodeOnly, 'codemodeOnly');
     botModels[bot.botId] = selection;
   }
+  const models = existingModels ?? createModels();
   const built = normalized.map((provider) => {
     const original = snapshot.providers.find((p) => p.id === provider.id);
     let credential;
     if (original.credentialRef !== null) {
       credential = snapshot.credentials[original.credentialRef] ?? null;
     }
-    return nativeCenterProvider(provider, provider.models, credential, authResolver, streamAntigravity);
+    return nativeCenterProvider(provider, provider.models, credential, authResolver, antigravityClient);
   });
-  const models = existingModels ?? createModels();
   models.clearProviders();
-  for (const provider of built) models.setProvider(withBillionContextOutputRepair(provider));
+  for (const provider of built) {
+    models.setProvider(provider.id === ANTIGRAVITY_PROVIDER_ID ? provider : withBillionContextOutputRepair(provider));
+  }
   return { models, botModels };
 }
 

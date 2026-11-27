@@ -257,7 +257,7 @@ function publicRecord(record, base) {
   };
 }
 
-export function registerClientReleaseRoutes(app, { store, dataRoot, registry, internalDeviceId, publicUrl }) {
+export function registerClientReleaseRoutes(app, { store, dataRoot, registry, internalDeviceId, publicUrl, onReleasePublished }) {
   const directory = join(dataRoot, 'client-releases');
   mkdirSync(directory, { recursive: true });
   const base = new URL(publicUrl);
@@ -364,7 +364,9 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
     if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.published !== 'boolean' || Object.keys(body).some((key) => key !== 'published')) {
       fail('INVALID_ARGUMENT', 'Expected {published: boolean}');
     }
-    return publicRecord(store.setClientReleasePublished(req?.params?.id, body.published), base);
+    const record = publicRecord(store.setClientReleasePublished(req?.params?.id, body.published), base);
+    if (body.published === true) onReleasePublished?.();
+    return record;
   };
   app.post('/api/client-releases/:id/publish', { onRequest: ownerWrite }, setReleasePublished);
 

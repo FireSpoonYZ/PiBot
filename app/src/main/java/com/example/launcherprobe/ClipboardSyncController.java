@@ -451,7 +451,7 @@ final class ClipboardSyncController {
     /**
      * Extracts plain text from a {@link ClipData} strictly without dereferencing URI/Intent:
      * Reads only the explicit plain-text representation, even for newHtmlText. Files, intents,
-     * sensitive, own or Shower clips and multi-item clips are not read.
+     * own or Shower clips and multi-item clips are not read.
      */
     static ClipReadResult extractSendableText(ClipData clip) {
         if (clip == null || clip.getItemCount() <= 0) {
@@ -535,9 +535,6 @@ final class ClipboardSyncController {
         PersistableBundle extras = description.getExtras();
         if (isTruthyExtra(extras, EXTRA_OWN_SYNC)) {
             return ClipReadResult.error("CLIPBOARD_REJECTED", "当前剪贴板内容已同步");
-        }
-        if (isTruthyExtra(extras, ClipDescription.EXTRA_IS_SENSITIVE)) {
-            return ClipReadResult.error("CLIPBOARD_SENSITIVE", "敏感剪贴板内容不会同步");
         }
         CharSequence label = description.getLabel();
         if (label != null) {

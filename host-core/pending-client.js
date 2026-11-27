@@ -28,6 +28,7 @@ const DEFINITIVE_CODES = new Set([
   'SCOPE_FORBIDDEN',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
+  'AGY_HISTORY_CHANGED',
 ]);
 const MISSING_CODES = new Set(['SUBMISSION_NOT_FOUND', 'MESSAGE_NOT_FOUND']);
 const PRIMARY_STATUSES = new Set(['queued', 'placed', 'done', 'unanswered']);

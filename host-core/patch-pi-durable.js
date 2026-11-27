@@ -6,6 +6,18 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PI_DURABLE_VERSION = '1.5.2';
 
+const GENERATION_IMPORTS_ENTRIES_ORIGINAL = `import { AssistantEntry, ResetEntry, SystemEntry, UserEntry } from "../entries.js";`;
+
+const GENERATION_IMPORTS_ENTRIES_PATCHED = `import { AssistantEntry, ResetEntry, SystemEntry, ToolResultEntry, UserEntry } from "../entries.js";`;
+
+const GENERATION_IMPORTS_INBOX_ORIGINAL = `import { applyBoundary, hasQueuedReset, prepareBoundary, withdrawQueuedInputs } from "./inbox.js";`;
+
+const GENERATION_IMPORTS_INBOX_PATCHED = `import { applyBoundary, hasQueuedReset, InboxDoc, prepareBoundary, withdrawQueuedInputs } from "./inbox.js";`;
+
+const GENERATION_IMPORTS_PROVIDER_ORIGINAL = `import { ensureProviderSessionId } from "./provider.js";`;
+
+const GENERATION_IMPORTS_PROVIDER_PATCHED = `import { ensureProviderSessionId, ProviderDoc } from "./provider.js";`;
+
 const GENERATION_ORIGINAL = `            const threshold = compacted === undefined
                 ? thresholdCompaction(view, entries, resolved.contextWindow, compactionPolicy(settings, model, agent.compaction))
                 : undefined;
@@ -32,7 +44,7 @@ const GENERATION_REQUEST_ORIGINAL = `            const message = await streamRes
             const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
             await classify(runtime, request, message, context);`;
 
-const GENERATION_REQUEST_PATCHED = `            let { message, emittedOutput } = await streamResponse(runtime, model, messages, options, attempt, context);
+const LEGACY_GENERATION_REQUEST_PATCHED = `            let { message, emittedOutput } = await streamResponse(runtime, model, messages, options, attempt, context);
             if (!runtime.signal.aborted &&
                 !context.abortSignal?.aborted &&
                 compacted === undefined &&
@@ -54,6 +66,90 @@ const GENERATION_REQUEST_PATCHED = `            let { message, emittedOutput } =
             }
             const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
             await classify(runtime, request, message, context);`;
+
+const GENERATION_REQUEST_PATCHED = `            const externalProvider = runtime.models.getProvider?.(ref.provider);
+            if (typeof externalProvider?.runExternalTurn === "function") {
+                return await externalProvider.runExternalTurn({
+                    task,
+                    runtime,
+                    context,
+                    model,
+                    ref,
+                    thinkingLevel,
+                    cutoff,
+                    attempt,
+                    view,
+                    messages,
+                    options,
+                    helpers: {
+                        LiveDoc,
+                        InboxDoc,
+                        ProviderDoc,
+                        AssistantEntry,
+                        ToolResultEntry,
+                        SystemEntry,
+                        UserEntry,
+                        ResetEntry,
+                        ToolTask,
+                        PROGRESS_COMMIT,
+                        PartialChanges,
+                        copyJson,
+                        getCurrentTools,
+                        appendAssistant,
+                        appendToolResult,
+                        harnessError,
+                        convertPartial,
+                        endRun,
+                        startRun,
+                        prepareFailure,
+                        endFailedRun,
+                        prepareBoundary,
+                        applyBoundary,
+                        hasQueuedReset,
+                        asksAfterRun,
+                        holdRun,
+                        addTools,
+                        classify: (message) => classify(runtime, { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages, external: true }, message, context),
+                        answer: (message) => answer(runtime, message, context),
+                        finishExternalTerminate: (assistantId, resultEntryIds, controls) => finishExternalTerminate(runtime, assistantId, resultEntryIds, controls, context),
+                        createExternalToolTask: (tx, assistantId, callId, unoffered) => tx.createTask(ToolTask, { kind: "model", assistant: assistantId, callId, ...(unoffered === undefined ? {} : { unoffered }) }, { ownership: { kind: "task", taskId: runtime.taskId }, abandonOnRestart: true }),
+                    },
+                });
+            }
+            let { message, emittedOutput } = await streamResponse(runtime, model, messages, options, attempt, context);
+            if (!runtime.signal.aborted &&
+                !context.abortSignal?.aborted &&
+                compacted === undefined &&
+                !emittedOutput &&
+                message.stopReason === "error" &&
+                isContextOverflow(message)) {
+                let recovered;
+                await runtime.hooks.each("recoverContextOverflow", async (hook) => {
+                    if (recovered !== undefined || runtime.signal.aborted || context.abortSignal?.aborted)
+                        return;
+                    const decision = await hook({ model, messages, error: message, attempt, cutoff }, runtime, context);
+                    if (Array.isArray(decision?.messages))
+                        recovered = decision.messages;
+                });
+                if (recovered !== undefined && !runtime.signal.aborted && !context.abortSignal?.aborted) {
+                    messages = recovered;
+                    ({ message } = await streamResponse(runtime, model, messages, options, attempt, context));
+                }
+            }
+            const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
+            await classify(runtime, request, message, context);`;
+
+const GENERATION_INTERRUPTED_ORIGINAL = `async function interrupted(runtime, checkpoint, context) {
+    const { attempt, compacted } = checkpoint;
+    const policy = runtime.settings.retry;
+    const retry = policy.enabled && attempt <= policy.maxRetries;`;
+
+const GENERATION_INTERRUPTED_PATCHED = `async function interrupted(runtime, checkpoint, context) {
+    const { attempt, compacted } = checkpoint;
+    const policy = runtime.settings.retry;
+    const external = checkpoint.model !== undefined &&
+        typeof runtime.models.getProvider?.(checkpoint.model.provider)?.runExternalTurn === "function";
+    const retry = !external && policy.enabled && attempt <= policy.maxRetries;`;
 
 const GENERATION_STREAM_ORIGINAL = `    try {
         const events = runtime.models.streamSimple(model, { messages: [...messages] }, options);
@@ -114,7 +210,83 @@ const GENERATION_STREAM_PATCHED = `    let emittedOutput = false;
         return { message, emittedOutput };
     }`;
 
-const COMPACTION_OPTIONS_ORIGINAL = `            const options = {
+const GENERATION_CLASSIFY_COMPACTION_ORIGINAL = `    const compaction = overflow && compacted === undefined
+        ? compactionPolicy(settings, ref, (await runtime.agent(context)).compaction)
+        : undefined;`;
+
+const GENERATION_CLASSIFY_COMPACTION_PATCHED = `    const compaction = !request.external && overflow && compacted === undefined
+        ? compactionPolicy(settings, ref, (await runtime.agent(context)).compaction)
+        : undefined;`;
+
+const GENERATION_CLASSIFY_RETRY_ORIGINAL = `    const retry = message.stopReason === "error" &&
+        !overflow &&
+        isRetryableAssistantError(message) &&
+        policy.enabled &&
+        attempt <= policy.maxRetries;`;
+
+const GENERATION_CLASSIFY_RETRY_PATCHED = `    const retry = !request.external &&
+        message.stopReason === "error" &&
+        !overflow &&
+        isRetryableAssistantError(message) &&
+        policy.enabled &&
+        attempt <= policy.maxRetries;`;
+
+const GENERATION_EXTERNAL_TERMINATE_ORIGINAL = `                handOver(live, runtime.taskId, await createGeneration(tx, conversationId));
+            }
+        }
+        return { status: "terminal", outcome: { status: "completed", result: { entryId: assistant } } };
+    }, context);
+}
+/**
+ * Append a provider result and add its usage to \`pi.usage\` in the same commit.
+ * REMINDER: every built-in writer of assistant entries goes through here, so the usage ledger stays complete.
+ */
+async function appendAssistant(tx, conversationId, message) {`;
+
+const GENERATION_EXTERNAL_TERMINATE_PATCHED = `                handOver(live, runtime.taskId, await createGeneration(tx, conversationId));
+            }
+        }
+        return { status: "terminal", outcome: { status: "completed", result: { entryId: assistant } } };
+    }, context);
+}
+async function finishExternalTerminate(runtime, assistant, results, controls, context) {
+    const conversationId = runtime.conversationId;
+    const resultList = results ?? [];
+    const controlList = controls ?? [];
+    await runtime.hooks.each("afterTools", (hook) => hook(assistant, resultList, runtime, context));
+    const added = controlList.flatMap((control) => control?.addTools ?? []);
+    const handoff = controlList.findLast((control) => control?.handoff !== undefined)?.handoff;
+    const afterRun = await asksAfterRun(runtime, context);
+    await runtime.commit(async (tx) => {
+        const boundary = await prepareBoundary(tx, conversationId, runtime.settings);
+        if (added.length > 0)
+            await addTools(tx, conversationId, added);
+        const live = await tx.doc(LiveDoc, conversationId);
+        const now = runtime.now();
+        let last = resultList.reduce((newest, id) => (id > newest ? id : newest), assistant);
+        if (handoff !== undefined) {
+            const message = { role: "user", content: handoff, timestamp: now };
+            const entry = await tx.appendEntry(ResetEntry, conversationId, { head: "self", model: [message] });
+            boundary.head = entry.id;
+            last = entry.id;
+        }
+        const held = afterRun ? holdRun(tx, live, runtime, { reason: "terminate", answer: assistant, last }) : undefined;
+        if (held !== undefined)
+            return held;
+        const { users, first } = await applyBoundary(tx, boundary, "final", now);
+        endRun(tx, live, runtime.taskId, { status: "done", answer: assistant });
+        if (users.length > 0)
+            await startRun(tx, conversationId, live, { inputs: users, first });
+        return { status: "terminal", outcome: { status: "completed", result: { entryId: assistant } } };
+    }, context);
+}
+/**
+ * Append a provider result and add its usage to \`pi.usage\` in the same commit.
+ * REMINDER: every built-in writer of assistant entries goes through here, so the usage ledger stays complete.
+ */
+async function appendAssistant(tx, conversationId, message) {`;
+
+const LEGACY_COMPACTION_OPTIONS_ORIGINAL = `            const options = {
                 ...forwarded,
                 cacheRetention: "none",
                 maxTokens,
@@ -125,7 +297,7 @@ const COMPACTION_OPTIONS_ORIGINAL = `            const options = {
             };
             const message = await runtime.models.completeSimple(model, { messages }, options);`;
 
-const COMPACTION_OPTIONS_PATCHED = `            const providerSessionId = await ensureProviderSessionId(runtime, context);
+const LEGACY_COMPACTION_OPTIONS_PATCHED = `            const providerSessionId = await ensureProviderSessionId(runtime, context);
             const options = {
                 ...forwarded,
                 cacheRetention: "none",
@@ -219,14 +391,22 @@ function countOccurrences(haystack, needle) {
 function applyExactPatches(filePath, patches) {
   let source = readFileSync(filePath, 'utf8');
   let changed = false;
-  for (const { original, patched } of patches) {
+  for (const { original, patched, legacyPatched = [] } of patches) {
     const origCount = countOccurrences(source, original);
     const patchedCount = countOccurrences(source, patched);
     if (patchedCount === 1 && origCount === 0) continue;
     if (origCount === 1 && patchedCount === 0) {
-      source = source.replace(original, patched);
+      source = source.replace(original, () => patched);
       changed = true;
       continue;
+    }
+    if (origCount === 0 && patchedCount === 0 && legacyPatched.length > 0) {
+      const matchedLegacy = legacyPatched.filter((legacy) => countOccurrences(source, legacy) === 1);
+      if (matchedLegacy.length === 1) {
+        source = source.replace(matchedLegacy[0], () => patched);
+        changed = true;
+        continue;
+      }
     }
     throw new Error(
       `${filePath} does not match expected @earendil-works/pi-durable@${PI_DURABLE_VERSION} ` +
@@ -237,6 +417,21 @@ function applyExactPatches(filePath, patches) {
     writeFileSync(filePath, source, 'utf8');
   }
   return changed;
+}
+
+function revertExactPatchIfPresent(filePath, patched, original) {
+  if (!existsSync(filePath)) return false;
+  const source = readFileSync(filePath, 'utf8');
+  const patchedCount = countOccurrences(source, patched);
+  if (patchedCount === 0) return false;
+  if (patchedCount !== 1) {
+    throw new Error(
+      `${filePath} does not match expected @earendil-works/pi-durable@${PI_DURABLE_VERSION} ` +
+        `legacy patched state (patched=${patchedCount})`
+    );
+  }
+  writeFileSync(filePath, source.replace(patched, () => original), 'utf8');
+  return true;
 }
 
 export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules')) {
@@ -254,9 +449,29 @@ export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules'))
   const generationChanged = applyExactPatches(
     path.join(pkgDir, 'dist', 'harness', 'generation.js'),
     [
+      { original: GENERATION_IMPORTS_ENTRIES_ORIGINAL, patched: GENERATION_IMPORTS_ENTRIES_PATCHED },
+      { original: GENERATION_IMPORTS_INBOX_ORIGINAL, patched: GENERATION_IMPORTS_INBOX_PATCHED },
+      { original: GENERATION_IMPORTS_PROVIDER_ORIGINAL, patched: GENERATION_IMPORTS_PROVIDER_PATCHED },
       { original: GENERATION_ORIGINAL, patched: GENERATION_PATCHED },
-      { original: GENERATION_REQUEST_ORIGINAL, patched: GENERATION_REQUEST_PATCHED },
+      {
+        original: GENERATION_REQUEST_ORIGINAL,
+        patched: GENERATION_REQUEST_PATCHED,
+        legacyPatched: [LEGACY_GENERATION_REQUEST_PATCHED],
+      },
+      { original: GENERATION_INTERRUPTED_ORIGINAL, patched: GENERATION_INTERRUPTED_PATCHED },
       { original: GENERATION_STREAM_ORIGINAL, patched: GENERATION_STREAM_PATCHED },
+      {
+        original: GENERATION_CLASSIFY_COMPACTION_ORIGINAL,
+        patched: GENERATION_CLASSIFY_COMPACTION_PATCHED,
+      },
+      {
+        original: GENERATION_CLASSIFY_RETRY_ORIGINAL,
+        patched: GENERATION_CLASSIFY_RETRY_PATCHED,
+      },
+      {
+        original: GENERATION_EXTERNAL_TERMINATE_ORIGINAL,
+        patched: GENERATION_EXTERNAL_TERMINATE_PATCHED,
+      },
     ]
   );
   const typesPath = path.join(pkgDir, 'dist', 'harness', 'types.d.ts');
@@ -270,9 +485,10 @@ export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules'))
     path.join(pkgDir, 'dist', 'storage', 'sqlite', 'storage.js'),
     [{ original: STORAGE_ORIGINAL, patched: STORAGE_PATCHED }]
   );
-  const compactionChanged = applyExactPatches(
+  const compactionChanged = revertExactPatchIfPresent(
     path.join(pkgDir, 'dist', 'harness', 'compaction.js'),
-    [{ original: COMPACTION_OPTIONS_ORIGINAL, patched: COMPACTION_OPTIONS_PATCHED }]
+    LEGACY_COMPACTION_OPTIONS_PATCHED,
+    LEGACY_COMPACTION_OPTIONS_ORIGINAL
   );
   return { generationChanged, typesChanged, storageChanged, compactionChanged };
 }

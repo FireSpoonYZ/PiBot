@@ -23,8 +23,6 @@ import {
   AgentDoc,
 } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
-import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
-import { assertValidAntigravityTurnContext } from './request-context.js';
 import {
   MCP_DISPATCH_EXTENSION_NAME,
   MCP_SAFE_TOOL_POLICY,
@@ -96,19 +94,6 @@ function assistantText(entry) {
   return texts.join('\n');
 }
 
-function computeIsolatedAntigravityTurnContext(messages) {
-  let inputIndex = null;
-  if (Array.isArray(messages)) {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]?.role !== 'system') {
-        inputIndex = i;
-        break;
-      }
-    }
-  }
-  return { inputIndex, auxiliaryIndices: [] };
-}
-
 function cancelledReceipt(botId, requestId, reason = 'cancelled') {
   return {
     botId,
@@ -124,8 +109,8 @@ function cancelledReceipt(botId, requestId, reason = 'cancelled') {
 /**
  * Dedicated zero-tool extension installed in the Host registry exclusively for isolated
  * MCP dispatch conversations (never included in `coreExtensions`).
- * Enforces online status, Bot/model validity, strict 0-tool AgentDoc invariants, and
- * Antigravity turnContext compatibility before any provider request is dispatched.
+ * Enforces online status, Bot/model validity, and strict 0-tool AgentDoc invariants
+ * before any provider request is dispatched.
  */
 export function createMcpDispatchExtension({
   host,
@@ -185,28 +170,6 @@ export function createMcpDispatchExtension({
             // SDK swallows plain hook exceptions; explicitly abort this task before rethrowing.
             try {
               await harness.abortTask(api.taskId, context);
-            } catch (abortErr) {
-              if (!context?.abortSignal?.aborted) throw abortErr;
-            }
-          }
-          throw err;
-        }
-      },
-      async beforeProviderRequest({ model, payload }, api, context) {
-        if (!model || (model.provider !== ANTIGRAVITY_PROVIDER_ID && model.api !== ANTIGRAVITY_API)) {
-          return undefined;
-        }
-        try {
-          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-            throw errWithCode('Antigravity provider payload must be an object', 'INVALID_STATE');
-          }
-          const turnContext = computeIsolatedAntigravityTurnContext(payload.messages);
-          assertValidAntigravityTurnContext(payload.messages, turnContext);
-          return { payload: { ...payload, turnContext } };
-        } catch (err) {
-          if (!context?.abortSignal?.aborted) {
-            try {
-              await getHarness().abortTask(api.taskId, context);
             } catch (abortErr) {
               if (!context?.abortSignal?.aborted) throw abortErr;
             }

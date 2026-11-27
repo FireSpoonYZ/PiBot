@@ -126,6 +126,7 @@ export function CenterAdminPanel({
   onConfigureBot,
   onStartGoogleSetupWizard,
   renderQr,
+  backHandlerRef,
 }: CenterAdminPanelProps): React.JSX.Element {
   const t = useText();
   const [internalTab, setInternalTab] = useState<CenterAdminTab>(() =>
@@ -139,6 +140,7 @@ export function CenterAdminPanel({
   const currentTab: CenterAdminTab = normalizeCenterAdminTab(activeTab ?? internalTab);
 
   const navGuardRef = useRef<((nextTab: CenterAdminTab) => boolean) | null>(null);
+  const subviewBackHandlerRef = useRef<(() => boolean) | null>(null);
 
   const registerNavGuard = useCallback(
     (guard: ((nextTab: CenterAdminTab) => boolean) | null) => {
@@ -146,6 +148,26 @@ export function CenterAdminPanel({
     },
     [],
   );
+
+  const registerBackHandler = useCallback(
+    (handler: () => boolean) => {
+      subviewBackHandlerRef.current = handler;
+      return () => {
+        if (subviewBackHandlerRef.current === handler) {
+          subviewBackHandlerRef.current = null;
+        }
+      };
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!backHandlerRef) return;
+    backHandlerRef.current = () => Boolean(subviewBackHandlerRef.current?.());
+    return () => {
+      backHandlerRef.current = null;
+    };
+  }, [backHandlerRef]);
 
   const commitTabChange = useCallback(
     (next: CenterAdminTab) => {
@@ -214,6 +236,7 @@ export function CenterAdminPanel({
             active
             cacheKey={scopeKey}
             onOpenExternalUrl={onOpenExternalUrl}
+            onRegisterBackHandler={registerBackHandler}
           />
         );
       case 'devices':
@@ -224,6 +247,7 @@ export function CenterAdminPanel({
             cacheKey={scopeKey}
             onConfigureBot={onConfigureBot}
             renderQr={renderQr}
+            onRegisterBackHandler={registerBackHandler}
           />
         );
       case 'capabilities':
@@ -234,6 +258,7 @@ export function CenterAdminPanel({
             cacheKey={scopeKey}
             onOpenExternal={onOpenExternal}
             onOpenExternalUrl={onOpenExternalUrl}
+            onRegisterBackHandler={registerBackHandler}
           />
         );
       case 'google':
@@ -258,6 +283,7 @@ export function CenterAdminPanel({
             cacheKey={scopeKey}
             onRegisterNavGuard={registerNavGuard}
             onNavigateTab={commitTabChange}
+            onRegisterBackHandler={registerBackHandler}
           />
         );
       case 'releases':

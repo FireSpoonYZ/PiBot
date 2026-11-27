@@ -3,6 +3,7 @@ import type * as React from 'react';
 import {
   AlertCircle,
   AlertTriangle,
+  Bell,
   Bot,
   CalendarClock,
   Check,
@@ -11,6 +12,7 @@ import {
   ExternalLink,
   Globe,
   Loader2,
+  Mail,
   Pencil,
   Plus,
   RefreshCw,
@@ -49,16 +51,23 @@ import {
   useUiLocale,
 } from './primitives';
 import {
+  DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES,
+  DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES,
   DEFAULT_CALENDAR_MINUTES_BEFORE,
   GOOGLE_CLOUD_AUTH_CLIENTS_URL,
   GOOGLE_CLOUD_AUTH_OVERVIEW_URL,
   GOOGLE_CLOUD_CREATE_PROJECT_URL,
   GOOGLE_CONNECTIONS_URL,
   GOOGLE_SERVICE_CHOICES,
+  assistantRuntimeBadgeMeta,
+  buildGoogleAssistantSetupPayload,
   buildReadinessRows,
   calendarMinutesBeforeInputValue,
   canonicalChoices,
+  defaultDigestTimesForMode,
   deriveFallbackRedirectUri,
+  formatCalendarMinutesBefore,
+  formatDigestTimesInput,
   googleAdminTrustMessage,
   googleApiEnableUrl,
   googleChoiceDescription,
@@ -70,19 +79,26 @@ import {
   mergeChoices,
   normalizeGoogleRulesResponse,
   parseCalendarMinutesBefore,
+  pickDefaultAssistantDeviceId,
+  pickDefaultExistingAssistantBot,
   readinessBadgeMeta,
   ruleEffectiveStatus,
+  shouldPromptGoogleAssistantSetup,
   validateWebClientJson,
 } from './googleHelpers';
 import type {
   CenterBotRef,
   CenterDevice,
   GoogleAccountStatus,
+  GoogleAssistantConfig,
+  GoogleAssistantMode,
+  GoogleAssistantRuntime,
   GoogleFlowPhase,
   GoogleRule,
   GoogleRuleSource,
   GoogleServiceChoice,
   GoogleStatusResponse,
+  ModelPickerResponse,
 } from './types';
 
 type GoogleSection = 'accounts' | 'rules' | 'client';
@@ -94,7 +110,9 @@ type GoogleModal =
   | { kind: 'connect'; targetAccount: GoogleAccountStatus | null }
   | { kind: 'remove-account'; account: GoogleAccountStatus }
   | { kind: 'rule'; editing: GoogleRule | null }
-  | { kind: 'confirm-delete-rule'; rule: GoogleRule };
+  | { kind: 'confirm-delete-rule'; rule: GoogleRule }
+  | { kind: 'assistant-setup'; postOAuth?: boolean; isEdit?: boolean }
+  | { kind: 'confirm-remove-assistant' };
 
 interface ActiveAuthFlow {
   flowId: string;
@@ -167,6 +185,18 @@ interface GoogleCacheData {
   bots: CenterBotRef[];
   rules: GoogleRule[];
   rulesUnavailable: boolean;
+  assistant?: GoogleAssistantConfig | null;
+  assistantRuntime?: GoogleAssistantRuntime | null;
+  assistantUnavailable?: boolean;
+  picker?: ModelPickerResponse | null;
+}
+
+interface GoogleLoadResult {
+  accounts: GoogleAccountStatus[];
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  assistant: GoogleAssistantConfig | null;
+  assistantUnavailable: boolean;
 }
 
 const MINUTES_BEFORE_PRESETS = [0, 5, 10, 15, 30] as const;
@@ -260,9 +290,53 @@ export function GoogleTab({
   const [togglingRuleId, setTogglingRuleId] = useState<string | null>(null);
   const [deletingRule, setDeletingRule] = useState(false);
 
+  // Proactive mail & calendar assistant state
+  const [assistant, setAssistant] = useState<GoogleAssistantConfig | null>(
+    () => initialCache?.assistant ?? null,
+  );
+  const [assistantRuntime, setAssistantRuntime] = useState<GoogleAssistantRuntime | null>(
+    () => initialCache?.assistantRuntime ?? null,
+  );
+  const [assistantUnavailable, setAssistantUnavailable] = useState<boolean>(
+    () => initialCache?.assistantUnavailable ?? false,
+  );
+  const [picker, setPicker] = useState<ModelPickerResponse | null>(
+    () => initialCache?.picker ?? null,
+  );
+  const [assistantToggling, setAssistantToggling] = useState(false);
+  const [assistantRemoving, setAssistantRemoving] = useState(false);
+
+  // Proactive assistant setup / edit modal form state
+  const [assistantMode, setAssistantMode] = useState<GoogleAssistantMode>('dedicated');
+  const [assistantDedicatedAction, setAssistantDedicatedAction] = useState<'create' | 'keep'>('create');
+  const [assistantDeviceId, setAssistantDeviceId] = useState('');
+  const [assistantBotName, setAssistantBotName] = useState('');
+  const [assistantModelRef, setAssistantModelRef] = useState('');
+  const [assistantTargetBotKey, setAssistantTargetBotKey] = useState('');
+  const [assistantAccounts, setAssistantAccounts] = useState<string[]>([]);
+  const [assistantBatchWindow, setAssistantBatchWindow] = useState(
+    String(DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES),
+  );
+  const [assistantDigestTimes, setAssistantDigestTimes] = useState('');
+  const [assistantDigestDirty, setAssistantDigestDirty] = useState(false);
+  const [assistantCalendarEnabled, setAssistantCalendarEnabled] = useState(true);
+  const [assistantCalendarLead, setAssistantCalendarLead] = useState(
+    String(DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES),
+  );
+  const [assistantHindsight, setAssistantHindsight] = useState(true);
+  const [assistantHindsightDirty, setAssistantHindsightDirty] = useState(false);
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantFormError, setAssistantFormError] = useState('');
+
   const hasLoadedRef = useRef(hasLoaded);
   const statusRef = useRef(status);
   statusRef.current = status;
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
+  const botsRef = useRef(bots);
+  botsRef.current = bots;
+  const assistantRef = useRef(assistant);
+  assistantRef.current = assistant;
   const cacheKeyRef = useRef(cacheKey);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -461,6 +535,103 @@ export function GoogleTab({
   }, [activeBots, deviceById]);
 
   const accounts = useMemo(() => status?.accounts ?? [], [status]);
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
+
+  const globalDefaultModelName = useMemo(() => {
+    if (!picker?.defaultModel) return '';
+    const found = picker.models.find(m => m.modelRef === picker.defaultModel);
+    return found?.name || picker.defaultModel;
+  }, [picker]);
+
+  const sortedPickerModels = useMemo(() => {
+    if (!picker) return [];
+    const starred = new Set(picker.starredModels);
+    return [...picker.models].sort(
+      (a, b) => (starred.has(a.modelRef) ? 0 : 1) - (starred.has(b.modelRef) ? 0 : 1),
+    );
+  }, [picker]);
+
+  const openAssistantSetupModal = useCallback(
+    (opts?: {
+      postOAuth?: boolean;
+      editing?: GoogleAssistantConfig | null;
+      accountsOverride?: GoogleAccountStatus[];
+      devicesOverride?: CenterDevice[];
+      botsOverride?: CenterBotRef[];
+    }) => {
+      const liveAccounts = opts?.accountsOverride ?? accountsRef.current;
+      const liveDevices = opts?.devicesOverride ?? devicesRef.current;
+      const liveBots = opts?.botsOverride ?? botsRef.current;
+      const existingCfg = opts?.editing ?? null;
+      const tr = tRef.current;
+
+      const readyEmails = liveAccounts
+        .filter(a => !isAccountReconnectRequired(a))
+        .map(a => a.email);
+      const fallbackEmails = readyEmails.length > 0 ? readyEmails : liveAccounts.map(a => a.email);
+
+      const defaultDevice = pickDefaultAssistantDeviceId(liveDevices, existingCfg?.deviceId);
+      const defaultBot = pickDefaultExistingAssistantBot(liveBots, liveDevices, existingCfg?.deviceId);
+
+      if (existingCfg) {
+        setAssistantMode(existingCfg.mode);
+        setAssistantDedicatedAction(existingCfg.mode === 'dedicated' ? 'keep' : 'create');
+        setAssistantDeviceId(defaultDevice || existingCfg.deviceId);
+        const currentBot = liveBots.find(
+          b => b.deviceId === existingCfg.deviceId && b.botId === existingCfg.botId,
+        );
+        const t = tr;
+        setAssistantBotName(currentBot?.name || t('邮件与日程管家', 'Mail & Calendar Assistant'));
+        setAssistantModelRef('');
+        setAssistantTargetBotKey(
+          existingCfg.mode === 'existing'
+            ? botKey(existingCfg.deviceId, existingCfg.botId)
+            : defaultBot
+              ? botKey(defaultBot.deviceId, defaultBot.botId)
+              : '',
+        );
+        const savedAccounts = existingCfg.accounts.filter(Boolean);
+        setAssistantAccounts(savedAccounts.length > 0 ? savedAccounts : fallbackEmails);
+        setAssistantBatchWindow(
+          String(existingCfg.batchWindowMinutes || DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES),
+        );
+        const formattedDigest = formatDigestTimesInput(existingCfg.digestTimes);
+        const modeDefaultDigest = formatDigestTimesInput(defaultDigestTimesForMode(existingCfg.mode));
+        setAssistantDigestTimes(formattedDigest);
+        setAssistantDigestDirty(formattedDigest !== modeDefaultDigest);
+        setAssistantCalendarEnabled(Boolean(existingCfg.calendarEnabled));
+        setAssistantCalendarLead(
+          String(existingCfg.calendarLeadMinutes ?? DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES),
+        );
+        const savedHindsight = Boolean(existingCfg.hindsightPrivateMemory);
+        setAssistantHindsight(savedHindsight);
+        setAssistantHindsightDirty(savedHindsight !== (existingCfg.mode === 'dedicated'));
+        setAssistantFormError('');
+        setModal({ kind: 'assistant-setup', isEdit: true });
+        return;
+      }
+
+      setAssistantMode('dedicated');
+      setAssistantDedicatedAction('create');
+      setAssistantDeviceId(defaultDevice);
+      const t = tr;
+      setAssistantBotName(t('邮件与日程管家', 'Mail & Calendar Assistant'));
+      setAssistantModelRef('');
+      setAssistantTargetBotKey(defaultBot ? botKey(defaultBot.deviceId, defaultBot.botId) : '');
+      setAssistantAccounts(fallbackEmails);
+      setAssistantBatchWindow(String(DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES));
+      setAssistantDigestTimes(formatDigestTimesInput(defaultDigestTimesForMode('dedicated')));
+      setAssistantDigestDirty(false);
+      setAssistantCalendarEnabled(true);
+      setAssistantCalendarLead(String(DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES));
+      setAssistantHindsight(true);
+      setAssistantHindsightDirty(false);
+      setAssistantFormError('');
+      setModal({ kind: 'assistant-setup', postOAuth: Boolean(opts?.postOAuth), isEdit: false });
+    },
+    [],
+  );
 
   const accountsByKey = useMemo(() => {
     const map = new Map<string, GoogleAccountStatus>();
@@ -534,7 +705,7 @@ export function GoogleTab({
   );
 
   const loadAll = useCallback(
-    async (opts?: { silent?: boolean }) => {
+    async (opts?: { silent?: boolean }): Promise<GoogleLoadResult | null> => {
       const gen = ++loadGenRef.current;
       const isBackground = Boolean(opts?.silent) || hasLoadedRef.current;
       if (isBackground) setRefreshing(true);
@@ -545,11 +716,16 @@ export function GoogleTab({
       }
 
       try {
-        const [googleRes, syncRes] = await Promise.all([
+        const [googleRes, syncRes, assistantRes, pickerRes] = await Promise.all([
           api.getGoogleStatus(),
           api.getBotSync().catch(() => null),
+          api.getGoogleAssistant().then(
+            data => ({ ok: true as const, data }),
+            err => ({ ok: false as const, err }),
+          ),
+          api.getModelPicker().catch(() => null),
         ]);
-        if (gen !== loadGenRef.current) return;
+        if (gen !== loadGenRef.current) return null;
 
         setLoadError('');
         clearNotice('load-error');
@@ -576,6 +752,28 @@ export function GoogleTab({
         const nextBots = syncRes?.bots ?? [];
         setDevices(nextDevices);
         setBots(nextBots);
+        if (pickerRes) {
+          setPicker(pickerRes);
+        }
+
+        let nextAssistant: GoogleAssistantConfig | null = assistantRef.current;
+        let nextAssistantUnavailable = false;
+        if (assistantRes.ok) {
+          nextAssistant = assistantRes.data?.assistant ?? null;
+          nextAssistantUnavailable = false;
+          setAssistantUnavailable(false);
+          setAssistant(nextAssistant);
+          setAssistantRuntime(assistantRes.data?.runtime ?? null);
+        } else if (
+          assistantRes.err instanceof CenterApiError &&
+          (assistantRes.err.status === 404 || assistantRes.err.status === 501)
+        ) {
+          nextAssistant = null;
+          nextAssistantUnavailable = true;
+          setAssistantUnavailable(true);
+          setAssistant(null);
+          setAssistantRuntime(null);
+        }
 
         const activeList = nextBots.filter(b => !b.archivedAt);
         if (activeList.length > 0) {
@@ -589,12 +787,21 @@ export function GoogleTab({
         if (googleRes.available !== false) {
           await loadRules(activeList);
         }
-        if (gen !== loadGenRef.current) return;
+        if (gen !== loadGenRef.current) return null;
         hasLoadedRef.current = true;
         cacheKeyRef.current = cacheKey;
         setHasLoaded(true);
+
+        if (googleRes.available === false) return null;
+        return {
+          accounts: googleRes.accounts ?? [],
+          devices: nextDevices,
+          bots: nextBots,
+          assistant: nextAssistant,
+          assistantUnavailable: nextAssistantUnavailable,
+        };
       } catch (err) {
-        if (gen !== loadGenRef.current) return;
+        if (gen !== loadGenRef.current) return null;
         const t = tRef.current;
         if (err instanceof CenterApiError && (err.status === 404 || err.status === 501)) {
           setUnavailableReason(
@@ -643,6 +850,7 @@ export function GoogleTab({
             setLoadError(msg);
           }
         }
+        return null;
       } finally {
         if (gen === loadGenRef.current) {
           setRefreshing(false);
@@ -681,8 +889,26 @@ export function GoogleTab({
       bots,
       rules,
       rulesUnavailable,
+      assistant,
+      assistantRuntime,
+      assistantUnavailable,
+      picker,
     });
-  }, [bots, cacheKey, devices, forbiddenReason, hasLoaded, rules, rulesUnavailable, status, unavailableReason]);
+  }, [
+    assistant,
+    assistantRuntime,
+    assistantUnavailable,
+    bots,
+    cacheKey,
+    devices,
+    forbiddenReason,
+    hasLoaded,
+    picker,
+    rules,
+    rulesUnavailable,
+    status,
+    unavailableReason,
+  ]);
 
   // Countdown tick while waiting for system browser OAuth (paused when tab hidden)
   useEffect(() => {
@@ -712,7 +938,7 @@ export function GoogleTab({
 
   const handleFlowCompleted = useCallback(
     async (account: GoogleAccountStatus | undefined, flow: ActiveAuthFlow) => {
-      await loadAll({ silent: true });
+      const fresh = await loadAll({ silent: true });
       if (account) {
         const rows = buildReadinessRows(account.services ?? [], t);
         const readyLabels = rows.filter(r => r.state === 'ready').map(r => r.label);
@@ -739,8 +965,21 @@ export function GoogleTab({
             : t('Google 账号已连接，本中心所有 Bot 均可使用已就绪服务', 'Google account connected. Ready services are available to all Bots.'),
         });
       }
+
+      if (fresh && !fresh.assistantUnavailable) {
+        const connectedCount = fresh.accounts.filter(a => !isAccountReconnectRequired(a)).length;
+        const effectiveCount = connectedCount > 0 ? connectedCount : fresh.accounts.length;
+        if (shouldPromptGoogleAssistantSetup(fresh.assistant, effectiveCount)) {
+          openAssistantSetupModal({
+            postOAuth: true,
+            accountsOverride: fresh.accounts,
+            devicesOverride: fresh.devices,
+            botsOverride: fresh.bots,
+          });
+        }
+      }
     },
-    [loadAll, setBanner, t],
+    [loadAll, openAssistantSetupModal, setBanner, t],
   );
 
   // Poll POST /api/google/flow while pending and tab active, plus immediate check on window focus / visibility
@@ -1298,6 +1537,210 @@ export function GoogleTab({
     });
   }, [rules, ruleBotFilter, ruleSourceFilter]);
 
+  const handleSelectAssistantMode = (nextMode: GoogleAssistantMode) => {
+    setAssistantMode(nextMode);
+    setAssistantFormError('');
+    if (!assistantDigestDirty) {
+      setAssistantDigestTimes(formatDigestTimesInput(defaultDigestTimesForMode(nextMode)));
+    }
+    if (!assistantHindsightDirty) {
+      setAssistantHindsight(nextMode === 'dedicated');
+    }
+    if (nextMode === 'dedicated' && !assistantDeviceId && devices.length > 0) {
+      setAssistantDeviceId(pickDefaultAssistantDeviceId(devices));
+    }
+    if (nextMode === 'existing' && !assistantTargetBotKey) {
+      const fallbackBot = pickDefaultExistingAssistantBot(bots, devices);
+      if (fallbackBot) {
+        setAssistantTargetBotKey(botKey(fallbackBot.deviceId, fallbackBot.botId));
+      }
+    }
+  };
+
+  const toggleAssistantAccount = (email: string) => {
+    setAssistantAccounts(prev => {
+      if (prev.includes(email)) {
+        return prev.filter(item => item !== email);
+      }
+      return [...prev, email];
+    });
+  };
+
+  const handleSubmitAssistant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (assistantBusy || modal?.kind !== 'assistant-setup') return;
+    setAssistantFormError('');
+
+    const isEditingExistingDedicated =
+      Boolean(modal.isEdit) &&
+      assistantMode === 'dedicated' &&
+      assistant?.mode === 'dedicated' &&
+      assistantDedicatedAction === 'keep';
+
+    let resolvedDeviceId = assistantDeviceId;
+    let resolvedBotId = '';
+    if (assistantMode === 'existing') {
+      const sep = assistantTargetBotKey.indexOf('::');
+      if (sep > 0) {
+        resolvedDeviceId = assistantTargetBotKey.slice(0, sep);
+        resolvedBotId = assistantTargetBotKey.slice(sep + 2);
+      } else {
+        resolvedDeviceId = '';
+        resolvedBotId = '';
+      }
+    } else if (isEditingExistingDedicated && assistant) {
+      resolvedDeviceId = assistant.deviceId;
+      resolvedBotId = assistant.botId;
+    }
+
+    const built = buildGoogleAssistantSetupPayload(
+      {
+        mode: assistantMode,
+        deviceId: resolvedDeviceId,
+        ...(resolvedBotId ? { botId: resolvedBotId } : {}),
+        ...(assistantMode === 'dedicated' && !isEditingExistingDedicated
+          ? {
+              role: assistantBotName,
+              ...(assistantModelRef ? { modelRef: assistantModelRef } : {}),
+            }
+          : {}),
+        accounts: assistantAccounts,
+        batchWindowMinutes: assistantBatchWindow,
+        digestTimesInput: assistantDigestTimes,
+        calendarEnabled: assistantCalendarEnabled,
+        calendarLeadMinutes: assistantCalendarLead,
+        hindsightPrivateMemory: assistantHindsight,
+      },
+      t,
+    );
+
+    if (!built.ok) {
+      setAssistantFormError(built.error);
+      return;
+    }
+
+    setAssistantBusy(true);
+    try {
+      const payload = built.payload;
+      const useSaveInPlace =
+        Boolean(modal.isEdit) &&
+        Boolean(assistant) &&
+        (isEditingExistingDedicated || (payload.mode === 'existing' && assistant?.mode === 'existing'));
+
+      if (useSaveInPlace && assistant) {
+        const res = await api.saveGoogleAssistant({
+          enabled: assistant.enabled,
+          deviceId: payload.deviceId,
+          botId: payload.mode === 'existing' ? payload.botId : assistant.botId,
+          mode: payload.mode,
+          accounts: payload.accounts,
+          batchWindowMinutes: payload.batchWindowMinutes,
+          digestTimes: payload.digestTimes,
+          calendarEnabled: payload.calendarEnabled,
+          calendarLeadMinutes: payload.calendarLeadMinutes,
+          hindsightPrivateMemory: payload.hindsightPrivateMemory,
+          expectedRevision: assistant.revision,
+        });
+        setAssistant(res.assistant ?? null);
+        setAssistantRuntime(res.runtime ?? null);
+        setModal(null);
+        await loadAll({ silent: true });
+        setBanner({
+          tone: 'ok',
+          text: t('主动邮箱与日程管家设置已保存', 'Proactive mail & calendar assistant settings saved'),
+        });
+      } else {
+        const res = await api.setupGoogleAssistant(payload);
+        setAssistant(res.assistant ?? null);
+        setAssistantRuntime(res.runtime ?? null);
+        setModal(null);
+        await loadAll({ silent: true });
+        const createdName = res.createdBot?.role;
+        setBanner({
+          tone: 'ok',
+          text: createdName
+            ? t(`已创建专职管家 Bot「${createdName}」并启用主动邮箱与日程感知`, `Created dedicated assistant Bot "${createdName}" and enabled proactive mail & calendar monitoring`)
+            : t('已启用主动邮箱与日程感知', 'Proactive mail & calendar assistant enabled'),
+        });
+      }
+    } catch (err) {
+      setAssistantFormError(
+        errorMessage(
+          err,
+          t('保存主动管家配置失败，请检查设置后重试', 'Failed to save proactive assistant configuration. Please retry.'),
+        ),
+      );
+    } finally {
+      setAssistantBusy(false);
+    }
+  };
+
+  const handleToggleAssistantEnabled = async () => {
+    if (!assistant || assistantToggling) return;
+    setAssistantToggling(true);
+    try {
+      const nextEnabled = !assistant.enabled;
+      const res = await api.saveGoogleAssistant({
+        enabled: nextEnabled,
+        deviceId: assistant.deviceId,
+        botId: assistant.botId,
+        mode: assistant.mode,
+        accounts: assistant.accounts,
+        batchWindowMinutes: assistant.batchWindowMinutes,
+        digestTimes: assistant.digestTimes,
+        calendarEnabled: assistant.calendarEnabled,
+        calendarLeadMinutes: assistant.calendarLeadMinutes,
+        hindsightPrivateMemory: assistant.hindsightPrivateMemory,
+        expectedRevision: assistant.revision,
+      });
+      setAssistant(res.assistant ?? null);
+      setAssistantRuntime(res.runtime ?? null);
+      setBanner({
+        tone: 'info',
+        text: nextEnabled
+          ? t('已恢复主动邮箱与日程管家（仅对恢复后新到达的邮件生效）', 'Proactive assistant resumed (applies only to newly arriving mail).')
+          : t('已暂停主动邮箱与日程管家（不影响 Bot 主动使用 Google 工具）', 'Proactive assistant paused (Bots can still use Google tools on demand).'),
+      });
+    } catch (err) {
+      setBanner({
+        tone: 'danger',
+        text: errorMessage(
+          err,
+          t('更新主动管家状态失败，请重试', 'Failed to update proactive assistant status. Please retry.'),
+        ),
+      });
+    } finally {
+      setAssistantToggling(false);
+    }
+  };
+
+  const handleConfirmRemoveAssistant = async () => {
+    if (assistantRemoving) return;
+    setAssistantRemoving(true);
+    try {
+      await api.removeGoogleAssistant();
+      setModal(null);
+      setAssistant(null);
+      setAssistantRuntime(null);
+      await loadAll({ silent: true });
+      setBanner({
+        tone: 'info',
+        text: t('已移除主动邮箱与日程管家绑定（不会删除已有 Bot 或撤销 Google 账号授权）', 'Removed proactive assistant binding (existing Bots and Google accounts were kept).'),
+      });
+    } catch (err) {
+      setModal(null);
+      setBanner({
+        tone: 'danger',
+        text: errorMessage(
+          err,
+          t('移除主动管家绑定失败，请重试', 'Failed to remove proactive assistant binding. Please retry.'),
+        ),
+      });
+    } finally {
+      setAssistantRemoving(false);
+    }
+  };
+
   const handleCopyWithFeedback = async (key: string, value: string) => {
     const ok = await copyToClipboard(value);
     if (ok) {
@@ -1621,6 +2064,177 @@ export function GoogleTab({
                   />
                 </CaDisclosure>
               )}
+            </section>
+          )}
+
+          {/* Ongoing Proactive Mail & Calendar Assistant Management Card */}
+          {accounts.length > 0 && !assistantUnavailable && (
+            <section className="ca-section" aria-labelledby="ca-google-assistant-heading">
+              {!assistant ? (
+                <div className="ca-row">
+                  <div className="ca-row-main">
+                    <div className="ca-row-title">
+                      <Mail size={14} aria-hidden="true" />
+                      <span id="ca-google-assistant-heading">
+                        {t('主动邮箱与日程管家', 'Proactive Mail & Calendar Assistant')}
+                      </span>
+                      <span className="ca-pill ca-pill-muted">{t('未开启', 'Not configured')}</span>
+                    </div>
+                    <span className="ca-row-sub">
+                      {t('自动按批次聚合新邮件与会前日程提醒；可创建独立专职管家 Bot 或交给已有 Bot，后台仅读信与草拟回复、绝不自动外发。', 'Batch new mail and pre-meeting reminders automatically with a dedicated assistant Bot or an existing Bot. Background runs are strictly read & draft only.')}
+                    </span>
+                  </div>
+                  <div className="ca-row-actions">
+                    <button
+                      type="button"
+                      className="ca-btn ca-btn-primary ca-btn-sm"
+                      onClick={() => openAssistantSetupModal()}
+                    >
+                      <Bot size={13} aria-hidden="true" />
+                      <span>{t('配置主动邮箱与日程管家', 'Set up proactive assistant')}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (() => {
+                const badge = assistantRuntimeBadgeMeta(assistant, assistantRuntime, t);
+                const pendingTotal =
+                  (assistantRuntime?.pendingBucketCount ?? 0) +
+                  (assistantRuntime?.pendingDeliveryCount ?? 0);
+                const runtimeNotice = assistantRuntime?.detail || assistantRuntime?.reason || '';
+                const showRuntimeAlert =
+                  Boolean(runtimeNotice) && (badge.tone === 'warn' || badge.tone === 'danger');
+
+                return (
+                  <>
+                    <div className="ca-row">
+                      <div className="ca-row-main">
+                        <div className="ca-row-title">
+                          <StatusDot tone={badge.tone} />
+                          <Mail size={14} aria-hidden="true" />
+                          <span id="ca-google-assistant-heading">
+                            {t('主动邮箱与日程管家', 'Proactive Mail & Calendar Assistant')}
+                          </span>
+                          <span className="ca-pill ca-pill-info">
+                            {assistant.mode === 'dedicated'
+                              ? t('独立管家', 'Dedicated Bot')
+                              : t('已有 Bot', 'Existing Bot')}
+                          </span>
+                          <span className={`ca-pill ca-pill-${badge.tone}`}>{badge.label}</span>
+                        </div>
+                        <span className="ca-row-sub">
+                          {t('绑定目标：', 'Bound Bot: ')}
+                          {formatBotDisplay(assistant.deviceId, assistant.botId)}
+                        </span>
+                      </div>
+
+                      <div className="ca-row-actions ca-wrap">
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          disabled={assistantToggling}
+                          onClick={() => void handleToggleAssistantEnabled()}
+                        >
+                          <LabelStack
+                            active={
+                              assistantToggling
+                                ? t('更新中…', 'Updating…')
+                                : assistant.enabled
+                                  ? t('暂停', 'Pause')
+                                  : t('恢复', 'Resume')
+                            }
+                            labels={[t('暂停', 'Pause'), t('恢复', 'Resume'), t('更新中…', 'Updating…')]}
+                          />
+                        </button>
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          onClick={() => openAssistantSetupModal({ editing: assistant })}
+                        >
+                          <Settings2 size={13} aria-hidden="true" />
+                          <span>{t('切换 Bot / 编辑设置', 'Switch Bot / Edit')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-ghost ca-btn-sm"
+                          onClick={() => setModal({ kind: 'confirm-remove-assistant' })}
+                        >
+                          <Trash2 size={13} aria-hidden="true" />
+                          <span>{t('移除绑定', 'Remove')}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="ca-google-assistant-meta">
+                      <div className="ca-google-assistant-meta-item">
+                        <span className="ca-google-assistant-meta-label">
+                          {t('监听账号', 'Watched accounts')}
+                        </span>
+                        <span className="ca-google-assistant-meta-value">
+                          {assistant.accounts.length > 0
+                            ? assistant.accounts.join(', ')
+                            : t('未指定', 'None')}
+                        </span>
+                      </div>
+                      <div className="ca-google-assistant-meta-item">
+                        <span className="ca-google-assistant-meta-label">
+                          {t('批次与简报节奏', 'Batch & digest schedule')}
+                        </span>
+                        <span className="ca-google-assistant-meta-value">
+                          {t(`每 ${assistant.batchWindowMinutes} 分钟聚合`, `Batch every ${assistant.batchWindowMinutes}m`)}
+                          {assistant.digestTimes.length > 0
+                            ? t(` · 简报 ${assistant.digestTimes.join('、')}`, ` · Digests ${assistant.digestTimes.join(', ')}`)
+                            : t(' · 仅实时批次', ' · Batch only')}
+                        </span>
+                      </div>
+                      <div className="ca-google-assistant-meta-item">
+                        <span className="ca-google-assistant-meta-label">
+                          {t('日程与私人记忆', 'Calendar & private memory')}
+                        </span>
+                        <span className="ca-google-assistant-meta-value">
+                          {assistant.calendarEnabled
+                            ? formatCalendarMinutesBefore(assistant.calendarLeadMinutes, t)
+                            : t('日程提醒已关', 'Calendar reminders off')}
+                          {' · '}
+                          {assistant.hindsightPrivateMemory
+                            ? t('Hindsight 私人记忆已开', 'Hindsight private memory on')
+                            : t('Hindsight 私人记忆已关', 'Hindsight private memory off')}
+                        </span>
+                      </div>
+                    </div>
+
+                    {assistantRuntime && (
+                      <div className="ca-google-assistant-runtime">
+                        <span className="ca-num">
+                          <Bell size={12} aria-hidden="true" style={{ verticalAlign: '-1px', marginRight: 4 }} />
+                          {t(`待推送批次 ${pendingTotal}`, `Pending ${pendingTotal}`)}
+                          {assistantRuntime.missedCount > 0
+                            ? t(` · 错过 ${assistantRuntime.missedCount}`, ` · Missed ${assistantRuntime.missedCount}`)
+                            : ''}
+                        </span>
+                        {assistantRuntime.lastCheckedAt && (
+                          <span>
+                            <Clock size={12} aria-hidden="true" style={{ verticalAlign: '-1px', marginRight: 4 }} />
+                            {t('上次检查 ', 'Last checked ')}
+                            {formatTime(assistantRuntime.lastCheckedAt, locale)}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {showRuntimeAlert && (
+                      <div className="ca-section-body" style={{ paddingTop: 0 }}>
+                        <div
+                          className={`ca-google-account-alert ${badge.tone === 'danger' ? 'is-danger' : 'is-warn'}`}
+                          role="status"
+                        >
+                          <AlertCircle size={14} aria-hidden="true" />
+                          <span>{runtimeNotice}</span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </section>
           )}
 
@@ -1995,7 +2609,56 @@ export function GoogleTab({
 
       {/* SECTION 2: Mail & Calendar Trigger Rules */}
       {section === 'rules' && (
-        <section className="ca-section" aria-labelledby="ca-google-rules-heading">
+        <div className="ca-form-stack">
+          {accounts.length > 0 && !assistantUnavailable && (
+            <section className="ca-section" aria-label={t('主动邮箱与日程管家快捷入口', 'Proactive assistant shortcut')}>
+              <div className="ca-row">
+                <div className="ca-row-main">
+                  <div className="ca-row-title">
+                    <Mail size={14} aria-hidden="true" />
+                    <span>{t('主动邮箱与日程管家', 'Proactive Mail & Calendar Assistant')}</span>
+                    {assistant ? (
+                      <>
+                        <span className="ca-pill ca-pill-info">
+                          {assistant.mode === 'dedicated'
+                            ? t('独立管家', 'Dedicated Bot')
+                            : t('已有 Bot', 'Existing Bot')}
+                        </span>
+                        <span
+                          className={`ca-pill ca-pill-${assistantRuntimeBadgeMeta(assistant, assistantRuntime, t).tone}`}
+                        >
+                          {assistantRuntimeBadgeMeta(assistant, assistantRuntime, t).label}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="ca-pill ca-pill-muted">{t('未开启', 'Not configured')}</span>
+                    )}
+                  </div>
+                  <span className="ca-row-sub">
+                    {assistant
+                      ? `${formatBotDisplay(assistant.deviceId, assistant.botId)} · ${t(`每 ${assistant.batchWindowMinutes} 分钟聚合`, `Batch every ${assistant.batchWindowMinutes}m`)}${assistant.digestTimes.length > 0 ? ` · ${assistant.digestTimes.join(', ')}` : ''}`
+                      : t('不想手动逐条配置过滤规则？开启主动管家即可按批次自动归纳新邮件与会前日程。', 'Want automatic mail batching and pre-meeting summaries without managing individual filter rules? Enable the proactive assistant.')}
+                  </span>
+                </div>
+                <div className="ca-row-actions">
+                  <button
+                    type="button"
+                    className={`ca-btn ca-btn-sm${assistant ? '' : ' ca-btn-primary'}`}
+                    onClick={() => openAssistantSetupModal(assistant ? { editing: assistant } : undefined)}
+                  >
+                    <Settings2 size={13} aria-hidden="true" />
+                    <span>
+                      {assistant
+                        ? t('管理主动管家', 'Manage assistant')
+                        : t('开启主动管家', 'Set up assistant')}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          <section className="ca-section" aria-labelledby="ca-google-rules-heading">
           <div className="ca-section-head">
             <div>
               <h3 id="ca-google-rules-heading" className="ca-section-title">
@@ -2165,6 +2828,7 @@ export function GoogleTab({
             </div>
           )}
         </section>
+        </div>
       )}
 
       {/* SECTION 3: OAuth Client Setup & Rotation (in-page, no drawer) */}
@@ -3079,6 +3743,426 @@ export function GoogleTab({
           if (!deletingRule) setModal(null);
         }}
         onConfirm={() => void handleConfirmDeleteRule()}
+      />
+
+      {/* Mutually Exclusive Modal 6: Proactive Mail & Calendar Assistant Setup / Edit */}
+      <CaModal
+        open={modal?.kind === 'assistant-setup'}
+        onOpenChange={open => {
+          if (!open && !assistantBusy) {
+            setAssistantFormError('');
+            setModal(null);
+          }
+        }}
+        title={
+          modal?.kind === 'assistant-setup' && modal.isEdit
+            ? t('编辑主动邮箱与日程管家', 'Edit Proactive Mail & Calendar Assistant')
+            : modal?.kind === 'assistant-setup' && modal.postOAuth
+              ? t('账号已连接 · 开启主动邮箱与日程感知？', 'Account Connected · Enable Proactive Assistant?')
+              : t('配置主动邮箱与日程管家', 'Set Up Proactive Mail & Calendar Assistant')
+        }
+        description={t('选择由独立专职管家 Bot 或已有 Bot 在后台聚合新邮件与会前日程提醒；随时可在账号或规则页修改。', 'Choose a dedicated assistant Bot or an existing Bot to batch incoming mail and pre-meeting reminders. You can change or pause this anytime.')}
+        variant="modal"
+        wide
+      >
+        <form className="ca-form-stack" onSubmit={e => void handleSubmitAssistant(e)}>
+          <div
+            className="ca-google-assistant-options"
+            role="radiogroup"
+            aria-label={t('选择主动管家运行方式', 'Choose proactive assistant mode')}
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={assistantMode === 'dedicated'}
+              disabled={assistantBusy}
+              className={`ca-google-assistant-option${assistantMode === 'dedicated' ? ' is-selected' : ''}`}
+              onClick={() => handleSelectAssistantMode('dedicated')}
+            >
+              <span
+                className={`ca-google-assistant-radio${assistantMode === 'dedicated' ? ' is-checked' : ''}`}
+                aria-hidden="true"
+              />
+              <span className="ca-google-choice-text">
+                <span className="ca-row-title">
+                  <span>{t('选项 1：创建独立专职管家 Bot', 'Option 1: Create Dedicated Assistant Bot')}</span>
+                  <span className="ca-pill ca-pill-ok">{t('推荐', 'Recommended')}</span>
+                </span>
+                <span className="ca-row-sub">
+                  {t('独立会话与记忆，不干扰主 Bot，后台仅读信与草拟回复、绝不自动外发。', 'Isolated session and memory without crowding your main Bot; background runs read & draft replies only, never auto-send.')}
+                </span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              role="radio"
+              aria-checked={assistantMode === 'existing'}
+              disabled={assistantBusy}
+              className={`ca-google-assistant-option${assistantMode === 'existing' ? ' is-selected' : ''}`}
+              onClick={() => handleSelectAssistantMode('existing')}
+            >
+              <span
+                className={`ca-google-assistant-radio${assistantMode === 'existing' ? ' is-checked' : ''}`}
+                aria-hidden="true"
+              />
+              <span className="ca-google-choice-text">
+                <span className="ca-row-title">
+                  <span>{t('选项 2：交给已有 Bot（如主 Bot）', 'Option 2: Assign to Existing Bot (e.g. Main Bot)')}</span>
+                </span>
+                <span className="ca-row-sub">
+                  {t('无需切换聊天；后台邮件批次禁止自动发信，普通邮件按早晚简报合并以免占满主上下文，跨 Bot Skill 共享仍保持隔离。', 'No chat switching; background mail batches cannot auto-send, routine mail merges into scheduled digests to protect main context, and cross-Bot skill isolation stays intact.')}
+                </span>
+              </span>
+            </button>
+          </div>
+
+          {assistantMode === 'dedicated' ? (
+            <div className="ca-google-assistant-subcard">
+              {modal?.kind === 'assistant-setup' && modal.isEdit && assistant?.mode === 'dedicated' && (
+                <div className="ca-inline-between ca-wrap" style={{ gap: 8 }}>
+                  <span className="ca-field-label">
+                    {t('当前专职管家 Bot：', 'Current dedicated Bot: ')}
+                    {formatBotDisplay(assistant.deviceId, assistant.botId)}
+                  </span>
+                  <CaSegmented<'keep' | 'create'>
+                    value={assistantDedicatedAction}
+                    onChange={setAssistantDedicatedAction}
+                    ariaLabel={t('专职管家 Bot 策略', 'Dedicated Bot action')}
+                    options={[
+                      { value: 'keep', label: t('保留当前 Bot', 'Keep current Bot') },
+                      { value: 'create', label: t('新建替代 Bot', 'Create new Bot') },
+                    ]}
+                  />
+                </div>
+              )}
+
+              {!(
+                modal?.kind === 'assistant-setup' &&
+                modal.isEdit &&
+                assistant?.mode === 'dedicated' &&
+                assistantDedicatedAction === 'keep'
+              ) && (
+                <>
+                  {devices.length === 0 ? (
+                    <CaNotice tone="warn">
+                      {t('当前中心暂无已配对主机设备。请先在桌面端或手机端配对设备，或稍后再开启主动管家。', 'No paired host devices are available on this Center yet. Pair a device first, then configure the proactive assistant.')}
+                    </CaNotice>
+                  ) : (
+                    <div className="ca-grid-2">
+                      <div className="ca-field">
+                        <label className="ca-field-label" htmlFor="ca-google-assistant-device">
+                          {t('托管主机设备', 'Host device')}
+                          <span className="ca-req">*</span>
+                        </label>
+                        <select
+                          id="ca-google-assistant-device"
+                          className="ca-select"
+                          disabled={assistantBusy}
+                          value={assistantDeviceId}
+                          onChange={e => setAssistantDeviceId(e.target.value)}
+                        >
+                          <option value="">{t('请选择设备…', 'Select a device…')}</option>
+                          {devices.map(dev => (
+                            <option key={dev.deviceId} value={dev.deviceId}>
+                              {dev.name || dev.deviceId} ({platformLabel(dev.platform, t)}
+                              {dev.online ? t(' · 在线', ' · online') : t(' · 离线', ' · offline')})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="ca-field">
+                        <label className="ca-field-label" htmlFor="ca-google-assistant-bot-name">
+                          {t('专职管家 Bot 名称', 'Dedicated Bot name')}
+                          <span className="ca-req">*</span>
+                        </label>
+                        <input
+                          id="ca-google-assistant-bot-name"
+                          type="text"
+                          className="ca-input"
+                          maxLength={64}
+                          disabled={assistantBusy}
+                          placeholder={t('邮件与日程管家', 'Mail & Calendar Assistant')}
+                          value={assistantBotName}
+                          onChange={e => setAssistantBotName(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="ca-field">
+                    <label className="ca-field-label" htmlFor="ca-google-assistant-model">
+                      {t('模型选择（可选）', 'Model (optional)')}
+                    </label>
+                    <select
+                      id="ca-google-assistant-model"
+                      className="ca-select"
+                      disabled={assistantBusy}
+                      value={assistantModelRef}
+                      onChange={e => setAssistantModelRef(e.target.value)}
+                    >
+                      <option value="">
+                        {globalDefaultModelName
+                          ? t(`使用默认模型（${globalDefaultModelName}）`, `Use default model (${globalDefaultModelName})`)
+                          : t('使用默认模型', 'Use default model')}
+                      </option>
+                      {sortedPickerModels.map(m => (
+                        <option key={m.modelRef} value={m.modelRef}>
+                          {m.name} ({m.modelRef})
+                        </option>
+                      ))}
+                    </select>
+                    <p className="ca-field-help">
+                      {t('推荐选择响应快、成本较低的模型处理高频邮件批次与日程摘要。', 'Recommended: pick a fast, low-cost model for frequent mail batches and calendar summaries.')}
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="ca-google-assistant-subcard">
+              {activeBots.length === 0 ? (
+                <CaNotice tone="warn">
+                  {t('当前中心暂无可用 Bot。你可以切换到「选项 1」直接创建独立专职管家 Bot。', 'No active Bots found on this Center. Switch to Option 1 to create a dedicated assistant Bot.')}
+                </CaNotice>
+              ) : (
+                <div className="ca-field">
+                  <label className="ca-field-label" htmlFor="ca-google-assistant-existing-bot">
+                    {t('选择已有 Bot', 'Select existing Bot')}
+                    <span className="ca-req">*</span>
+                  </label>
+                  <select
+                    id="ca-google-assistant-existing-bot"
+                    className="ca-select"
+                    disabled={assistantBusy}
+                    value={assistantTargetBotKey}
+                    onChange={e => setAssistantTargetBotKey(e.target.value)}
+                  >
+                    <option value="">{t('请选择 Bot…', 'Select a Bot…')}</option>
+                    {botsByDevice.map(([devId, group]) => {
+                      const dev = group.device;
+                      const devSuffix = dev
+                        ? ` (${platformLabel(dev.platform, t)}${dev.online ? '' : t(' · 离线', ' · offline')})`
+                        : '';
+                      return (
+                        <optgroup key={devId} label={`${dev?.name || devId}${devSuffix}`}>
+                          {group.bots.map(b => (
+                            <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
+                              {b.name}
+                              {b.isPrimary ? t('（主 Bot）', ' (Primary)') : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      );
+                    })}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Watched Google Accounts multi-select */}
+          <div className="ca-field">
+            <span className="ca-field-label">
+              {t('监听的 Google 账号', 'Monitored Google accounts')}
+              <span className="ca-req">*</span>
+            </span>
+            <div className="ca-google-assistant-accounts" role="group" aria-label={t('选择要监听的 Google 账号', 'Choose Google accounts to monitor')}>
+              {accounts.map(acc => {
+                const checked = assistantAccounts.includes(acc.email);
+                const needsReconnect = isAccountReconnectRequired(acc);
+                return (
+                  <label key={acc.id || acc.email} className="ca-check-label">
+                    <input
+                      type="checkbox"
+                      disabled={assistantBusy}
+                      checked={checked}
+                      onChange={() => toggleAssistantAccount(acc.email)}
+                    />
+                    <span>
+                      {acc.email}
+                      {needsReconnect ? t('（需重连）', ' (needs reconnect)') : ''}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Batch window & Digest times */}
+          <div className="ca-grid-2">
+            <div className="ca-field">
+              <label className="ca-field-label" htmlFor="ca-google-assistant-batch">
+                {t('邮件批次聚合窗口（分钟）', 'Mail batch window (minutes)')}
+              </label>
+              <input
+                id="ca-google-assistant-batch"
+                type="number"
+                min={1}
+                max={1440}
+                step={1}
+                className="ca-input ca-num"
+                disabled={assistantBusy}
+                value={assistantBatchWindow}
+                onChange={e => setAssistantBatchWindow(e.target.value)}
+              />
+              <p className="ca-field-help">
+                {assistantMode === 'existing'
+                  ? t('高优邮件批次聚合间隔（1–1440 分钟，默认 10）', 'High-priority mail batch window (1–1440m, default 10)')
+                  : t('新邮件聚合窗口（1–1440 分钟，默认 10）', 'New mail batch window (1–1440m, default 10)')}
+              </p>
+            </div>
+
+            <div className="ca-field">
+              <label className="ca-field-label" htmlFor="ca-google-assistant-digest">
+                {t('定时简报时间（24 小时制，可选）', 'Digest times (24h HH:mm, optional)')}
+              </label>
+              <input
+                id="ca-google-assistant-digest"
+                type="text"
+                className="ca-input ca-mono"
+                disabled={assistantBusy}
+                placeholder="09:00, 18:00"
+                value={assistantDigestTimes}
+                onChange={e => {
+                  setAssistantDigestTimes(e.target.value);
+                  setAssistantDigestDirty(true);
+                }}
+              />
+              <p className="ca-field-help">
+                {t('逗号或空格分隔，最多 6 个；留空表示仅按批次聚合。', 'Comma or space separated, up to 6 slots; leave empty for batch-only.')}
+              </p>
+            </div>
+          </div>
+
+          {/* Calendar pre-meeting reminder */}
+          <div className="ca-google-assistant-switch-row">
+            <div className="ca-google-assistant-switch-text">
+              <span className="ca-field-label">{t('会前日程提醒', 'Pre-meeting calendar reminders')}</span>
+              <span className="ca-row-sub">
+                {t('自动在会议开始前汇总参会人与相关背景提醒你。', 'Remind you before upcoming meetings with attendee and mail context.')}
+              </span>
+              {assistantCalendarEnabled && (
+                <div className="ca-inline-row ca-mt-2" style={{ gap: 8 }}>
+                  <label className="ca-muted" htmlFor="ca-google-assistant-cal-lead">
+                    {t('提前分钟数（0–1440）', 'Lead minutes (0–1440)')}
+                  </label>
+                  <input
+                    id="ca-google-assistant-cal-lead"
+                    type="number"
+                    min={0}
+                    max={1440}
+                    step={1}
+                    className="ca-input ca-input-compact ca-num"
+                    style={{ width: 96 }}
+                    disabled={assistantBusy}
+                    value={assistantCalendarLead}
+                    onChange={e => setAssistantCalendarLead(e.target.value)}
+                  />
+                </div>
+              )}
+            </div>
+            <CaSwitch
+              checked={assistantCalendarEnabled}
+              disabled={assistantBusy}
+              label={t('启用会前日程提醒', 'Enable pre-meeting calendar reminders')}
+              onChange={setAssistantCalendarEnabled}
+            />
+          </div>
+
+          {/* Hindsight Private Memory toggle */}
+          <div className="ca-google-assistant-switch-row">
+            <div className="ca-google-assistant-switch-text">
+              <span className="ca-field-label">
+                {assistantMode === 'dedicated'
+                  ? t('允许管家使用自己的 Hindsight 私人记忆记住邮件偏好', 'Allow assistant to use its own Hindsight private memory for mail preferences')
+                  : t('允许将邮件偏好写入该 Bot 的主 Hindsight 记忆库', 'Allow saving mail preferences to this Bot’s primary Hindsight memory bank')}
+              </span>
+              <span className="ca-row-sub">
+                {assistantMode === 'dedicated'
+                  ? t('仅写入该专职管家 Bot 自己的私有主库，不向其他 Bot 或共享记忆外泄。', 'Writes only to this dedicated Bot’s private primary bank; never exported to shared memory or other Bots.')
+                  : t('默认关闭以保持主 Bot 长期记忆干净；如开启，仅限写入该 Bot 自己的私有主库。', 'Off by default to keep your main Bot’s memory clean; when enabled, strictly limited to its own private primary bank.')}
+              </span>
+            </div>
+            <CaSwitch
+              checked={assistantHindsight}
+              disabled={assistantBusy}
+              label={t('允许使用 Hindsight 私人记忆', 'Allow Hindsight private memory')}
+              onChange={next => {
+                setAssistantHindsight(next);
+                setAssistantHindsightDirty(true);
+              }}
+            />
+          </div>
+
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {assistantFormError ? (
+              <p className="ca-error-text" role="alert">
+                {assistantFormError}
+              </p>
+            ) : null}
+          </ReservedSlot>
+
+          <div className="ca-form-actions">
+            <button
+              type="button"
+              className="ca-btn"
+              disabled={assistantBusy}
+              onClick={() => {
+                setAssistantFormError('');
+                setModal(null);
+              }}
+            >
+              {modal?.kind === 'assistant-setup' && modal.isEdit
+                ? t('取消', 'Cancel')
+                : t('暂不开启', 'Not now')}
+            </button>
+            <button
+              type="submit"
+              className="ca-btn ca-btn-primary"
+              disabled={assistantBusy}
+              aria-busy={assistantBusy}
+            >
+              <LabelStack
+                active={
+                  assistantBusy
+                    ? modal?.kind === 'assistant-setup' && modal.isEdit
+                      ? t('保存中…', 'Saving…')
+                      : t('正在启用…', 'Enabling…')
+                    : modal?.kind === 'assistant-setup' && modal.isEdit
+                      ? t('保存设置', 'Save settings')
+                      : t('启用主动感知', 'Enable proactive assistant')
+                }
+                labels={[
+                  t('启用主动感知', 'Enable proactive assistant'),
+                  t('正在启用…', 'Enabling…'),
+                  t('保存设置', 'Save settings'),
+                  t('保存中…', 'Saving…'),
+                ]}
+              />
+            </button>
+          </div>
+        </form>
+      </CaModal>
+
+      {/* Mutually Exclusive Modal 7: Confirm Remove Proactive Assistant Binding */}
+      <CaConfirmDialog
+        open={modal?.kind === 'confirm-remove-assistant'}
+        title={t('移除主动邮箱与日程管家绑定', 'Remove Proactive Assistant Binding')}
+        description={
+          assistant
+            ? t(`移除与「${formatBotDisplay(assistant.deviceId, assistant.botId)}」的主动管家绑定后，后台新邮件与会前聚合推送将停止；不会删除该 Bot，也不会撤销 Google 账号授权。`, `Removing the proactive assistant binding for "${formatBotDisplay(assistant.deviceId, assistant.botId)}" stops background mail and calendar batching without deleting the Bot or revoking Google access.`)
+            : ''
+        }
+        confirmLabel={assistantRemoving ? t('正在移除…', 'Removing…') : t('移除绑定', 'Remove binding')}
+        cancelLabel={t('取消', 'Cancel')}
+        danger
+        busy={assistantRemoving}
+        onCancel={() => {
+          if (!assistantRemoving) setModal(null);
+        }}
+        onConfirm={() => void handleConfirmRemoveAssistant()}
       />
     </div>
   );

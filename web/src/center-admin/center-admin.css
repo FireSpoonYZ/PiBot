@@ -1093,6 +1093,7 @@ a.ca-btn:focus {
 }
 
 .ca-dialog-header {
+  flex-shrink: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1128,6 +1129,31 @@ a.ca-btn:focus {
   container-type: inline-size;
 }
 
+.ca-dialog-body-flex {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ca-dialog-body-flex > .ca-notice {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.ca-dialog-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px) 18px;
+  border-top: 1px solid var(--ca-border);
+  background: var(--ca-surface);
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+
 .ca-confirm-body {
   display: flex;
   flex-direction: column;
@@ -1159,8 +1185,10 @@ a.ca-btn:focus {
   padding-top: calc(14px + var(--top, env(safe-area-inset-top, 0px)));
 }
 
-.ca-dialog-content.is-drawer > .ca-dialog-body,
-.ca-modal-content.is-drawer > .ca-dialog-body {
+.ca-dialog-content.is-drawer > .ca-dialog-body:last-child,
+.ca-modal-content.is-drawer > .ca-dialog-body:last-child,
+.ca-dialog-content.is-drawer > .ca-dialog-footer,
+.ca-modal-content.is-drawer > .ca-dialog-footer {
   padding-bottom: calc(
     var(--space-4, 16px) +
     max(var(--bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px), 0px) +
@@ -1225,11 +1253,13 @@ a.ca-btn:focus {
   appearance: none;
   border: none;
   border-bottom: 1px solid var(--ca-border);
+  border-radius: 0;
   background: transparent;
   color: var(--ca-text);
   text-align: left;
   font: inherit;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   padding: 9px var(--space-3, 12px);
   display: flex;
   align-items: center;
@@ -1273,6 +1303,7 @@ a.ca-btn:focus {
 .ca-model-option-trigger {
   appearance: none;
   border: none;
+  border-radius: 0;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1282,10 +1313,15 @@ a.ca-btn:focus {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 0;
+  min-height: auto;
   flex: 1;
   padding: 9px var(--space-3, 12px);
   transition: background var(--ca-dur-fast) var(--ca-ease-out);
+}
+
+.ca-model-option-trigger .ca-mono,
+.ca-model-option-main .ca-mono {
+  overflow-wrap: anywhere;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -1438,7 +1474,8 @@ a.ca-btn:focus {
   font: inherit;
   font-size: var(--text-sm, 13px);
   white-space: nowrap;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   padding: 6px 10px;
   border-radius: 5px;
   cursor: pointer;
@@ -1938,6 +1975,10 @@ a.ca-btn:focus {
   max-width: 100%;
 }
 
+.ca-discover-bar {
+  flex-shrink: 0;
+}
+
 .ca-discover-search {
   flex: 1 1 140px;
   min-width: 0;
@@ -1949,6 +1990,33 @@ a.ca-btn:focus {
   width: 160px;
   min-width: 0;
   max-width: 100%;
+}
+
+.ca-discover-summary {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ca-discover-list {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
+}
+
+.ca-model-option.ca-discover-option {
+  justify-content: flex-start;
+}
+
+.ca-model-option.ca-discover-option > input[type='checkbox'] {
+  flex-shrink: 0;
+}
+
+.ca-model-option.ca-discover-option > .ca-model-option-main {
+  flex: 1;
 }
 
 .ca-oauth-bot-select {
@@ -2102,7 +2170,6 @@ a.ca-btn:focus {
   .ca-search-compact,
   .ca-select-compact,
   .ca-picker-search,
-  .ca-discover-device,
   .ca-probe-select,
   .ca-oauth-bot-select,
   .ca-google-filter-select {
@@ -2179,8 +2246,7 @@ a.ca-btn:focus {
   .ca-oauth-input-row,
   .ca-cred-box .ca-inline-row,
   .ca-array-box .ca-inline-row,
-  .ca-skill-subfile-row,
-  .ca-discover-bar {
+  .ca-skill-subfile-row {
     flex-direction: column;
     align-items: stretch;
   }
@@ -2190,6 +2256,20 @@ a.ca-btn:focus {
   }
 
   .ca-rename-row {
+    max-width: 100%;
+  }
+}
+
+@container (max-width: 420px) {
+  .ca-discover-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ca-discover-bar > .ca-discover-search,
+  .ca-discover-bar > .ca-discover-device {
+    flex: 0 0 auto;
+    width: 100%;
     max-width: 100%;
   }
 }
@@ -2268,7 +2348,6 @@ a.ca-btn:focus {
   .ca-search-compact,
   .ca-select-compact,
   .ca-picker-search,
-  .ca-discover-device,
   .ca-probe-select,
   .ca-oauth-bot-select {
     width: 100%;
@@ -2359,6 +2438,13 @@ a.ca-btn:focus {
     align-items: stretch;
   }
 
+  .ca-discover-bar > .ca-discover-search,
+  .ca-discover-bar > .ca-discover-device {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
+  }
+
   .ca-probe-actions {
     width: 100%;
   }
@@ -2377,7 +2463,8 @@ a.ca-btn:focus {
   }
 
   .ca-dialog-header,
-  .ca-dialog-body {
+  .ca-dialog-body,
+  .ca-dialog-footer {
     padding-left: var(--space-4, 16px);
     padding-right: var(--space-4, 16px);
   }
@@ -2691,7 +2778,8 @@ a.ca-btn:focus {
 .ca-google-choice {
   appearance: none;
   width: 100%;
-  min-height: 0;
+  flex-shrink: 0;
+  min-height: auto;
   text-align: left;
   font: inherit;
   color: var(--ca-text);
@@ -2825,10 +2913,159 @@ a.ca-btn:focus {
   font-size: 12.5px;
 }
 
+/* Proactive Google Mail & Calendar Assistant */
+.ca-google-assistant-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 14px;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--ca-border);
+  background: var(--ca-surface-2);
+}
+
+.ca-google-assistant-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ca-google-assistant-meta-label {
+  font-size: 11.5px;
+  color: var(--ca-text-muted);
+}
+
+.ca-google-assistant-meta-value {
+  font-size: 13px;
+  color: var(--ca-text);
+  overflow-wrap: anywhere;
+}
+
+.ca-google-assistant-runtime {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--ca-border);
+  font-size: 12px;
+  color: var(--ca-text-muted);
+}
+
+.ca-google-assistant-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ca-google-assistant-option {
+  appearance: none;
+  width: 100%;
+  flex-shrink: 0;
+  min-height: auto;
+  text-align: left;
+  font: inherit;
+  color: var(--ca-text);
+  background: var(--ca-surface);
+  border: 1px solid var(--ca-border-strong);
+  border-radius: var(--ca-radius-sm);
+  padding: 11px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--ca-dur-fast) var(--ca-ease-out),
+    border-color var(--ca-dur-fast) var(--ca-ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ca-google-assistant-option:hover:not(:disabled) {
+    background: var(--ca-surface-2);
+  }
+}
+
+.ca-google-assistant-option:focus-visible {
+  outline: 2px solid var(--ca-accent);
+  outline-offset: 2px;
+}
+
+.ca-google-assistant-option.is-selected {
+  border-color: var(--ca-accent);
+  background: var(--ca-info-bg);
+}
+
+.ca-google-assistant-radio {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ca-border-strong);
+  background: var(--ca-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ca-google-assistant-radio.is-checked {
+  border-color: var(--ca-accent);
+}
+
+.ca-google-assistant-radio.is-checked::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ca-accent);
+}
+
+.ca-google-assistant-subcard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--ca-radius-sm);
+  border: 1px solid var(--ca-border);
+  background: var(--ca-surface-2);
+}
+
+.ca-google-assistant-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--ca-radius-sm);
+  border: 1px solid var(--ca-border);
+  background: var(--ca-surface);
+}
+
+.ca-google-assistant-switch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--ca-radius-sm);
+  border: 1px solid var(--ca-border);
+  background: var(--ca-surface);
+}
+
+.ca-google-assistant-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
 @media (max-width: 640px) {
   .ca-google-subbar,
-  .ca-google-account {
-    padding: 12px;
+  .ca-google-account,
+  .ca-google-assistant-meta,
+  .ca-google-assistant-runtime {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 
   .ca-google-filter-select {
@@ -2938,6 +3175,7 @@ a.ca-btn:focus {
   .ca-card-disclosure-head,
   .ca-card-disclosure-chevron,
   .ca-google-choice,
+  .ca-google-assistant-option,
   .ca-refresh-bar {
     transition: none;
   }

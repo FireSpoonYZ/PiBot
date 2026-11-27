@@ -7,179 +7,602 @@ import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { SharedMcpBridge } from '../../center-server/antigravity/mcp-bridge.ts';
+import { POLL_TOOL_NAME, RunToolWaiters } from '../../center-server/antigravity/tool-waiters.ts';
 import {
-  createControlledAcpDriverHarness, openIsolatedAntigravity, closeAndRemove,
-  drainEventStream, BASE_SYSTEM, MODEL_ID, toolResult,
+  collectRunEvents,
+  createControlledAcpDriverHarness,
+  openAntigravity,
+  waitUntil,
 } from './helpers/antigravity-sync-harness.mjs';
 
 const requireCenter = createRequire(new URL('../../center-server/package.json', import.meta.url));
 const transportEntry = requireCenter.resolve('@modelcontextprotocol/sdk/server/streamableHttp.js');
-// The locked SDK exposes separate CJS and ESM builds. Resolve from Center's
-// dependencies, then load its ESM sibling so the mock targets the exact class
-// used by mcp-bridge.ts rather than an independent CJS prototype.
 const transportEsmEntry = path.resolve(path.dirname(transportEntry), '../../esm/server/streamableHttp.js');
 const { StreamableHTTPServerTransport } = await import(pathToFileURL(transportEsmEntry).href);
 
-const headers = token => ({
+const MODEL_ID = 'gemini-4-hydrogen';
+const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1cAAAAASUVORK5CYII=';
+
+const mcpHeaders = (token, extra = {}) => ({
   'content-type': 'application/json',
   accept: 'application/json, text/event-stream',
   'x-bridge-token': token,
+  ...extra,
 });
 
-test('MCP preserves UTF-8 tool arguments when a character crosses HTTP chunks', { timeout: 15_000 }, async t => {
+function readRpcResponse(body, id = 1) {
+  if (body.trimStart().startsWith('{')) return JSON.parse(body);
+  const frames = body
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => JSON.parse(line.slice('data:'.length).trim()));
+  return frames.find((frame) => frame.id === id) ?? frames.at(-1);
+}
+
+test('SharedMcpBridge handles split UTF-8, /.well-known/ 404, non-POST 405, protocol downgrade 2026-07-28, and token isolation', { timeout: 15_000 }, async (t) => {
   const bridge = new SharedMcpBridge();
-  let observed;
-  const registration = bridge.registerSession({
-    listTools: () => [],
-    async onToolCall(_id, _name, args) {
-      observed = args;
-      return { content: [{ type: 'text', text: 'ok' }] };
+  const observedCalls = [];
+  const regA = bridge.registerSession({
+    listTools: () => [{ name: 'write_file', description: 'Write', inputSchema: { type: 'object', properties: {} } }],
+    async onToolCall(_callId, name, args) {
+      observedCalls.push({ owner: 'A', name, args });
+      return { content: [{ type: 'text', text: `A:${args.content ?? 'ok'}` }] };
     },
   });
+  const regB = bridge.registerSession({
+    listTools: () => [],
+    async onToolCall(_callId, name, args) {
+      observedCalls.push({ owner: 'B', name, args });
+      return { content: [{ type: 'text', text: 'B:ok' }] };
+    },
+  });
+
   try {
     await bridge.ensureStarted();
-    const content = '中文😀END';
+    const mcpUrl = bridge.serverConfig(regA.token).url;
+    const baseUrl = new URL(mcpUrl).origin;
+
+    // 1. /.well-known/ returns 404 for GET and POST
+    assert.equal((await fetch(`${baseUrl}/.well-known/oauth-protected-resource`, { signal: t.signal })).status, 404);
+    assert.equal((await fetch(`${baseUrl}/.well-known/oauth-authorization-server`, { method: 'POST', signal: t.signal })).status, 404);
+
+    // 2. Non-POST methods return 405
+    assert.equal((await fetch(mcpUrl, { method: 'GET', headers: { 'x-bridge-token': regA.token }, signal: t.signal })).status, 405);
+    assert.equal((await fetch(mcpUrl, { method: 'DELETE', headers: { 'x-bridge-token': regA.token }, signal: t.signal })).status, 405);
+
+    // 3. Cross-chunk UTF-8 tool arguments decode without corruption
+    const utf8Text = '中文😀END';
     const bytes = Buffer.from(JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'tools/call',
-      params: { name: 'write_file', arguments: { content } },
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'write_file', arguments: { content: utf8Text } },
     }));
     const split = bytes.indexOf(Buffer.from('中')) + 1;
-    const finished = Promise.withResolvers();
-    const req = http.request(bridge.serverConfig(registration.token).url, {
-      method: 'POST', headers: headers(registration.token), signal: t.signal,
-    }, res => {
-      res.once('error', finished.reject);
-      res.once('end', () => finished.resolve(res.statusCode));
-      res.resume();
+    const chunked = Promise.withResolvers();
+    const req = http.request(mcpUrl, {
+      method: 'POST',
+      headers: mcpHeaders(regA.token),
+      signal: t.signal,
+    }, (res) => {
+      const parts = [];
+      res.on('data', (d) => parts.push(d));
+      res.once('error', chunked.reject);
+      res.once('end', () => chunked.resolve({ status: res.statusCode, body: Buffer.concat(parts).toString('utf8') }));
     });
-    req.once('error', finished.reject);
+    req.once('error', chunked.reject);
+    req.setNoDelay?.(true);
     req.write(bytes.subarray(0, split));
-    await new Promise(resolve => setTimeout(resolve, 15));
+    await new Promise((resolve) => setTimeout(resolve, 15));
     req.end(bytes.subarray(split));
-    assert.equal(await finished.promise, 200);
-    assert.equal(observed.content, content);
+    const chunkedRes = await chunked.promise;
+    assert.equal(chunkedRes.status, 200);
+    assert.equal(readRpcResponse(chunkedRes.body).result.content[0].text, `A:${utf8Text}`);
+
+    // 4. mcp-protocol-version: 2026-07-28 downgrade works for both tools/list and tools/call
+    const listRes = await fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders(regA.token, { 'mcp-protocol-version': '2026-07-28' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    });
+    assert.equal(listRes.status, 200);
+    assert.equal(readRpcResponse(await listRes.text(), 2).result.tools[0].name, 'write_file');
+
+    const callRes = await fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders(regA.token, { 'mcp-protocol-version': '2026-07-28' }),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'write_file', arguments: { content: 'v2026' } } }),
+    });
+    assert.equal(callRes.status, 200);
+    assert.equal(readRpcResponse(await callRes.text(), 3).result.content[0].text, 'A:v2026');
+
+    // 5. Token isolation and 403 after unregister
+    const badRes = await fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders('wrong-token'),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} }),
+    });
+    assert.equal(badRes.status, 403);
+
+    regA.unregister();
+    const retiredRes = await fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders(regA.token),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'write_file', arguments: {} } }),
+    });
+    assert.equal(retiredRes.status, 403);
+
+    const bRes = await fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders(regB.token),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'write_file', arguments: {} } }),
+    });
+    assert.equal(bRes.status, 200);
+    assert.equal(readRpcResponse(await bRes.text(), 6).result.content[0].text, 'B:ok');
   } finally {
-    registration.unregister();
+    regA.unregister();
+    regB.unregister();
     await bridge.close();
   }
 });
 
-function readRpcResponse(body) {
-  if (body.trimStart().startsWith('{')) return JSON.parse(body);
-  const frames = body.split('\n')
-    .filter(line => line.startsWith('data:'))
-    .map(line => JSON.parse(line.slice('data:'.length).trim()));
-  return frames.find(frame => frame.id === 1);
-}
-
-async function httpToolRoundTrip(t, { failResponse = false, nativeToolError = false } = {}) {
-  const driver = createControlledAcpDriverHarness(t);
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-http-delivery-'));
-  const service = openIsolatedAntigravity(rootDir);
-  const requestAbort = new AbortController();
-  const requestSignal = AbortSignal.any([requestAbort.signal, t.signal]);
-  const marker = 'ACTUAL_HOST_TOOL_RESULT_DELIVERY_MARKER';
-  let failed = false;
-  let received;
-  let transportError;
-
-  if (failResponse) {
-    const original = StreamableHTTPServerTransport.prototype.send;
-    t.mock.method(StreamableHTTPServerTransport.prototype, 'send', async function (message, ...rest) {
-      if (JSON.stringify(message).includes(marker)) {
-        failed = true;
-        requestAbort.abort();
-        throw new Error('injected MCP response send failure');
-      }
-      return original.call(this, message, ...rest);
-    });
-  }
-
-  driver.setOnRun(async ctx => {
-    if (driver.runs.length === 1) {
-      const args = { path: 'fixture.txt' };
-      ctx.emit({ type: 'tool_start', toolCallId: 'native-read', name: 'read_file', args, mcpServer: 'pibot-bridge' });
-      try {
-        const res = await fetch(ctx.mcp.bridge.serverConfig(ctx.mcp.token).url, {
-          method: 'POST', headers: headers(ctx.mcp.token), signal: requestSignal,
-          body: JSON.stringify({
-            jsonrpc: '2.0', id: 1, method: 'tools/call',
-            params: { name: 'read_file', arguments: args },
-          }),
-        });
-        received = { status: res.status, frame: readRpcResponse(await res.text()) };
-      } catch (err) {
-        // Native agy can still end normally after a tool transport failure.
-        // The Center must independently prevent an uncertain ready checkpoint.
-        transportError = err;
-      }
-      if (nativeToolError) {
-        ctx.emit({
-          type: 'tool_error', toolCallId: 'native-read', name: 'read_file',
-          message: 'native failed to consume', mcpServer: 'pibot-bridge',
-        });
-      }
-    }
-    const reply = driver.runs.length === 1 ? 'native tool turn ended' : 'follow-up completed';
-    ctx.emit({ type: 'text', delta: reply });
-    ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: reply, finished: true, aborted: false });
+test('Connection-level MCP token is reused across hot runs, captureContext rejects stale run without poisoning token', { timeout: 15_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-token-reuse-'));
+  const contexts = [];
+  const harness = createControlledAcpDriverHarness((ctx) => {
+    contexts.push(ctx);
+  });
+  const service = openAntigravity({
+    dataRoot: root,
+    bin: 'mocked-agy',
+    geminiHome: path.join(root, 'antigravity', 'gemini'),
   });
 
-  const user = { role: 'user', content: 'Read fixture.txt and remember its result.', timestamp: 10 };
-  const send = messages => drainEventStream(service.stream({
-    deviceId: 'http-delivery', sessionId: 'http-delivery', modelId: MODEL_ID, messages,
-    turnContext: { inputIndex: messages.length - 1, auxiliaryIndices: [] },
-  }));
   try {
-    const first = await send([BASE_SYSTEM, user]);
-    assert.equal(first.terminal.reason, 'toolUse');
-    const call = first.terminal.message.content.find(block => block.type === 'toolCall');
-    assert.ok(call, 'real MCP HTTP tools/call must park a Host tool call');
-    const history = [BASE_SYSTEM, user, first.terminal.message, toolResult(call.id, call.name, marker, 12)];
-    const result = await send(history);
-    if (failResponse) {
-      assert.equal(failed, true, 'failure injection must target the production ESM transport');
-      assert.ok(transportError, 'the native HTTP client must observe the failed response');
-    } else {
-      assert.equal(received?.status, 200);
-      assert.equal(received.frame.result.isError, false);
-      assert.deepEqual(received.frame.result.content, [{ type: 'text', text: marker }]);
-      assert.equal(transportError, undefined);
-    }
+    // Run 1 starts on hot session
+    const run1EventsPromise = collectRunEvents(service.run({
+      deviceId: 'dev-reuse',
+      sessionId: 'sess-reuse',
+      runId: 'run-reuse-1',
+      modelId: MODEL_ID,
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: {} } }],
+      inputs: [{ text: 'First turn' }],
+    }));
+    const ctx1 = await waitUntil(() => contexts[0], { label: 'run 1 context' });
+    const token1 = ctx1.mcp.token;
+    const mcpUrl = ctx1.mcp.bridge.serverConfig(token1).url;
 
-    if (failResponse || nativeToolError) {
-      assert.equal(result.terminal.type, 'error', 'uncertain tool delivery must not acknowledge a ready native history');
-    } else {
-      assert.equal(result.terminal.type, 'done');
-      assert.equal(result.terminal.reason, 'stop');
-      history.push(result.terminal.message);
+    // Spy on captureContext so we deterministically know the HTTP request entered during Run 1
+    // and captured Run 1's reference BEFORE its body finishes arriving.
+    const capturedInRun1 = Promise.withResolvers();
+    const origCapture = ctx1.mcp.handler.captureContext;
+    ctx1.mcp.handler.captureContext = () => {
+      const value = origCapture();
+      capturedInRun1.resolve(value);
+      return value;
+    };
+
+    const staleBody = Buffer.from(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'from-run-1.txt' } },
+    }));
+    const staleResponse = Promise.withResolvers();
+    const staleReq = http.request(mcpUrl, {
+      method: 'POST',
+      headers: mcpHeaders(token1),
+      signal: t.signal,
+    }, (res) => {
+      const parts = [];
+      res.on('data', (d) => parts.push(d));
+      res.once('error', staleResponse.reject);
+      res.once('end', () => staleResponse.resolve({ status: res.statusCode, body: Buffer.concat(parts).toString('utf8') }));
+    });
+    staleReq.once('error', staleResponse.reject);
+    staleReq.setNoDelay?.(true);
+    staleReq.flushHeaders();
+    staleReq.write(staleBody.subarray(0, 10));
+    await capturedInRun1.promise;
+    ctx1.mcp.handler.captureContext = origCapture;
+
+    // Finish Run 1 while keeping driver alive (hot connection!)
+    ctx1.emit({ type: 'text', delta: 'run-1-done' });
+    ctx1.finish();
+    const run1Events = await run1EventsPromise;
+    assert.equal(run1Events.at(-1)?.type, 'turn_done');
+
+    // Start Run 2 on the exact same session -> MUST reuse connection-level MCP token (no rotation!).
+    const stream2 = service.run({
+      deviceId: 'dev-reuse',
+      sessionId: 'sess-reuse',
+      runId: 'run-reuse-2',
+      modelId: MODEL_ID,
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: {} } }],
+      inputs: [{ text: 'Second turn' }],
+    });
+    const iter2 = stream2[Symbol.asyncIterator]();
+    const ctx2 = await waitUntil(() => contexts[1], { label: 'run 2 context' });
+    assert.equal(ctx2.mcp.token, token1, 'hot connection must reuse the same connection-level MCP token');
+    assert.equal(harness.mcpRegistrations.length, 1);
+
+    // Now finish sending the delayed Run 1 request body during Run 2.
+    staleReq.end(staleBody.subarray(10));
+    const staleRes = await staleResponse.promise;
+    assert.equal(staleRes.status, 200);
+    const staleRpc = readRpcResponse(staleRes.body, 10);
+    assert.equal(staleRpc.result.isError, true, 'delayed call captured during Run 1 must be rejected as isError');
+    assert.match(staleRpc.result.content[0].text, /inactive run/);
+
+    // Verify the connection-level token was NOT poisoned: Run 2 can still execute a real tool call over the SAME token!
+    const freshCallPromise = fetch(mcpUrl, {
+      method: 'POST',
+      signal: t.signal,
+      headers: mcpHeaders(token1),
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: { name: 'read_file', arguments: { path: 'from-run-2.txt' } },
+      }),
+    }).then(async (res) => ({ status: res.status, frame: readRpcResponse(await res.text(), 11) }));
+
+    const toolReqStep = await iter2.next();
+    assert.equal(toolReqStep.done, false);
+    assert.equal(toolReqStep.value.type, 'tool_request');
+    assert.equal(toolReqStep.value.name, 'read_file');
+    assert.deepEqual(toolReqStep.value.args, { path: 'from-run-2.txt' });
+
+    await service.submitToolResult({
+      deviceId: 'dev-reuse',
+      sessionId: 'sess-reuse',
+      runId: 'run-reuse-2',
+      callId: toolReqStep.value.callId,
+      content: [{ type: 'text', text: 'run-2-tool-ok' }],
+      isError: false,
+    });
+
+    const freshRes = await freshCallPromise;
+    assert.equal(freshRes.status, 200);
+    assert.equal(freshRes.frame.result.isError, false);
+    assert.deepEqual(freshRes.frame.result.content, [{ type: 'text', text: 'run-2-tool-ok' }]);
+
+    ctx2.emit({ type: 'text', delta: 'run-2-done' });
+    ctx2.finish();
+    const run2Rest = [];
+    for (;;) {
+      const next = await iter2.next();
+      if (next.done) break;
+      run2Rest.push(next.value);
     }
-    const next = await send([...history, { role: 'user', content: 'Continue using the file result.', timestamp: 20 }]);
-    assert.equal(next.terminal.reason, 'stop');
-    assert.equal(driver.runs.length, 2, 'the first continuation must reenter its parked native turn');
-    const followUp = driver.runs[1].request;
-    if (failResponse || nativeToolError) {
-      assert.equal(followUp.conversationId, null, 'uncertain native history must be rebuilt');
-      assert.ok(followUp.contextBlock?.text.includes(marker), 'full replay must retain the actual Host tool result');
-      assert.ok(followUp.contextBlock.text.includes(call.id), 'full replay must preserve the corresponding tool call');
-      assert.ok(followUp.contextBlock.text.includes(user.content));
-    } else {
-      assert.equal(followUp.conversationId, driver.runs[0].assignedConversationId, 'successful HTTP delivery must retain the reusable binding');
+    assert.equal(run2Rest.at(-1)?.type, 'turn_done');
+  } finally {
+    await service.close();
+    harness.restore();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP transport write failure triggers onDeliveryError, aborts active run, and recycles connection', { timeout: 15_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-delivery-err-'));
+  const marker = 'DELIVERY_WRITE_FAILURE_MARKER';
+  const requestAbort = new AbortController();
+  let injectedFailure = false;
+
+  const origSend = StreamableHTTPServerTransport.prototype.send;
+  t.mock.method(StreamableHTTPServerTransport.prototype, 'send', async function (message, ...rest) {
+    if (JSON.stringify(message).includes(marker)) {
+      injectedFailure = true;
+      throw new Error('injected MCP transport write failure');
     }
+    return origSend.call(this, message, ...rest);
+  });
+
+  const httpDone = Promise.withResolvers();
+  const harness = createControlledAcpDriverHarness(async (ctx) => {
+    if (harness.runs.length === 1) {
+      const url = ctx.mcp.bridge.serverConfig(ctx.mcp.token).url;
+      try {
+        await fetch(url, {
+          method: 'POST',
+          headers: mcpHeaders(ctx.mcp.token),
+          signal: AbortSignal.any([requestAbort.signal, t.signal]),
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'read_file', arguments: { path: 'x.txt' } },
+          }),
+        });
+      } catch {
+        // Expected when server transport fails mid-write.
+      } finally {
+        httpDone.resolve();
+      }
+      // Even if native ACP still attempts to finish OK, Center must fail closed due to onDeliveryError.
+      ctx.emit({ type: 'text', delta: 'must-not-succeed' });
+      ctx.finish();
+      return;
+    }
+    ctx.emit({ type: 'text', delta: 'recovered-after-recycle' });
+    ctx.finish();
+  });
+
+  const service = openAntigravity({
+    dataRoot: root,
+    bin: 'mocked-agy',
+    geminiHome: path.join(root, 'antigravity', 'gemini'),
+  });
+
+  try {
+    const stream1 = service.run({
+      deviceId: 'dev-deliv',
+      sessionId: 'sess-deliv',
+      runId: 'run-deliv-1',
+      modelId: MODEL_ID,
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: {} } }],
+      inputs: [{ text: 'Call tool with delivery failure' }],
+    });
+    const iter1 = stream1[Symbol.asyncIterator]();
+    const reqStep = await iter1.next();
+    assert.equal(reqStep.value?.type, 'tool_request');
+
+    await service.submitToolResult({
+      deviceId: 'dev-deliv',
+      sessionId: 'sess-deliv',
+      runId: 'run-deliv-1',
+      callId: reqStep.value.callId,
+      content: [{ type: 'text', text: marker }],
+      isError: false,
+    });
+    await httpDone.promise;
+
+    const rest1 = [];
+    for (;;) {
+      const step = await iter1.next();
+      if (step.done) break;
+      rest1.push(step.value);
+    }
+    assert.equal(injectedFailure, true, 'failure injection must hit the ESM StreamableHTTPServerTransport');
+    assert.equal(rest1.at(-1)?.type, 'error', 'delivery failure must fail the run rather than emitting turn_done');
+    assert.match(rest1.at(-1)?.message ?? '', /injected MCP transport write failure/);
+    assert.ok(harness.closes.some((c) => c.reason === 'recycle' && c.cause === 'mcp delivery error'));
+    assert.equal(harness.mcpRegistrations[0]?.unregistered, true);
+
+    // Subsequent run on the same session obtains a fresh MCP token after connection recycle.
+    const events2 = await collectRunEvents(service.run({
+      deviceId: 'dev-deliv',
+      sessionId: 'sess-deliv',
+      runId: 'run-deliv-2',
+      modelId: MODEL_ID,
+      tools: [{ name: 'read_file', parameters: { type: 'object', properties: {} } }],
+      inputs: [{ text: 'Fresh run after recycle' }],
+    }));
+    assert.equal(events2.at(-1)?.type, 'turn_done');
+    assert.equal(harness.mcpRegistrations.length, 2);
+    assert.notEqual(harness.mcpRegistrations[1].token, harness.mcpRegistrations[0].token);
   } finally {
     requestAbort.abort();
-    await closeAndRemove({ antigravity: service, rootDir });
+    await service.close();
+    harness.restore();
+    fs.rmSync(root, { recursive: true, force: true });
   }
-}
-
-test('MCP HTTP send failure cannot acknowledge a successful Host tool result', { timeout: 15_000 }, async t => {
-  await httpToolRoundTrip(t, { failResponse: true });
 });
 
-test('MCP HTTP successful result delivery retains the native binding', { timeout: 15_000 }, async t => {
-  await httpToolRoundTrip(t);
+test('RunToolWaiters returns standard MCP text + image blocks directly on normal resolution', async () => {
+  const requests = [];
+  const inFlightHistory = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: (ev) => requests.push(ev),
+    onInFlightChange: (count) => inFlightHistory.push(count),
+  });
+
+  const ac = new AbortController();
+  const pending = waiters.handleToolCall('call-img-1', 'codemode', { code: 'read("pic.png")' }, ac.signal);
+  assert.deepEqual(requests, [{ callId: 'call-img-1', name: 'codemode', args: { code: 'read("pic.png")' } }]);
+  assert.deepEqual(inFlightHistory, [1]);
+
+  assert.equal(
+    waiters.resolve('call-img-1', [
+      { type: 'text', text: 'image loaded' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+  assert.equal(waiters.resolve('call-img-1', 'duplicate', false), false);
+
+  const result = await pending;
+  assert.deepEqual(result, {
+    content: [
+      { type: 'text', text: 'image loaded' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ],
+    isError: false,
+  });
+  assert.deepEqual(inFlightHistory, [1, 0]);
+  assert.equal(waiters.inFlightCount, 0);
 });
 
-test('MCP native bridge tool_error invalidates an otherwise successful turn', { timeout: 15_000 }, async t => {
-  await httpToolRoundTrip(t, { nativeToolError: true });
+test('RunToolWaiters escalates slow tools to STILL RUNNING + callId and bridge_poll_result retrieves full text + image without re-running', { timeout: 10_000 }, async () => {
+  const requests = [];
+  const inFlightHistory = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 40,
+    onToolRequest: (ev) => requests.push(ev),
+    onInFlightChange: (count) => inFlightHistory.push(count),
+  });
+  const ac = new AbortController();
+
+  // 1. Direct call escalates after 40ms
+  const ack = await waiters.handleToolCall('slow-call-1', 'codemode', { code: 'slow()' }, ac.signal);
+  assert.equal(requests.length, 1);
+  assert.equal(ack.isError, false);
+  assert.match(ack.content[0].text, /STILL RUNNING/);
+  assert.ok(ack.content[0].text.includes('slow-call-1'));
+  assert.ok(ack.content[0].text.includes(POLL_TOOL_NAME));
+  assert.equal(waiters.inFlightCount, 1);
+
+  // 2. First poll while still executing also returns STILL RUNNING without re-running tool
+  const stillRunning = await waiters.handleToolCall('poll-1', POLL_TOOL_NAME, { callId: 'slow-call-1' }, ac.signal);
+  assert.equal(stillRunning.isError, false);
+  assert.match(stillRunning.content[0].text, /STILL RUNNING/);
+  assert.equal(requests.length, 1);
+
+  // 3. Second poll awaits completion and receives complete text + image block
+  const pollPromise = waiters.handleToolCall('poll-2', POLL_TOOL_NAME, { callId: 'slow-call-1' }, ac.signal);
+  assert.equal(requests.length, 1);
+  assert.equal(
+    waiters.resolve('slow-call-1', [
+      { type: 'text', text: 'slow result ready' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+  const completed = await pollPromise;
+  assert.deepEqual(completed, {
+    content: [
+      { type: 'text', text: 'slow result ready' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ],
+    isError: false,
+  });
+
+  // 4. Subsequent poll returns the cached result cleanly; onToolRequest stayed strictly 1!
+  const repeated = await waiters.handleToolCall('poll-3', POLL_TOOL_NAME, { callId: 'slow-call-1' }, ac.signal);
+  assert.deepEqual(repeated, completed);
+  assert.equal(requests.length, 1, 'onToolRequest must fire strictly once for an escalated tool');
+  assert.deepEqual(inFlightHistory, [1, 0]);
+});
+
+test('bridge_poll_result rejects unknown, non-escalated, and cross-run callIds with isError: true', { timeout: 10_000 }, async () => {
+  const requests1 = [];
+  const run1Waiters = new RunToolWaiters({
+    escalateAfterMs: 40,
+    onToolRequest: (ev) => requests1.push(ev),
+  });
+  const ac = new AbortController();
+
+  // Unknown, empty, and non-escalated in-flight callId
+  const unknown = await run1Waiters.handleToolCall('p-unk', POLL_TOOL_NAME, { callId: 'does-not-exist' }, ac.signal);
+  assert.equal(unknown.isError, true);
+  const empty = await run1Waiters.handleToolCall('p-empty', POLL_TOOL_NAME, {}, ac.signal);
+  assert.equal(empty.isError, true);
+
+  const nonEscalatedWaiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: () => {},
+  });
+  const pendingDirect = nonEscalatedWaiters.handleToolCall('not-escalated', 'codemode', {}, ac.signal);
+  const pollEarly = await nonEscalatedWaiters.handleToolCall('p-early', POLL_TOOL_NAME, { callId: 'not-escalated' }, ac.signal);
+  assert.equal(pollEarly.isError, true);
+  nonEscalatedWaiters.failAll('cleanup');
+  await pendingDirect;
+
+  // Escalate a call in Run 1
+  await run1Waiters.handleToolCall('run1-slow', 'codemode', { code: 'work()' }, ac.signal);
+  run1Waiters.resolve('run1-slow', 'run1 done', false);
+  assert.equal(requests1.length, 1);
+
+  // Cross-run poll in Run 2 must fail closed with isError: true and never dispatch a tool
+  const requests2 = [];
+  const run2Waiters = new RunToolWaiters({
+    escalateAfterMs: 40,
+    onToolRequest: (ev) => requests2.push(ev),
+  });
+  const crossRun = await run2Waiters.handleToolCall('p-cross', POLL_TOOL_NAME, { callId: 'run1-slow' }, ac.signal);
+  assert.equal(crossRun.isError, true);
+  assert.match(crossRun.content[0].text, /Unknown or non-escalated callId/);
+  assert.equal(requests2.length, 0);
+});
+
+test('RunToolWaiters with deliverToolImages routes images via hook channel and returns text-only MCP block', async () => {
+  const delivered = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: () => {},
+    deliverToolImages: (callId, images) => delivered.push({ callId, images }),
+  });
+
+  const ac = new AbortController();
+  const pending = waiters.handleToolCall('call-hook-1', 'codemode', { code: 'screenshot()' }, ac.signal);
+  assert.equal(
+    waiters.resolve('call-hook-1', [
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+
+  const result = await pending;
+  assert.equal(result.isError, false);
+  assert.equal(result.content.length, 1);
+  assert.equal(result.content[0].type, 'text');
+  assert.match(result.content[0].text, /screenshot taken/);
+  assert.match(result.content[0].text, /Visual attachments for Pi host tool result "call-hook-1": 1 image\(s\)/);
+  assert.deepEqual(delivered, [
+    { callId: 'call-hook-1', images: [{ data: PNG_1X1, mimeType: 'image/png' }] },
+  ]);
+});
+
+test('RunToolWaiters with deliverToolImages defers slow-tool images until bridge_poll_result and surfaces delivery failures', { timeout: 10_000 }, async () => {
+  const delivered = [];
+  const waiters = new RunToolWaiters({
+    escalateAfterMs: 40,
+    onToolRequest: () => {},
+    deliverToolImages: (callId, images) => delivered.push({ callId, images }),
+  });
+  const ac = new AbortController();
+
+  // Slow tool escalates before resolve.
+  const ack = await waiters.handleToolCall('slow-img-1', 'codemode', { code: 'slowShot()' }, ac.signal);
+  assert.match(ack.content[0].text, /STILL RUNNING/);
+
+  // Resolve while no poll is waiting -> deliverToolImages must NOT fire yet.
+  assert.equal(
+    waiters.resolve('slow-img-1', [
+      { type: 'text', text: 'slow shot done' },
+      { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+    ], false),
+    true,
+  );
+  assert.equal(delivered.length, 0, 'images for escalated tool must wait until bridge_poll_result materializes result');
+
+  // First bridge_poll_result delivers images once and returns text-only MCP receipt.
+  const polled = await waiters.handleToolCall('poll-img-1', POLL_TOOL_NAME, { callId: 'slow-img-1' }, ac.signal);
+  assert.equal(polled.isError, false);
+  assert.equal(polled.content.length, 1);
+  assert.equal(polled.content[0].type, 'text');
+  assert.match(polled.content[0].text, /slow shot done/);
+  assert.match(polled.content[0].text, /Visual attachments for Pi host tool result "slow-img-1": 1 image\(s\)/);
+  assert.equal(delivered.length, 1);
+
+  // Repeat poll returns cached text receipt without re-delivering images.
+  const repeated = await waiters.handleToolCall('poll-img-2', POLL_TOOL_NAME, { callId: 'slow-img-1' }, ac.signal);
+  assert.deepEqual(repeated, polled);
+  assert.equal(delivered.length, 1, 'repeat poll must not re-deliver tool images');
+
+  // Delivery error returns isError: true with non-retry guidance.
+  const failingWaiters = new RunToolWaiters({
+    escalateAfterMs: 5_000,
+    onToolRequest: () => {},
+    deliverToolImages: () => {
+      throw new Error('hook budget exceeded');
+    },
+  });
+  const failPending = failingWaiters.handleToolCall('call-fail-1', 'codemode', {}, ac.signal);
+  failingWaiters.resolve('call-fail-1', [
+    { type: 'text', text: 'tool ran' },
+    { type: 'image', data: PNG_1X1, mimeType: 'image/png' },
+  ], false);
+  const failed = await failPending;
+  assert.equal(failed.isError, true);
+  assert.match(failed.content[0].text, /tool ran/);
+  assert.match(failed.content[0].text, /Tool image delivery failed: hook budget exceeded/);
+  assert.match(failed.content[0].text, /do not repeat side effects/);
 });

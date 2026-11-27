@@ -80,7 +80,7 @@ impl LinkShared {
     }
 
     pub(crate) fn publish(&self, generation: u64, text: &str) -> bool {
-        if !clipboard_sync::eligible_text(text, false) {
+        if !clipboard_sync::eligible_text(text) {
             return false;
         }
         {
@@ -513,7 +513,7 @@ fn handle_incoming_text<F>(
     let Ok(plaintext) = key.decrypt(&event.from_device_id, &event.clip, now_unix) else {
         return;
     };
-    if !clipboard_sync::eligible_text(&plaintext, false) {
+    if !clipboard_sync::eligible_text(&plaintext) {
         return;
     }
     if !replay_cache.insert_verified(

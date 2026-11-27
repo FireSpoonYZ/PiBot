@@ -16,7 +16,8 @@ import type {
   MessageScope,
   ScopeInfo,
 } from '../../../host-core/index.js';
-import { ActionBar, useDirtyForm } from '../../../web/src/components/ui';
+import { ActionBar, ConfirmDialog, registerOverlayBackHandler, useDirtyForm } from '../../../web/src/components/ui';
+import { useText } from '../../../web/src/ui';
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../../../web/src/GrokBotAvatar';
 import {
   ConversationGroupAvatar,
@@ -177,9 +178,20 @@ export function memberMetaText(
   return parts.join(' · ');
 }
 
+function areMembersEqual(a: readonly MessageMember[], b: readonly MessageMember[]): boolean {
+  if (a.length !== b.length) return false;
+  const keys = new Set(a.map((m) => `${m.deviceId}\0${m.botId}`));
+  if (keys.size !== b.length) return false;
+  return b.every((m) => keys.has(`${m.deviceId}\0${m.botId}`));
+}
+
 export interface GroupSettingsProps {
   api: ScopeReadApi;
   variant?: 'desktop' | 'mobile';
+  /** 当前设置面板是否可见/打开（挂载保活且隐藏时为 false，避免截获返回或保留旧编辑态）。 */
+  open?: boolean;
+  /** 所在宿主页面是否处于活跃态。 */
+  active?: boolean;
   /** 指向权威节点的写通道（非权威或未就绪时为 null）。 */
   membersApi: DesktopViewApi | null;
   scope: ScopeInfo;
@@ -194,6 +206,8 @@ export interface GroupSettingsProps {
 export function GroupSettings({
   api,
   variant = 'mobile',
+  open = true,
+  active = true,
   membersApi,
   scope,
   bots,
@@ -203,6 +217,7 @@ export function GroupSettings({
   onClose,
   onDeleted,
 }: GroupSettingsProps) {
+  const t = useText();
   const desktop = variant === 'desktop';
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -284,23 +299,26 @@ export function GroupSettings({
   const dissolveConfirmHeadingRef = useRef<HTMLElement>(null);
   const dissolveConfirmWasOpenRef = useRef(false);
 
-  useLayoutEffect(() => {
-    if (titleEditing) titleInputRef.current?.focus();
-    else if (titleWasEditingRef.current) titleEditButtonRef.current?.focus();
-    titleWasEditingRef.current = titleEditing;
-  }, [titleEditing]);
+  const isVisible = open && active;
+  const [discardConfirm, setDiscardConfirm] = useState<'members' | 'title' | null>(null);
 
   useLayoutEffect(() => {
-    const isConfirmVisible = managementOpen && confirmDeleteOpen;
+    if (isVisible && titleEditing) titleInputRef.current?.focus();
+    else if (isVisible && titleWasEditingRef.current) titleEditButtonRef.current?.focus();
+    titleWasEditingRef.current = isVisible && titleEditing;
+  }, [isVisible, titleEditing]);
+
+  useLayoutEffect(() => {
+    const isConfirmVisible = isVisible && managementOpen && confirmDeleteOpen;
     if (isConfirmVisible) {
       (dissolveCancelButtonRef.current ?? dissolveConfirmHeadingRef.current)?.focus();
-    } else if (dissolveConfirmWasOpenRef.current && managementOpen) {
+    } else if (isVisible && dissolveConfirmWasOpenRef.current && managementOpen) {
       const trigger = dissolveTriggerButtonRef.current;
       if (trigger && !trigger.disabled) trigger.focus();
       else dissolveToggleButtonRef.current?.focus();
     }
     dissolveConfirmWasOpenRef.current = isConfirmVisible;
-  }, [managementOpen, confirmDeleteOpen]);
+  }, [isVisible, managementOpen, confirmDeleteOpen]);
 
   // 被动 prop 刷新：未改名时同步名称显示；未处于成员编辑时同步成员列表。
   useEffect(() => {
@@ -895,9 +913,102 @@ export function GroupSettings({
     }
   }
 
+  const isBusy = deleting || preparingDelete || savingMembers || enteringEdit || titleSaving;
   const trimmedTitleInput = titleInput.trim();
   const isTitleChanged = trimmedTitleInput !== savedTitle;
-  useDirtyForm((titleEditing && isTitleChanged) || editMode);
+  const isTitleDirty = titleEditing && (isTitleChanged || Boolean(titleFrozenAttempt));
+  const isMembersDirty = editMode && (!areMembersEqual(editMembers, scope.scope.members) || Boolean(membersFrozenAttempt));
+  useDirtyForm(isVisible && (isTitleDirty || editMode));
+
+  function handleStepBack(): boolean {
+    if (isBusy) return true;
+    if (confirmDeleteOpen) {
+      cancelDeleteRoom();
+      return true;
+    }
+    if (editMode) {
+      if (isMembersDirty) {
+        setDiscardConfirm('members');
+      } else {
+        cancelEdit();
+      }
+      return true;
+    }
+    if (titleEditing) {
+      if (isTitleDirty) {
+        setDiscardConfirm('title');
+      } else {
+        handleResetTitleInput();
+        setTitleEditing(false);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  const handleStepBackRef = useRef(handleStepBack);
+  handleStepBackRef.current = handleStepBack;
+
+  const hasBackSubState = confirmDeleteOpen || editMode || titleEditing || isBusy;
+  const shouldInterceptBack = isVisible && hasBackSubState;
+  useEffect(() => {
+    if (!shouldInterceptBack) return;
+    return registerOverlayBackHandler(() => {
+      handleStepBackRef.current();
+    });
+  }, [shouldInterceptBack]);
+
+  useEffect(() => {
+    if (!isVisible) setDiscardConfirm(null);
+  }, [isVisible]);
+
+  const prevOpenRef = useRef(open);
+  const pendingCloseResetRef = useRef<{ delete: boolean; members: boolean; title: boolean }>({
+    delete: false,
+    members: false,
+    title: false,
+  });
+  useEffect(() => {
+    const wasOpen = prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (open) {
+      pendingCloseResetRef.current = { delete: false, members: false, title: false };
+      return;
+    }
+    if (wasOpen) {
+      setDiscardConfirm(null);
+      setManagementOpen(false);
+      pendingCloseResetRef.current = { delete: true, members: true, title: true };
+    }
+    const pending = pendingCloseResetRef.current;
+    if (pending.delete && !deleting && !preparingDelete) {
+      pending.delete = false;
+      setConfirmDeleteOpen(false);
+      setDeleteFrozenAttempt(null);
+      setDeleteError(null);
+    }
+    if (pending.members && !savingMembers && !enteringEdit) {
+      pending.members = false;
+      editBaselineRef.current = null;
+      setMembersFrozenAttempt(null);
+      setEditMembers(scope.scope.members.map((m) => ({ ...m })));
+      setSaveMembersError(null);
+      setEnterEditError(null);
+      setMemberQuery('');
+      setEditMode(false);
+    }
+    if (pending.title && !titleSaving) {
+      pending.title = false;
+      titleDirtyRef.current = false;
+      titleBaselineRef.current = null;
+      setTitleFrozenAttempt(null);
+      setTitleInput(savedTitle);
+      setTitleError(null);
+      setTitleNotice(null);
+      setTitleEditing(false);
+    }
+  }, [open, deleting, preparingDelete, savingMembers, enteringEdit, titleSaving, scope.scope.members, savedTitle]);
+
   const candidateChoices = memberCandidates.filter(
     (b) => !editMembers.some((m) => m.deviceId === b.deviceId && m.botId === b.botId),
   );
@@ -912,7 +1023,11 @@ export function GroupSettings({
         <button
           type="button"
           className="conversation-chat-header__circle"
-          onClick={onClose}
+          disabled={isBusy}
+          onClick={() => {
+            if (handleStepBack()) return;
+            onClose();
+          }}
           aria-label="返回聊天"
           title="返回聊天"
         >
@@ -1469,6 +1584,35 @@ export function GroupSettings({
           ) : null}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={isVisible && discardConfirm !== null}
+        title={t('放弃未保存的修改？', 'Discard unsaved changes?')}
+        description={
+          discardConfirm === 'members'
+            ? t('当前有尚未保存的群成员修改，返回将放弃这些更改。确认放弃吗？', 'You have unsaved group member changes. Going back will discard them. Continue?')
+            : t('当前有尚未保存的群聊名称修改，返回将放弃这些更改。确认放弃吗？', 'You have unsaved group name changes. Going back will discard them. Continue?')
+        }
+        danger
+        busy={isBusy}
+        confirmLabel={t('放弃修改', 'Discard changes')}
+        cancelLabel={t('继续编辑', 'Keep editing')}
+        onCancel={() => {
+          if (!isBusy) setDiscardConfirm(null);
+        }}
+        onConfirm={() => {
+          if (isBusy) return;
+          const target = discardConfirm;
+          setDiscardConfirm(null);
+          if (target === 'members') {
+            cancelEdit();
+          } else if (target === 'title') {
+            setTitleFrozenAttempt(null);
+            handleResetTitleInput();
+            setTitleEditing(false);
+          }
+        }}
+      />
     </div>
   );
 }

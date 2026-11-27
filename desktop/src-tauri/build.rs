@@ -1,6 +1,7 @@
 const APP_COMMANDS: &[&str] = &[
   "desktop_request",
   "desktop_pet",
+  "desktop_pet_kde_rule",
   "desktop_pet_voice",
   "desktop_open_center",
   "desktop_observe",

@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import {
+  GOOGLE_ASSISTANT_POLL_HEADER,
+  GOOGLE_ASSISTANT_POLL_VALUE,
+} from '../center-contract/google-workspace.js';
+import {
   MAX_DISPATCH_ANSWER_CHARS,
   MCP_DISPATCH_CAPABILITY_HEADER,
   MCP_DISPATCH_SESSION_ISOLATION,
@@ -121,7 +125,10 @@ function pollOptionsFromRequest(req) {
   const mcpDispatch = typeof raw === 'string' && raw.trim() === MCP_DISPATCH_SESSION_ISOLATION
     ? MCP_DISPATCH_SESSION_ISOLATION
     : null;
-  return { mcpDispatch };
+  const rawAssistant = req.headers?.[GOOGLE_ASSISTANT_POLL_HEADER];
+  const googleAssistantBatch = typeof rawAssistant === 'string'
+    && rawAssistant.trim() === GOOGLE_ASSISTANT_POLL_VALUE;
+  return { mcpDispatch, googleAssistantBatch };
 }
 
 export function registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify }) {

@@ -9,7 +9,14 @@
  * shared center account pool, zero per-Bot OAuth switches).
  */
 import type {
+  CenterBotRef,
+  CenterDevice,
   GoogleAccountStatus,
+  GoogleAssistantConfig,
+  GoogleAssistantCreateBotInput,
+  GoogleAssistantMode,
+  GoogleAssistantRuntime,
+  GoogleAssistantSetupRequest,
   GoogleRule,
   GoogleRulesListResponse,
   GoogleServiceChoice,
@@ -553,4 +560,406 @@ export function formatCalendarMinutesBefore(
     return t('开始时（0 分钟）', 'At start (0m)');
   }
   return t(`会前 ${minutes} 分钟`, `${minutes}m before event`);
+}
+
+export const DEFAULT_GOOGLE_ASSISTANT_BOT_NAME = '邮件与日程管家';
+export const DEFAULT_ASSISTANT_BATCH_WINDOW_MINUTES = 10;
+export const MIN_ASSISTANT_BATCH_WINDOW_MINUTES = 1;
+export const MAX_ASSISTANT_BATCH_WINDOW_MINUTES = 24 * 60;
+export const DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES = 15;
+export const MAX_ASSISTANT_DIGEST_TIMES = 6;
+const MAX_ASSISTANT_BOT_ROLE_LENGTH = 64;
+
+function defaultHelperTranslate(zh: string, en: string): string {
+  return typeof navigator !== 'undefined' && navigator.language.startsWith('en') ? en : zh;
+}
+
+export function defaultDigestTimesForMode(mode: GoogleAssistantMode): string[] {
+  return mode === 'existing' ? ['09:00', '18:00'] : [];
+}
+
+export interface DigestTimesParseResult {
+  valid: boolean;
+  times: string[];
+  error?: string;
+}
+
+/**
+ * Parse comma/space-separated 24-hour `HH:mm` digest times, deduplicate, and sort.
+ * Allows empty input (`times: []`) and at most 6 unique time slots.
+ */
+export function parseDigestTimesInput(
+  raw: string,
+  t: TranslateFn = defaultHelperTranslate,
+): DigestTimesParseResult {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) {
+    return { valid: true, times: [] };
+  }
+
+  const tokens = trimmed.split(/[\s,，、;；]+/).filter(Boolean);
+  const unique = new Set<string>();
+
+  for (const token of tokens) {
+    const normalized = token.replace(/：/g, ':');
+    const match = /^(\d{1,2}):(\d{2})$/.exec(normalized);
+    if (!match) {
+      return {
+        valid: false,
+        times: [],
+        error: t(
+          `简报时间「${token}」格式无效，请使用 24 小时制 HH:mm（例如 09:00, 18:00）`,
+          `Invalid digest time "${token}". Use 24-hour HH:mm format (e.g. 09:00, 18:00).`,
+        ),
+      };
+    }
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return {
+        valid: false,
+        times: [],
+        error: t(
+          `简报时间「${token}」超出 00:00–23:59 范围`,
+          `Digest time "${token}" must be between 00:00 and 23:59.`,
+        ),
+      };
+    }
+    unique.add(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  }
+
+  const times = Array.from(unique).sort();
+  if (times.length > MAX_ASSISTANT_DIGEST_TIMES) {
+    return {
+      valid: false,
+      times: [],
+      error: t(
+        `定时简报最多支持 ${MAX_ASSISTANT_DIGEST_TIMES} 个时间点`,
+        `You can configure at most ${MAX_ASSISTANT_DIGEST_TIMES} digest times.`,
+      ),
+    };
+  }
+
+  return { valid: true, times };
+}
+
+export function formatDigestTimesInput(times?: readonly string[] | null): string {
+  if (!Array.isArray(times) || times.length === 0) return '';
+  return times
+    .map(item => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .join(', ');
+}
+
+export interface BuildGoogleAssistantSetupInput {
+  mode: GoogleAssistantMode;
+  deviceId: string;
+  botId?: string;
+  role?: string;
+  description?: string;
+  modelRef?: string;
+  thinkingLevel?: string;
+  cwd?: string;
+  accounts: readonly string[];
+  batchWindowMinutes: string | number;
+  digestTimesInput?: string;
+  digestTimes?: readonly string[];
+  calendarEnabled: boolean;
+  calendarLeadMinutes: string | number;
+  hindsightPrivateMemory: boolean;
+}
+
+export type BuildGoogleAssistantSetupResult =
+  | { ok: true; payload: GoogleAssistantSetupRequest }
+  | { ok: false; error: string };
+
+function parseStrictBoundedInt(
+  raw: string | number,
+  min: number,
+  max: number,
+): number | null {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return null;
+    return parsed >= min && parsed <= max ? parsed : null;
+  }
+  if (!Number.isFinite(raw) || !Number.isInteger(raw)) return null;
+  return raw >= min && raw <= max ? raw : null;
+}
+
+export function buildGoogleAssistantSetupPayload(
+  input: BuildGoogleAssistantSetupInput,
+  t: TranslateFn = defaultHelperTranslate,
+): BuildGoogleAssistantSetupResult {
+  const mode: GoogleAssistantMode = input.mode;
+  if (mode !== 'dedicated' && mode !== 'existing') {
+    return {
+      ok: false,
+      error: t('请选择有效的管家运行模式', 'Choose a valid assistant mode.'),
+    };
+  }
+
+  const deviceId = (input.deviceId ?? '').trim();
+  if (!deviceId) {
+    return {
+      ok: false,
+      error: t('请选择托管主机设备', 'Select a host device.'),
+    };
+  }
+
+  const seenAccounts = new Set<string>();
+  const accounts: string[] = [];
+  for (const rawAccount of input.accounts ?? []) {
+    const email = typeof rawAccount === 'string' ? rawAccount.trim() : '';
+    if (!email) continue;
+    const key = email.toLowerCase();
+    if (seenAccounts.has(key)) continue;
+    seenAccounts.add(key);
+    accounts.push(email);
+  }
+  if (accounts.length === 0) {
+    return {
+      ok: false,
+      error: t('请至少选择一个要监听的 Google 账号', 'Select at least one Google account to monitor.'),
+    };
+  }
+
+  const batchWindowMinutes = parseStrictBoundedInt(
+    input.batchWindowMinutes,
+    MIN_ASSISTANT_BATCH_WINDOW_MINUTES,
+    MAX_ASSISTANT_BATCH_WINDOW_MINUTES,
+  );
+  if (batchWindowMinutes === null) {
+    return {
+      ok: false,
+      error: t(
+        `批次聚合窗口需为 ${MIN_ASSISTANT_BATCH_WINDOW_MINUTES}–${MAX_ASSISTANT_BATCH_WINDOW_MINUTES} 之间的整数分钟`,
+        `Batch window must be an integer between ${MIN_ASSISTANT_BATCH_WINDOW_MINUTES} and ${MAX_ASSISTANT_BATCH_WINDOW_MINUTES} minutes.`,
+      ),
+    };
+  }
+
+  const calendarEnabled = Boolean(input.calendarEnabled);
+  let calendarLeadMinutes: number;
+  if (!calendarEnabled && (input.calendarLeadMinutes === '' || input.calendarLeadMinutes === undefined || input.calendarLeadMinutes === null)) {
+    calendarLeadMinutes = DEFAULT_ASSISTANT_CALENDAR_LEAD_MINUTES;
+  } else {
+    const parsedLead = parseStrictBoundedInt(input.calendarLeadMinutes, 0, MAX_CALENDAR_MINUTES_BEFORE);
+    if (parsedLead === null) {
+      return {
+        ok: false,
+        error: t(
+          `会前提醒提前时间需为 0–${MAX_CALENDAR_MINUTES_BEFORE} 之间的整数分钟`,
+          `Calendar lead time must be an integer between 0 and ${MAX_CALENDAR_MINUTES_BEFORE} minutes.`,
+        ),
+      };
+    }
+    calendarLeadMinutes = parsedLead;
+  }
+
+  let digestTimes: string[];
+  if (input.digestTimesInput !== undefined) {
+    const parsedDigest = parseDigestTimesInput(input.digestTimesInput, t);
+    if (!parsedDigest.valid) {
+      return {
+        ok: false,
+        error: parsedDigest.error || t('定时简报时间格式无效', 'Invalid digest times.'),
+      };
+    }
+    digestTimes = parsedDigest.times;
+  } else if (input.digestTimes !== undefined) {
+    const parsedDigest = parseDigestTimesInput(input.digestTimes.join(', '), t);
+    if (!parsedDigest.valid) {
+      return {
+        ok: false,
+        error: parsedDigest.error || t('定时简报时间格式无效', 'Invalid digest times.'),
+      };
+    }
+    digestTimes = parsedDigest.times;
+  } else {
+    digestTimes = defaultDigestTimesForMode(mode);
+  }
+
+  const shared = {
+    accounts,
+    batchWindowMinutes,
+    digestTimes,
+    calendarEnabled,
+    calendarLeadMinutes,
+    hindsightPrivateMemory: Boolean(input.hindsightPrivateMemory),
+  };
+
+  if (mode === 'existing') {
+    const botId = (input.botId ?? '').trim();
+    if (!botId) {
+      return {
+        ok: false,
+        error: t('请选择一个已有 Bot', 'Select an existing Bot.'),
+      };
+    }
+    return {
+      ok: true,
+      payload: {
+        mode: 'existing',
+        deviceId,
+        botId,
+        ...shared,
+      },
+    };
+  }
+
+  const botId = (input.botId ?? '').trim();
+  const role = (input.role ?? '').trim();
+  const description = (input.description ?? '').trim();
+  const modelRef = (input.modelRef ?? '').trim();
+  const thinkingLevel = (input.thinkingLevel ?? '').trim();
+  const cwd = (input.cwd ?? '').trim();
+
+  if (!botId && !role) {
+    return {
+      ok: false,
+      error: t('请填写专职管家 Bot 名称', 'Enter a name for the dedicated assistant Bot.'),
+    };
+  }
+  if (role.length > MAX_ASSISTANT_BOT_ROLE_LENGTH) {
+    return {
+      ok: false,
+      error: t(
+        `专职管家 Bot 名称不能超过 ${MAX_ASSISTANT_BOT_ROLE_LENGTH} 个字符`,
+        `Dedicated assistant Bot name must be at most ${MAX_ASSISTANT_BOT_ROLE_LENGTH} characters.`,
+      ),
+    };
+  }
+  if (modelRef && /\s/.test(modelRef)) {
+    return {
+      ok: false,
+      error: t('模型标识格式无效，不能包含空白字符', 'Invalid model reference; whitespace is not allowed.'),
+    };
+  }
+
+  const createBot: GoogleAssistantCreateBotInput = {};
+  if (role) createBot.role = role;
+  if (description) createBot.description = description;
+  if (modelRef) createBot.modelRef = modelRef;
+  if (thinkingLevel) createBot.thinkingLevel = thinkingLevel;
+  if (cwd) createBot.cwd = cwd;
+
+  return {
+    ok: true,
+    payload: {
+      mode: 'dedicated',
+      deviceId,
+      ...(botId ? { botId } : {}),
+      ...(!botId || Object.keys(createBot).length > 0 ? { createBot } : {}),
+      ...shared,
+    },
+  };
+}
+
+/**
+ * Prompt the user with the 2-option Proactive Assistant choice right after OAuth
+ * finishes only when no assistant is configured yet and at least one account is connected.
+ */
+export function shouldPromptGoogleAssistantSetup(
+  assistant: GoogleAssistantConfig | null | undefined,
+  connectedAccountsCount: number,
+): boolean {
+  return !assistant && connectedAccountsCount > 0;
+}
+
+export function assistantRuntimeBadgeMeta(
+  assistant: Pick<GoogleAssistantConfig, 'enabled'>,
+  runtime: GoogleAssistantRuntime | null | undefined,
+  t: TranslateFn = defaultHelperTranslate,
+): { label: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {
+  const status = (runtime?.status ?? '').toLowerCase();
+  if (!assistant.enabled || status === 'paused_disabled') {
+    return { label: t('已暂停', 'Paused'), tone: 'muted' };
+  }
+  if (
+    status === 'paused_account_reconnect' ||
+    status.includes('reconnect') ||
+    status.includes('invalid_grant')
+  ) {
+    return { label: t('账号需重连', 'Reconnect required'), tone: 'warn' };
+  }
+  if (status === 'paused_bot_unavailable') {
+    return { label: t('目标 Bot 不可用', 'Target Bot unavailable'), tone: 'danger' };
+  }
+  if (status === 'paused_account_missing') {
+    return { label: t('监听账号已移除', 'Account missing'), tone: 'danger' };
+  }
+  if (status === 'paused_service_unavailable') {
+    return { label: t('服务未就绪', 'Service unavailable'), tone: 'warn' };
+  }
+  if (status === 'backing_off' || status === 'backoff' || status === 'rate_limited') {
+    return { label: t('限流退避中', 'Rate-limited'), tone: 'warn' };
+  }
+  if (status.includes('offline') || runtime?.targetOnline === false) {
+    return { label: t('目标主机离线', 'Host offline'), tone: 'warn' };
+  }
+  if (status === 'error' || status === 'failed') {
+    return { label: t('检查异常', 'Check error'), tone: 'danger' };
+  }
+  if (status.startsWith('paused_')) {
+    return { label: t('已暂停（需处理）', 'Paused (attention needed)'), tone: 'warn' };
+  }
+  if (status === 'paused' || status === 'disabled') {
+    return { label: t('已暂停', 'Paused'), tone: 'muted' };
+  }
+  return { label: t('运行中', 'Running'), tone: 'ok' };
+}
+
+export function pickDefaultAssistantDeviceId(
+  devices: readonly Pick<CenterDevice, 'deviceId' | 'online'>[],
+  preferredDeviceId?: string,
+): string {
+  if (preferredDeviceId) {
+    const preferredOnline = devices.find(d => d.deviceId === preferredDeviceId && d.online);
+    if (preferredOnline) return preferredOnline.deviceId;
+  }
+  const firstOnline = devices.find(d => d.online);
+  if (firstOnline) return firstOnline.deviceId;
+  if (preferredDeviceId && devices.some(d => d.deviceId === preferredDeviceId)) {
+    return preferredDeviceId;
+  }
+  return devices[0]?.deviceId ?? preferredDeviceId ?? '';
+}
+
+export function pickDefaultExistingAssistantBot<
+  TBot extends Pick<CenterBotRef, 'deviceId' | 'botId' | 'isPrimary' | 'archivedAt' | 'online'>,
+>(
+  bots: readonly TBot[],
+  devices: readonly Pick<CenterDevice, 'deviceId' | 'online'>[],
+  preferredDeviceId?: string,
+): TBot | null {
+  const active = bots.filter(b => !b.archivedAt);
+  if (active.length === 0) return null;
+  const onlineDeviceIds = new Set(devices.filter(d => d.online).map(d => d.deviceId));
+  const isOnline = (b: TBot) => Boolean(b.online || onlineDeviceIds.has(b.deviceId));
+
+  if (preferredDeviceId) {
+    const preferredPrimaryOnline = active.find(
+      b => b.deviceId === preferredDeviceId && b.isPrimary && isOnline(b),
+    );
+    if (preferredPrimaryOnline) return preferredPrimaryOnline;
+    const preferredPrimary = active.find(b => b.deviceId === preferredDeviceId && b.isPrimary);
+    if (preferredPrimary) return preferredPrimary;
+  }
+
+  const onlinePrimary = active.find(b => b.isPrimary && isOnline(b));
+  if (onlinePrimary) return onlinePrimary;
+
+  if (preferredDeviceId) {
+    const preferredAny = active.find(b => b.deviceId === preferredDeviceId);
+    if (preferredAny) return preferredAny;
+  }
+
+  const anyPrimary = active.find(b => b.isPrimary);
+  if (anyPrimary) return anyPrimary;
+
+  const anyOnline = active.find(b => isOnline(b));
+  return anyOnline ?? active[0];
 }

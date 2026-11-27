@@ -38,6 +38,14 @@ Windows 和 Linux 在系统托盘可用时显示 PiBot 托盘。关闭主窗口�
 「Quit Client」会关闭桌宠和桌面客户端，已经运行的 Host 继续执行任务。
 发送状态尚未确认或发送中主窗口重新加载时，先打开主界面的「发送记录」核实；桌宠不会自动重发消息。
 
+### Kubuntu / KDE Plasma：桌宠置顶与任务栏
+
+X11（含 XWayland）下，PiBot 已向窗口管理器请求让桌宠置顶并跳过任务栏/分页器，并在窗口显示后补设提示以兼容不同窗口管理器的映射时序。原生 Wayland 下，GTK 3 的普通窗口不会向 KWin 传递这些提示，需要通过 KWin 窗口规则生效。
+
+**自动配置与设置入口**：在 KDE Plasma（同时覆盖原生 Wayland 与 KDE X11，兼容 Plasma 5.27 与 Plasma 6）中，PiBot 启动及首次创建桌宠前会自动把桌宠规则幂等写入 `$XDG_CONFIG_HOME/kwinrulesrc`（默认 `~/.config/kwinrulesrc`），并通过 D-Bus 通知 KWin 重载配置（使用应用内更新升级并重启客户端后同样自动生效，不会重复覆盖此前手动导入的规则）。规则精确匹配应用 `pibot` 和桌宠标题 `PiBot`，保持置顶并从任务栏、分页器与窗口切换器隐藏，不影响标题为 `Pi Bot` 的主窗口。无需切换到 XWayland。
+
+如果你在 KDE「系统设置 → 窗口管理 → 窗口规则」或 PiBot「设置 → 外观与对话 → 悬浮桌宠 → KDE 窗口规则」中移除了该规则，后续启动和更新会尊重选择、不再强行写回；随时可在上述设置项中一键「应用规则 / 重新应用」或「移除规则」。若 `~/.config/kwinrulesrc` 为外部管理的符号链接（如 Nix / dotfiles），PiBot 会跳过自动改写，安装包中仍保留 `/usr/share/pibot/desktop-pet.kwinrule`（源码 [`desktop-pet.kwinrule`](linux/desktop-pet.kwinrule)）供手动导入或声明式引用。
+
 ### 语音
 
 先展开桌宠，点击「语音设置」，为语音识别填写 OpenAI 兼容的接口基础地址、模型和服务所需的 API 密钥。
@@ -105,10 +113,10 @@ macOS 没有安装器生命周期：安装准备通过后，客户端先用当�
 新安装默认关闭。在「设置 → 剪贴板同步」配置同步组并打开本机开关。客户端会保存开关状态，下次启动并连接同一 Center 后恢复已开启的同步。macOS 暂不支持。
 
 - **交互与前提**：采用「一次入组（`pibot-clipboard-v1:...`）+ 每设备独立开关」。需先升级 Center 至支持 `/v1/link` `X-PiBot-Clipboard-V1: 1` 隔离中继的版本；仅实时在线投递，无离线补发或历史记录。
-- **范围与安全边界**：仅同步 `≤ 64 KiB` 的非空 UTF-8 纯文本，端到端 `XChaCha20-Poly1305` 加密；敏感/密码管理器标记按平台尽力跳过（best-effort），硬拦截含 `pibot1.` 或 `pibot-clipboard-v1:` 的文本；不同步文件/图片/富文本，不做自动粘贴注入，也不向 Bot、Host 工具或 MCP 暴露。
+- **范围与安全边界**：仅同步 `≤ 64 KiB` 的非空 UTF-8 纯文本，端到端 `XChaCha20-Poly1305` 加密；带敏感标记的纯文本也可发送，包括验证码和密码，请只把可信设备加入同组；硬拦截含 `pibot1.` 或 `pibot-clipboard-v1:` 的文本；不同步文件/图片/富文本，不做自动粘贴注入，也不向 Bot、Host 工具或 MCP 暴露。
 - **托盘与进程语义**：剪贴板同步由桌面客户端运行。同步开启后，PiBot 托盘可显示连接状态并暂停、恢复本机同步。退出客户端会结束同步，`pibot-host` 会继续运行。Linux 下能否继续粘贴 PiBot 持有的文本取决于是否有独立剪贴板管理器。
 - **平台实现**：
-  - **Windows**：独立工作线程 `HWND_MESSAGE` + `AddClipboardFormatListener`（无焦点抢占），仅读 `CF_UNICODETEXT`，跳过 `CF_HDROP` 与监控/历史/云同步排除格式；写入附带 `PiBot.ClipboardSync.OwnWrite.v1` 防回环标记。
+  - **Windows**：独立工作线程 `HWND_MESSAGE` + `AddClipboardFormatListener`（无焦点抢占），仅读 `CF_UNICODETEXT`，跳过 `CF_HDROP` 与自有标记；写入仍附带 `PiBot.ClipboardSync.OwnWrite.v1` 防回环标记和供 Windows 使用的监视、历史、云剪贴板排除标记。
   - **Linux**：仅监听常规 `CLIPBOARD`（绝不监听 `PRIMARY`）。Wayland 探测 `ext-data-control` / `wlr-data-control`，**不支持该协议的合成器直接返回 `Unsupported`，不回退 XWayland**；X11 使用 `XFixes` + 未映射 `InputOnly` 窗口，支持单次与 `INCR` 读写；写入附带 `application/x-pibot-clipboard-sync` 标记。
 
 完整设计、Linux 合成器测试矩阵与三节点验收清单见 [docs/clipboard-sync.md](../docs/clipboard-sync.md)。

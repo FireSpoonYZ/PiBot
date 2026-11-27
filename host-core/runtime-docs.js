@@ -1,5 +1,6 @@
-import { defineDoc, configure, AgentDoc } from '@earendil-works/pi-durable';
+import { defineDoc, configure, AgentDoc, ResetEntry } from '@earendil-works/pi-durable';
 import { parseModelRef } from './runtime-models.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -52,8 +53,11 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
     // 主会话人格来自真实 SOUL.md；未提供时保留旧 role 以兼容遗留导入路径。
     instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
+    ...(options.selectedExtensions ? { extensions: options.selectedExtensions } : {}),
     tools: initialToolsChange(options.removeTools),
-    ...(options.codemodeOnly ? { modelTools: codemodeModelTools(options) } : {}),
+    ...(model.provider === ANTIGRAVITY_PROVIDER_ID ? { compaction: { enabled: false } } : {}),
+    ...(options.codemodeOnly || model.provider === ANTIGRAVITY_PROVIDER_ID
+      ? { modelTools: codemodeModelTools({ ...options, antigravity: model.provider === ANTIGRAVITY_PROVIDER_ID }) } : {}),
   });
   draft.byPrimary[primaryId] = record.id;
   return record.id;
@@ -102,7 +106,8 @@ export function codemodeModelTools(profile, modelTools) {
     && tool.name !== 'tool_search'
     && (tool.name === 'ask_user_question' || (tool.callers?.includes('model') && !tool.callers.includes('tools')))
     && !removed.has(tool.name)
-    && (tool.deferred !== true || loaded.has(tool.name)));
+    // AGY declares a stable outer tool set once; model-only tools cannot be discovered inside codemode.
+    && (profile.antigravity === true || tool.deferred !== true || loaded.has(tool.name)));
   return [{ name: 'codemode' }, ...modelOnly.map((tool) => ({ name: tool.name }))];
 }
 
@@ -142,6 +147,15 @@ export function agentProfileChange(state, profile) {
     }
   }
 
+  if (profile?.antigravity === true) {
+    // Replace model overrides too: native ACP owns compaction and Pi must not rewrite its history.
+    if (JSON.stringify(state?.compaction) !== JSON.stringify({ enabled: false })) {
+      change.compaction = { enabled: false };
+    }
+  } else if (state?.model?.provider === ANTIGRAVITY_PROVIDER_ID && model && model.provider !== ANTIGRAVITY_PROVIDER_ID) {
+    change.compaction = null;
+  }
+
   const thinkingLevel = profile?.thinkingLevel;
   if (thinkingLevel !== undefined && (state?.thinkingLevel ?? null) !== thinkingLevel) {
     change.thinkingLevel = thinkingLevel;
@@ -173,7 +187,27 @@ export function agentProfileChange(state, profile) {
   const pluginTools = profile?.pluginTools ?? [];
   const pluginNames = new Set(pluginTools.map((tool) => tool.name));
   const current = state?.tools;
-  if (Array.isArray(current)) {
+  if (profile?.strictTools === true && Array.isArray(current)) {
+    const allowedToolMap = new Map(
+      (profile.selectedExtensions ?? [])
+        .flatMap((extension) => extension.tools ?? [])
+        .map((tool) => [tool.name, tool]),
+    );
+    for (const tool of desired) {
+      allowedToolMap.delete(typeof tool === 'string' ? tool : tool.name);
+    }
+    const kept = current.filter((name) => allowedToolMap.has(name));
+    const added = pluginTools
+      .filter((tool) => allowedToolMap.has(tool.name) && !kept.includes(tool.name))
+      .map((tool) => tool.name);
+    const nextNames = [...kept, ...added];
+    const unchanged =
+      nextNames.length === current.length &&
+      nextNames.every((name, index) => name === current[index]);
+    if (!unchanged) {
+      change.tools = nextNames.map((name) => allowedToolMap.get(name) ?? { name });
+    }
+  } else if (Array.isArray(current)) {
     const added = pluginTools.filter((tool) => !current.includes(tool.name));
     if (added.length) change.tools = [...current.map((name) => ({ name })), ...added];
   } else {
@@ -193,11 +227,43 @@ export function agentProfileChange(state, profile) {
   return Object.keys(change).length === 0 ? undefined : change;
 }
 
+async function assertNativeModelChange(current, model, readPage) {
+  if (!model || current?.provider === model.provider) return;
+  if (current?.provider !== ANTIGRAVITY_PROVIDER_ID && model.provider !== ANTIGRAVITY_PROVIDER_ID) return;
+  let cursor;
+  for (;;) {
+    const page = await readPage(cursor);
+    for (const entry of page.items) {
+      if (entry.kind === ResetEntry.kind) return;
+      if ((entry.model ?? []).some((message) => message.role !== 'system')) {
+        throw errWithCode(
+          'Cannot continue a non-empty conversation after switching between Antigravity and another provider. Use /clear first.',
+          'AGY_HISTORY_CHANGED',
+        );
+      }
+    }
+    if (!page.next) return;
+    cursor = page.next;
+  }
+}
+
+/** Read-only conversation continuation check enforced at Host turn admission. */
+export async function assertAntigravityModelSelection(harness, conversationId, model, context) {
+  const state = await harness.snapshot(AgentDoc, conversationId, context);
+  if (state?.model?.provider !== ANTIGRAVITY_PROVIDER_ID && model?.provider !== ANTIGRAVITY_PROVIDER_ID) return;
+  if (!model || state?.model?.provider === model.provider) return;
+  const conversation = await harness.conversation(conversationId, context);
+  await assertNativeModelChange(state?.model, model, (cursor) =>
+    conversation.entries({ order: 'descending' }, 200, cursor, context));
+}
+
 /** 在调用方事务内比较并应用人格/工具，返回是否写入。 */
 export async function applyAgentProfileInTx(tx, conversationId, profile) {
   const state = await tx.doc(AgentDoc, conversationId);
   const change = agentProfileChange(state, profile);
   if (!change) return false;
+  await assertNativeModelChange(state?.model, change.model, (cursor) =>
+    tx.scanEntries({ conversationId, order: 'descending' }, 200, cursor));
   await configure(tx, conversationId, change);
   return true;
 }

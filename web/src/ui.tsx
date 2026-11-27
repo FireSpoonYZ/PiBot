@@ -11,8 +11,10 @@ import './error-notice.css';
 // The old "hide" setting only collapsed calls. Keep its stored value for that behavior.
 const COLLAPSE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
 const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-chat-hide-tool-output:v1';
+const HIDE_BOT_DM_STORAGE_KEY = 'pibot-chat-hide-bot-dm:v1';
+const COLLAPSE_BOT_DM_STORAGE_KEY = 'pibot-chat-collapse-bot-dm:v1';
 
-function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
+function useBooleanPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
   const changeEvent = key + ':change';
   const read = useCallback(() => {
     try {
@@ -59,11 +61,19 @@ function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, 
 }
 
 export function useHideToolOutput() {
-  return useToolOutputPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
+  return useBooleanPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
 }
 
 export function useCollapseToolOutput() {
-  return useToolOutputPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
+  return useBooleanPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
+}
+
+export function useHideBotDm() {
+  return useBooleanPreference(HIDE_BOT_DM_STORAGE_KEY, true);
+}
+
+export function useCollapseBotDm() {
+  return useBooleanPreference(COLLAPSE_BOT_DM_STORAGE_KEY, true);
 }
 
 export type UiLanguage = 'system' | 'zh' | 'en';
@@ -546,6 +556,16 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
       tone: 'warning',
       title: t('当前操作较为频繁', 'Service Busy'),
       description: t('系统正在处理上一项任务，请稍候片刻再试', 'Another request is currently being processed. Please wait a moment'),
+      detail,
+    };
+  }
+
+  if (code === 'AGY_HISTORY_CHANGED' || body.includes('AGY_HISTORY_CHANGED')) {
+    return {
+      tone: 'warning',
+      title: t('请先 /clear 开启新会话', 'Use /clear to Start a New Session'),
+      description: t('跨服务商切换模型后无法继续原对话，旧会话升级或原生会话失效时同样需先输入 /clear 开启新会话（也可切回原服务商模型继续）。Antigravity 会话不支持编辑历史或手动压缩。',
+        'Cannot continue this conversation after switching between Antigravity and another provider. Use /clear to start a new session (or switch back to the previous provider), and also use /clear when upgrading a legacy session or when the native session is unavailable. Antigravity sessions do not support editing history or manual compaction.'),
       detail,
     };
   }

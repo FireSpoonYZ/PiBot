@@ -8,6 +8,22 @@ import { prepareGoogleFileCall, finishGoogleFileCall } from '../google-file-tran
 import { projectToolPresentation } from '../tool-presentation.js';
 
 
+const GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE = 'google-workspace-assistant';
+const GOOGLE_ASSISTANT_ALLOWED_TOOLS = new Set([
+  'gmail_search',
+  'gmail_read',
+  'gmail_draft',
+  'calendar_list',
+  'calendar_get',
+  'calendar_suggest-time',
+  'contacts_find',
+  'drive_search',
+  'drive_list',
+  'drive_read',
+  'docs_read',
+  'sheets_read',
+]);
+
 const GOOGLE_BINARY_FIELD_KEYS = new Set([
   'base64',
   'contentBase64',
@@ -181,6 +197,57 @@ function fail(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
+function isGoogleAssistantSource(value) {
+  return value === GOOGLE_WORKSPACE_ASSISTANT_SOURCE_TYPE;
+}
+
+function isProactiveRunContext(runContext) {
+  if (!isPlainObject(runContext)) return false;
+  if (isGoogleAssistantSource(runContext.sourceType) || isGoogleAssistantSource(runContext.source)) {
+    return true;
+  }
+  if (isGoogleAssistantSource(runContext.sender?.sourceType)) {
+    return true;
+  }
+  if (Array.isArray(runContext.events)) {
+    return runContext.events.some(
+      (event) => isGoogleAssistantSource(event?.source) || isGoogleAssistantSource(event?.sender?.sourceType),
+    );
+  }
+  return false;
+}
+
+function isProactiveTurn(turn) {
+  return isPlainObject(turn) && turn.sender?.kind === 'host' && isGoogleAssistantSource(turn.sender?.sourceType);
+}
+
+async function resolveBackgroundProactiveTurn(host, api, invocation) {
+  if (typeof host?.getRunContext === 'function') {
+    try {
+      const runContext = await host.getRunContext(api, invocation);
+      if (isProactiveRunContext(runContext)) return true;
+      const hasExplicitRunInfo =
+        isPlainObject(runContext) &&
+        (runContext.sourceType !== undefined ||
+          runContext.source !== undefined ||
+          runContext.sender !== undefined ||
+          (Array.isArray(runContext.events) && runContext.events.length > 0));
+      if (hasExplicitRunInfo) return false;
+    } catch {
+      // Fall through to getTurn fallback if getRunContext is unavailable.
+    }
+  }
+  if (typeof host?.getTurn === 'function') {
+    try {
+      const turn = await host.getTurn(api, invocation);
+      if (isProactiveTurn(turn)) return true;
+    } catch {
+      // Ignore fallback lookup errors.
+    }
+  }
+  return false;
+}
+
 function credential(credentials, ref) {
   if (typeof credentials[ref] !== 'string') throw fail('MCP_CREDENTIAL_MISSING', 'MCP credential is unavailable.');
   return credentials[ref];
@@ -325,6 +392,30 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               check();
               if (owner !== botId) throw fail('MCP_FORBIDDEN', 'MCP tool is not available to this Bot.');
               if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
+              const rawArgs = isPlainObject(args) ? args : {};
+              const isDedicatedProactiveAssistant =
+                effectiveConfig?.proactiveAssistant?.role === 'dedicated' ||
+                host?.getProactiveAssistantConfig?.(botId)?.role === 'dedicated';
+              const isBackgroundProactiveTurn = isGoogleWorkspace
+                ? await resolveBackgroundProactiveTurn(host, api, invocation)
+                : false;
+              invocation.abortSignal?.throwIfAborted();
+              check();
+              if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
+              if (isGoogleWorkspace && (isDedicatedProactiveAssistant || isBackgroundProactiveTurn)) {
+                if (!GOOGLE_ASSISTANT_ALLOWED_TOOLS.has(tool.name)) {
+                  throw fail('FORBIDDEN', `Tool ${tool.name} is forbidden for the proactive Google Workspace assistant.`);
+                }
+                if (tool.name === 'gmail_read' && (rawArgs.download !== undefined || rawArgs.out !== undefined)) {
+                  throw fail('FORBIDDEN', 'gmail_read attachment download is forbidden for the proactive Google Workspace assistant.');
+                }
+                if (
+                  tool.name === 'gmail_draft' &&
+                  (rawArgs.bodyFile !== undefined || rawArgs.attach !== undefined || rawArgs.attachments !== undefined)
+                ) {
+                  throw fail('FORBIDDEN', 'gmail_draft local file or attachment staging is forbidden for the proactive Google Workspace assistant.');
+                }
+              }
               // 内置 Center Google Workspace MCP：真实执行前原子持久化会话隐私隔离标记；
               // 标记失败则 fail-closed 拒调 Center，绝不以 tools/list 或默认可见触发标记。
               const privacyGuard = await guardGoogleWorkspaceMcpCall({
@@ -341,7 +432,6 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               check();
               if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
               const signal = invocation.abortSignal ? AbortSignal.any([invocation.abortSignal, abort.signal]) : abort.signal;
-              const rawArgs = isPlainObject(args) ? args : {};
               let callArgs = args;
               let transferOptions;
               if (isGoogleWorkspace) {
@@ -370,7 +460,16 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               let result;
               try {
                 result = target === 'center'
-                  ? await host.centerClient.callCapabilityTool(installationId, botId, tool.name, callArgs, api.callId, { signal })
+                  ? await host.centerClient.callCapabilityTool(
+                    installationId,
+                    botId,
+                    tool.name,
+                    callArgs,
+                    api.callId,
+                    isGoogleWorkspace && isBackgroundProactiveTurn
+                      ? { signal, backgroundProactive: true }
+                      : { signal },
+                  )
                   : await client.callTool(tool.name, callArgs, { signal, timeoutMs: effectiveConfig.timeoutMs });
                 await privacyGuard.finish(result?.isError ? 'failed' : 'completed');
                 invocation.abortSignal?.throwIfAborted();

@@ -1,0 +1,539 @@
+/* TurnProcessRail & AssistantTurnBody styles — Warm Mineral Stone (Light) / Obsidian Moss (Dark).
+ * Pure Wave 1 design-system tokens with legacy fallbacks (zero raw color literals).
+ * Animates only transform, opacity, and CSS Grid grid-template-rows. */
+
+.turn-process-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
+  margin-bottom: var(--space-1, 4px);
+}
+
+.turn-process-rail:last-child {
+  margin-bottom: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Compact Trigger Pill                                                */
+/* ------------------------------------------------------------------ */
+
+.turn-process-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+  transition: transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.turn-process-trigger::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+.turn-process-trigger:active {
+  transform: scale(0.98);
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-trigger:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
+.turn-process-rail.is-live .turn-process-trigger {
+  border-color: var(--signal-primary-border, var(--color-line, var(--line)));
+  background: var(--signal-primary-soft, transparent);
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-rail.is-live .turn-process-trigger:active {
+  background: var(--signal-primary-soft, transparent);
+}
+
+.turn-process-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+.turn-process-icon > svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.turn-process-rail.is-live .turn-process-icon {
+  color: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.turn-process-live-dot {
+  position: relative;
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.turn-process-live-dot::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+  opacity: 0;
+  transform: scale(0.8);
+  pointer-events: none;
+  animation: turn-process-dot-pulse 2s var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) infinite;
+}
+
+@keyframes turn-process-dot-pulse {
+  0% {
+    opacity: 0.34;
+    transform: scale(0.8);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.38);
+  }
+}
+
+.turn-process-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium, 500);
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+}
+
+.turn-process-rail.is-live .turn-process-title {
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-sep {
+  flex: none;
+  color: var(--ink-muted, var(--color-text-subtle, var(--muted)));
+  user-select: none;
+}
+
+.turn-process-meta {
+  flex: none;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.turn-process-chevron {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-left: 2px;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.turn-process-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Collapsible Process Body (CSS Grid 0fr -> 1fr + opacity)            */
+/* ------------------------------------------------------------------ */
+
+.turn-process-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  width: 100%;
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    grid-template-rows 160ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity 160ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.turn-process-collapse.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    grid-template-rows 210ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)),
+    opacity 210ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.turn-process-collapse-inner {
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Vertical Timeline & Steps                                           */
+/* ------------------------------------------------------------------ */
+
+.turn-process-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 2px 0 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.turn-process-step {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 20px;
+  min-width: 0;
+}
+
+/* Hairline connects only adjacent timeline steps and never dangles past the last dot. */
+.turn-process-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 6.5px;
+  top: 13px;
+  bottom: -17px;
+  width: 1px;
+  background: var(--border-subtle, var(--color-line, var(--line)));
+  pointer-events: none;
+}
+
+.turn-process-step:not(:has(+ .turn-process-step))::before {
+  display: none;
+}
+
+.turn-process-step-dot {
+  position: absolute;
+  left: 4.5px;
+  top: 7.5px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--ink-muted, var(--color-text-subtle, var(--muted)));
+  pointer-events: none;
+}
+
+.turn-process-step.is-active .turn-process-step-dot {
+  left: 4px;
+  top: 7px;
+  width: 6px;
+  height: 6px;
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+}
+
+.turn-process-step.is-active .turn-process-step-dot::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius-full, 999px);
+  background: var(--signal-primary, var(--color-primary, var(--accent)));
+  opacity: 0;
+  transform: scale(0.8);
+  pointer-events: none;
+  animation: turn-process-dot-pulse 2s var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)) infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* Step Narration & Nested Extras                                      */
+/* ------------------------------------------------------------------ */
+
+.turn-process-step-text {
+  font-size: var(--text-sm, 0.8125rem);
+  line-height: 1.55;
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown p {
+  margin: 0 0 6px;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown p:last-child,
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown ul,
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown ol {
+  margin-block: 6px;
+  padding-left: 18px;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown li {
+  margin-block: 2px;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown h1,
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown h2,
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown h3 {
+  margin: 8px 0 4px;
+  font-size: var(--text-sm, 0.8125rem);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown blockquote {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-default, var(--color-line, var(--line)));
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.5;
+}
+
+.turn-process-rail .turn-process-step .turn-process-step-text .markdown :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs, 6px);
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-step-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.turn-process-step .turn-process-step-extras > .bot-chat-tools,
+.turn-process-step .turn-process-step-extras > .bot-chat-tools-group,
+.turn-process-step .turn-process-step-extras > .bot-chat-thinking {
+  margin-bottom: 0;
+}
+
+.turn-process-step-extras .bot-chat-thinking {
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+}
+
+.turn-process-step-extras .bot-chat-thinking > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.turn-process-step-extras .bot-chat-thinking > pre {
+  margin: var(--space-1, 4px) 0 0;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  border: 1px solid var(--border-subtle, var(--color-line, var(--line)));
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  color: var(--ink-secondary, var(--color-text-muted, var(--muted)));
+  font-family: var(--font-mono);
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ------------------------------------------------------------------ */
+/* Long-Timeline Collapse Footer                                       */
+/* ------------------------------------------------------------------ */
+
+.turn-process-footer {
+  display: flex;
+  align-items: center;
+  padding: 0 0 6px 20px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+.turn-process-footer-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--radius-xs, 6px);
+  background: transparent;
+  color: var(--ink-tertiary, var(--color-text-subtle, var(--muted)));
+  font-family: var(--font-sans);
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1.35;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+  transition: transform var(--dur-press, 120ms) var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+.turn-process-footer-btn > svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.turn-process-footer-btn::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+.turn-process-footer-btn:active {
+  transform: scale(0.97);
+  background: var(--surface-inset, var(--color-surface-3, var(--surface)));
+  color: var(--ink-primary, var(--color-text, var(--text)));
+}
+
+.turn-process-footer-btn:focus-visible {
+  outline: 2px solid var(--signal-primary, var(--color-primary, var(--accent)));
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Final Answer & Segment Separation                                   */
+/* ------------------------------------------------------------------ */
+
+.turn-final-answer {
+  width: 100%;
+  min-width: 0;
+}
+
+.turn-process-rail + .turn-final-answer,
+.turn-final-answer + .turn-process-rail {
+  margin-top: var(--space-2, 8px);
+}
+
+/* ------------------------------------------------------------------ */
+/* Fine Pointer Hover States                                           */
+/* ------------------------------------------------------------------ */
+
+@media (hover: hover) and (pointer: fine) {
+  .turn-process-trigger:hover {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    border-color: var(--border-default, var(--color-line, var(--line)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+
+  .turn-process-trigger:hover .turn-process-title {
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+
+  .turn-process-rail.is-live .turn-process-trigger:hover {
+    background: var(--signal-primary-soft, transparent);
+    border-color: var(--signal-primary, var(--color-primary, var(--accent)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+
+  .turn-process-footer-btn:hover {
+    background: var(--surface-1, var(--color-surface-1, var(--surface)));
+    color: var(--ink-primary, var(--color-text, var(--text)));
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Coarse Pointer (Touch) Polish                                       */
+/* ------------------------------------------------------------------ */
+
+@media (pointer: coarse) {
+  .turn-process-trigger {
+    min-height: 34px;
+    padding: 6px 12px 6px 10px;
+    font-size: var(--text-sm, 0.8125rem);
+  }
+
+  .turn-process-meta {
+    font-size: var(--text-sm, 0.8125rem);
+  }
+
+  .turn-process-timeline {
+    gap: 12px;
+  }
+
+  .turn-process-step:not(:last-child)::before {
+    bottom: -19px;
+  }
+
+  .turn-process-footer-btn {
+    min-height: 34px;
+    padding: 6px 10px;
+    font-size: var(--text-sm, 0.8125rem);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced Motion                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-process-trigger,
+  .turn-process-chevron,
+  .turn-process-collapse,
+  .turn-process-collapse.is-open,
+  .turn-process-footer-btn {
+    transition: none;
+  }
+
+  .turn-process-trigger:active,
+  .turn-process-footer-btn:active {
+    transform: none;
+  }
+
+  .turn-process-live-dot::after,
+  .turn-process-step.is-active .turn-process-step-dot::after {
+    animation: none;
+    opacity: 0.24;
+    transform: scale(1);
+  }
+}

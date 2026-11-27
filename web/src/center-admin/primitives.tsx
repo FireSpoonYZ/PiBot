@@ -108,6 +108,8 @@ export function CaModal({
   ariaDescription,
   variant = 'drawer',
   wide,
+  footer,
+  bodyClassName,
   children,
 }: {
   open: boolean;
@@ -117,6 +119,8 @@ export function CaModal({
   ariaDescription?: string;
   variant?: 'modal' | 'drawer';
   wide?: boolean;
+  footer?: React.ReactNode;
+  bodyClassName?: string;
   children: React.ReactNode;
 }): React.JSX.Element {
   const t = useText();
@@ -160,7 +164,8 @@ export function CaModal({
                 </button>
               </Dialog.Close>
             </div>
-            <div className="ca-dialog-body">{children}</div>
+            <div className={`ca-dialog-body${bodyClassName ? ` ${bodyClassName}` : ''}`}>{children}</div>
+            {footer ? <div className="ca-dialog-footer">{footer}</div> : null}
           </Dialog.Content>
         </div>
       </Dialog.Portal>

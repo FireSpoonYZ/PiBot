@@ -155,12 +155,14 @@ export function DevicesTab({
   cacheKey = 'default',
   onConfigureBot,
   renderQr,
+  onRegisterBackHandler,
 }: {
   api: CenterApi;
   active?: boolean;
   cacheKey?: string;
   onConfigureBot?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
+  onRegisterBackHandler?: (handler: () => boolean) => () => void;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
@@ -504,12 +506,25 @@ export function DevicesTab({
     setCfgInlineNotice('');
   }, []);
 
+  const hasCfgBot = Boolean(cfgBot);
+  const closeBuiltinBotConfigRef = useRef(closeBuiltinBotConfig);
+  closeBuiltinBotConfigRef.current = closeBuiltinBotConfig;
+
   useEffect(() => {
-    if (!active || !cfgBot) return;
-    return registerOverlayBackHandler(() => {
-      closeBuiltinBotConfig();
+    if (!active || !hasCfgBot) return;
+    const handleBack = () => {
+      closeBuiltinBotConfigRef.current();
+      return true;
+    };
+    const unregisterOverlay = registerOverlayBackHandler(() => {
+      handleBack();
     });
-  }, [active, cfgBot, closeBuiltinBotConfig]);
+    const unregisterPanel = onRegisterBackHandler?.(handleBack);
+    return () => {
+      unregisterPanel?.();
+      unregisterOverlay();
+    };
+  }, [active, hasCfgBot, onRegisterBackHandler]);
 
   const handleOpenPairing = async (targetDeviceId?: string) => {
     // Reuse existing pending code if it matches the same target and has > 15s remaining

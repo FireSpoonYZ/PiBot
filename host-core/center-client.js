@@ -1,7 +1,5 @@
 import http from 'node:http';
 import https from 'node:https';
-import { randomUUID } from 'node:crypto';
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { assertDeviceToken } from './relay-protocol.js';
 import { assertId } from './message-protocol.js';
 import {
@@ -9,26 +7,18 @@ import {
   MCP_DISPATCH_SESSION_ISOLATION,
 } from './mcp-dispatch-policy.js';
 import {
-  ANTIGRAVITY_API,
+  ANTIGRAVITY_RUN_PATH,
+  ANTIGRAVITY_TOOL_RESULT_PATH,
+  ANTIGRAVITY_STEER_PATH,
   ANTIGRAVITY_CANCEL_PATH,
   ANTIGRAVITY_MAX_FRAME_BYTES,
-  ANTIGRAVITY_PROVIDER_ID,
-  ANTIGRAVITY_STREAM_PATH,
-  assertAntigravityStreamEvent,
-  createAntigravityErrorEvent,
-} from './antigravity-provider.js';
+} from '../center-contract/antigravity.js';
+
+const GOOGLE_ASSISTANT_POLL_HEADER = 'x-pibot-google-assistant';
+const GOOGLE_ASSISTANT_POLL_VALUE = 'batch-v1';
 
 function centerError(code, message) {
   return Object.assign(new Error(message), { code });
-}
-
-function normalizeResponseHeaders(rawHeaders) {
-  const out = {};
-  for (const [key, value] of Object.entries(rawHeaders ?? {})) {
-    if (typeof value === 'string') out[key] = value;
-    else if (Array.isArray(value)) out[key] = value.join(', ');
-  }
-  return out;
 }
 
 export function validateCenterUrl(centerUrl) {
@@ -41,7 +31,7 @@ export function validateCenterUrl(centerUrl) {
   return base;
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, oauthToken, onOAuthToken, onDisconnect, onChange, onWebhookReady, onTaskReady }) {
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, oauthToken, onOAuthToken, onDisconnect, onChange, onWebhookReady, onTaskReady, onClientReleasePublished }) {
   const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
@@ -408,18 +398,21 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     const disconnected = () => disconnect(centerError('CENTER_OFFLINE', 'center event stream disconnected'));
     events.setEncoding('utf8');
     events.on('data', (chunk) => {
+      if (closed) return;
       arm();
       buffer += chunk;
       if (buffer.length > 65536) { events.destroy(); return; }
       let end;
-      while ((end = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      while (!closed && (end = buffer.search(/\r?\n\r?\n/)) !== -1) {
         const frame = buffer.slice(0, end);
         const separator = /^\r?\n\r?\n/.exec(buffer.slice(end))[0];
         buffer = buffer.slice(end + separator.length);
         const lines = frame.split(/\r?\n/);
-        if (lines.includes('event: config-changed')) onChange?.();
-        if (lines.includes('event: webhook-ready')) onWebhookReady?.();
-        if (lines.includes('event: task-ready')) onTaskReady?.();
+        const hasEvent = (name) => lines.includes(`event: ${name}`) || lines.includes(`event:${name}`);
+        if (hasEvent('config-changed')) onChange?.();
+        if (hasEvent('webhook-ready')) onWebhookReady?.();
+        if (hasEvent('task-ready')) onTaskReady?.();
+        if (hasEvent('client-release-published')) onClientReleasePublished?.();
       }
     });
     events.once('end', disconnected);
@@ -515,7 +508,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', {
       method: 'POST',
       body: { cursor: options.cursor },
-      headers: { [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION },
+      headers: {
+        [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION,
+        [GOOGLE_ASSISTANT_POLL_HEADER]: GOOGLE_ASSISTANT_POLL_VALUE,
+      },
       signal: options.signal,
     }),
     stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
@@ -533,21 +529,137 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
     // 中心共享 Google Workspace 状态（只读，复用 device Bearer 认证，不授予普通 Host owner 凭据）。
     getGoogleStatus: (options = {}) => request('/api/host/google/status', { signal: options?.signal }),
-    listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
-    callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
-    streamAntigravity(payload, options = {}) {
-      const eventStream = createAssistantMessageEventStream();
-      const requestId = randomUUID();
-      const model = options.model ?? {
-        id: typeof payload?.modelId === 'string' ? payload.modelId : '',
-        api: ANTIGRAVITY_API,
-        provider: ANTIGRAVITY_PROVIDER_ID,
+    listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', {
+      method: 'POST',
+      body: {
+        botId,
+        ...(typeof options.backgroundProactive === 'boolean' ? { backgroundProactive: options.backgroundProactive } : {}),
+      },
+      signal: options.signal,
+    }),
+    callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', {
+      method: 'POST',
+      body: {
+        botId,
+        name,
+        args,
+        callId,
+        ...(typeof options.backgroundProactive === 'boolean' ? { backgroundProactive: options.backgroundProactive } : {}),
+      },
+      signal: options.signal,
+    }),
+    antigravity: (() => {
+      const readAntigravityError = async (response) => {
+        const chunks = [];
+        let totalBytes = 0;
+        for await (const chunk of response) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (totalBytes + buf.length > 65536) {
+            chunks.push(buf.subarray(0, 65536 - totalBytes));
+            totalBytes = 65536;
+            response.destroy();
+            break;
+          }
+          chunks.push(buf);
+          totalBytes += buf.length;
+        }
+        let code = null;
+        let message = null;
+        if (totalBytes > 0) {
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks, totalBytes).toString('utf8'));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              const nested = parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error)
+                ? parsed.error
+                : null;
+              const rawCode = nested ? nested.code : parsed.code;
+              const rawMsg = nested
+                ? nested.message
+                : (typeof parsed.error === 'string' ? parsed.error : parsed.message);
+              if (typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(rawCode)) {
+                code = rawCode;
+              }
+              if (typeof rawMsg === 'string' && rawMsg.trim() !== '' && rawMsg.length <= 512) {
+                message = rawMsg;
+              }
+            }
+          } catch { /* non-JSON error body */ }
+        }
+        return { code, message };
       };
-      const cancelAntigravity = async (sessionId) => {
-        if (closed || typeof sessionId !== 'string' || !sessionId.trim()) return;
+
+      const throwAntigravityHttpError = async (response, fallbackPrefix) => {
+        const { code, message } = await readAntigravityError(response);
+        if (response.statusCode === 401) {
+          const authError = Object.assign(
+            centerError('UNAUTHORIZED', message ?? 'center authentication failed'),
+            { statusCode: 401 },
+          );
+          disconnect(authError);
+          throw authError;
+        }
+        throw Object.assign(
+          centerError(code ?? 'CENTER_REQUEST_FAILED', message ?? `${fallbackPrefix} (${response.statusCode})`),
+          { statusCode: response.statusCode },
+        );
+      };
+
+      const postJson = async (path, payload, { signal, timeoutMs = 30_000 } = {}) => {
+        if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+        if (signal?.aborted) {
+          throw Object.assign(new Error('Request was aborted'), { name: 'AbortError' });
+        }
+        let req = null;
         let timer;
         try {
-          const cancelReq = start(ANTIGRAVITY_CANCEL_PATH, { method: 'POST', body: { sessionId, requestId } });
+          req = start(path, { method: 'POST', body: payload, signal });
+          timer = setTimeout(() => {
+            req?.destroy(centerError('CENTER_OFFLINE', 'center request timed out'));
+          }, timeoutMs);
+          timer.unref?.();
+          const response = await new Promise((resolve, reject) => {
+            req.once('response', resolve);
+            req.once('error', reject);
+          });
+          req.on('error', () => {});
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            await throwAntigravityHttpError(response, 'center antigravity request failed');
+          }
+          if (response.statusCode === 204) {
+            response.resume();
+            return undefined;
+          }
+          const chunks = [];
+          let size = 0;
+          for await (const chunk of response) {
+            size += chunk.length;
+            if (size > 16 * 1024 * 1024) {
+              response.destroy();
+              throw centerError('CENTER_REQUEST_FAILED', 'center response too large');
+            }
+            chunks.push(chunk);
+          }
+          if (size === 0) return undefined;
+          try {
+            return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+          } catch {
+            throw centerError('CENTER_REQUEST_FAILED', 'invalid center response');
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
+      const cancel = async (payload) => {
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId.trim() : '';
+        if (closed || !sessionId) return;
+        const runId = typeof payload?.runId === 'string' && payload.runId.trim() ? payload.runId : undefined;
+        let timer;
+        try {
+          const cancelReq = start(ANTIGRAVITY_CANCEL_PATH, {
+            method: 'POST',
+            body: { sessionId, ...(runId !== undefined ? { runId } : {}) },
+          });
           cancelReq.on('error', () => {});
           timer = setTimeout(() => cancelReq.destroy(centerError('CENTER_OFFLINE', 'center cancel timed out')), 5000);
           timer.unref?.();
@@ -558,61 +670,47 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
           cancelRes.on('error', () => {});
           cancelRes.resume();
         } catch {
-          // Best-effort cancel on caller abort.
+          // Best-effort cancel; never throw.
         } finally {
           clearTimeout(timer);
         }
       };
 
-      void (async () => {
-        const signal = options.signal;
+      async function* run(payload, { signal } = {}) {
+        if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+        if (signal?.aborted) {
+          throw Object.assign(new Error('Request was aborted'), { name: 'AbortError' });
+        }
+        if (
+          !payload || typeof payload !== 'object' || Array.isArray(payload) ||
+          typeof payload.sessionId !== 'string' || !payload.sessionId.trim() ||
+          typeof payload.runId !== 'string' || !payload.runId.trim() ||
+          typeof payload.modelId !== 'string' || !payload.modelId.trim()
+        ) {
+          throw centerError('INVALID_ARGUMENT', 'invalid antigravity run payload');
+        }
+
         let terminalSeen = false;
         let cancelTriggered = false;
         let started = false;
         let req = null;
         let response = null;
-        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
-        let cancelSessionId = sessionId;
         const triggerCancel = () => {
           if (terminalSeen || cancelTriggered) return;
           cancelTriggered = true;
           req?.destroy();
           response?.destroy();
-          if (started) void cancelAntigravity(cancelSessionId);
+          if (started) {
+            void cancel({ sessionId: payload.sessionId, runId: payload.runId });
+          }
         };
         const onAbort = () => triggerCancel();
+        signal?.addEventListener('abort', onAbort, { once: true });
 
         try {
-          if (signal?.aborted) {
-            eventStream.push(createAntigravityErrorEvent(model, new Error('Request was aborted'), true));
-            return;
-          }
-          if (closed) {
-            throw centerError('CENTER_OFFLINE', 'center is disconnected');
-          }
-          if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-              !sessionId.trim() || typeof payload.modelId !== 'string' || !payload.modelId.trim() ||
-              !Array.isArray(payload.messages)) {
-            throw centerError('INVALID_ARGUMENT', 'invalid antigravity stream payload');
-          }
-          let bodyPayload = payload;
-          if (typeof options.onPayload === 'function') {
-            const nextPayload = await options.onPayload(bodyPayload, model);
-            if (nextPayload !== undefined) bodyPayload = nextPayload;
-          }
-          // This attempt's cancellation identity is transport-owned. A payload
-          // hook may reshape model input but must not reuse an older stream ID.
-          bodyPayload = { ...bodyPayload, requestId };
-          cancelSessionId = typeof bodyPayload.sessionId === 'string' ? bodyPayload.sessionId : '';
-          if (signal?.aborted) {
-            eventStream.push(createAntigravityErrorEvent(model, new Error('Request was aborted'), true));
-            return;
-          }
-
-          signal?.addEventListener('abort', onAbort, { once: true });
-          req = start(ANTIGRAVITY_STREAM_PATH, {
+          req = start(ANTIGRAVITY_RUN_PATH, {
             method: 'POST',
-            body: bodyPayload,
+            body: payload,
             signal,
             headers: { Accept: 'application/x-ndjson' },
           });
@@ -621,71 +719,40 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
             req.once('response', resolve);
             req.once('error', reject);
           });
+          req.setTimeout(0);
           req.on('error', () => {});
 
-          await options.onResponse?.({
-            status: response.statusCode ?? 0,
-            headers: normalizeResponseHeaders(response.headers),
-          }, model);
-
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            const errChunks = [];
-            let errBytes = 0;
-            for await (const chunk of response) {
-              const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-              if (errBytes + buf.length > 65536) {
-                errChunks.push(buf.subarray(0, 65536 - errBytes));
-                response.destroy();
-                break;
-              }
-              errChunks.push(buf);
-              errBytes += buf.length;
-            }
-            let errorCode = null;
-            let errorMessage = null;
-            try {
-              const parsed = JSON.parse(Buffer.concat(errChunks, errBytes).toString('utf8'));
-              if (typeof parsed?.error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(parsed.error.code)) {
-                errorCode = parsed.error.code;
-              }
-              if (typeof parsed?.error?.message === 'string' && parsed.error.message.length <= 512) {
-                errorMessage = parsed.error.message;
-              }
-            } catch { /* non-JSON error body */ }
-            if (response.statusCode === 401 || response.statusCode === 403) {
-              const authError = centerError('UNAUTHORIZED', 'center authentication failed');
-              if (response.statusCode === 401) disconnect(authError);
-              throw authError;
-            }
-            if (errorCode) throw centerError(errorCode, errorMessage ?? 'center request failed');
-            throw centerError('CENTER_REQUEST_FAILED', errorMessage ?? `center antigravity stream failed (${response.statusCode})`);
+            await throwAntigravityHttpError(response, 'center antigravity run failed');
           }
 
           const contentType = String(response.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase();
           if (contentType !== 'application/x-ndjson') {
             response.destroy();
-            throw centerError('CENTER_REQUEST_FAILED', 'invalid antigravity stream content-type');
+            throw centerError('CENTER_REQUEST_FAILED', 'invalid antigravity run content-type');
           }
 
           const decoder = new TextDecoder('utf-8', { fatal: true });
           let lineChunks = [];
           let lineBytes = 0;
 
-          const handleLine = async (rawLine) => {
+          const parseLine = (rawLine) => {
             const trimmed = rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
               ? rawLine.subarray(0, rawLine.length - 1)
               : rawLine;
-            if (trimmed.length === 0) return false;
+            if (trimmed.length === 0) return null;
             const text = decoder.decode(trimmed);
-            if (!text.trim()) return false;
-            const parsed = JSON.parse(text);
-            const event = assertAntigravityStreamEvent(parsed);
-            await options.onProviderStreamEvent?.(event, model);
-            if (event.type === 'done' || event.type === 'error') {
-              terminalSeen = true;
+            if (!text.trim()) return null;
+            let parsed;
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              throw centerError('CENTER_REQUEST_FAILED', 'invalid antigravity run frame');
             }
-            eventStream.push(event);
-            return terminalSeen;
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.type !== 'string') {
+              throw centerError('CENTER_REQUEST_FAILED', 'invalid antigravity run event');
+            }
+            return parsed;
           };
 
           for await (const chunk of response) {
@@ -714,7 +781,13 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
               lineChunks = [];
               lineBytes = 0;
               offset = nl + 1;
-              if (await handleLine(lineBuf)) {
+              const event = parseLine(lineBuf);
+              if (!event) continue;
+              if (event.type === 'turn_done' || event.type === 'error') {
+                terminalSeen = true;
+              }
+              yield event;
+              if (terminalSeen) {
                 response.on('error', () => {});
                 response.destroy();
                 return;
@@ -726,26 +799,42 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
             const tailBuf = lineChunks.length === 1 ? lineChunks[0] : Buffer.concat(lineChunks, lineBytes);
             lineChunks = [];
             lineBytes = 0;
-            if (await handleLine(tailBuf)) return;
+            const event = parseLine(tailBuf);
+            if (event) {
+              if (event.type === 'turn_done' || event.type === 'error') {
+                terminalSeen = true;
+              }
+              yield event;
+              if (terminalSeen) return;
+            }
           }
 
           if (!terminalSeen) {
-            if (signal?.aborted) throw new Error('Request was aborted');
+            if (signal?.aborted) {
+              throw Object.assign(new Error('Request was aborted'), { name: 'AbortError' });
+            }
             throw centerError('CENTER_REQUEST_FAILED', 'antigravity stream ended without a terminal event');
           }
-        } catch (err) {
-          if (terminalSeen) return;
-          const aborted = Boolean(signal?.aborted);
-          if (aborted) triggerCancel();
-          eventStream.push(createAntigravityErrorEvent(model, err, aborted));
         } finally {
           signal?.removeEventListener('abort', onAbort);
-          eventStream.end();
+          if (!terminalSeen) {
+            if (signal?.aborted) {
+              triggerCancel();
+            } else {
+              req?.destroy();
+              response?.destroy();
+            }
+          }
         }
-      })();
+      }
 
-      return eventStream;
-    },
+      return {
+        run,
+        toolResult: (payload, options = {}) => postJson(ANTIGRAVITY_TOOL_RESULT_PATH, payload, { signal: options?.signal, timeoutMs: 30_000 }),
+        steer: (payload, options = {}) => postJson(ANTIGRAVITY_STEER_PATH, payload, { signal: options?.signal, timeoutMs: 30_000 }),
+        cancel,
+      };
+    })(),
     async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; currentOAuthToken = ''; oauthTokenPromise = null; for (const active of requests) active.destroy(); events.destroy(); agent.destroy(); },
   };
 }

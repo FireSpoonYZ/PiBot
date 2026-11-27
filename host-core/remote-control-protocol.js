@@ -177,6 +177,8 @@ const CONTROL_V2_METHODS = Object.freeze([
   // 对话命令：/clear 与 /compact 是 additive v2，只接 {botId}。
   'clearHistory',
   'compact',
+  // Read-only model preflight; Center must call this before committing an AGY selection.
+  'assertModelSelectionAllowed',
   // 流控制与历史编辑：撤回排队消息、将排队项提升为立即打断发送（steer）、编辑历史消息重生成。
   'withdrawQueued',
   'steerQueued',
@@ -219,6 +221,7 @@ export const CONTROL_ERROR_CODES = new Set([
   'TASK_NOT_FOUND',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
+  'AGY_HISTORY_CHANGED',
   'COMPACTION_FAILED',
   'RUNTIME_BUSY',
   'PRIMARY_BOT_PROTECTED',
@@ -396,6 +399,12 @@ function normalizeControlParams(method, params) {
       rejectUnknownFields(params, new Set(['botId']), 'params');
       assertId(params.botId, 'botId');
       return { botId: params.botId };
+    }
+    case 'assertModelSelectionAllowed': {
+      rejectUnknownFields(params, new Set(['botId', 'modelRef']), 'params');
+      assertId(params.botId, 'botId');
+      if (params.modelRef !== null) assertNonEmptyString(params.modelRef, 'modelRef');
+      return { botId: params.botId, modelRef: params.modelRef };
     }
     case 'findByRequest': {
       rejectUnknownFields(params, new Set(['requestId']), 'params');

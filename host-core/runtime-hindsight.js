@@ -502,6 +502,8 @@ export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getW
       assertOpen();
       callContext.abortSignal?.throwIfAborted();
 
+      // Keep source registration and auto-retain above; ACP history only receives explicit memory tool results.
+      if (policyFor(capture.identity.botId)?.autoRecall === false) return undefined;
       if (typeof capture.query !== 'string' || capture.query.length === 0) return undefined;
 
       const recall = await computeRecall(contextRow, capture, api, callContext);

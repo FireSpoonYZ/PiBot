@@ -409,8 +409,10 @@ public final class BotHostUiBridgeService extends Service {
                     validateUpdateParams(params, null);
                     return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
                 case "updateCheck":
+                    validateUpdateCheckParams(params);
+                    return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
                 case "updateInstall":
-                    validateUpdateParams(params, "updateCheck".equals(op) ? "automatic" : "stopActive");
+                    validateUpdateParams(params, "stopActive");
                     return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
                 case "clipboardSync":
                     return ClipboardSyncController.get(BotHostUiBridgeService.this).handleAction(params);
@@ -887,6 +889,11 @@ public final class BotHostUiBridgeService extends Service {
                 || (params.has(option) && !(params.opt(option) instanceof Boolean))) {
             throw new BridgeException("INVALID_ARGUMENT", "not-sent", "更新参数无效");
         }
+    }
+
+    /** 严格白名单校验 updateCheck 参数：仅允许 automatic(boolean) 与白名单 reason(string)。 */
+    static void validateUpdateCheckParams(JSONObject params) throws BridgeException {
+        ClientUpdater.parseCheckParams(params);
     }
 
     private static String required(JSONObject params, String name) {

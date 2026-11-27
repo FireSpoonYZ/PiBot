@@ -18,6 +18,7 @@ import {
   Image as ImageIcon,
   LockKeyhole,
   MessageSquare,
+  MessagesSquare,
   Monitor,
   MoreHorizontal,
   PanelLeftClose,
@@ -73,7 +74,7 @@ import {
 } from '../../../web/src/components/ui';
 import { hasOpenFloatingPopover, isEventInsideFloatingUi } from '../../../web/src/components/ui/Overlay';
 import { BotReadScope } from '../../../web/src/botReadScope';
-import { deleteBotAndVerify } from '../../../web/src/botOperations';
+import { deleteBotAndVerify, hasAntigravityHistory } from '../../../web/src/botOperations';
 import { SendButtonIcon } from '../../../web/src/SendButtonIcon';
 import { useReceiptRecovery } from '../../../web/src/useReceiptRecovery';
 import type {
@@ -151,7 +152,7 @@ import { targetApi } from './targetApi';
 import { HistoryEpochChangedError, readHistoryPage } from './history';
 import { Scopes } from './Scopes';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import type { RoomApiResolver, ScopeReadApi } from './scope-api';
+import type { MemberApiResolver, RoomApiResolver, ScopeReadApi } from './scope-api';
 import {
   ConversationContextMenu,
   ConversationGroupAvatar,
@@ -574,7 +575,7 @@ function RawEntryRow({ entry }: { entry: AnyRawEntry }) {
   const label = ({
     'pi.user': '用户消息',
     'pi.assistant': 'Bot 回复',
-    'pi.tool_result': '工具结果',
+    'pi.tool-result': '工具结果',
     'pi.reset': '对话已清空',
   } as Record<string, string>)[entry.kind] ?? '会话事件';
   const summary = truncate(entryTextLines(entry).join('\n'), 320);
@@ -4238,18 +4239,20 @@ function PrimaryChatPane({
     isSendingMessage ||
     slashBusy !== null ||
     (effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed');
-  const canEditTurns = Boolean(online && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
+  const nativeHistoryLocked = hasAntigravityHistory(bot.modelRef, [...rawItems, ...(live?.history ?? [])], clearedThroughEntryId);
+  const canEditTurns = Boolean(online && !nativeHistoryLocked && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
   useEffect(() => {
     if (!editingTurn || editSubmitting) return;
     if (
       editingTurn.sess !== sess ||
       editingTurn.botId !== bot.botId ||
+      nativeHistoryLocked ||
       !online ||
       isArchived
     ) {
       setEditingTurn(null);
     }
-  }, [editingTurn, editSubmitting, sess, bot.botId, online, isArchived]);
+  }, [editingTurn, editSubmitting, sess, bot.botId, nativeHistoryLocked, online, isArchived]);
   const startEditTurn = useCallback(
     (turn: ChatTurn) => {
       if (!canEditTurns) return;
@@ -5235,7 +5238,31 @@ function PrimaryChatPane({
                 </div>
                 <BotProfile api={api} centerApi={centerApi} bot={bot} page={isManagementPage ? 'management' : 'profile'} onSaved={onProfileSaved} />
                 {isProfilePage ? (
-                  <nav className="inspector-links" aria-label="Bot 设置">
+                  <nav className="inspector-links" aria-label={t('Bot 设置', 'Bot settings')}>
+                    {onOpenPrivateChats ? (
+                      <section className="inspector-link-group">
+                        <h3 className="inspector-section-title">{t('Bot 协作', 'Bot collaboration')}</h3>
+                        <button
+                          type="button"
+                          className="inspector-dm-entry"
+                          onClick={() => {
+                            setInspectorTab(null);
+                            onOpenPrivateChats(bot);
+                          }}
+                        >
+                          <span className="inspector-dm-icon" aria-hidden="true">
+                            <MessagesSquare size={16} />
+                          </span>
+                          <span className="inspector-dm-copy">
+                            <span className="inspector-dm-title">{t('查看该 Bot 的私聊', 'View this bot’s private chats')}</span>
+                            <span className="inspector-dm-sub">
+                              {t('查看与其他 Bot 的收发私聊记录', 'Browse incoming & outgoing peer bot DMs')}
+                            </span>
+                          </span>
+                          <ChevronRight size={15} className="inspector-dm-chevron" aria-hidden="true" />
+                        </button>
+                      </section>
+                    ) : null}
                     {inspectorGroups.map(group => (
                       <section className="inspector-link-group" key={group.title}>
                         <h3 className="inspector-section-title">{group.title}</h3>
@@ -6565,6 +6592,20 @@ export function BotChats({
     },
     [roomSendDeviceIdOf, roomWriteTargetApiMap],
   );
+  /**
+   * DM 成员只读端解析器：优先命中按「设备+在线布尔」内容签名稳定的 roomWriteTargetApiMap，
+   * 目录尚未含目标设备时回退 stageApi（仅 targetDeviceId 精确匹配）。
+   * 同内容目录轮询不换引用，避免 DM 详情重置成员观察与历史。
+   */
+  const resolveMemberApi = useCallback<MemberApiResolver>(
+    (deviceId) => {
+      if (!deviceId) return null;
+      const mapped = roomWriteTargetApiMap.get(deviceId);
+      if (mapped) return mapped;
+      return stageApi?.identity?.targetDeviceId === deviceId ? stageApi : null;
+    },
+    [roomWriteTargetApiMap, stageApi],
+  );
   // Scopes 消息链接与主聊同一通道：desktop_open_center 原生命令（仅放行 HTTPS），失败可见化。
   const openScopeLink = useCallback(
     (href: string) =>
@@ -7695,6 +7736,7 @@ export function BotChats({
               readOnly
               variant="desktop"
               scopeKind="dm"
+              resolveMemberApi={resolveMemberApi}
               participant={stage.member}
               participantName={stage.name}
               selectedScopeId={dmScopeId}
