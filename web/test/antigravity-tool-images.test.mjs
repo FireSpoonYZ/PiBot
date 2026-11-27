@@ -319,9 +319,14 @@ for await (const line of createInterface({ input: process.stdin })) {
 
   const mcpBridge = new SharedMcpBridge();
   let activeWaiters = null;
+  let onPollCall = null;
   const reg = mcpBridge.registerSession({
     listTools: () => [{ name: 'codemode', description: 'Run', inputSchema: { type: 'object', properties: {} } }],
-    onToolCall: (callId, name, args, signal) => activeWaiters.handleToolCall(callId, name, args, signal),
+    onToolCall: (callId, name, args, signal) => {
+      const result = activeWaiters.handleToolCall(callId, name, args, signal);
+      if (name === POLL_TOOL_NAME) onPollCall?.(args);
+      return result;
+    },
   });
   await mcpBridge.ensureStarted();
 
@@ -365,11 +370,16 @@ for await (const line of createInterface({ input: process.stdin })) {
     // 2. Escalated slow tool (`bridge_poll_result`) returning image on hot reused session
     {
       const toolReqSeen = Promise.withResolvers();
+      const firstPollSeen = Promise.withResolvers();
       activeWaiters = new RunToolWaiters({
-        escalateAfterMs: 40,
+        escalateAfterMs: 60,
         onToolRequest: (ev) => toolReqSeen.resolve(ev),
         deliverToolImages: (callId, images) => driver.queueToolResultImages(callId, images),
       });
+      onPollCall = () => {
+        onPollCall = null;
+        firstPollSeen.resolve();
+      };
       const handle = await driver.run({
         cwd: root,
         model: MODEL_ID,
@@ -378,7 +388,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         prompt: 'TURN_ESCALATED',
       });
       const reqEv = await toolReqSeen.promise;
-      await new Promise((resolve) => setTimeout(resolve, 90));
+      await firstPollSeen.promise;
       activeWaiters.resolve(reqEv.callId, [
         { type: 'text', text: 'slow-shot' },
         { type: 'image', data: JPEG_TINY, mimeType: 'image/jpeg' },
