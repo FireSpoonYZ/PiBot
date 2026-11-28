@@ -29,10 +29,6 @@ export interface DriverTurnRequest extends DriverProfile {
 	/** Image blocks riding with the prompt, forwarded as ACP `image` content blocks. */
 	images?: ToolResultImage[];
 	signal?: AbortSignal;
-	/** Overall turn cap in minutes (default 10). 0 disables the cap. */
-	timeoutMin?: number;
-	/** Stdout-inactivity cap in minutes (default 5). 0 disables the cap. */
-	inactivityMin?: number;
 }
 
 export type AgyUsage = {
@@ -138,10 +134,6 @@ export interface TurnDriver {
 	steer(prompt: string, images?: ToolResultImage[]): Promise<void>;
 	/** Queue tool-result images for delivery on the next PreInvocation hook of the active turn. */
 	queueToolResultImages?(toolCallId: string, images: readonly ToolResultImage[]): void;
-	/** Pause idle/overall timers while host MCP tools are executing. */
-	pauseTimers(): void;
-	/** Resume idle/overall timers once host MCP tools finish. */
-	resumeTimers(): void;
 	/** Send native session/cancel to the active turn (with teardown safety net). */
 	cancel(): void;
 	set onTurnEnd(fn: ((outcome: TurnOutcome) => void) | undefined);

@@ -361,7 +361,7 @@ export class AcpConnection {
 	}
 
 	/** Stateless prompt RPC; supports multiple concurrent in-flight prompts on
-	 *  the same session (steer). No request timeout: driver timers govern turns. */
+	 *  the same session (steer). No request timeout; turns run until completion or cancellation. */
 	async prompt(
 		sessionId: string,
 		text: string,

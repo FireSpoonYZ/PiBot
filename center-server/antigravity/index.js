@@ -456,7 +456,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 			}
 
 			const runAbort = new AbortController();
-			let timersPaused = false;
 			let resolveSettled;
 			const settledPromise = new Promise((resolve) => { resolveSettled = resolve; });
 
@@ -466,15 +465,6 @@ export function openAntigravity({ dataRoot, bin, geminiHome, escalateAfterMs } =
 				onToolRequest: ({ callId, name, args }) => {
 					if (!run || run.aborted || run.deliveryError) return;
 					stream.push({ type: "tool_request", callId, name, args });
-				},
-				onInFlightChange: (count) => {
-					if (count > 0 && !timersPaused) {
-						timersPaused = true;
-						slot.driver.pauseTimers();
-					} else if (count === 0 && timersPaused) {
-						timersPaused = false;
-						slot.driver.resumeTimers();
-					}
 				},
 				deliverToolImages: (callId, images) => {
 					if (!run || run.aborted || run.deliveryError) {

@@ -28,6 +28,7 @@ Adapted from upstream [`@estebanforge/pi-antigravity-bridge`](https://www.npmjs.
 3. **Permission policy inspection**: Passed `AcpPermissionRequest` into `AcpConnectionOptions.permissions(req)` and `AcpDriverOptions.permissionPolicy(req)` (expanding `toolCall` with optional `name` and `_meta`) so `center-server` can deny individual non-bridge permission requests.
 4. **Bridge server prefix matching**: Extended `nativeMcpTool` in `acp/events.ts` to match both `pibot-bridge` and `pi-bridge` MCP server prefixes.
 5. **Typed auth error & deterministic child exit**: Added `readonly code = "UNAUTHENTICATED"` on `AcpAuthError`, exposed `AcpConnection.waitForExit()`, and awaited spawned child termination in `AcpDriver.close()` without altering upstream cancel/kill teardown semantics.
+6. **No driver turn timeouts**: Removed `AcpDriver`'s overall deadline timer (`timeoutMin`), stdout-inactivity stall timer (`inactivityMin`), and `pauseTimers`/`resumeTimers` hooks so active turns run until completion or explicit cancellation.
 
 ## Current PiBot integration
 

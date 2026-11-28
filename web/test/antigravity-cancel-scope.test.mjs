@@ -293,7 +293,7 @@ test('session-wide cancel without runId stops the active run while invalid runId
 });
 
 test('Stop/cancel fails pending MCP waiter before session/cancel, preserves hot process + SessionStore, and hot-reuses conversationId', { timeout: 20_000 }, async () => {
-  // Part A: deterministic in-process ordering check (MCP waiter fails & timers resume synchronously before abort fires).
+  // Part A: deterministic in-process ordering check (MCP waiter fails synchronously before abort fires).
   {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-cancel-order-'));
     const order = [];
@@ -301,17 +301,21 @@ test('Stop/cancel fails pending MCP waiter before session/cancel, preserves hot 
     let driverAliveAfterAbort;
     const harness = createControlledAcpDriverHarness(async (ctx) => {
       const state = harness.getDriverState(ctx.driver);
-      const origResume = ctx.driver.resumeTimers;
-      ctx.driver.resumeTimers = function () {
-        order.push('waiters-failed-resume-timers');
-        return origResume.call(this);
-      };
       ctx.req.signal.addEventListener('abort', () => {
         order.push('driver-abort-signal');
         driverAliveAfterAbort = state.alive;
       }, { once: true });
 
       const captured = ctx.mcp.captureContext();
+      const origFailAll = captured.waiters.failAll.bind(captured.waiters);
+      captured.waiters.failAll = function (reason) {
+        const hadPending = captured.waiters.inFlightCount > 0;
+        const result = origFailAll(reason);
+        if (hadPending && captured.waiters.inFlightCount === 0) {
+          order.push('waiters-failed');
+        }
+        return result;
+      };
       toolCallPromise = ctx.mcp.handler.onToolCall(
         'call-order-1',
         'read_file',
@@ -352,7 +356,7 @@ test('Stop/cancel fails pending MCP waiter before session/cancel, preserves hot 
       assert.equal(rest.at(-1)?.aborted, true);
       assert.equal(toolResult?.isError, true);
       assert.equal(driverAliveAfterAbort, true, 'cancel must not kill the hot driver');
-      assert.deepEqual(order, ['waiters-failed-resume-timers', 'driver-abort-signal']);
+      assert.deepEqual(order, ['waiters-failed', 'driver-abort-signal']);
       assert.equal(harness.closes.length, 0, 'cancel must not close/kill the driver');
     } finally {
       await service.close();

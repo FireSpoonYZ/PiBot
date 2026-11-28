@@ -380,3 +380,68 @@ test('openAntigravity emits native_tool_start/end for non-bridge native tools an
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('AcpDriver arms no turn deadline or inactivity timeout timers during active turns', { timeout: 15_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-acp-no-turn-timeout-'));
+  const script = path.join(root, 'fake-acp-slow.mjs');
+
+  fs.writeFileSync(script, String.raw`
+import { createInterface } from 'node:readline';
+
+const send = (frame) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...frame }) + '\n');
+
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line);
+  if (method === 'initialize') {
+    send({ id, result: { agentInfo: { name: 'fake-agy', version: '1.5.12' } } });
+  } else if (method === 'session/new') {
+    send({ id, result: { sessionId: 'no-timeout-conv', configOptions: [] } });
+  } else if (method === 'session/prompt') {
+    setTimeout(() => {
+      send({
+        method: 'session/update',
+        params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'completed-without-deadline' } } },
+      });
+      send({ id, result: { stopReason: 'end_turn', usage: { inputTokens: 8, outputTokens: 3, totalTokens: 11 } } });
+    }, 60);
+  } else if (id !== undefined) {
+    send({ id, result: {} });
+  }
+}
+`, 'utf8');
+
+  const driver = new AcpDriver({ bin: process.execPath, binArgs: [script] });
+  const origSetTimeout = globalThis.setTimeout;
+  const promptStageDelays = [];
+  let observeTimers = false;
+
+  globalThis.setTimeout = function patchedSetTimeout(fn, delay, ...args) {
+    if (observeTimers) promptStageDelays.push(delay);
+    return origSetTimeout.call(this, fn, delay, ...args);
+  };
+
+  try {
+    assert.equal('pauseTimers' in driver, false);
+    assert.equal('resumeTimers' in driver, false);
+
+    const handle = await driver.run({
+      cwd: root,
+      model: MODEL_ID,
+      mode: 'default',
+      prompt: 'long running task without turn timeout',
+      beforePrompt: () => {
+        observeTimers = true;
+      },
+    });
+    const outcome = await handle.outcome;
+    observeTimers = false;
+
+    assert.equal(outcome.status, 'OK');
+    assert.equal(outcome.response, 'completed-without-deadline');
+    assert.deepEqual(promptStageDelays, [], 'active ACP turn must not arm any deadline or inactivity timeout timers');
+  } finally {
+    globalThis.setTimeout = origSetTimeout;
+    await driver.close('shutdown');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

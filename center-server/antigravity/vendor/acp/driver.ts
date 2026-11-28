@@ -84,12 +84,6 @@ interface ActiveTurn {
 	promptStarted: boolean;
 	promptTerminal: boolean;
 	aborted: boolean;
-	abortedBy: "signal" | "timer" | null;
-	timersPaused: boolean;
-	overallDeadline: number | null;
-	overallRemainingMs: number | null;
-	overallTimer?: ReturnType<typeof setTimeout>;
-	idleTimer?: ReturnType<typeof setTimeout>;
 	cancelTimer?: ReturnType<typeof setTimeout>;
 	abortCleanup?: () => void;
 	toolCalls: Map<string, { name: string; args: Record<string, unknown>; diff?: AcpEditDiff; mcpServer?: string }>;
@@ -152,24 +146,6 @@ export class AcpDriver implements TurnDriver {
 		this.#onTurnEnd = fn;
 	}
 
-	pauseTimers(): void {
-		const t = this.#active;
-		if (!t || t.closed || t.timersPaused) return;
-		t.timersPaused = true;
-		this.#clearIdle(t);
-		this.#pauseOverall(t);
-		this.#log("timers-paused");
-	}
-
-	resumeTimers(): void {
-		const t = this.#active;
-		if (!t || t.closed || !t.timersPaused) return;
-		t.timersPaused = false;
-		this.#armIdle(t);
-		this.#resumeOverall(t);
-		this.#log("timers-resumed");
-	}
-
 	/** Send a steer prompt on the active native session while a turn is running.
 	 *  Writes the JSON-RPC frame synchronously to stdin and returns without
 	 *  waiting for the prompt to settle. */
@@ -182,7 +158,6 @@ export class AcpDriver implements TurnDriver {
 			});
 		}
 		turn.estimatedInputTokens += estimateTokens(prompt);
-		if (turn.idleTimer) turn.idleTimer.refresh();
 		this.#log("steer", {
 			sessionId: turn.sessionId,
 			inFlight: turn.inFlightPrompts + 1,
@@ -353,8 +328,6 @@ export class AcpDriver implements TurnDriver {
 		}
 		if (turn.closed) return;
 
-		this.#armOverall(turn);
-		this.#armIdle(turn);
 		this.#emitLiveEstimate(turn);
 
 		try {
@@ -515,7 +488,6 @@ export class AcpDriver implements TurnDriver {
 		const turn = this.#active;
 		if (!turn || turn.closed) return;
 		if (sessionId !== null && sessionId !== turn.sessionId) return;
-		if (turn.idleTimer) turn.idleTimer.refresh();
 		const mapped = mapUpdate(update);
 		if (!mapped) return;
 		switch (mapped.kind) {
@@ -704,7 +676,6 @@ export class AcpDriver implements TurnDriver {
 	#abortTurn(turn: ActiveTurn): void {
 		if (turn.closed || turn.aborted) return;
 		turn.aborted = true;
-		turn.abortedBy = "signal";
 		const conn = this.#conn;
 		if (turn.sessionId) conn?.cancelTurnHooks(turn.sessionId);
 		if (!conn?.alive || turn.sessionId === "" || !turn.promptStarted) {
@@ -767,85 +738,8 @@ export class AcpDriver implements TurnDriver {
 			promptStarted: false,
 			promptTerminal: false,
 			aborted: false,
-			abortedBy: null,
-			timersPaused: false,
-			overallDeadline: null,
-			overallRemainingMs: null,
 			toolCalls: new Map(),
 		};
-	}
-
-	// --- timers ----------------------------------------------------------------
-
-	#overallBudgetMs(turn: ActiveTurn): number {
-		return (turn.request.timeoutMin ?? 10) * 60_000;
-	}
-
-	#idleBudgetMs(turn: ActiveTurn): number {
-		return (turn.request.inactivityMin ?? 5) * 60_000;
-	}
-
-	#nowMs(): number {
-		return Date.now();
-	}
-
-	#armOverall(turn: ActiveTurn): void {
-		const budget = this.#overallBudgetMs(turn);
-		if (turn.overallTimer) clearTimeout(turn.overallTimer);
-		if (turn.timersPaused) {
-			turn.overallDeadline = null;
-			turn.overallRemainingMs = budget;
-			return;
-		}
-		turn.overallRemainingMs = null;
-		this.#startOverallTimer(turn, budget);
-	}
-
-	#startOverallTimer(turn: ActiveTurn, ms: number): void {
-		if (ms <= 0) return;
-		turn.overallDeadline = this.#nowMs() + ms;
-		turn.overallTimer = setTimeout(() => {
-			if (turn.closed) return;
-			turn.abortedBy = "timer";
-			this.#log("timeout", { sessionId: turn.sessionId });
-			this.#conn?.abortAll("turn deadline");
-			this.#conn?.kill();
-			this.#failTurn(turn, `ACP turn exceeded the ${(this.#overallBudgetMs(turn) / 60_000) | 0}m deadline`);
-		}, ms);
-	}
-
-	#pauseOverall(turn: ActiveTurn): void {
-		if (turn.overallDeadline === null) return;
-		if (turn.overallTimer) clearTimeout(turn.overallTimer);
-		turn.overallTimer = undefined;
-		turn.overallRemainingMs = Math.max(0, turn.overallDeadline - this.#nowMs());
-		turn.overallDeadline = null;
-	}
-
-	#resumeOverall(turn: ActiveTurn): void {
-		if (turn.overallRemainingMs === null) return;
-		const remaining = turn.overallRemainingMs;
-		turn.overallRemainingMs = null;
-		this.#startOverallTimer(turn, remaining);
-	}
-
-	#armIdle(turn: ActiveTurn): void {
-		if (turn.idleTimer) clearTimeout(turn.idleTimer);
-		if (turn.timersPaused) return;
-		const idleMs = this.#idleBudgetMs(turn);
-		if (idleMs <= 0) return;
-		turn.idleTimer = setTimeout(() => {
-			if (turn.closed) return;
-			this.#log("stall", { sessionId: turn.sessionId });
-			this.#conn?.abortAll("idle stall");
-			this.#conn?.kill();
-			this.#failTurn(turn, `ACP stalled for ${(idleMs / 60_000) | 0}m with no output`);
-		}, idleMs);
-	}
-
-	#clearIdle(turn: ActiveTurn): void {
-		if (turn.idleTimer) clearTimeout(turn.idleTimer);
-		turn.idleTimer = undefined;
 	}
 
 	// --- settling ----------------------------------------------------------------
@@ -869,8 +763,6 @@ export class AcpDriver implements TurnDriver {
 			}
 		}
 		turn.closed = true;
-		if (turn.overallTimer) clearTimeout(turn.overallTimer);
-		if (turn.idleTimer) clearTimeout(turn.idleTimer);
 		if (turn.cancelTimer) {
 			clearTimeout(turn.cancelTimer);
 			turn.cancelTimer = undefined;
@@ -883,7 +775,6 @@ export class AcpDriver implements TurnDriver {
 		if (outcome.conversationId) this.#lastSessionId = outcome.conversationId;
 		for (const wake of turn.wake) wake();
 		turn.wake = [];
-		if (outcome.aborted && turn.abortedBy === null) turn.abortedBy = "signal";
 		turn.resolve(outcome);
 		try {
 			this.#onTurnEnd?.(outcome);

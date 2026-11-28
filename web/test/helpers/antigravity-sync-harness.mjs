@@ -101,9 +101,6 @@ export function createControlledAcpDriverHarness(handler) {
         lastSessionId: undefined,
         onTurnEnd: undefined,
         mcp: null,
-        timersPaused: false,
-        pauseTimersCount: 0,
-        resumeTimersCount: 0,
         spawns: 0,
         turns: 0,
         prompts: 0,
@@ -200,24 +197,6 @@ export function createControlledAcpDriverHarness(handler) {
     },
     set(fn) {
       stateFor(this).onTurnEnd = fn;
-    },
-  });
-
-  patchProperty(AcpDriver.prototype, 'pauseTimers', {
-    writable: true,
-    value: function pauseTimers() {
-      const s = stateFor(this);
-      s.timersPaused = true;
-      s.pauseTimersCount += 1;
-    },
-  });
-
-  patchProperty(AcpDriver.prototype, 'resumeTimers', {
-    writable: true,
-    value: function resumeTimers() {
-      const s = stateFor(this);
-      s.timersPaused = false;
-      s.resumeTimersCount += 1;
     },
   });
 
